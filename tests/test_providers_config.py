@@ -55,6 +55,55 @@ class ProvidersConfigTests(unittest.TestCase):
         self.assertEqual(request.get_header("Accept"), "application/json")
         self.assertEqual(mock_urlopen.call_args.kwargs, {"timeout": 9})
 
+    def test_discover_official_models_accepts_models_key_and_bare_list_payloads(self):
+        cases = [
+            (
+                {
+                    "models": [
+                        {"id": "gpt-from-models-b", "max_output_tokens": 2048},
+                        {"id": "gpt-from-models-a", "context_window": 64000},
+                        {"id": "gpt-from-models-b", "context_window": 1, "max_output_tokens": 1},
+                        {"id": "chatgpt-from-models"},
+                        {"id": "  "},
+                    ]
+                },
+                [
+                    {"id": "gpt-from-models-a", "context_window": 64000, "max_output_tokens": None},
+                    {"id": "gpt-from-models-b", "context_window": None, "max_output_tokens": 2048},
+                ],
+            ),
+            (
+                [
+                    {"slug": "gpt-from-list-c", "context_length": "32000"},
+                    "gpt-from-list-a",
+                    {"model": " gpt-from-list-b ", "output_tokens": "1024"},
+                    {"name": "gpt-from-list-c", "context_window": 1, "max_output_tokens": 1},
+                    {"id": "o3"},
+                    {"id": "not-gpt-from-list"},
+                    {"id": "  "},
+                ],
+                [
+                    {"id": "gpt-from-list-a", "context_window": None, "max_output_tokens": None},
+                    {"id": "gpt-from-list-b", "context_window": None, "max_output_tokens": 1024},
+                    {"id": "gpt-from-list-c", "context_window": 32000, "max_output_tokens": None},
+                ],
+            ),
+        ]
+
+        for payload, expected in cases:
+            with self.subTest(payload_type=type(payload).__name__):
+                mock_response = unittest.mock.Mock()
+                mock_response.__enter__ = unittest.mock.Mock(return_value=mock_response)
+                mock_response.__exit__ = unittest.mock.Mock(return_value=None)
+                mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+
+                with patch("providers_config.urlopen", return_value=mock_response):
+                    models = discover_official_models("test-secret")
+
+                self.assertEqual(models, expected)
+                for model in models:
+                    self.assertEqual(set(model), {"id", "context_window", "max_output_tokens"})
+
     def test_discover_provider_models_fetches_models_and_normalizes_response(self):
         payload = {
             "data": [
