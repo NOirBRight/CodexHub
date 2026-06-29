@@ -19,6 +19,9 @@ config/secrets.toml
 frontend/node_modules/
 frontend/dist/
 
+# Local worktrees
+.worktrees/
+
 # OS
 Thumbs.db
 .DS_Store
