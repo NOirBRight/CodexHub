@@ -344,6 +344,16 @@ fn generate_catalog_with_runner(
         ));
     }
 
+    let catalog_path = paths.generated_catalog_path();
+    if let Some(parent) = catalog_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create catalog output directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
     let outcome = runner.run_sync(python, &script, &paths.codex_dir)?;
     if outcome.code != Some(0) {
         return Err(format!(
@@ -354,28 +364,7 @@ fn generate_catalog_with_runner(
         ));
     }
 
-    let catalog_path =
-        catalog_path_from_stdout(&outcome.stdout).unwrap_or_else(|| paths.generated_catalog_path());
-    read_catalog_models(&resolve_catalog_path(&catalog_path, &paths.repo_root))
-}
-
-fn catalog_path_from_stdout(stdout: &str) -> Option<PathBuf> {
-    stdout.lines().find_map(|line| {
-        let path = line.strip_prefix("catalog=")?.trim();
-        if path.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(path))
-        }
-    })
-}
-
-fn resolve_catalog_path(path: &Path, repo_root: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        repo_root.join(path)
-    }
+    read_catalog_models(&catalog_path)
 }
 
 fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
@@ -462,7 +451,7 @@ fn find_python() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout, generate_catalog_with_runner,
+        discover_provider_models_with_timeout, generate_catalog_with_runner, list_models,
         refresh_official_models_from_endpoint, CatalogCommandOutcome, CatalogSyncRunner,
         ModelPaths,
     };
@@ -640,9 +629,8 @@ mod tests {
         fs::create_dir_all(paths.catalog_sync_script().parent().unwrap()).unwrap();
         fs::write(paths.catalog_sync_script(), "# fake catalog sync").unwrap();
         let catalog_path = paths.generated_catalog_path();
-        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
-        fs::write(
-            &catalog_path,
+        let runner = WritingCatalogRunner::new(
+            catalog_path.clone(),
             r#"
             {
               "models": [
@@ -664,17 +652,17 @@ mod tests {
               ]
             }
             "#,
-        )
-        .unwrap();
-        let runner = RecordingCatalogRunner::new(CatalogCommandOutcome {
-            code: Some(0),
-            stdout: "visible_models=2\n".to_string(),
-            stderr: String::new(),
-        });
+            CatalogCommandOutcome {
+                code: Some(0),
+                stdout: "visible_models=2\n".to_string(),
+                stderr: String::new(),
+            },
+        );
 
         let models = generate_catalog_with_runner(&paths, Path::new("python-test"), &runner)
             .expect("catalog");
 
+        assert!(catalog_path.exists());
         assert_eq!(models.len(), 2);
         assert_model(
             &models[0],
@@ -703,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_catalog_honors_catalog_path_printed_by_sync() {
+    fn generate_catalog_reads_codex_home_even_if_sync_prints_another_catalog_path() {
         let root = temp_root("generate-catalog-stdout-path");
         let paths = test_paths(&root);
         fs::create_dir_all(paths.catalog_sync_script().parent().unwrap()).unwrap();
@@ -715,16 +703,46 @@ mod tests {
             r#"{"models":[{"slug":"printed-model","display_name":"Printed Model"}]}"#,
         )
         .unwrap();
-        let runner = RecordingCatalogRunner::new(CatalogCommandOutcome {
-            code: Some(0),
-            stdout: format!("catalog={}\n", printed_catalog.display()),
-            stderr: String::new(),
-        });
+        let runner = WritingCatalogRunner::new(
+            paths.generated_catalog_path(),
+            r#"{"models":[{"slug":"codex-home-model","display_name":"Codex Home Model"}]}"#,
+            CatalogCommandOutcome {
+                code: Some(0),
+                stdout: format!("catalog={}\n", printed_catalog.display()),
+                stderr: String::new(),
+            },
+        );
 
         let models = generate_catalog_with_runner(&paths, Path::new("python-test"), &runner)
             .expect("catalog");
 
-        assert_eq!(model_ids(&models), ["printed-model"]);
+        assert_eq!(model_ids(&models), ["codex-home-model"]);
+    }
+
+    #[test]
+    fn list_models_reads_generated_catalog_from_codex_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-models-codex-home");
+        let codex_home = root.join("codex-home");
+        let catalog_path = codex_home
+            .join("model-catalogs")
+            .join(super::GENERATED_CATALOG_FILE);
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"models":[{"slug":"codex-home-list-model","display_name":"Codex Home List Model"}]}"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let models = list_models();
+
+        restore_env("CODEX_HOME", previous);
+        assert_eq!(
+            model_ids(&models.expect("list models")),
+            ["codex-home-list-model"]
+        );
     }
 
     fn compact_models(models: &[Model]) -> Vec<(&str, Option<u32>, Option<u32>)> {
@@ -829,27 +847,41 @@ mod tests {
         codex_dir: PathBuf,
     }
 
-    struct RecordingCatalogRunner {
+    struct WritingCatalogRunner {
         commands: RefCell<Vec<RecordedCatalogCommand>>,
+        catalog_path: PathBuf,
+        catalog_body: String,
         outcome: CatalogCommandOutcome,
     }
 
-    impl RecordingCatalogRunner {
-        fn new(outcome: CatalogCommandOutcome) -> Self {
+    impl WritingCatalogRunner {
+        fn new(catalog_path: PathBuf, catalog_body: &str, outcome: CatalogCommandOutcome) -> Self {
             Self {
                 commands: RefCell::new(Vec::new()),
+                catalog_path,
+                catalog_body: catalog_body.to_string(),
                 outcome,
             }
         }
     }
 
-    impl CatalogSyncRunner for RecordingCatalogRunner {
+    impl CatalogSyncRunner for WritingCatalogRunner {
         fn run_sync(
             &self,
             python: &Path,
             script: &Path,
             codex_dir: &Path,
         ) -> Result<CatalogCommandOutcome, String> {
+            let catalog_parent = self
+                .catalog_path
+                .parent()
+                .ok_or_else(|| "catalog path must have a parent".to_string())?;
+            assert!(
+                catalog_parent.is_dir(),
+                "catalog output directory should exist before sync runs"
+            );
+            fs::write(&self.catalog_path, &self.catalog_body)
+                .map_err(|error| format!("failed to write test catalog: {error}"))?;
             self.commands.borrow_mut().push(RecordedCatalogCommand {
                 python: python.to_path_buf(),
                 script: script.to_path_buf(),

@@ -1,4 +1,7 @@
+import importlib
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -260,6 +263,38 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(kimi_model["max_output_tokens"], 32768)
         self.assertEqual(kimi_model["input_modalities"], ["text", "image"])
         self.assertEqual(kimi_model["codex_proxy_metadata"]["context_source"], "ollama_api_show")
+
+    def test_generated_paths_use_codex_home_when_imported(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            try:
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                    importlib.reload(catalog_sync)
+
+                    self.assertEqual(
+                        catalog_sync.GENERATED_CATALOG_PATH,
+                        codex_home / "model-catalogs" / "codex-proxy-official-ollama.json",
+                    )
+                    self.assertEqual(
+                        catalog_sync.GENERATED_STATE_PATH,
+                        codex_home / "model-catalogs" / "codex-proxy-state.json",
+                    )
+                    self.assertEqual(catalog_sync.POLICY_PATH, repo_root / "config" / "catalog_policy.toml")
+                    self.assertEqual(
+                        catalog_sync.OLLAMA_FALLBACK_PATH,
+                        repo_root / "model-catalogs" / "ollama-cloud.json",
+                    )
+            finally:
+                importlib.reload(catalog_sync)
+
+    def test_write_json_creates_missing_parent_directories(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "missing" / "model-catalogs" / "state.json"
+
+            catalog_sync.write_json(target, {"ok": True})
+
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
 
     def test_extracts_context_and_capabilities_from_ollama_show_payload(self):
         payload = {

@@ -16,14 +16,16 @@ from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index,
 
 
 PROXY_DIR = Path(__file__).resolve().parent
-CODEX_DIR = PROXY_DIR.parent
-MODEL_CATALOG_DIR = CODEX_DIR / "model-catalogs"
+REPO_ROOT = PROXY_DIR.parent
+RUNTIME_CODEX_DIR = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+BUNDLED_MODEL_CATALOG_DIR = REPO_ROOT / "model-catalogs"
+RUNTIME_MODEL_CATALOG_DIR = RUNTIME_CODEX_DIR / "model-catalogs"
 
-POLICY_PATH = CODEX_DIR / "config" / "catalog_policy.toml"
-OFFICIAL_SEED_PATH = MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
-OLLAMA_FALLBACK_PATH = MODEL_CATALOG_DIR / "ollama-cloud.json"
-GENERATED_CATALOG_PATH = MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"
-GENERATED_STATE_PATH = MODEL_CATALOG_DIR / "codex-proxy-state.json"
+POLICY_PATH = REPO_ROOT / "config" / "catalog_policy.toml"
+OFFICIAL_SEED_PATH = BUNDLED_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
+OLLAMA_FALLBACK_PATH = BUNDLED_MODEL_CATALOG_DIR / "ollama-cloud.json"
+GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"
+GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -547,6 +549,7 @@ def load_previous_visible_models(path: Path = GENERATED_STATE_PATH) -> set[str]:
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
