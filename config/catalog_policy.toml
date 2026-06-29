@@ -1,0 +1,63 @@
+[routing]
+official_prefixes = ["gpt-"]
+official_upstream_base_url = "https://chatgpt.com/backend-api/codex"
+ollama_cloud_base_url = "https://ollama.com/v1"
+
+[visibility]
+auto_include_ollama_cloud = false
+official_models = [
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
+]
+allowed_ollama_cloud_models = [
+  "minimax-m3",
+  "glm-5.2",
+  "kimi-k2.7-code",
+  "gemini-3-flash-preview",
+  "deepseek-v4-pro",
+  "deepseek-v4-flash",
+]
+allowed_provider_models = [
+  "volc/ark-code-latest",
+  "volc/doubao-seed-2.0-code",
+  "volc/doubao-seed-2.0-pro",
+  "volc/doubao-seed-2.0-lite",
+  "volc/glm-5.2",
+  "volc/deepseek-v4-pro",
+  "volc/deepseek-v4-flash",
+  "volc/minimax-m3",
+  "volc/kimi-k2.6",
+  "minimax-cn/minimax-m3",
+]
+denied_models = [
+  "glm-5.1",
+  "glm-5.1:cloud",
+  "qwen3-embedding",
+  "qwen3-embedding:latest",
+]
+denied_substrings = ["embedding"]
+
+[display_names]
+"gpt-5.5" = "GPT-5.5"
+"gpt-5.4" = "GPT-5.4"
+"gpt-5.4-mini" = "GPT-5.4-Mini"
+"gpt-5.3-codex-spark" = "GPT-5.3-Codex-Spark"
+"glm-5.2" = "Ollama GLM-5.2"
+"minimax-m3" = "Ollama MiniMax-M3"
+"kimi-k2.7-code" = "Ollama Kimi K2.7 Code"
+"deepseek-v4-pro" = "Ollama DeepSeek V4 Pro"
+"deepseek-v4-flash" = "Ollama DeepSeek V4 Flash"
+"gemini-3-flash-preview" = "Ollama Gemini 3 Flash Preview"
+"kimi-k2.6" = "Kimi K2.6"
+"volc/ark-code-latest" = "Volc Ark Code Latest"
+"volc/doubao-seed-2.0-code" = "Volc Doubao Seed 2.0 Code"
+"volc/doubao-seed-2.0-pro" = "Volc Doubao Seed 2.0 Pro"
+"volc/doubao-seed-2.0-lite" = "Volc Doubao Seed 2.0 Lite"
+"volc/glm-5.2" = "Volc GLM-5.2"
+"volc/deepseek-v4-pro" = "Volc DeepSeek V4 Pro"
+"volc/deepseek-v4-flash" = "Volc DeepSeek V4 Flash"
+"volc/minimax-m3" = "Volc MiniMax-M3"
+"volc/kimi-k2.6" = "Volc Kimi K2.6"
+"minimax-cn/minimax-m3" = "MiniMax.cn MiniMax-M3"
