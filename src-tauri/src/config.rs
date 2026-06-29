@@ -22,9 +22,8 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
     save_settings_with_paths(settings, &ConfigPaths::runtime()?)
 }
 
-pub fn switch_mode(mode: &str) -> Result<AppStatus, String> {
+pub fn switch_mode(mode: &str, auto_sync: bool) -> Result<AppStatus, String> {
     let paths = ConfigPaths::runtime()?;
-    let auto_sync = get_settings_with_paths(&paths)?.auto_sync_history;
     let python = find_python();
     let runner = ProcessCommandRunner;
 
@@ -32,7 +31,7 @@ pub fn switch_mode(mode: &str) -> Result<AppStatus, String> {
 }
 
 #[derive(Debug, Clone)]
-struct ConfigPaths {
+pub(crate) struct ConfigPaths {
     codex_dir: PathBuf,
     repo_root: PathBuf,
 }
@@ -53,7 +52,7 @@ impl ConfigPaths {
         Ok(Self::new(codex_dir, repo_root))
     }
 
-    fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
         Self {
             codex_dir: codex_dir.into(),
             repo_root: repo_root.into(),
@@ -119,13 +118,13 @@ impl ConfigPaths {
 }
 
 #[derive(Debug, Clone)]
-struct CommandOutcome {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
+pub(crate) struct CommandOutcome {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
-trait CommandRunner {
+pub(crate) trait CommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String>;
 }
 
@@ -247,7 +246,7 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
     Ok(settings)
 }
 
-fn switch_mode_with_paths(
+pub(crate) fn switch_mode_with_paths(
     mode: &str,
     auto_sync: bool,
     paths: &ConfigPaths,
@@ -429,6 +428,11 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn public_switch_mode_exposes_auto_sync_parameter() {
+        let _switch: fn(&str, bool) -> Result<crate::AppStatus, String> = super::switch_mode;
+    }
 
     #[test]
     fn providers_toml_roundtrip_preserves_all_provider_and_model_fields() {

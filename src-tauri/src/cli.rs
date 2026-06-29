@@ -1,16 +1,14 @@
-use crate::{autostart, catalog, config, history, models, proxy};
+use crate::{autostart, catalog, config, history, models, proxy, AppStatus, Settings};
 use serde::Serialize;
 
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("status") => print_result(proxy::status()),
-        Some("switch") => match args.get(1).map(String::as_str) {
-            Some(mode @ ("official" | "custom")) => print_result(config::switch_mode(mode)),
-            _ => {
-                eprintln!("usage: codexhub switch <official|custom>");
-                2
-            }
-        },
+        Some("switch") => {
+            run_switch_command(&args[1..], config::get_settings, |mode, auto_sync| {
+                config::switch_mode(mode, auto_sync)
+            })
+        }
         Some("start") => print_result(proxy::start()),
         Some("stop") => print_result(proxy::stop()),
         Some("restart") => print_result(proxy::restart()),
@@ -52,8 +50,71 @@ fn parse_set_autostart_enabled(values: &[String]) -> Result<bool, ()> {
     }
 }
 
+struct SwitchRequest<'a> {
+    mode: &'a str,
+    auto_sync: Option<bool>,
+}
+
+fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
+    let Some((mode, flags)) = values.split_first() else {
+        return Err(());
+    };
+    if mode != "official" && mode != "custom" {
+        return Err(());
+    }
+
+    let mut auto_sync = None;
+    for flag in flags {
+        let value = match flag.as_str() {
+            "--auto-sync" => true,
+            "--no-auto-sync" => false,
+            _ => return Err(()),
+        };
+        if auto_sync.replace(value).is_some() {
+            return Err(());
+        }
+    }
+
+    Ok(SwitchRequest { mode, auto_sync })
+}
+
+fn run_switch_command<GetSettings, SwitchMode>(
+    values: &[String],
+    get_settings: GetSettings,
+    switch_mode: SwitchMode,
+) -> i32
+where
+    GetSettings: FnOnce() -> Result<Settings, String>,
+    SwitchMode: FnOnce(&str, bool) -> Result<AppStatus, String>,
+{
+    let request = match parse_switch_args(values) {
+        Ok(request) => request,
+        Err(()) => {
+            print_switch_usage();
+            return 2;
+        }
+    };
+
+    let auto_sync = match request.auto_sync {
+        Some(auto_sync) => auto_sync,
+        None => match get_settings() {
+            Ok(settings) => settings.auto_sync_history,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        },
+    };
+
+    print_result(switch_mode(request.mode, auto_sync))
+}
+
 fn print_set_autostart_usage() {
     eprintln!("usage: codexhub set-autostart [true|false]");
+}
+
+fn print_switch_usage() {
+    eprintln!("usage: codexhub switch <official|custom> [--auto-sync|--no-auto-sync]");
 }
 
 fn print_result<T: Serialize>(result: Result<T, String>) -> i32 {
@@ -83,7 +144,7 @@ CodexHub CLI
 Usage:
   codexhub app
   codexhub status
-  codexhub switch <official|custom>
+  codexhub switch <official|custom> [--auto-sync|--no-auto-sync]
   codexhub start
   codexhub stop
   codexhub restart
@@ -99,7 +160,12 @@ Usage:
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_set_autostart_enabled, run};
+    use super::{parse_set_autostart_enabled, run, run_switch_command};
+    use crate::config::{self, CommandOutcome, CommandRunner, ConfigPaths};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn help_command_succeeds() {
@@ -150,5 +216,139 @@ mod tests {
         let args = vec!["set-autostart".to_string(), "yes".to_string()];
 
         assert_eq!(run(&args), 2);
+    }
+
+    #[test]
+    fn switch_no_auto_sync_flag_skips_history_overlay() {
+        let root = temp_root("cli-switch-no-auto-sync");
+        let paths = test_paths(&root);
+        let runner = RecordingRunner::successful();
+        let args = vec!["custom".to_string(), "--no-auto-sync".to_string()];
+
+        let exit = run_switch_command(
+            &args,
+            || panic!("explicit flag should not read settings"),
+            |mode, auto_sync| {
+                config::switch_mode_with_paths(
+                    mode,
+                    auto_sync,
+                    &paths,
+                    Path::new("python-test"),
+                    &runner,
+                )
+            },
+        );
+
+        assert_eq!(exit, 0);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].args.iter().any(|arg| arg == "apply"));
+        assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
+    }
+
+    #[test]
+    fn switch_auto_sync_flag_runs_history_overlay() {
+        let root = temp_root("cli-switch-auto-sync");
+        let paths = test_paths(&root);
+        let runner = RecordingRunner::successful();
+        let args = vec!["custom".to_string(), "--auto-sync".to_string()];
+
+        let exit = run_switch_command(
+            &args,
+            || panic!("explicit flag should not read settings"),
+            |mode, auto_sync| {
+                config::switch_mode_with_paths(
+                    mode,
+                    auto_sync,
+                    &paths,
+                    Path::new("python-test"),
+                    &runner,
+                )
+            },
+        );
+
+        assert_eq!(exit, 0);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].args.iter().any(|arg| arg == "normalize-fast"));
+        assert!(commands[1].args.iter().any(|arg| arg == "apply"));
+    }
+
+    #[test]
+    fn switch_without_flag_uses_settings_default() {
+        let root = temp_root("cli-switch-settings-default");
+        let paths = test_paths(&root);
+        let runner = RecordingRunner::successful();
+        let args = vec!["custom".to_string()];
+
+        let exit = run_switch_command(
+            &args,
+            || {
+                Ok(crate::Settings {
+                    auto_sync_history: false,
+                    ..crate::Settings::default()
+                })
+            },
+            |mode, auto_sync| {
+                config::switch_mode_with_paths(
+                    mode,
+                    auto_sync,
+                    &paths,
+                    Path::new("python-test"),
+                    &runner,
+                )
+            },
+        );
+
+        assert_eq!(exit, 0);
+        assert_eq!(runner.commands.borrow().len(), 1);
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedCommand {
+        args: Vec<String>,
+    }
+
+    struct RecordingRunner {
+        commands: RefCell<Vec<RecordedCommand>>,
+    }
+
+    impl RecordingRunner {
+        fn successful() -> Self {
+            Self {
+                commands: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, _program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
+            self.commands.borrow_mut().push(RecordedCommand {
+                args: args.to_vec(),
+            });
+            Ok(CommandOutcome {
+                code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn test_paths(root: &Path) -> ConfigPaths {
+        ConfigPaths::new(root.join("codex-home"), root.join("repo-root"))
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codexhub-cli-{name}-{}-{suffix}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }
