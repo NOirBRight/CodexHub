@@ -1,4 +1,4 @@
-use crate::config::{self, CommandRunner, ProcessCommandRunner};
+use crate::config::{self, CommandOutcome, CommandRunner, ProcessCommandRunner};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -174,7 +174,16 @@ fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String
         WINDOWS_TASK_NAME.to_string(),
         "/F".to_string(),
     ];
-    run_autostart_command("delete Windows autostart task", program, &args, runner)?;
+    let label = "delete Windows autostart task";
+    let outcome = runner
+        .run(program, &args)
+        .map_err(|error| format!("{label} failed to start: {error}"))?;
+
+    if outcome.code != Some(0) && !is_windows_task_missing(&outcome) {
+        return Err(config::format_command_failure(
+            label, program, &args, &outcome,
+        ));
+    }
 
     Ok(format!(
         "Autostart removed from Windows Task Scheduler task {WINDOWS_TASK_NAME}"
@@ -231,12 +240,16 @@ fn register_linux_autostart(
     filesystem.create_dir_all(parent)?;
     filesystem.write(&service_path, &linux_service_content(exe))?;
 
+    let reload_args = linux_systemctl_args("daemon-reload");
+    run_autostart_command(
+        "reload Linux systemd user daemon",
+        Path::new("systemctl"),
+        &reload_args,
+        runner,
+    )?;
+
     let program = Path::new("systemctl");
-    let args = vec![
-        "--user".to_string(),
-        "enable".to_string(),
-        LINUX_SERVICE_FILE.to_string(),
-    ];
+    let args = linux_systemctl_args_with_unit("enable");
     run_autostart_command("enable Linux autostart service", program, &args, runner)?;
 
     Ok(format!(
@@ -250,16 +263,19 @@ fn remove_linux_autostart(
     filesystem: &dyn AutostartFileSystem,
     runner: &dyn CommandRunner,
 ) -> Result<String, String> {
-    let program = Path::new("systemctl");
-    let args = vec![
-        "--user".to_string(),
-        "disable".to_string(),
-        LINUX_SERVICE_FILE.to_string(),
-    ];
-    run_autostart_command("disable Linux autostart service", program, &args, runner)?;
-
     let service_path = linux_service_path(paths)?;
+
+    let program = Path::new("systemctl");
+    let args = linux_systemctl_args_with_unit("disable");
+    let disable_result = run_linux_systemctl_disable_best_effort(program, &args, runner);
+
     filesystem.remove_file_if_exists(&service_path)?;
+
+    let reload_args = linux_systemctl_args("daemon-reload");
+    let reload_result = run_linux_systemctl_cleanup_best_effort(program, &reload_args, runner);
+
+    disable_result?;
+    reload_result?;
 
     Ok(format!(
         "Autostart removed from Linux systemd user service {}",
@@ -278,6 +294,68 @@ fn run_autostart_command(
         .map_err(|error| format!("{label} failed to start: {error}"))?;
 
     if outcome.code == Some(0) {
+        Ok(())
+    } else {
+        Err(config::format_command_failure(
+            label, program, args, &outcome,
+        ))
+    }
+}
+
+fn linux_systemctl_args(command: &str) -> Vec<String> {
+    vec!["--user".to_string(), command.to_string()]
+}
+
+fn linux_systemctl_args_with_unit(command: &str) -> Vec<String> {
+    let mut args = linux_systemctl_args(command);
+    args.push(LINUX_SERVICE_FILE.to_string());
+    args
+}
+
+fn run_linux_systemctl_disable_best_effort(
+    program: &Path,
+    args: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<(), String> {
+    run_linux_systemctl_cleanup_command(
+        "disable Linux autostart service",
+        program,
+        args,
+        runner,
+        true,
+    )
+}
+
+fn run_linux_systemctl_cleanup_best_effort(
+    program: &Path,
+    args: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<(), String> {
+    run_linux_systemctl_cleanup_command(
+        "reload Linux systemd user daemon",
+        program,
+        args,
+        runner,
+        false,
+    )
+}
+
+fn run_linux_systemctl_cleanup_command(
+    label: &str,
+    program: &Path,
+    args: &[String],
+    runner: &dyn CommandRunner,
+    allow_missing_unit: bool,
+) -> Result<(), String> {
+    let outcome = match runner.run(program, args) {
+        Ok(outcome) => outcome,
+        Err(error) if is_nonfatal_systemctl_start_failure(&error) => return Ok(()),
+        Err(error) => return Err(format!("{label} failed to start: {error}")),
+    };
+
+    if outcome.code == Some(0)
+        || is_nonfatal_systemctl_cleanup_failure(&outcome, allow_missing_unit)
+    {
         Ok(())
     } else {
         Err(config::format_command_failure(
@@ -340,14 +418,77 @@ fn linux_service_content(exe: &Path) -> String {
 
 fn systemd_quote_exec_path(path: &Path) -> String {
     let text = path.to_string_lossy();
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
     if text
         .chars()
-        .any(|character| character.is_whitespace() || character == '"')
+        .any(|character| character.is_whitespace() || character == '"' || character == '\\')
     {
-        format!("\"{}\"", text.replace('"', "\\\""))
+        format!("\"{}\"", escaped)
     } else {
-        text.into_owned()
+        escaped
     }
+}
+
+fn is_windows_task_missing(outcome: &CommandOutcome) -> bool {
+    command_output_contains(
+        outcome,
+        &[
+            "cannot find the file specified",
+            "task does not exist",
+            "the system cannot find",
+        ],
+    )
+}
+
+fn is_nonfatal_systemctl_start_failure(error: &str) -> bool {
+    let text = error.to_ascii_lowercase();
+    text.contains("failed to start systemctl")
+        || text.contains("systemctl")
+            && (text.contains("not found")
+                || text.contains("no such file or directory")
+                || text.contains("cannot find")
+                || text.contains("not recognized"))
+}
+
+fn is_nonfatal_systemctl_cleanup_failure(
+    outcome: &CommandOutcome,
+    allow_missing_unit: bool,
+) -> bool {
+    let common_nonfatal = command_output_contains(
+        outcome,
+        &[
+            "failed to connect to bus",
+            "system has not been booted with systemd",
+            "dbus_session_bus_address",
+            "xdg_runtime_dir",
+            "no medium found",
+            "host is down",
+        ],
+    );
+
+    if common_nonfatal {
+        return true;
+    }
+
+    allow_missing_unit
+        && command_output_contains(
+            outcome,
+            &[
+                "unit codexhub-proxy.service does not exist",
+                "unit file codexhub-proxy.service does not exist",
+                "codexhub-proxy.service does not exist",
+                "codexhub-proxy.service not found",
+                "not enabled",
+            ],
+        )
+}
+
+fn command_output_contains(outcome: &CommandOutcome, needles: &[&str]) -> bool {
+    let text = format!("{}\n{}", outcome.stdout, outcome.stderr).to_ascii_lowercase();
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn escape_xml(value: &str) -> String {
@@ -368,7 +509,7 @@ mod tests {
     };
     use crate::config::{CommandOutcome, CommandRunner};
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -420,6 +561,40 @@ mod tests {
         remove_autostart_with_dependencies(OperatingSystem::Windows, &paths, &filesystem, &runner)
             .unwrap();
 
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[RecordedCommand {
+                program: PathBuf::from("schtasks"),
+                args: vec![
+                    "/Delete".to_string(),
+                    "/TN".to_string(),
+                    WINDOWS_TASK_NAME.to_string(),
+                    "/F".to_string(),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn windows_set_autostart_false_tolerates_missing_logon_task() {
+        let paths = FakePaths::new_with_current_exe_error(
+            "current exe should not be needed".to_string(),
+            PathBuf::from(r"C:\Users\noirb"),
+        );
+        let filesystem = MemoryFileSystem::default();
+        let runner =
+            RecordingRunner::failed(1, "", "ERROR: The system cannot find the file specified.");
+
+        set_autostart_with_dependencies(
+            false,
+            OperatingSystem::Windows,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap();
+
+        assert_eq!(*paths.current_exe_calls.borrow(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
             &[RecordedCommand {
@@ -488,7 +663,7 @@ mod tests {
     #[test]
     fn linux_set_autostart_writes_systemd_user_service_and_enables_it() {
         let home = PathBuf::from("home").join("alice");
-        let exe = PathBuf::from("opt").join("codexhub").join("codexhub");
+        let exe = PathBuf::from("opt/codexhub/codexhub");
         let paths = FakePaths::new(exe.clone(), home.clone());
         let filesystem = MemoryFileSystem::default();
         let runner = RecordingRunner::successful();
@@ -514,13 +689,67 @@ mod tests {
         assert!(service.contains("WantedBy=default.target"));
         assert_eq!(
             runner.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec!["--user".to_string(), "daemon-reload".to_string(),],
+                },
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec![
+                        "--user".to_string(),
+                        "enable".to_string(),
+                        LINUX_SERVICE_FILE.to_string(),
+                    ],
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_set_autostart_escapes_systemd_exec_paths_with_spaces_quotes_and_percent() {
+        let home = PathBuf::from("home").join("alice");
+        let exe = PathBuf::from("opt/Codex Hub/quoted\"dir/codex%hub");
+        let paths = FakePaths::new(exe, home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::successful();
+
+        set_autostart_with_dependencies(true, OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        let service_path = home
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .join(LINUX_SERVICE_FILE);
+        let writes = filesystem.writes.borrow();
+        let service = writes.get(&service_path).unwrap();
+        assert!(service.contains("ExecStart=\"opt/Codex Hub/quoted\\\"dir/codex%%hub\" start"));
+    }
+
+    #[test]
+    fn linux_set_autostart_returns_daemon_reload_failure_before_enabling() {
+        let home = PathBuf::from("home").join("alice");
+        let paths = FakePaths::new(PathBuf::from("codexhub"), home);
+        let filesystem = MemoryFileSystem::default();
+        let runner =
+            RecordingRunner::sequence(vec![Ok(command_outcome(Some(1), "", "reload failed"))]);
+
+        let error = set_autostart_with_dependencies(
+            true,
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("reload Linux systemd user daemon"));
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
             &[RecordedCommand {
                 program: PathBuf::from("systemctl"),
-                args: vec![
-                    "--user".to_string(),
-                    "enable".to_string(),
-                    LINUX_SERVICE_FILE.to_string(),
-                ],
+                args: vec!["--user".to_string(), "daemon-reload".to_string()],
             }]
         );
     }
@@ -537,14 +766,20 @@ mod tests {
 
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("systemctl"),
-                args: vec![
-                    "--user".to_string(),
-                    "disable".to_string(),
-                    LINUX_SERVICE_FILE.to_string(),
-                ],
-            }]
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec![
+                        "--user".to_string(),
+                        "disable".to_string(),
+                        LINUX_SERVICE_FILE.to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec!["--user".to_string(), "daemon-reload".to_string()],
+                }
+            ]
         );
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
@@ -554,6 +789,154 @@ mod tests {
                 .join("user")
                 .join(LINUX_SERVICE_FILE)]
         );
+    }
+
+    #[test]
+    fn linux_remove_autostart_deletes_service_file_when_disable_reports_missing_unit() {
+        let home = PathBuf::from("home").join("alice");
+        let paths = FakePaths::new(PathBuf::from("codexhub"), home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "Failed to disable unit: Unit file codexhub-proxy.service does not exist.",
+            )),
+            Ok(command_outcome(Some(0), "", "")),
+        ]);
+
+        remove_autostart_with_dependencies(OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        assert_eq!(
+            filesystem.removed_files.borrow().as_slice(),
+            &[home
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .join(LINUX_SERVICE_FILE)]
+        );
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec![
+                        "--user".to_string(),
+                        "disable".to_string(),
+                        LINUX_SERVICE_FILE.to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec!["--user".to_string(), "daemon-reload".to_string()],
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_remove_autostart_deletes_service_file_when_systemctl_is_unavailable() {
+        let home = PathBuf::from("home").join("alice");
+        let paths = FakePaths::new(PathBuf::from("codexhub"), home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::sequence(vec![
+            Err("failed to start systemctl: program not found".to_string()),
+            Err("failed to start systemctl: program not found".to_string()),
+        ]);
+
+        remove_autostart_with_dependencies(OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        assert_eq!(
+            filesystem.removed_files.borrow().as_slice(),
+            &[home
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .join(LINUX_SERVICE_FILE)]
+        );
+    }
+
+    #[test]
+    fn linux_remove_autostart_succeeds_when_disable_reports_not_enabled() {
+        let home = PathBuf::from("home").join("alice");
+        let paths = FakePaths::new(PathBuf::from("codexhub"), home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "Unit codexhub-proxy.service is not enabled.",
+            )),
+            Ok(command_outcome(Some(0), "", "")),
+        ]);
+
+        remove_autostart_with_dependencies(OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        assert_eq!(
+            filesystem.removed_files.borrow().as_slice(),
+            &[home
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .join(LINUX_SERVICE_FILE)]
+        );
+    }
+
+    #[test]
+    fn linux_remove_autostart_succeeds_when_user_bus_is_unavailable() {
+        let home = PathBuf::from("home").join("alice");
+        let paths = FakePaths::new(PathBuf::from("codexhub"), home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "Failed to connect to bus: No medium found",
+            )),
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "Failed to connect to bus: No medium found",
+            )),
+        ]);
+
+        remove_autostart_with_dependencies(OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        assert_eq!(
+            filesystem.removed_files.borrow().as_slice(),
+            &[home
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .join(LINUX_SERVICE_FILE)]
+        );
+    }
+
+    #[test]
+    fn linux_remove_autostart_preserves_real_service_file_removal_failure() {
+        let home = PathBuf::from("home").join("alice");
+        let paths = FakePaths::new(PathBuf::from("codexhub"), home);
+        let filesystem = MemoryFileSystem::new_with_remove_error("permission denied".to_string());
+        let runner = RecordingRunner::failed(
+            1,
+            "",
+            "Failed to connect to bus: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined",
+        );
+
+        let error = remove_autostart_with_dependencies(
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("permission denied"));
+        assert_eq!(runner.commands.borrow().len(), 1);
     }
 
     #[test]
@@ -578,14 +961,20 @@ mod tests {
         assert_eq!(*paths.current_exe_calls.borrow(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("systemctl"),
-                args: vec![
-                    "--user".to_string(),
-                    "disable".to_string(),
-                    LINUX_SERVICE_FILE.to_string(),
-                ],
-            }]
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec![
+                        "--user".to_string(),
+                        "disable".to_string(),
+                        LINUX_SERVICE_FILE.to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    program: PathBuf::from("systemctl"),
+                    args: vec!["--user".to_string(), "daemon-reload".to_string()],
+                }
+            ]
         );
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
@@ -651,29 +1040,32 @@ mod tests {
 
     struct RecordingRunner {
         commands: RefCell<Vec<RecordedCommand>>,
-        outcome: CommandOutcome,
+        outcomes: RefCell<VecDeque<Result<CommandOutcome, String>>>,
+        fallback: Result<CommandOutcome, String>,
     }
 
     impl RecordingRunner {
         fn successful() -> Self {
             Self {
                 commands: RefCell::new(Vec::new()),
-                outcome: CommandOutcome {
-                    code: Some(0),
-                    stdout: "ok".to_string(),
-                    stderr: String::new(),
-                },
+                outcomes: RefCell::new(VecDeque::new()),
+                fallback: Ok(command_outcome(Some(0), "ok", "")),
             }
         }
 
         fn failed(code: i32, stdout: &str, stderr: &str) -> Self {
             Self {
                 commands: RefCell::new(Vec::new()),
-                outcome: CommandOutcome {
-                    code: Some(code),
-                    stdout: stdout.to_string(),
-                    stderr: stderr.to_string(),
-                },
+                outcomes: RefCell::new(VecDeque::new()),
+                fallback: Ok(command_outcome(Some(code), stdout, stderr)),
+            }
+        }
+
+        fn sequence(outcomes: Vec<Result<CommandOutcome, String>>) -> Self {
+            Self {
+                commands: RefCell::new(Vec::new()),
+                outcomes: RefCell::new(VecDeque::from(outcomes)),
+                fallback: Err("unexpected command without configured outcome".to_string()),
             }
         }
     }
@@ -684,7 +1076,18 @@ mod tests {
                 program: program.to_path_buf(),
                 args: args.to_vec(),
             });
-            Ok(self.outcome.clone())
+            self.outcomes
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.clone())
+        }
+    }
+
+    fn command_outcome(code: Option<i32>, stdout: &str, stderr: &str) -> CommandOutcome {
+        CommandOutcome {
+            code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
         }
     }
 
@@ -734,6 +1137,16 @@ mod tests {
         created_dirs: RefCell<Vec<PathBuf>>,
         writes: RefCell<HashMap<PathBuf, String>>,
         removed_files: RefCell<Vec<PathBuf>>,
+        remove_error: Option<String>,
+    }
+
+    impl MemoryFileSystem {
+        fn new_with_remove_error(remove_error: String) -> Self {
+            Self {
+                remove_error: Some(remove_error),
+                ..Self::default()
+            }
+        }
     }
 
     impl AutostartFileSystem for MemoryFileSystem {
@@ -751,6 +1164,9 @@ mod tests {
 
         fn remove_file_if_exists(&self, path: &Path) -> Result<(), String> {
             self.removed_files.borrow_mut().push(path.to_path_buf());
+            if let Some(error) = &self.remove_error {
+                return Err(error.clone());
+            }
             Ok(())
         }
     }
