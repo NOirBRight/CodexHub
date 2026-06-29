@@ -120,7 +120,12 @@ fn provider_models_endpoint(base_url: &str) -> Result<String, String> {
         return Err("provider base_url is required for model discovery".to_string());
     }
 
-    Ok(format!("{}/models", base_url.trim_end_matches('/')))
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        Ok(format!("{base_url}/models"))
+    } else {
+        Ok(format!("{base_url}/v1/models"))
+    }
 }
 
 fn safe_http_error(error: reqwest::Error) -> String {
@@ -577,7 +582,7 @@ mod tests {
 
             assert_eq!(compact_models(&models), expected);
             let request = server.request();
-            assert!(request.starts_with("GET /models "));
+            assert!(request.starts_with("GET /v1/models "));
             assert!(request
                 .to_ascii_lowercase()
                 .contains("authorization: bearer provider-secret"));
@@ -595,7 +600,23 @@ mod tests {
 
         assert_eq!(model_ids(&models), ["public-model"]);
         let request = server.request();
+        assert!(request.starts_with("GET /v1/models "));
         assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        server.join();
+    }
+
+    #[test]
+    fn provider_discovery_does_not_duplicate_v1_suffix() {
+        let server = MockServer::json(r#"{"models":["v1-model"]}"#, Duration::ZERO);
+        let base_url = format!("{}/v1/", server.base_url());
+
+        let models =
+            discover_provider_models_with_timeout(&base_url, "test-secret", Duration::from_secs(2))
+                .expect("provider discovery");
+
+        assert_eq!(model_ids(&models), ["v1-model"]);
+        let request = server.request();
+        assert!(request.starts_with("GET /v1/models "));
         server.join();
     }
 
