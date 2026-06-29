@@ -37,7 +37,7 @@ pub(crate) struct ConfigPaths {
 }
 
 impl ConfigPaths {
-    fn runtime() -> Result<Self, String> {
+    pub(crate) fn runtime() -> Result<Self, String> {
         let codex_dir = match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
             Some(value) => PathBuf::from(value),
             None => dirs::home_dir()
@@ -59,11 +59,11 @@ impl ConfigPaths {
         }
     }
 
-    fn codex_dir(&self) -> &Path {
+    pub(crate) fn codex_dir(&self) -> &Path {
         &self.codex_dir
     }
 
-    fn proxy_dir(&self) -> PathBuf {
+    pub(crate) fn proxy_dir(&self) -> PathBuf {
         self.codex_dir.join("proxy")
     }
 
@@ -97,7 +97,7 @@ impl ConfigPaths {
         self.repo_root.join("src-python").join("config_overlay.py")
     }
 
-    fn history_overlay_script(&self) -> PathBuf {
+    pub(crate) fn history_overlay_script(&self) -> PathBuf {
         self.repo_root.join("src-python").join("history_overlay.py")
     }
 
@@ -128,7 +128,7 @@ pub(crate) trait CommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String>;
 }
 
-struct ProcessCommandRunner;
+pub(crate) struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
@@ -364,7 +364,7 @@ fn ensure_mode_switch_directories(paths: &ConfigPaths) -> Result<(), String> {
     Ok(())
 }
 
-fn run_python_script(
+pub(crate) fn run_python_script(
     label: &str,
     python: &Path,
     script: PathBuf,
@@ -385,7 +385,7 @@ fn run_python_script(
     Err(format_command_failure(label, python, &args, &outcome))
 }
 
-fn format_command_failure(
+pub(crate) fn format_command_failure(
     label: &str,
     program: &Path,
     args: &[String],
@@ -427,7 +427,7 @@ fn quote_command_part(part: OsString) -> String {
     }
 }
 
-fn find_python() -> PathBuf {
+pub(crate) fn find_python() -> PathBuf {
     which::which("python").unwrap_or_else(|_| PathBuf::from("python"))
 }
 
