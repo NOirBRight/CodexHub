@@ -22,7 +22,7 @@ enabled = true
   enabled = true
 
 [[providers]]
-id = "volcengine"
+id = "volc"
 name = "Volcengine"
 base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
 api_key = "{env:VOLCENGINE_API_KEY}"

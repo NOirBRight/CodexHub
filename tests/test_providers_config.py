@@ -15,6 +15,11 @@ class ProvidersConfigTests(unittest.TestCase):
 
             self.assertEqual(load_providers(path), [])
 
+    def test_default_config_uses_provider_ids_that_match_model_slug_prefixes(self):
+        providers = load_providers()
+
+        self.assertEqual([provider.id for provider in providers], ["ollama-cloud", "volc", "minimax-cn"])
+
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
@@ -102,6 +107,51 @@ sort_order = 20
         self.assertEqual(literal_provider.resolved_api_key(), "literal-secret")
         self.assertIsNone(missing_env_provider.resolved_api_key())
         self.assertIsNone(empty_provider.resolved_api_key())
+
+    def test_resolved_api_key_keeps_partial_env_placeholders_as_literals(self):
+        provider = ProviderConfig(
+            id="partial",
+            name="Partial Provider",
+            base_url="https://partial.example/v1",
+            api_key="prefix-{env:PROVIDERS_CONFIG_TEST_KEY}",
+        )
+
+        with patch.dict("os.environ", {"PROVIDERS_CONFIG_TEST_KEY": "env-secret"}, clear=False):
+            self.assertEqual(provider.resolved_api_key(), "prefix-{env:PROVIDERS_CONFIG_TEST_KEY}")
+
+    def test_load_rejects_providers_table_that_is_not_an_array(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[providers]
+id = "not-an-array"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                load_providers(path)
+
+    def test_load_rejects_models_table_that_is_not_an_array(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "provider"
+name = "Provider"
+base_url = "https://provider.example/v1"
+api_key = "literal-secret"
+
+  [providers.models]
+  id = "not-an-array"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                load_providers(path)
 
     def test_load_coerces_simple_string_values_without_inventing_numeric_limits(self):
         with tempfile.TemporaryDirectory() as tmpdir:
