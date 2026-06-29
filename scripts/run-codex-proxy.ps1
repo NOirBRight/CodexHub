@@ -1,5 +1,8 @@
 $ErrorActionPreference = 'Stop'
-$ProxyDir = Split-Path -Parent $PSCommandPath
+$ScriptDir = Split-Path -Parent $PSCommandPath
+$RepoRoot = Split-Path -Parent $ScriptDir
+$ProxyDir = Join-Path $RepoRoot 'src-python'
+$ConfigDir = Join-Path $RepoRoot 'config'
 $ProxyPort = '9099'
 $env:CODEX_PROXY_PORT = $ProxyPort
 Set-Location -LiteralPath $ProxyDir

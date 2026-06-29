@@ -222,7 +222,7 @@ function Backup-ConfigBeforeWrite {
         return
     }
 
-    $backupDir = Join-Path $ProxyDir 'mode-backups'
+    $backupDir = Join-Path $ScriptDir 'mode-backups'
     New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $backupPath = Join-Path $backupDir "config.$TargetMode.$stamp.toml.bak"
@@ -326,7 +326,7 @@ function Assert-CodexClosed {
 
 function Get-ProxyProcesses {
     $pythonPattern = [Regex]::Escape((Join-Path $ProxyDir 'codex_proxy.py'))
-    $runnerPattern = [Regex]::Escape((Join-Path $ProxyDir 'run-codex-proxy.ps1'))
+    $runnerPattern = [Regex]::Escape((Join-Path $ScriptDir 'run-codex-proxy.ps1'))
     @(Get-CimInstance Win32_Process | Where-Object {
         $commandLine = [string]$_.CommandLine
         ($_.Name -ieq 'python.exe' -and $commandLine -match $pythonPattern) -or
@@ -360,16 +360,13 @@ function Test-ProxyHealth {
 }
 
 function Test-ProxyNeedsRestart {
-    $repoRoot = Split-Path -Parent $ProxyDir
-    $pythonDir = Join-Path $repoRoot 'src-python'
-    $configDir = Join-Path $repoRoot 'config'
     $dependencyPaths = @(
-        (Join-Path $pythonDir 'codex_proxy.py'),
-        (Join-Path $pythonDir 'catalog_sync.py'),
-        (Join-Path $pythonDir 'catalog.py'),
-        (Join-Path $pythonDir 'providers_config.py'),
-        (Join-Path $configDir 'catalog_policy.toml'),
-        (Join-Path $configDir 'providers.toml')
+        (Join-Path $ProxyDir 'codex_proxy.py'),
+        (Join-Path $ProxyDir 'catalog_sync.py'),
+        (Join-Path $ProxyDir 'catalog.py'),
+        (Join-Path $ProxyDir 'providers_config.py'),
+        (Join-Path $ConfigDir 'catalog_policy.toml'),
+        (Join-Path $ConfigDir 'providers.toml')
     )
     $latestDependency = $dependencyPaths |
         Where-Object { Test-Path -LiteralPath $_ } |
@@ -397,7 +394,7 @@ function Stop-ProxyProcesses {
 }
 
 function Start-ProxyProcess {
-    $runner = Join-Path $ProxyDir 'run-codex-proxy.ps1'
+    $runner = Join-Path $ScriptDir 'run-codex-proxy.ps1'
     $startArgs = @(
         '-NoProfile',
         '-ExecutionPolicy',
@@ -405,7 +402,7 @@ function Start-ProxyProcess {
         '-File',
         "`"$runner`""
     )
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $startArgs -WorkingDirectory $ProxyDir -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $startArgs -WorkingDirectory $ScriptDir -WindowStyle Hidden | Out-Null
 }
 
 function Wait-ProxyHealth {
@@ -475,7 +472,7 @@ function Repair-UiStateFile {
         return
     }
 
-    $backupDir = Join-Path $ProxyDir 'mode-backups'
+    $backupDir = Join-Path $ScriptDir 'mode-backups'
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     $backupPath = Join-Path $backupDir ("global-state.$BackupLabel.$(Get-Date -Format 'yyyyMMddHHmmss').bak")
     Invoke-Checked -FilePath 'python' -Arguments @(
@@ -546,7 +543,7 @@ function Invoke-HistoryOverlay {
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $historyOverlay = Join-Path $ProxyDir 'history_overlay.py'
     if ($TargetProvider -eq 'custom') {
-        $backupRoot = Join-Path $ProxyDir "history-openai-to-custom-$stamp"
+        $backupRoot = Join-Path $ScriptDir "history-openai-to-custom-$stamp"
         Invoke-Checked -FilePath 'python' -Arguments @(
             $historyOverlay,
             'normalize-fast',
@@ -559,7 +556,7 @@ function Invoke-HistoryOverlay {
         )
     }
     else {
-        $backupRoot = Join-Path $ProxyDir "history-custom-to-openai-$stamp"
+        $backupRoot = Join-Path $ScriptDir "history-custom-to-openai-$stamp"
         Invoke-Checked -FilePath 'python' -Arguments @(
             $historyOverlay,
             'normalize-fast',
@@ -592,7 +589,7 @@ function Invoke-ConsolidateOfficial {
     }
 
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
-    $backupRoot = Join-Path $ProxyDir "consolidate-official-$stamp"
+    $backupRoot = Join-Path $ScriptDir "consolidate-official-$stamp"
     $targetProvider = Get-CurrentHistoryProvider
     Invoke-Checked -FilePath 'python' -Arguments @(
         (Join-Path $ProxyDir 'history_consolidate.py'),
@@ -725,9 +722,12 @@ if ($Help) {
     exit 0
 }
 
-$ProxyDir = Split-Path -Parent $PSCommandPath
+$ScriptDir = Split-Path -Parent $PSCommandPath
+$RepoRoot = Split-Path -Parent $ScriptDir
+$ProxyDir = Join-Path $RepoRoot 'src-python'
+$ConfigDir = Join-Path $RepoRoot 'config'
 $CodexDir = Join-Path $env:USERPROFILE '.codex'
-$ModeStateRoot = Join-Path $ProxyDir 'mode-state'
+$ModeStateRoot = Join-Path $ScriptDir 'mode-state'
 $CatalogPath = Join-Path $CodexDir 'model-catalogs\codex-proxy-official-ollama.json'
 $HealthUrl = 'http://127.0.0.1:9099/health'
 

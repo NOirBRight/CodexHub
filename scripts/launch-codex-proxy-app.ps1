@@ -111,7 +111,10 @@ if ($WorkspacePath -ieq 'repair-ui-state') {
     $WorkspacePath = (Get-Location).Path
 }
 
-$ProxyDir = Split-Path -Parent $PSCommandPath
+$ScriptDir = Split-Path -Parent $PSCommandPath
+$RepoRoot = Split-Path -Parent $ScriptDir
+$ProxyDir = Join-Path $RepoRoot 'src-python'
+$ConfigDir = Join-Path $RepoRoot 'config'
 $ProxyHost = '127.0.0.1'
 $ProxyPort = '9099'
 $ProxyBaseUrl = "http://${ProxyHost}:$ProxyPort"
@@ -119,16 +122,16 @@ $CatalogSync = Join-Path $ProxyDir 'catalog_sync.py'
 $ConfigOverlay = Join-Path $ProxyDir 'config_overlay.py'
 $GlobalStateRepair = Join-Path $ProxyDir 'global_state_repair.py'
 $HistoryOverlay = Join-Path $ProxyDir 'history_overlay.py'
-$ProxyRunner = Join-Path $ProxyDir 'run-codex-proxy.ps1'
+$ProxyRunner = Join-Path $ScriptDir 'run-codex-proxy.ps1'
 $HealthUrl = "$ProxyBaseUrl/health"
 $CatalogPath = Join-Path $env:USERPROFILE '.codex\model-catalogs\codex-proxy-official-ollama.json'
 $CodexDir = Join-Path $env:USERPROFILE '.codex'
 $ConfigPath = Join-Path $env:USERPROFILE '.codex\config.toml'
 $GlobalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 $SessionId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
-$ConfigBackupPath = Join-Path $ProxyDir "config.toml.session-$SessionId.bak"
-$GlobalStateBackupPath = Join-Path $ProxyDir "global-state.session-$SessionId.bak"
-$HistoryRepairBackupRoot = Join-Path $ProxyDir "history-promote-custom-openai-$SessionId"
+$ConfigBackupPath = Join-Path $ScriptDir "config.toml.session-$SessionId.bak"
+$GlobalStateBackupPath = Join-Path $ScriptDir "global-state.session-$SessionId.bak"
+$HistoryRepairBackupRoot = Join-Path $ScriptDir "history-promote-custom-openai-$SessionId"
 $CodexAppStartTimeoutSeconds = 120
 
 function Get-CodexAppProcesses {
@@ -228,16 +231,13 @@ function Get-ProxyProcesses {
 }
 
 function Test-ProxyNeedsRestart {
-    $repoRoot = Split-Path -Parent $ProxyDir
-    $pythonDir = Join-Path $repoRoot 'src-python'
-    $configDir = Join-Path $repoRoot 'config'
     $dependencyPaths = @(
-        (Join-Path $pythonDir 'codex_proxy.py'),
-        (Join-Path $pythonDir 'catalog_sync.py'),
-        (Join-Path $pythonDir 'catalog.py'),
-        (Join-Path $pythonDir 'providers_config.py'),
-        (Join-Path $configDir 'catalog_policy.toml'),
-        (Join-Path $configDir 'providers.toml')
+        (Join-Path $ProxyDir 'codex_proxy.py'),
+        (Join-Path $ProxyDir 'catalog_sync.py'),
+        (Join-Path $ProxyDir 'catalog.py'),
+        (Join-Path $ProxyDir 'providers_config.py'),
+        (Join-Path $ConfigDir 'catalog_policy.toml'),
+        (Join-Path $ConfigDir 'providers.toml')
     )
     $latestDependency = $dependencyPaths |
         Where-Object { Test-Path -LiteralPath $_ } |
@@ -274,7 +274,7 @@ function Start-ProxyProcess {
         '-File',
         "`"$ProxyRunner`""
     )
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $startArgs -WorkingDirectory $ProxyDir -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $startArgs -WorkingDirectory $ScriptDir -WindowStyle Hidden | Out-Null
 }
 
 function Wait-ProxyHealth {
