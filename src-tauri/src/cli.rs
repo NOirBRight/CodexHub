@@ -19,10 +19,13 @@ pub fn run(args: &[String]) -> i32 {
         Some("sync-catalog") => print_result(catalog::sync_catalog()),
         Some("list-providers") => print_result(config::get_providers()),
         Some("list-models") => print_result(models::list_models()),
-        Some("set-autostart") => {
-            let enabled = args.get(1).map(String::as_str).unwrap_or("true") != "false";
-            print_result(autostart::set_autostart(enabled))
-        }
+        Some("set-autostart") => match parse_set_autostart_enabled(&args[1..]) {
+            Ok(enabled) => print_result(autostart::set_autostart(enabled)),
+            Err(()) => {
+                print_set_autostart_usage();
+                2
+            }
+        },
         Some("remove-autostart") => print_result(autostart::remove_autostart()),
         Some("app") | None => 0,
         Some("-h" | "--help" | "help") => {
@@ -35,6 +38,22 @@ pub fn run(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+fn parse_set_autostart_enabled(values: &[String]) -> Result<bool, ()> {
+    match values {
+        [] => Ok(true),
+        [value] => match value.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+fn print_set_autostart_usage() {
+    eprintln!("usage: codexhub set-autostart [true|false]");
 }
 
 fn print_result<T: Serialize>(result: Result<T, String>) -> i32 {
@@ -80,7 +99,7 @@ Usage:
 
 #[cfg(test)]
 mod tests {
-    use super::run;
+    use super::{parse_set_autostart_enabled, run};
 
     #[test]
     fn help_command_succeeds() {
@@ -92,6 +111,43 @@ mod tests {
     #[test]
     fn unknown_command_returns_usage_error() {
         let args = vec!["nope".to_string()];
+
+        assert_eq!(run(&args), 2);
+    }
+
+    #[test]
+    fn set_autostart_accepts_no_value_as_true() {
+        let args: Vec<String> = Vec::new();
+
+        assert_eq!(parse_set_autostart_enabled(&args), Ok(true));
+    }
+
+    #[test]
+    fn set_autostart_accepts_true_and_false_values() {
+        let true_args = vec!["true".to_string()];
+        let false_args = vec!["false".to_string()];
+
+        assert_eq!(parse_set_autostart_enabled(&true_args), Ok(true));
+        assert_eq!(parse_set_autostart_enabled(&false_args), Ok(false));
+    }
+
+    #[test]
+    fn set_autostart_rejects_unknown_value() {
+        let args = vec!["yes".to_string()];
+
+        assert_eq!(parse_set_autostart_enabled(&args), Err(()));
+    }
+
+    #[test]
+    fn set_autostart_rejects_extra_values() {
+        let args = vec!["true".to_string(), "extra".to_string()];
+
+        assert_eq!(parse_set_autostart_enabled(&args), Err(()));
+    }
+
+    #[test]
+    fn set_autostart_unknown_value_returns_usage_error() {
+        let args = vec!["set-autostart".to_string(), "yes".to_string()];
 
         assert_eq!(run(&args), 2);
     }
