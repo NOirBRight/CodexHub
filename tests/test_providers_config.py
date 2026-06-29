@@ -226,6 +226,23 @@ enabled = true
 
         self.assertEqual([provider.id for provider in providers], ["ollama-cloud", "volc", "minimax-cn"])
 
+    def test_default_config_external_aliases_exclude_volc_minimax_m3_by_default(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OLLAMA_API_KEY": "ollama-secret",
+                "VOLCENGINE_API_KEY": "volc-secret",
+                "MINIMAX_API_KEY": "minimax-secret",
+            },
+            clear=True,
+        ):
+            index = build_external_model_index(load_providers())
+            volc_minimax = resolve_external_model_alias("volc/minimax-m3")
+
+        self.assertEqual(sorted(index), ["minimax-cn/minimax-m3", "volc/glm-5.2"])
+        self.assertNotIn("volc/minimax-m3", index)
+        self.assertIsNone(volc_minimax)
+
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"

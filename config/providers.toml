@@ -43,7 +43,7 @@ enabled = true
   display_name = "Volc MiniMax-M3"
   max_output_tokens = 8192
   sort_order = 2
-  enabled = true
+  enabled = false
 
 [[providers]]
 id = "minimax-cn"
