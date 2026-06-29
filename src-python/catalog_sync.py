@@ -12,18 +12,30 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from catalog import CatalogPolicy, canonical_model_id, display_name_for, load_catalog_models, load_policy, should_include_model
-from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index, load_providers
+from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index, load_providers, runtime_providers_path
 
 
 PROXY_DIR = Path(__file__).resolve().parent
-CODEX_DIR = PROXY_DIR.parent
-MODEL_CATALOG_DIR = CODEX_DIR / "model-catalogs"
+REPO_ROOT = PROXY_DIR.parent
+def _runtime_codex_dir() -> Path:
+    codex_home_env = os.environ.get("CODEX_HOME")
+    if codex_home_env:
+        return Path(codex_home_env)
+    try:
+        return Path.home() / ".codex"
+    except (RuntimeError, OSError):
+        return REPO_ROOT
 
-POLICY_PATH = CODEX_DIR / "config" / "catalog_policy.toml"
-OFFICIAL_SEED_PATH = MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
-OLLAMA_FALLBACK_PATH = MODEL_CATALOG_DIR / "ollama-cloud.json"
-GENERATED_CATALOG_PATH = MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"
-GENERATED_STATE_PATH = MODEL_CATALOG_DIR / "codex-proxy-state.json"
+
+RUNTIME_CODEX_DIR = _runtime_codex_dir()
+BUNDLED_MODEL_CATALOG_DIR = REPO_ROOT / "model-catalogs"
+RUNTIME_MODEL_CATALOG_DIR = RUNTIME_CODEX_DIR / "model-catalogs"
+
+POLICY_PATH = REPO_ROOT / "config" / "catalog_policy.toml"
+OFFICIAL_SEED_PATH = BUNDLED_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
+OLLAMA_FALLBACK_PATH = BUNDLED_MODEL_CATALOG_DIR / "ollama-cloud.json"
+GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"
+GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -120,6 +132,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         OFFICIAL_SEED_PATH,
         OLLAMA_FALLBACK_PATH,
         DEFAULT_PROVIDERS_PATH,
+        runtime_providers_path(),
         Path(__file__).resolve(),
         PROXY_DIR / "catalog.py",
         PROXY_DIR / "providers_config.py",
@@ -547,6 +560,7 @@ def load_previous_visible_models(path: Path = GENERATED_STATE_PATH) -> set[str]:
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 

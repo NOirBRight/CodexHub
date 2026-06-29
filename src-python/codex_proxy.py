@@ -907,6 +907,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/shutdown":
+            self._send_json(200, {"ok": True, "message": "shutdown scheduled"})
+            self.close_connection = True
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+
         if parsed.path != "/v1/responses":
             self._send_json(404, {"error": "not found"})
             return

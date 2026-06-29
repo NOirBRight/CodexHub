@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CodexHub",
+  "version": "0.1.0",
+  "identifier": "com.codexhub.app",
+  "build": {
+    "frontendDist": "../frontend/dist",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "CodexHub",
+        "width": 900,
+        "height": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": []
+  }
+}
