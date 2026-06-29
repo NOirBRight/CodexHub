@@ -13,6 +13,29 @@ from catalog import canonical_model_id
 
 
 DEFAULT_PROVIDERS_PATH = Path(__file__).resolve().parents[1] / "config" / "providers.toml"
+
+
+def runtime_providers_path() -> Path:
+    """Return the active providers.toml path.
+
+    Prefer the runtime copy at CODEX_HOME/proxy/config/providers.toml (written by
+    the Tauri/React UI), falling back to the bundled repo config when the runtime
+    copy does not exist yet. This keeps catalog_sync, proxy routing, and the Rust
+    backend reading the same source of truth.
+    """
+    codex_home_env = os.environ.get("CODEX_HOME")
+    if codex_home_env:
+        codex_home = Path(codex_home_env)
+    else:
+        try:
+            codex_home = Path.home() / ".codex"
+        except (RuntimeError, OSError):
+            return DEFAULT_PROVIDERS_PATH
+    runtime_path = codex_home / "proxy" / "config" / "providers.toml"
+    if runtime_path.exists():
+        return runtime_path
+    return DEFAULT_PROVIDERS_PATH
+
 OFFICIAL_OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
 ENV_PLACEHOLDER_RE = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
@@ -170,12 +193,16 @@ def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str,
 
 def resolve_external_model_alias(
     model_id: str,
-    providers_path: Path = DEFAULT_PROVIDERS_PATH,
+    providers_path: Path | None = None,
 ) -> dict[str, Any] | None:
+    if providers_path is None:
+        providers_path = runtime_providers_path()
     return build_external_model_index(load_providers(providers_path)).get(canonical_model_id(model_id).lower())
 
 
-def load_providers(path: Path = DEFAULT_PROVIDERS_PATH) -> list[ProviderConfig]:
+def load_providers(path: Path | None = None) -> list[ProviderConfig]:
+    if path is None:
+        path = runtime_providers_path()
     if not path.exists():
         return []
 

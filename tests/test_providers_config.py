@@ -723,6 +723,45 @@ enabled = "0"
         self.assertIn('api_key = "{env:ROUNDTRIP_PROVIDER_KEY}"', raw_toml)
         self.assertNotIn("must-not-be-written", raw_toml)
 
+    def test_runtime_providers_path_preferred_over_bundled(self):
+        """Regression: runtime CODEX_HOME/providers.toml must be read by load_providers
+        and resolve_external_model_alias, matching the Rust backend write path."""
+        import importlib
+        import providers_config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            runtime_providers = codex_home / "proxy" / "config" / "providers.toml"
+            runtime_providers.parent.mkdir(parents=True)
+            runtime_providers.write_text(
+                """
+[[providers]]
+id = "test-runtime"
+name = "Test Runtime Provider"
+base_url = "https://runtime.example/v1"
+api_key = "runtime-key"
+
+  [[providers.models]]
+  id = "runtime-model"
+  context_window = 64000
+""",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                importlib.reload(providers_config)
+                resolved_path = providers_config.runtime_providers_path()
+                self.assertEqual(resolved_path, runtime_providers)
+
+                loaded = providers_config.load_providers()
+                self.assertEqual(len(loaded), 1)
+                self.assertEqual(loaded[0].id, "test-runtime")
+
+                alias = providers_config.resolve_external_model_alias("test-runtime/runtime-model")
+                self.assertIsNotNone(alias)
+                self.assertEqual(alias["upstream_model"], "runtime-model")
+            importlib.reload(providers_config)
+
 
 if __name__ == "__main__":
     unittest.main()
+

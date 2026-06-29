@@ -12,12 +12,22 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from catalog import CatalogPolicy, canonical_model_id, display_name_for, load_catalog_models, load_policy, should_include_model
-from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index, load_providers
+from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index, load_providers, runtime_providers_path
 
 
 PROXY_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PROXY_DIR.parent
-RUNTIME_CODEX_DIR = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+def _runtime_codex_dir() -> Path:
+    codex_home_env = os.environ.get("CODEX_HOME")
+    if codex_home_env:
+        return Path(codex_home_env)
+    try:
+        return Path.home() / ".codex"
+    except (RuntimeError, OSError):
+        return REPO_ROOT
+
+
+RUNTIME_CODEX_DIR = _runtime_codex_dir()
 BUNDLED_MODEL_CATALOG_DIR = REPO_ROOT / "model-catalogs"
 RUNTIME_MODEL_CATALOG_DIR = RUNTIME_CODEX_DIR / "model-catalogs"
 
@@ -122,6 +132,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         OFFICIAL_SEED_PATH,
         OLLAMA_FALLBACK_PATH,
         DEFAULT_PROVIDERS_PATH,
+        runtime_providers_path(),
         Path(__file__).resolve(),
         PROXY_DIR / "catalog.py",
         PROXY_DIR / "providers_config.py",
