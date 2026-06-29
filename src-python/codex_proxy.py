@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 from catalog import canonical_model_id, load_catalog_models, load_policy, should_include_model
 from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, sync_catalog
-from provider_registry import resolve_external_model_alias
+from providers_config import resolve_external_model_alias
 
 try:
     import zstandard
@@ -197,11 +197,11 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
     external_model = resolve_external_model_alias(slug)
     if external_model is not None:
         return {
-            "name": external_model.upstream_name,
-            "base_url": external_model.base_url,
+            "name": external_model["upstream_name"],
+            "base_url": external_model["base_url"],
             "auth": "api_key",
-            "api_key": external_model.api_key,
-            "upstream_model": external_model.upstream_model,
+            "api_key": external_model["api_key"],
+            "upstream_model": external_model["upstream_model"],
         }
 
     if "/" in slug:

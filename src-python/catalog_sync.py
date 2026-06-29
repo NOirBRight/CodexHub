@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from catalog import CatalogPolicy, canonical_model_id, display_name_for, load_catalog_models, load_policy, should_include_model
-from provider_registry import ExternalProviderModel, OPENCODE_CONFIG_PATH, configured_external_models
+from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index, load_providers
 
 
 PROXY_DIR = Path(__file__).resolve().parent
@@ -119,10 +119,10 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         POLICY_PATH,
         OFFICIAL_SEED_PATH,
         OLLAMA_FALLBACK_PATH,
-        OPENCODE_CONFIG_PATH,
+        DEFAULT_PROVIDERS_PATH,
         Path(__file__).resolve(),
         PROXY_DIR / "catalog.py",
-        PROXY_DIR / "provider_registry.py",
+        PROXY_DIR / "providers_config.py",
     )
 
 
@@ -421,7 +421,7 @@ def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: 
 
 
 def build_external_provider_model(
-    external_model: ExternalProviderModel,
+    external_model: dict[str, Any],
     policy: CatalogPolicy,
     fallback_template: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -430,27 +430,37 @@ def build_external_provider_model(
     else:
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
 
-    model["slug"] = external_model.alias
-    model["display_name"] = display_name_for(external_model.alias, policy)
-    model["description"] = external_model.description
+    alias = str(external_model["alias"])
+    display_prefix = str(external_model.get("display_prefix") or external_model.get("provider_alias") or "provider")
+
+    model["slug"] = alias
+    model["display_name"] = display_name_for(alias, policy)
+    description = external_model.get("description")
+    model["description"] = (
+        description
+        if isinstance(description, str) and description.strip()
+        else f"External {display_prefix} model via providers.toml."
+    )
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
-    model["input_modalities"] = list(external_model.input_modalities)
+    model["input_modalities"] = list(external_model.get("input_modalities") or ("text",))
 
-    if external_model.context_window:
-        model["context_window"] = external_model.context_window
-        model["max_context_window"] = external_model.context_window
-    if external_model.max_output_tokens:
-        model["max_output_tokens"] = external_model.max_output_tokens
+    context_window = external_model.get("context_window")
+    if isinstance(context_window, int) and context_window > 0:
+        model["context_window"] = context_window
+        model["max_context_window"] = context_window
+    max_output_tokens = external_model.get("max_output_tokens")
+    if isinstance(max_output_tokens, int) and max_output_tokens > 0:
+        model["max_output_tokens"] = max_output_tokens
 
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     proxy_metadata.update(
         {
-            "provider": external_model.provider_alias,
-            "upstream_name": external_model.upstream_name,
-            "upstream_model": external_model.upstream_model,
-            "context_source": external_model.context_source,
-            "max_output_source": external_model.max_output_source,
+            "provider": external_model["provider_alias"],
+            "upstream_name": external_model["upstream_name"],
+            "upstream_model": external_model["upstream_model"],
+            "context_source": external_model.get("context_source"),
+            "max_output_source": external_model.get("max_output_source"),
         }
     )
     model["codex_proxy_metadata"] = proxy_metadata
@@ -465,7 +475,7 @@ def build_codex_catalog(
     *,
     fallback_models: Iterable[dict[str, Any]] | None = None,
     ollama_model_metadata: dict[str, dict[str, Any]] | None = None,
-    external_models: Iterable[ExternalProviderModel] | None = None,
+    external_models: Iterable[dict[str, Any]] | None = None,
     fetched_at: str | None = None,
 ) -> dict[str, Any]:
     models: list[dict[str, Any]] = []
@@ -497,13 +507,14 @@ def build_codex_catalog(
         seen_slugs.add(slug)
 
     for priority_offset, external_model in enumerate(external_models or []):
-        slug = canonical_model_id(external_model.alias)
-        if not should_include_model(slug, policy):
+        slug = canonical_model_id(str(external_model.get("alias", "")))
+        if not slug or not should_include_model(slug, policy):
             continue
-        if not slug or slug in seen_slugs:
+        if slug in seen_slugs:
             continue
         model = build_external_provider_model(external_model, policy, fallback_template)
-        model["priority"] = external_model.priority_base + priority_offset
+        priority_base = external_model.get("priority_base")
+        model["priority"] = (priority_base if isinstance(priority_base, int) else 0) + priority_offset
         models.append(model)
         seen_slugs.add(slug)
 
@@ -563,7 +574,8 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     fallback_models = load_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
     discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
-    external_models = configured_external_models()
+    providers = load_providers()
+    external_models = list(build_external_model_index(providers).values())
     discovered_slugs = dedupe_canonical_model_ids(discovered_ids)
     visible_ollama_slugs = [
         canonical_model_id(str(slug))
@@ -593,7 +605,7 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         "metadata_detail": metadata_detail,
         "ollama_model_metadata": ollama_model_metadata,
         "discovered_ollama_models": discovered_slugs,
-        "external_provider_models": [model.alias for model in external_models],
+        "external_provider_models": [str(model["alias"]) for model in external_models],
         "visible_models": visible_slugs,
         "diff": diff,
     }

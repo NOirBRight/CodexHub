@@ -20,7 +20,6 @@ from codex_proxy import (
     upstream_timeout_seconds,
     upstream_headers,
 )
-from provider_registry import ExternalProviderModel
 
 
 class FakeWFile:
@@ -120,34 +119,36 @@ class RoutingTests(unittest.TestCase):
         )
         self.catalog_by_slug_patch.start()
         self.addCleanup(self.catalog_by_slug_patch.stop)
-        self.external_model = ExternalProviderModel(
-            alias="volc/glm-5.2",
-            provider_alias="volc",
-            upstream_name="volcengine",
-            display_prefix="Volc",
-            description="External Volcano Engine model.",
-            base_url="https://ark.example.test/v1",
-            api_key="volc-test-token",
-            upstream_model="glm-5.2",
-            priority_base=200,
-            context_window=1024000,
-            max_output_tokens=4096,
-            input_modalities=("text",),
-        )
-        self.minimax_external_model = ExternalProviderModel(
-            alias="minimax-cn/minimax-m3",
-            provider_alias="minimax-cn",
-            upstream_name="minimax_cn",
-            display_prefix="MiniMax.cn",
-            description="External MiniMax.cn model.",
-            base_url="https://api.minimaxi.com/v1",
-            api_key="minimax-test-token",
-            upstream_model="MiniMax-M3",
-            priority_base=300,
-            context_window=1000000,
-            max_output_tokens=524288,
-            input_modalities=("text", "image"),
-        )
+        self.external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        self.minimax_external_model = {
+            "alias": "minimax-cn/minimax-m3",
+            "provider_alias": "minimax-cn",
+            "upstream_name": "minimax_cn",
+            "display_prefix": "MiniMax.cn",
+            "base_url": "https://api.minimaxi.com/v1",
+            "api_key": "minimax-test-token",
+            "upstream_model": "minimax-m3",
+            "priority_base": 300,
+            "context_window": 1000000,
+            "max_output_tokens": 524288,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
         self.external_patch = patch(
             "codex_proxy.resolve_external_model_alias",
             side_effect=lambda slug: {
@@ -491,7 +492,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_converts_compaction_input_to_system_message(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "MiniMax-M3"),
+            ("minimax-cn/minimax-m3", "minimax-m3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = choose_upstream(model_id)
@@ -520,7 +521,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_converts_custom_tool_items_to_system_messages(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "MiniMax-M3"),
+            ("minimax-cn/minimax-m3", "minimax-m3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = choose_upstream(model_id)
@@ -564,7 +565,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_normalizes_real_history_artifact_items(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "MiniMax-M3"),
+            ("minimax-cn/minimax-m3", "minimax-m3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = choose_upstream(model_id)

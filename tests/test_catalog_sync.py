@@ -6,7 +6,6 @@ from urllib.error import HTTPError
 from catalog import CatalogPolicy
 import catalog_sync
 from catalog_sync import build_codex_catalog, diff_model_state, discover_ollama_ids
-from provider_registry import ExternalProviderModel
 
 
 class CatalogSyncTests(unittest.TestCase):
@@ -160,34 +159,36 @@ class CatalogSyncTests(unittest.TestCase):
 
     def test_build_catalog_appends_provider_prefixed_external_models(self):
         external_models = [
-            ExternalProviderModel(
-                alias="volc/glm-5.2",
-                provider_alias="volc",
-                upstream_name="volcengine",
-                display_prefix="Volc",
-                description="External Volcano Engine model.",
-                base_url="https://ark.example.test/v1",
-                api_key="secret-test-key",
-                upstream_model="glm-5.2",
-                priority_base=200,
-                context_window=1024000,
-                max_output_tokens=4096,
-                input_modalities=("text",),
-            ),
-            ExternalProviderModel(
-                alias="volc/minimax-m3",
-                provider_alias="volc",
-                upstream_name="volcengine",
-                display_prefix="Volc",
-                description="External Volcano Engine model.",
-                base_url="https://ark.example.test/v1",
-                api_key="secret-test-key",
-                upstream_model="minimax-m3",
-                priority_base=200,
-                context_window=512000,
-                max_output_tokens=4096,
-                input_modalities=("text", "image"),
-            ),
+            {
+                "alias": "volc/glm-5.2",
+                "provider_alias": "volc",
+                "upstream_name": "volcengine",
+                "display_prefix": "Volc",
+                "base_url": "https://ark.example.test/v1",
+                "api_key": "secret-test-key",
+                "upstream_model": "glm-5.2",
+                "priority_base": 200,
+                "context_window": 1024000,
+                "max_output_tokens": 4096,
+                "input_modalities": ("text",),
+                "context_source": "providers_toml",
+                "max_output_source": "providers_toml",
+            },
+            {
+                "alias": "volc/minimax-m3",
+                "provider_alias": "volc",
+                "upstream_name": "volcengine",
+                "display_prefix": "Volc",
+                "base_url": "https://ark.example.test/v1",
+                "api_key": "secret-test-key",
+                "upstream_model": "minimax-m3",
+                "priority_base": 200,
+                "context_window": 512000,
+                "max_output_tokens": 4096,
+                "input_modalities": ("text", "image"),
+                "context_source": "providers_toml",
+                "max_output_source": "providers_toml",
+            },
         ]
 
         catalog = build_codex_catalog([], [], self.policy, "0.142.0", external_models=external_models)
@@ -203,6 +204,10 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["volc/minimax-m3"]["input_modalities"], ["text", "image"])
         self.assertEqual(by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["provider"], "volc")
         self.assertEqual(by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["upstream_model"], "glm-5.2")
+        self.assertEqual(
+            by_slug["volc/glm-5.2"]["description"],
+            "External Volc model via providers.toml.",
+        )
         self.assertNotIn("secret-test-key", json.dumps(catalog))
 
     def test_dynamic_ollama_metadata_overrides_static_context_and_modalities(self):
