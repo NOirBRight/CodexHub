@@ -64,6 +64,7 @@ enabled = true
 
   [[providers.models]]
   id = "minimax-m3"
+  upstream_model = "MiniMax-M3"
   context_window = 1000000
   max_output_tokens = 524288
   sort_order = 1
@@ -98,10 +99,45 @@ enabled = true
         self.assertEqual(minimax["display_prefix"], "MiniMax.cn")
         self.assertEqual(minimax["base_url"], "https://api.minimaxi.com/v1")
         self.assertEqual(minimax["api_key"], "literal-minimax-secret")
-        self.assertEqual(minimax["upstream_model"], "minimax-m3")
+        self.assertEqual(minimax["upstream_model"], "MiniMax-M3")
         self.assertEqual(minimax["context_window"], 1000000)
         self.assertEqual(minimax["max_output_tokens"], 524288)
         self.assertEqual(minimax["priority_base"], 300)
+
+    def test_upstream_model_load_save_and_index_preserve_live_case(self):
+        providers = [
+            ProviderConfig(
+                id="case-provider",
+                name="Case Provider",
+                base_url="https://case.example/v1",
+                api_key="case-secret",
+                models=[
+                    ModelConfig(
+                        id="alias-model",
+                        upstream_model="Live-Case-Model",
+                        sort_order=1,
+                    ),
+                    ModelConfig(
+                        id=" Fallback-Model ",
+                        sort_order=2,
+                    ),
+                ],
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            save_providers(providers, path)
+            loaded = load_providers(path)
+            raw_toml = path.read_text(encoding="utf-8")
+
+        self.assertEqual(loaded[0].models[0].upstream_model, "Live-Case-Model")
+        self.assertIsNone(loaded[0].models[1].upstream_model)
+        self.assertIn('upstream_model = "Live-Case-Model"', raw_toml)
+
+        index = build_external_model_index(loaded)
+        self.assertEqual(index["case-provider/alias-model"]["upstream_model"], "Live-Case-Model")
+        self.assertEqual(index["case-provider/fallback-model"]["upstream_model"], "Fallback-Model")
 
     def test_build_external_model_index_skips_disabled_providers_and_models(self):
         providers = [
@@ -291,6 +327,7 @@ enabled = true
 
         self.assertEqual(sorted(index), ["minimax-cn/minimax-m3", "volc/glm-5.2"])
         self.assertNotIn("volc/minimax-m3", index)
+        self.assertEqual(index["minimax-cn/minimax-m3"]["upstream_model"], "MiniMax-M3")
         self.assertIsNone(volc_minimax)
 
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):

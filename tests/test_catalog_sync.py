@@ -210,6 +210,33 @@ class CatalogSyncTests(unittest.TestCase):
         )
         self.assertNotIn("secret-test-key", json.dumps(catalog))
 
+    def test_build_catalog_omits_empty_external_provider_source_metadata(self):
+        external_models = [
+            {
+                "alias": "volc/glm-5.2",
+                "provider_alias": "volc",
+                "upstream_name": "volcengine",
+                "display_prefix": "Volc",
+                "base_url": "https://ark.example.test/v1",
+                "api_key": "secret-test-key",
+                "upstream_model": "glm-5.2",
+                "priority_base": 200,
+                "context_window": 1024000,
+                "max_output_tokens": 4096,
+                "input_modalities": ("text",),
+                "context_source": None,
+                "max_output_source": None,
+            }
+        ]
+
+        catalog = build_codex_catalog([], [], self.policy, "0.142.0", external_models=external_models)
+        model = next(model for model in catalog["models"] if model["slug"] == "volc/glm-5.2")
+        metadata = model["codex_proxy_metadata"]
+
+        self.assertEqual(metadata["provider"], "volc")
+        self.assertNotIn("context_source", metadata)
+        self.assertNotIn("max_output_source", metadata)
+
     def test_dynamic_ollama_metadata_overrides_static_context_and_modalities(self):
         metadata = {
             "kimi-k2.7-code": {

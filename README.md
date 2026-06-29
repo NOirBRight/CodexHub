@@ -14,11 +14,11 @@ A local proxy layer for [OpenAI Codex](https://developers.openai.com/codex/) tha
 
 ```
 CodexHub/
-  src/                    # Core Python modules
+  src-python/             # Core Python modules
     codex_proxy.py        # HTTP proxy server (routing, SSE relay, reasoning handling)
     catalog.py            # Catalog model loading and policy filtering
     catalog_sync.py       # Ollama Cloud + provider catalog discovery and generation
-    provider_registry.py  # External provider definitions and OpenCode config reader
+    providers_config.py   # External provider config loader for config/providers.toml
     config_overlay.py     # Codex config.toml overlay writer
     global_state_repair.py# .codex-global-state.json sanitizer
     history_overlay.py    # Session JSONL provider-label normalizer
@@ -28,6 +28,7 @@ CodexHub/
   scripts/                # PowerShell launcher and mode-switch scripts
   config/                 # Default policy and config templates
     catalog_policy.toml   # Routing rules, model allow/deny lists, display names
+    providers.toml        # External provider endpoints, models, and env key bindings
   tests/                  # Python unittest suite
   frontend/               # (planned) Settings UI
 ```
@@ -35,11 +36,11 @@ CodexHub/
 ## Quick start
 
 1. Install Python 3.12+ (needs `tomllib`).
-2. Copy `config/catalog_policy.toml` to your Codex proxy directory.
-3. Set provider API keys as environment variables (see `provider_registry.py`).
+2. Review `config/catalog_policy.toml` and `config/providers.toml`.
+3. Set provider API keys as environment variables referenced by `config/providers.toml`.
 4. Run the proxy:
    ```powershell
-   python src/codex_proxy.py --port 9099
+   $env:PYTHONPATH='src-python'; python src-python/codex_proxy.py --port 9099
    ```
 5. Switch Codex App to custom provider:
    ```powershell
@@ -50,7 +51,7 @@ CodexHub/
 
 See `config/catalog_policy.toml` for routing rules, model visibility, and display names.
 
-Provider keys are read from environment variables or OpenCode's `opencode.json` config.
+Provider endpoints and model aliases are read from `config/providers.toml`; secrets stay in environment variables.
 
 ## License
 

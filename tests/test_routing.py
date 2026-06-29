@@ -141,7 +141,7 @@ class RoutingTests(unittest.TestCase):
             "display_prefix": "MiniMax.cn",
             "base_url": "https://api.minimaxi.com/v1",
             "api_key": "minimax-test-token",
-            "upstream_model": "minimax-m3",
+            "upstream_model": "MiniMax-M3",
             "priority_base": 300,
             "context_window": 1000000,
             "max_output_tokens": 524288,
@@ -492,7 +492,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_converts_compaction_input_to_system_message(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "minimax-m3"),
+            ("minimax-cn/minimax-m3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = choose_upstream(model_id)
@@ -521,7 +521,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_converts_custom_tool_items_to_system_messages(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "minimax-m3"),
+            ("minimax-cn/minimax-m3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = choose_upstream(model_id)
@@ -565,7 +565,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_normalizes_real_history_artifact_items(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "minimax-m3"),
+            ("minimax-cn/minimax-m3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = choose_upstream(model_id)
@@ -638,6 +638,22 @@ class RoutingTests(unittest.TestCase):
 
         self.assertIn(b'"model":"glm-5.2"', transformed)
         self.assertNotIn(b'"model":"volc/glm-5.2"', transformed)
+
+    def test_default_minimax_provider_rewrites_to_live_upstream_model_case(self):
+        from providers_config import resolve_external_model_alias as real_resolve_external_model_alias
+
+        with (
+            patch("codex_proxy.resolve_external_model_alias", side_effect=real_resolve_external_model_alias),
+            patch.dict(os.environ, {"MINIMAX_API_KEY": "minimax-live-case-token"}, clear=False),
+        ):
+            upstream = choose_upstream("minimax-cn/minimax-m3")
+
+            body = b'{"model":"minimax-cn/minimax-m3","input":"hi"}'
+            transformed = compatible_request_body(body, upstream, "minimax-cn/minimax-m3")
+
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+        self.assertEqual(json.loads(transformed)["model"], "MiniMax-M3")
 
     def test_official_responses_url_preserves_backend_subpath_and_query(self):
         upstream = official_upstream()

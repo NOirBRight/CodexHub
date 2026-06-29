@@ -360,12 +360,16 @@ function Test-ProxyHealth {
 }
 
 function Test-ProxyNeedsRestart {
+    $repoRoot = Split-Path -Parent $ProxyDir
+    $pythonDir = Join-Path $repoRoot 'src-python'
+    $configDir = Join-Path $repoRoot 'config'
     $dependencyPaths = @(
-        (Join-Path $ProxyDir 'codex_proxy.py'),
-        (Join-Path $ProxyDir 'catalog_sync.py'),
-        (Join-Path $ProxyDir 'catalog.py'),
-        (Join-Path $ProxyDir 'provider_registry.py'),
-        (Join-Path $ProxyDir 'catalog_policy.toml')
+        (Join-Path $pythonDir 'codex_proxy.py'),
+        (Join-Path $pythonDir 'catalog_sync.py'),
+        (Join-Path $pythonDir 'catalog.py'),
+        (Join-Path $pythonDir 'providers_config.py'),
+        (Join-Path $configDir 'catalog_policy.toml'),
+        (Join-Path $configDir 'providers.toml')
     )
     $latestDependency = $dependencyPaths |
         Where-Object { Test-Path -LiteralPath $_ } |

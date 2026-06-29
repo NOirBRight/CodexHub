@@ -64,7 +64,7 @@ Same stack as CC Switch. Native desktop binary, no web server.
 
 - HTTP proxy server (codex_proxy.py)
 - Catalog sync (catalog_sync.py)
-- Provider registry (provider_registry.py)
+- Provider config loader (providers_config.py)
 - Distributed as pip-installable package + bundled in Tauri sidecar
 
 ### CLI: codexhub command
@@ -251,7 +251,7 @@ CodexHub/
       codex_proxy.py
       catalog_sync.py
       catalog.py
-      provider_registry.py
+      providers_config.py
       config_overlay.py
       global_state_repair.py
       history_overlay.py

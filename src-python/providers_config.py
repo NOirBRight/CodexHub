@@ -23,6 +23,7 @@ EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
 @dataclass
 class ModelConfig:
     id: str
+    upstream_model: str | None = None
     display_name: str | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
@@ -86,7 +87,7 @@ def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str,
                 "display_prefix": provider.display_prefix or provider.name,
                 "base_url": base_url,
                 "api_key": api_key,
-                "upstream_model": model.id,
+                "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
                 "input_modalities": ("text",),
@@ -128,6 +129,7 @@ def load_providers(path: Path = DEFAULT_PROVIDERS_PATH) -> list[ProviderConfig]:
                 raise ValueError("provider models must be an array of tables")
             model = ModelConfig(
                 id=_string_field(raw_model.get("id")),
+                upstream_model=_optional_string_field(raw_model.get("upstream_model")),
                 display_name=_optional_string_field(raw_model.get("display_name")),
                 context_window=_optional_int_field(raw_model.get("context_window")),
                 max_output_tokens=_optional_int_field(raw_model.get("max_output_tokens")),
@@ -186,6 +188,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                     _toml_string_line("id", model.id, indent="  "),
                 ]
             )
+            if model.upstream_model is not None:
+                chunks.append(_toml_string_line("upstream_model", model.upstream_model, indent="  "))
             if model.display_name is not None:
                 chunks.append(_toml_string_line("display_name", model.display_name, indent="  "))
             if model.context_window is not None:
@@ -212,6 +216,13 @@ def _item_sort_order(value: Any) -> int:
 
 def _provider_priority_base(provider: ProviderConfig) -> int:
     return provider.sort_order * 100 if isinstance(provider.sort_order, int) else 0
+
+
+def _upstream_model_name(model: ModelConfig) -> str:
+    upstream_model = (model.upstream_model or "").strip()
+    if upstream_model:
+        return upstream_model
+    return model.id.strip()
 
 
 def _string_field(value: Any, default: str = "") -> str:

@@ -459,10 +459,14 @@ def build_external_provider_model(
             "provider": external_model["provider_alias"],
             "upstream_name": external_model["upstream_name"],
             "upstream_model": external_model["upstream_model"],
-            "context_source": external_model.get("context_source"),
-            "max_output_source": external_model.get("max_output_source"),
         }
     )
+    context_source = external_model.get("context_source")
+    if context_source is not None:
+        proxy_metadata["context_source"] = context_source
+    max_output_source = external_model.get("max_output_source")
+    if max_output_source is not None:
+        proxy_metadata["max_output_source"] = max_output_source
     model["codex_proxy_metadata"] = proxy_metadata
     return model
 
