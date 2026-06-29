@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import tomllib
 from typing import Any, Iterable
+from urllib.request import Request, urlopen
 
 from catalog import canonical_model_id
 
@@ -54,6 +55,42 @@ class ProviderConfig:
             resolved_api_key = env_api_key.strip()
             return resolved_api_key or None
         return configured_api_key
+
+
+def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
+    headers = {"Accept": "application/json"}
+    stripped_api_key = api_key.strip()
+    if stripped_api_key:
+        headers["Authorization"] = f"Bearer {stripped_api_key}"
+
+    request = Request(base_url.rstrip("/") + "/models", headers=headers)
+    with urlopen(request, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    raw_models = _provider_models_payload_items(payload)
+    models: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw_model in raw_models:
+        model_id = _discovered_model_id(raw_model)
+        if not model_id or model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
+        models.append(
+            {
+                "id": model_id,
+                "context_window": _discovered_numeric_limit(
+                    raw_model,
+                    ("context_window", "max_context_window", "context_length"),
+                    "context",
+                ),
+                "max_output_tokens": _discovered_numeric_limit(
+                    raw_model,
+                    ("max_output_tokens", "output_tokens"),
+                    "output",
+                ),
+            }
+        )
+    return models
 
 
 def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str, dict[str, Any]]:
@@ -212,6 +249,44 @@ def _sort_by_order[T](indexed_items: Iterable[tuple[int, T]]) -> list[T]:
 
 def _item_sort_order(value: Any) -> int:
     return value.sort_order if isinstance(value.sort_order, int) else 0
+
+
+def _provider_models_payload_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data
+        models = payload.get("models")
+        if isinstance(models, list):
+            return models
+    return []
+
+
+def _discovered_model_id(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("id", "model", "name", "slug"):
+        model_id = _string_field(value.get(key)).strip()
+        if model_id:
+            return model_id
+    return ""
+
+
+def _discovered_numeric_limit(value: Any, keys: tuple[str, ...], nested_limit_key: str) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    for key in keys:
+        parsed = _optional_int_field(value.get(key))
+        if parsed is not None:
+            return parsed
+    limit = value.get("limit")
+    if isinstance(limit, dict):
+        return _optional_int_field(limit.get(nested_limit_key))
+    return None
 
 
 def _provider_priority_base(provider: ProviderConfig) -> int:

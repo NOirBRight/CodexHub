@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from providers_config import (
     ModelConfig,
     ProviderConfig,
     build_external_model_index,
+    discover_provider_models,
     load_providers,
     resolve_external_model_alias,
     save_providers,
@@ -16,6 +18,68 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_discover_provider_models_fetches_models_and_normalizes_response(self):
+        payload = {
+            "data": [
+                {"id": "alpha", "context_window": 128000, "max_output_tokens": 8192},
+                {"model": "beta", "max_context_window": 64000, "output_tokens": 4096},
+                {"name": "nested", "limit": {"context": 32000, "output": 2048}},
+                "string-model",
+                {"slug": "alpha", "context_length": 1, "max_output_tokens": 1},
+                {"id": "  "},
+            ]
+        }
+
+        mock_response = unittest.mock.Mock()
+        mock_response.__enter__ = unittest.mock.Mock(return_value=mock_response)
+        mock_response.__exit__ = unittest.mock.Mock(return_value=None)
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+
+        with patch("providers_config.urlopen", return_value=mock_response) as mock_urlopen:
+            models = discover_provider_models("https://example.test/v1/", " test-secret ", timeout_seconds=7)
+
+        self.assertEqual(
+            models,
+            [
+                {"id": "alpha", "context_window": 128000, "max_output_tokens": 8192},
+                {"id": "beta", "context_window": 64000, "max_output_tokens": 4096},
+                {"id": "nested", "context_window": 32000, "max_output_tokens": 2048},
+                {"id": "string-model", "context_window": None, "max_output_tokens": None},
+            ],
+        )
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://example.test/v1/models")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-secret")
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(mock_urlopen.call_args.kwargs, {"timeout": 7})
+
+    def test_discover_provider_models_accepts_models_key_and_bare_list_payloads(self):
+        cases = [
+            (
+                {"models": [{"slug": "from-models", "context_length": 1024}]},
+                [{"id": "from-models", "context_window": 1024, "max_output_tokens": None}],
+            ),
+            (
+                [{"id": "from-list", "max_output_tokens": 256}],
+                [{"id": "from-list", "context_window": None, "max_output_tokens": 256}],
+            ),
+        ]
+
+        for payload, expected in cases:
+            with self.subTest(payload_type=type(payload).__name__):
+                mock_response = unittest.mock.Mock()
+                mock_response.__enter__ = unittest.mock.Mock(return_value=mock_response)
+                mock_response.__exit__ = unittest.mock.Mock(return_value=None)
+                mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+
+                with patch("providers_config.urlopen", return_value=mock_response) as mock_urlopen:
+                    models = discover_provider_models("https://example.test/v1", "  ")
+
+                self.assertEqual(models, expected)
+                request = mock_urlopen.call_args.args[0]
+                self.assertEqual(request.full_url, "https://example.test/v1/models")
+                self.assertIsNone(request.get_header("Authorization"))
+
     def test_build_external_model_index_emits_default_like_external_provider_entries(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
