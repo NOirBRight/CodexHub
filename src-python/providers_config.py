@@ -13,6 +13,7 @@ from catalog import canonical_model_id
 
 
 DEFAULT_PROVIDERS_PATH = Path(__file__).resolve().parents[1] / "config" / "providers.toml"
+OFFICIAL_OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
 ENV_PLACEHOLDER_RE = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
     "minimax-cn": "minimax_cn",
@@ -55,6 +56,38 @@ class ProviderConfig:
             resolved_api_key = env_api_key.strip()
             return resolved_api_key or None
         return configured_api_key
+
+
+def discover_official_models(api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
+    headers = {"Accept": "application/json"}
+    stripped_api_key = api_key.strip()
+    if stripped_api_key:
+        headers["Authorization"] = f"Bearer {stripped_api_key}"
+
+    request = Request(OFFICIAL_OPENAI_MODELS_URL, headers=headers)
+    with urlopen(request, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    models_by_id: dict[str, dict[str, Any]] = {}
+    for raw_model in _provider_models_payload_items(payload):
+        model_id = _official_model_id(raw_model)
+        if not model_id.startswith("gpt-") or model_id in models_by_id:
+            continue
+        models_by_id[model_id] = {
+            "id": model_id,
+            "context_window": _discovered_numeric_limit(
+                raw_model,
+                ("context_window", "max_context_window", "context_length"),
+                "context",
+            ),
+            "max_output_tokens": _discovered_numeric_limit(
+                raw_model,
+                ("max_output_tokens", "output_tokens"),
+                "output",
+            ),
+        }
+
+    return [models_by_id[model_id] for model_id in sorted(models_by_id)]
 
 
 def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
@@ -273,6 +306,20 @@ def _discovered_model_id(value: Any) -> str:
         model_id = _string_field(value.get(key)).strip()
         if model_id:
             return model_id
+    return ""
+
+
+def _official_model_id(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("id", "model", "name", "slug"):
+        raw_model_id = value.get(key)
+        if isinstance(raw_model_id, str):
+            model_id = raw_model_id.strip()
+            if model_id:
+                return model_id
     return ""
 
 

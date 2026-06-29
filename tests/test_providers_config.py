@@ -10,6 +10,7 @@ from providers_config import (
     ModelConfig,
     ProviderConfig,
     build_external_model_index,
+    discover_official_models,
     discover_provider_models,
     load_providers,
     resolve_external_model_alias,
@@ -18,6 +19,42 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_discover_official_models_fetches_gpt_models_sorted_with_limits(self):
+        payload = {
+            "data": [
+                {"id": " gpt-4.1-mini ", "context_window": 128000, "max_output_tokens": 32768},
+                {"id": "gpt-4.1", "context_length": "1047576", "output_tokens": "32768"},
+                {"model": "gpt-4o", "limit": {"context": 128000, "output": 16384}},
+                {"id": "gpt-4.1", "context_window": 1, "max_output_tokens": 1},
+                {"id": "chatgpt-4o-latest"},
+                {"id": "o3"},
+                {"id": "  "},
+                {"id": 123},
+            ]
+        }
+
+        mock_response = unittest.mock.Mock()
+        mock_response.__enter__ = unittest.mock.Mock(return_value=mock_response)
+        mock_response.__exit__ = unittest.mock.Mock(return_value=None)
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+
+        with patch("providers_config.urlopen", return_value=mock_response) as mock_urlopen:
+            models = discover_official_models(" test-secret ", timeout_seconds=9)
+
+        self.assertEqual(
+            models,
+            [
+                {"id": "gpt-4.1", "context_window": 1047576, "max_output_tokens": 32768},
+                {"id": "gpt-4.1-mini", "context_window": 128000, "max_output_tokens": 32768},
+                {"id": "gpt-4o", "context_window": 128000, "max_output_tokens": 16384},
+            ],
+        )
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.openai.com/v1/models")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-secret")
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(mock_urlopen.call_args.kwargs, {"timeout": 9})
+
     def test_discover_provider_models_fetches_models_and_normalizes_response(self):
         payload = {
             "data": [
