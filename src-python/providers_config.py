@@ -8,9 +8,16 @@ import re
 import tomllib
 from typing import Any, Iterable
 
+from catalog import canonical_model_id
+
 
 DEFAULT_PROVIDERS_PATH = Path(__file__).resolve().parents[1] / "config" / "providers.toml"
 ENV_PLACEHOLDER_RE = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
+    "minimax-cn": "minimax_cn",
+    "volc": "volcengine",
+}
+EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
 
 
 @dataclass
@@ -41,6 +48,47 @@ class ProviderConfig:
         if match:
             return os.environ.get(match.group(1))
         return self.api_key
+
+
+def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for provider in providers:
+        provider_id = canonical_model_id(provider.id).lower()
+        if not provider.enabled or provider_id in EXTERNAL_PROVIDER_EXCLUDED_IDS:
+            continue
+
+        api_key = provider.resolved_api_key()
+        if not api_key:
+            continue
+
+        for model in provider.models:
+            if not model.enabled:
+                continue
+
+            alias = canonical_model_id(f"{provider_id}/{model.id}").lower()
+            result[alias] = {
+                "alias": alias,
+                "provider_alias": provider_id,
+                "upstream_name": EXTERNAL_PROVIDER_UPSTREAM_NAMES.get(provider_id, provider_id),
+                "display_prefix": provider.display_prefix or provider.name,
+                "base_url": provider.base_url,
+                "api_key": api_key,
+                "upstream_model": model.id,
+                "context_window": model.context_window,
+                "max_output_tokens": model.max_output_tokens,
+                "input_modalities": ("text",),
+                "context_source": "providers_toml",
+                "max_output_source": "providers_toml",
+                "priority_base": _provider_priority_base(provider),
+            }
+    return result
+
+
+def resolve_external_model_alias(
+    model_id: str,
+    providers_path: Path = DEFAULT_PROVIDERS_PATH,
+) -> dict[str, Any] | None:
+    return build_external_model_index(load_providers(providers_path)).get(canonical_model_id(model_id).lower())
 
 
 def load_providers(path: Path = DEFAULT_PROVIDERS_PATH) -> list[ProviderConfig]:
@@ -147,6 +195,10 @@ def _sort_by_order[T](indexed_items: Iterable[tuple[int, T]]) -> list[T]:
 
 def _item_sort_order(value: Any) -> int:
     return value.sort_order if isinstance(value.sort_order, int) else 0
+
+
+def _provider_priority_base(provider: ProviderConfig) -> int:
+    return provider.sort_order * 100 if isinstance(provider.sort_order, int) else 0
 
 
 def _string_field(value: Any, default: str = "") -> str:
