@@ -19,7 +19,7 @@ PROXY_DIR = Path(__file__).resolve().parent
 CODEX_DIR = PROXY_DIR.parent
 MODEL_CATALOG_DIR = CODEX_DIR / "model-catalogs"
 
-POLICY_PATH = PROXY_DIR / "catalog_policy.toml"
+POLICY_PATH = CODEX_DIR / "config" / "catalog_policy.toml"
 OFFICIAL_SEED_PATH = MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
 OLLAMA_FALLBACK_PATH = MODEL_CATALOG_DIR / "ollama-cloud.json"
 GENERATED_CATALOG_PATH = MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"

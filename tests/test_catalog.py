@@ -13,7 +13,7 @@ from catalog import (
 )
 
 
-POLICY_PATH = Path(__file__).resolve().parents[1] / "catalog_policy.toml"
+POLICY_PATH = Path(__file__).resolve().parents[1] / "config" / "catalog_policy.toml"
 
 
 class CatalogPolicyTests(unittest.TestCase):
