@@ -2,9 +2,9 @@ use crate::AppStatus;
 use crate::Settings;
 use serde::Deserialize;
 use std::fs;
-use std::io;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -180,19 +180,7 @@ fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
 
     remove_pid(paths)?;
     let python = find_python(paths);
-    let mut command = Command::new(&python);
-    command
-        .arg(&script)
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(settings.proxy_port.to_string())
-        .current_dir(paths.proxy_script_dir())
-        .env("PYTHONPATH", paths.proxy_script_dir())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    configure_detached(&mut command);
+    let mut command = build_start_command(&python, &script, paths, settings.proxy_port);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -201,6 +189,7 @@ fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
             script.display()
         )
     })?;
+    drain_child_stdio(&mut child);
     let pid = child.id();
     if let Err(error) = write_pid(paths, pid) {
         let _ = child.kill();
@@ -228,6 +217,13 @@ fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
 }
 
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
+    stop_with_paths_and_killer(paths, &SystemProcessKiller)
+}
+
+fn stop_with_paths_and_killer(
+    paths: &ProxyPaths,
+    killer: &dyn ProcessKiller,
+) -> Result<AppStatus, String> {
     let settings = read_settings(paths)?;
     let mode = read_mode(paths)?;
     let pid = read_pid(paths)?;
@@ -237,7 +233,8 @@ fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
         .unwrap_or(false);
 
     if !was_running {
-        if pid.is_some() {
+        if let Some(pid) = pid {
+            killer.kill(pid)?;
             remove_pid(paths)?;
         }
         return Ok(AppStatus {
@@ -245,8 +242,8 @@ fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
             proxy_running: false,
             proxy_port: settings.proxy_port,
             proxy_build: None,
-            message: if pid.is_some() {
-                "Removed stale proxy PID; health endpoint was not running".to_string()
+            message: if let Some(pid) = pid {
+                format!("Proxy PID {pid} stopped after health endpoint was unavailable")
             } else {
                 "Proxy is not running".to_string()
             },
@@ -272,7 +269,7 @@ fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
         return Ok(status);
     };
 
-    kill_process(pid)?;
+    killer.kill(pid)?;
     if !wait_for_stopped(settings.proxy_port, KILL_STOP_TIMEOUT)? {
         return Err(format!(
             "sent kill signal to proxy PID {pid}, but health still responds on port {}",
@@ -288,6 +285,60 @@ fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
         proxy_build: None,
         message: format!("Proxy PID {pid} stopped"),
     })
+}
+
+fn build_start_command(python: &Path, script: &Path, paths: &ProxyPaths, port: u16) -> Command {
+    let mut command = Command::new(python);
+    command
+        .arg(script)
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .current_dir(paths.proxy_script_dir())
+        .env("PYTHONPATH", paths.proxy_script_dir());
+    configure_start_stdio(&mut command);
+    configure_detached(&mut command);
+    command
+}
+
+fn configure_start_stdio(command: &mut Command) {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
+
+fn drain_child_stdio(child: &mut Child) {
+    drop(child.stdin.take());
+    if let Some(stdout) = child.stdout.take() {
+        drain_reader(stdout);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        drain_reader(stderr);
+    }
+}
+
+fn drain_reader<R>(mut reader: R)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut sink = io::sink();
+        let _ = io::copy(&mut reader, &mut sink);
+    });
+}
+
+trait ProcessKiller {
+    fn kill(&self, pid: u32) -> Result<(), String>;
+}
+
+struct SystemProcessKiller;
+
+impl ProcessKiller for SystemProcessKiller {
+    fn kill(&self, pid: u32) -> Result<(), String> {
+        kill_process(pid)
+    }
 }
 
 fn read_settings(paths: &ProxyPaths) -> Result<Settings, String> {
@@ -576,13 +627,16 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_mode, read_pid, start_with_paths, status_with_paths, stop_with_paths, write_pid,
+        configure_start_stdio, detect_mode, find_python, read_pid, start_with_paths,
+        status_with_paths, stop_with_paths, stop_with_paths_and_killer, write_pid, ProcessKiller,
         ProxyPaths,
     };
     use crate::Settings;
+    use std::cell::RefCell;
     use std::fs;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -638,16 +692,34 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
     }
 
     #[test]
-    fn stop_removes_stale_pid_when_health_is_unavailable() {
+    fn stop_kills_pid_when_health_is_unavailable() {
         let root = temp_root("stale-pid");
         let paths = test_paths(&root);
         write_settings(&paths, free_port());
-        write_pid(&paths, 4_294_000_000u32).expect("write pid");
+        write_pid(&paths, 12_345u32).expect("write pid");
+        let killer = RecordingKiller::default();
 
-        let status = stop_with_paths(&paths).expect("stop stale");
+        let status = stop_with_paths_and_killer(&paths, &killer).expect("stop stale");
 
         assert!(!status.proxy_running);
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
+        assert_eq!(killer.killed.borrow().as_slice(), &[12_345]);
+    }
+
+    #[test]
+    fn start_stdio_configuration_exposes_piped_child_handles() {
+        let root = temp_root("start-command-stdio");
+        let paths = test_paths(&root);
+        let mut command = Command::new(find_python(&paths));
+        command.args(["-c", "import sys; sys.exit(0)"]);
+        configure_start_stdio(&mut command);
+
+        let mut child = command.spawn().expect("spawn stdio probe");
+        assert!(child.stdin.take().is_some());
+        assert!(child.stdout.take().is_some());
+        assert!(child.stderr.take().is_some());
+        let status = child.wait().expect("stdio probe exits");
+        assert!(status.success());
     }
 
     #[test]
@@ -750,6 +822,18 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
             Ok(())
         } else {
             Err(message.to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingKiller {
+        killed: RefCell<Vec<u32>>,
+    }
+
+    impl ProcessKiller for RecordingKiller {
+        fn kill(&self, pid: u32) -> Result<(), String> {
+            self.killed.borrow_mut().push(pid);
+            Ok(())
         }
     }
 }
