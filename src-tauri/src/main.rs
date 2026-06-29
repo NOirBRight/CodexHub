@@ -129,12 +129,12 @@ fn refresh_official_models() -> Result<Vec<Model>, String> {
 }
 
 #[tauri::command]
-fn discover_provider_models(provider_id: String) -> Result<Vec<Model>, String> {
-    models::discover_provider_models(&provider_id)
+fn discover_provider_models(base_url: String, api_key: String) -> Result<Vec<Model>, String> {
+    models::discover_provider_models(&base_url, &api_key)
 }
 
 #[tauri::command]
-fn generate_catalog() -> Result<String, String> {
+fn generate_catalog() -> Result<Vec<Model>, String> {
     catalog::generate_catalog()
 }
 
