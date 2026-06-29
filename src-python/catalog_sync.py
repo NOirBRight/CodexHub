@@ -36,6 +36,7 @@ OFFICIAL_SEED_PATH = BUNDLED_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
 OLLAMA_FALLBACK_PATH = BUNDLED_MODEL_CATALOG_DIR / "ollama-cloud.json"
 GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"
 GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
+SETTINGS_PATH = RUNTIME_CODEX_DIR / "proxy" / "settings.json"
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -581,6 +582,22 @@ def load_cached_state(path: Path = GENERATED_STATE_PATH) -> dict[str, Any]:
     }
 
 
+def load_include_official_models() -> bool:
+    """Read include_official_models from settings.json (written by Rust backend).
+
+    Defaults to True when settings file is missing or the key is absent,
+    matching the Rust Settings::default().
+    """
+    if not SETTINGS_PATH.exists():
+        return True
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    value = data.get("include_official_models")
+    return value if isinstance(value, bool) else True
+
+
 def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     if catalog_cache_is_fresh(max_age_seconds):
         state = load_cached_state(GENERATED_STATE_PATH)
@@ -588,7 +605,8 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         return state
 
     policy = load_policy(POLICY_PATH)
-    official_models = load_official_seed_models(OFFICIAL_SEED_PATH)
+    include_official = load_include_official_models()
+    official_models = load_official_seed_models(OFFICIAL_SEED_PATH) if include_official else []
     fallback_models = load_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
     discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()

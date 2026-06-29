@@ -430,6 +430,31 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(detail, "JSONDecodeError")
         self.assertNotIn(fake_key, detail)
 
+    def test_load_include_official_models_defaults_true_when_missing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"CODEX_HOME": tmpdir}, clear=False):
+                import importlib
+                import catalog_sync
+                importlib.reload(catalog_sync)
+                self.assertTrue(catalog_sync.load_include_official_models())
+                importlib.reload(catalog_sync)
+
+    def test_load_include_official_models_reads_false_from_settings(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir)
+            settings_path = codex_home / "proxy" / "settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text('{"include_official_models": false}', encoding="utf-8")
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                import importlib
+                import catalog_sync
+                importlib.reload(catalog_sync)
+                self.assertFalse(catalog_sync.load_include_official_models())
+                importlib.reload(catalog_sync)
+
 
 if __name__ == "__main__":
     unittest.main()
+
