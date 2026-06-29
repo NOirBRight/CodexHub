@@ -1,0 +1,63 @@
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+api_key = "{env:OLLAMA_API_KEY}"
+display_prefix = "Ollama"
+sort_order = 1
+enabled = true
+
+  [[providers.models]]
+  id = "minimax-m3"
+  display_name = "Ollama MiniMax-M3"
+  context_window = 512000
+  max_output_tokens = 524288
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.2"
+  display_name = "Ollama GLM-5.2"
+  sort_order = 2
+  enabled = true
+
+[[providers]]
+id = "volcengine"
+name = "Volcengine"
+base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
+api_key = "{env:VOLCENGINE_API_KEY}"
+display_prefix = "Volc"
+sort_order = 2
+enabled = true
+
+  [[providers.models]]
+  id = "glm-5.2"
+  display_name = "Volc GLM-5.2"
+  context_window = 1024000
+  max_output_tokens = 8192
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax-m3"
+  display_name = "Volc MiniMax-M3"
+  max_output_tokens = 8192
+  sort_order = 2
+  enabled = true
+
+[[providers]]
+id = "minimax-cn"
+name = "MiniMax.cn"
+base_url = "https://api.minimaxi.com/v1"
+api_key = "{env:MINIMAX_API_KEY}"
+display_prefix = "MiniMax.cn"
+sort_order = 3
+enabled = true
+
+  [[providers.models]]
+  id = "minimax-m3"
+  display_name = "MiniMax-M3"
+  context_window = 1000000
+  max_output_tokens = 524288
+  sort_order = 1
+  enabled = true
