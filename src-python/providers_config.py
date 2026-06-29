@@ -42,19 +42,28 @@ class ProviderConfig:
     models: list[ModelConfig] = field(default_factory=list)
 
     def resolved_api_key(self) -> str | None:
-        if not self.api_key:
+        configured_api_key = self.api_key.strip()
+        if not configured_api_key:
             return None
-        match = ENV_PLACEHOLDER_RE.fullmatch(self.api_key)
+        match = ENV_PLACEHOLDER_RE.fullmatch(configured_api_key)
         if match:
-            return os.environ.get(match.group(1))
-        return self.api_key
+            env_api_key = os.environ.get(match.group(1))
+            if env_api_key is None:
+                return None
+            resolved_api_key = env_api_key.strip()
+            return resolved_api_key or None
+        return configured_api_key
 
 
 def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for provider in providers:
         provider_id = canonical_model_id(provider.id).lower()
-        if not provider.enabled or provider_id in EXTERNAL_PROVIDER_EXCLUDED_IDS:
+        if not provider.enabled or not provider_id or provider_id in EXTERNAL_PROVIDER_EXCLUDED_IDS:
+            continue
+
+        base_url = provider.base_url.strip()
+        if not base_url:
             continue
 
         api_key = provider.resolved_api_key()
@@ -65,13 +74,17 @@ def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str,
             if not model.enabled:
                 continue
 
-            alias = canonical_model_id(f"{provider_id}/{model.id}").lower()
+            model_id = canonical_model_id(model.id).lower()
+            if not model_id:
+                continue
+
+            alias = canonical_model_id(f"{provider_id}/{model_id}").lower()
             result[alias] = {
                 "alias": alias,
                 "provider_alias": provider_id,
                 "upstream_name": EXTERNAL_PROVIDER_UPSTREAM_NAMES.get(provider_id, provider_id),
                 "display_prefix": provider.display_prefix or provider.name,
-                "base_url": provider.base_url,
+                "base_url": base_url,
                 "api_key": api_key,
                 "upstream_model": model.id,
                 "context_window": model.context_window,

@@ -157,6 +157,56 @@ enabled = true
         self.assertEqual(sorted(index), ["present-key/model"])
         self.assertEqual(index["present-key/model"]["api_key"], "present-secret")
 
+    def test_build_external_model_index_skips_whitespace_env_keys_and_invalid_routing_primitives(self):
+        providers = [
+            ProviderConfig(
+                id="whitespace-env",
+                name="Whitespace Env",
+                base_url="https://whitespace-env.example/v1",
+                api_key="{env:PROVIDERS_CONFIG_WHITESPACE_EXTERNAL_KEY}",
+                models=[ModelConfig(id="model")],
+            ),
+            ProviderConfig(
+                id="   ",
+                name="Blank Provider Id",
+                base_url="https://blank-provider.example/v1",
+                api_key="blank-provider-secret",
+                models=[ModelConfig(id="model")],
+            ),
+            ProviderConfig(
+                id="blank-base",
+                name="Blank Base URL",
+                base_url="  \t  ",
+                api_key="blank-base-secret",
+                models=[ModelConfig(id="model")],
+            ),
+            ProviderConfig(
+                id="blank-model",
+                name="Blank Model",
+                base_url="https://blank-model.example/v1",
+                api_key="blank-model-secret",
+                models=[ModelConfig(id="   ")],
+            ),
+            ProviderConfig(
+                id="valid",
+                name="Valid Provider",
+                base_url="  https://valid.example/v1  ",
+                api_key=" valid-secret ",
+                models=[ModelConfig(id="model")],
+            ),
+        ]
+
+        with patch.dict(
+            "os.environ",
+            {"PROVIDERS_CONFIG_WHITESPACE_EXTERNAL_KEY": "  \t  "},
+            clear=True,
+        ):
+            index = build_external_model_index(providers)
+
+        self.assertEqual(sorted(index), ["valid/model"])
+        self.assertEqual(index["valid/model"]["base_url"], "https://valid.example/v1")
+        self.assertEqual(index["valid/model"]["api_key"], "valid-secret")
+
     def test_build_external_model_index_excludes_ollama_cloud_provider(self):
         providers = [
             ProviderConfig(
@@ -330,6 +380,46 @@ sort_order = 20
         self.assertEqual(literal_provider.resolved_api_key(), "literal-secret")
         self.assertIsNone(missing_env_provider.resolved_api_key())
         self.assertIsNone(empty_provider.resolved_api_key())
+
+    def test_resolved_api_key_strips_literals_padded_placeholders_and_env_values(self):
+        whitespace_provider = ProviderConfig(
+            id="whitespace",
+            name="Whitespace Provider",
+            base_url="https://whitespace.example/v1",
+            api_key="  \t  ",
+        )
+        padded_env_provider = ProviderConfig(
+            id="padded-env",
+            name="Padded Env Provider",
+            base_url="https://padded.example/v1",
+            api_key="  {env:PROVIDERS_CONFIG_PADDED_TEST_KEY}  ",
+        )
+        whitespace_env_provider = ProviderConfig(
+            id="whitespace-env",
+            name="Whitespace Env Provider",
+            base_url="https://whitespace-env.example/v1",
+            api_key="{env:PROVIDERS_CONFIG_WHITESPACE_TEST_KEY}",
+        )
+        padded_literal_provider = ProviderConfig(
+            id="padded-literal",
+            name="Padded Literal Provider",
+            base_url="https://literal.example/v1",
+            api_key="  literal-secret  ",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "PROVIDERS_CONFIG_PADDED_TEST_KEY": "  env-secret  ",
+                "PROVIDERS_CONFIG_WHITESPACE_TEST_KEY": "  \t  ",
+            },
+            clear=True,
+        ):
+            self.assertEqual(padded_env_provider.resolved_api_key(), "env-secret")
+            self.assertIsNone(whitespace_env_provider.resolved_api_key())
+
+        self.assertIsNone(whitespace_provider.resolved_api_key())
+        self.assertEqual(padded_literal_provider.resolved_api_key(), "literal-secret")
 
     def test_resolved_api_key_keeps_partial_env_placeholders_as_literals(self):
         provider = ProviderConfig(
