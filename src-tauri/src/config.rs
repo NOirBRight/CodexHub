@@ -259,16 +259,21 @@ pub(crate) fn switch_mode_with_paths(
         ));
     }
 
-    let settings = get_settings_with_paths(paths)?;
+    let settings = if mode == "custom" {
+        get_settings_with_paths(paths)?
+    } else {
+        Settings::default()
+    };
     ensure_mode_switch_directories(paths)?;
 
+    let mut history_backup_root = None;
     if auto_sync {
         let target = if mode == "official" {
             "openai"
         } else {
             "custom"
         };
-        let history_backup_root = paths.history_backup_root(mode);
+        let backup_root = paths.history_backup_root(mode);
         run_python_script(
             "history overlay normalize",
             python,
@@ -278,15 +283,16 @@ pub(crate) fn switch_mode_with_paths(
                 "--codex-dir".to_string(),
                 paths.codex_dir().to_string_lossy().into_owned(),
                 "--backup-root".to_string(),
-                history_backup_root.to_string_lossy().into_owned(),
+                backup_root.to_string_lossy().into_owned(),
                 "--target".to_string(),
                 target.to_string(),
             ],
             runner,
         )?;
+        history_backup_root = Some(backup_root);
     }
 
-    if mode == "official" {
+    let overlay_result = if mode == "official" {
         run_python_script(
             "config overlay restore",
             python,
@@ -299,7 +305,7 @@ pub(crate) fn switch_mode_with_paths(
                 paths.config_backup_path().to_string_lossy().into_owned(),
             ],
             runner,
-        )?;
+        )
     } else {
         run_python_script(
             "config overlay apply",
@@ -320,8 +326,10 @@ pub(crate) fn switch_mode_with_paths(
                 format!("http://127.0.0.1:{}", settings.proxy_port),
             ],
             runner,
-        )?;
-    }
+        )
+    };
+    overlay_result
+        .map_err(|error| add_history_backup_context(error, history_backup_root.as_deref()))?;
 
     Ok(AppStatus {
         mode: mode.to_string(),
@@ -330,6 +338,13 @@ pub(crate) fn switch_mode_with_paths(
         proxy_build: None,
         message: format!("Switched to {mode} mode; proxy lifecycle is handled separately"),
     })
+}
+
+fn add_history_backup_context(error: String, history_backup_root: Option<&Path>) -> String {
+    match history_backup_root {
+        Some(path) => format!("{error}\nhistory backup root: {}", path.display()),
+        None => error,
+    }
 }
 
 fn ensure_mode_switch_directories(paths: &ConfigPaths) -> Result<(), String> {
@@ -506,8 +521,8 @@ sort_order = 7
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "bundled");
         assert_eq!(loaded[0].models[0].id, "model-a");
-        assert_eq!(loaded[0].enabled, true);
-        assert_eq!(loaded[0].models[0].enabled, true);
+        assert!(loaded[0].enabled);
+        assert!(loaded[0].models[0].enabled);
     }
 
     #[test]
@@ -608,6 +623,64 @@ sort_order = 7
     }
 
     #[test]
+    fn switch_mode_official_without_history_ignores_corrupt_settings() {
+        let root = temp_root("switch-official-corrupt-settings");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(paths.settings_path(), "{not json").unwrap();
+        let runner = RecordingRunner::successful();
+
+        let status =
+            switch_mode_with_paths("official", false, &paths, Path::new("python-test"), &runner)
+                .expect("switch official");
+
+        assert_eq!(status.mode, "official");
+        assert_eq!(status.proxy_port, Settings::default().proxy_port);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_contains_sequence(&commands[0].args, &["restore"]);
+    }
+
+    #[test]
+    fn switch_mode_reports_history_backup_when_overlay_fails_after_history() {
+        let root = temp_root("switch-overlay-fails-after-history");
+        let paths = test_paths(&root);
+        save_settings_with_paths(
+            Settings {
+                proxy_port: 4555,
+                ..Settings::default()
+            },
+            &paths,
+        )
+        .expect("settings save");
+        let runner = RecordingRunner::sequence(vec![
+            CommandOutcome {
+                code: Some(0),
+                stdout: "history ok".to_string(),
+                stderr: String::new(),
+            },
+            CommandOutcome {
+                code: Some(23),
+                stdout: "overlay stdout".to_string(),
+                stderr: "overlay stderr".to_string(),
+            },
+        ]);
+
+        let error =
+            switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
+                .expect_err("overlay should fail");
+
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        let backup_root = arg_value(&commands[0].args, "--backup-root").to_string();
+        drop(commands);
+        assert!(error.contains("config overlay apply failed"));
+        assert!(error.contains("history backup root"));
+        assert!(error.contains(&backup_root));
+        assert!(error.contains("overlay stderr"));
+    }
+
+    #[test]
     fn switch_mode_returns_stdout_stderr_context_when_python_fails() {
         let root = temp_root("switch-failure");
         let paths = test_paths(&root);
@@ -631,29 +704,30 @@ sort_order = 7
 
     struct RecordingRunner {
         commands: RefCell<Vec<RecordedCommand>>,
-        outcome: CommandOutcome,
+        outcomes: RefCell<Vec<CommandOutcome>>,
     }
 
     impl RecordingRunner {
         fn successful() -> Self {
-            Self {
-                commands: RefCell::new(Vec::new()),
-                outcome: CommandOutcome {
-                    code: Some(0),
-                    stdout: "ok".to_string(),
-                    stderr: String::new(),
-                },
-            }
+            Self::sequence(vec![CommandOutcome {
+                code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+            }])
         }
 
         fn failed(code: i32, stdout: &str, stderr: &str) -> Self {
+            Self::sequence(vec![CommandOutcome {
+                code: Some(code),
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+            }])
+        }
+
+        fn sequence(outcomes: Vec<CommandOutcome>) -> Self {
             Self {
                 commands: RefCell::new(Vec::new()),
-                outcome: CommandOutcome {
-                    code: Some(code),
-                    stdout: stdout.to_string(),
-                    stderr: stderr.to_string(),
-                },
+                outcomes: RefCell::new(outcomes),
             }
         }
     }
@@ -664,7 +738,16 @@ sort_order = 7
                 program: program.to_path_buf(),
                 args: args.to_vec(),
             });
-            Ok(self.outcome.clone())
+            let mut outcomes = self.outcomes.borrow_mut();
+            let outcome = if outcomes.len() > 1 {
+                outcomes.remove(0)
+            } else {
+                outcomes
+                    .first()
+                    .cloned()
+                    .expect("recording runner requires at least one outcome")
+            };
+            Ok(outcome)
         }
     }
 
