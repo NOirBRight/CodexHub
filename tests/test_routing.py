@@ -7,8 +7,10 @@ from unittest.mock import patch
 import codex_proxy
 from codex_proxy import (
     CodexProxyHandler,
+    _chat_stream_chunks_to_response_events,
     _filtered_response_headers,
     _is_websocket_upgrade,
+    _responses_request_to_chat_completion_body,
     _responses_url,
     choose_upstream,
     compatible_request_body,
@@ -80,6 +82,14 @@ class FakeResponse:
             return b""
         self.did_read = True
         return self.body
+
+
+class FakeContextResponse(FakeResponse):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return None
 
 
 class RoutingTests(unittest.TestCase):
@@ -162,12 +172,12 @@ class RoutingTests(unittest.TestCase):
     def test_gpt_routes_to_official(self):
         upstream = choose_upstream("gpt-5.5")
         self.assertEqual(upstream["name"], "official")
-        self.assertEqual(upstream["auth"], "incoming")
+        self.assertEqual(upstream["auth"], "codex_auth")
 
     def test_openai_alias_routes_to_official_and_rewrites_upstream_model(self):
         upstream = choose_upstream("openai/gpt-5.5")
         self.assertEqual(upstream["name"], "official")
-        self.assertEqual(upstream["auth"], "incoming")
+        self.assertEqual(upstream["auth"], "codex_auth")
         self.assertEqual(upstream["upstream_model"], "gpt-5.5")
 
         body = compatible_request_body(
@@ -185,11 +195,13 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["base_url"], "https://ollama.com/v1")
 
     def test_provider_prefixed_model_routes_to_external_provider(self):
+        self.external_model["upstream_format"] = "chat_completions"
         upstream = choose_upstream("volc/glm-5.2")
         self.assertEqual(upstream["name"], "volcengine")
         self.assertEqual(upstream["auth"], "api_key")
         self.assertEqual(upstream["base_url"], "https://ark.example.test/v1")
         self.assertEqual(upstream["upstream_model"], "glm-5.2")
+        self.assertEqual(upstream["upstream_format"], "chat_completions")
 
     def test_provider_prefixed_model_does_not_fall_back_to_ollama(self):
         with patch("codex_proxy.resolve_external_model_alias", return_value=None):
@@ -381,12 +393,12 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(payload["input"][1]["type"], "message")
         self.assertEqual(payload["input"][1]["role"], "system")
-        self.assertIn("[Codex tool call]", payload["input"][1]["content"])
+        self.assertIn("Read-only Codex tool call transcript", payload["input"][1]["content"])
         self.assertIn("apply_patch", payload["input"][1]["content"])
         self.assertIn("*** Begin Patch", payload["input"][1]["content"])
         self.assertEqual(payload["input"][2]["type"], "message")
         self.assertEqual(payload["input"][2]["role"], "system")
-        self.assertIn("[Codex tool result]", payload["input"][2]["content"])
+        self.assertIn("Read-only Codex tool result transcript", payload["input"][2]["content"])
         self.assertIn("Success. Updated demo.txt", payload["input"][2]["content"])
         self.assertNotIn('"type":"custom_tool_call"', raw)
         self.assertNotIn('"type":"custom_tool_call_output"', raw)
@@ -435,12 +447,12 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(len(payload["input"]), 6)
         self.assertTrue(all(item["type"] == "message" for item in payload["input"]))
-        self.assertIn("[Codex function call]", payload["input"][1]["content"])
+        self.assertIn("Read-only Codex function call transcript", payload["input"][1]["content"])
         self.assertIn("shell_command", payload["input"][1]["content"])
-        self.assertIn("[Codex function result]", payload["input"][2]["content"])
-        self.assertIn("[Codex web search call]", payload["input"][3]["content"])
-        self.assertIn("[Codex tool search call]", payload["input"][4]["content"])
-        self.assertIn("[Codex tool search result]", payload["input"][5]["content"])
+        self.assertIn("Read-only Codex function result transcript", payload["input"][2]["content"])
+        self.assertIn("Read-only Codex web search call transcript", payload["input"][3]["content"])
+        self.assertIn("Read-only Codex tool search call transcript", payload["input"][4]["content"])
+        self.assertIn("Read-only Codex tool search result transcript", payload["input"][5]["content"])
         for forbidden in (
             '"type":"reasoning"',
             '"type":"function_call"',
@@ -458,7 +470,6 @@ class RoutingTests(unittest.TestCase):
 
         transformed = compatible_request_body(body, upstream)
 
-        self.assertEqual(transformed, body)
         self.assertEqual(json.loads(transformed)["reasoning"]["effort"], "xhigh")
 
     def test_official_body_keeps_compaction_input_unchanged(self):
@@ -467,7 +478,6 @@ class RoutingTests(unittest.TestCase):
 
         transformed = compatible_request_body(body, upstream)
 
-        self.assertEqual(transformed, body)
         self.assertEqual(json.loads(transformed)["input"][0]["type"], "compaction")
 
     def test_official_body_keeps_custom_tool_items_unchanged(self):
@@ -476,8 +486,59 @@ class RoutingTests(unittest.TestCase):
 
         transformed = compatible_request_body(body, upstream)
 
-        self.assertEqual(transformed, body)
         self.assertEqual(json.loads(transformed)["input"][0]["type"], "custom_tool_call")
+
+    def test_official_body_injects_codex_endpoint_requirements(self):
+        upstream = choose_upstream("gpt-5.5")
+        body = b'{"model":"gpt-5.5","input":"hi","stream":false,"max_output_tokens":100}'
+
+        transformed = compatible_request_body(body, upstream)
+        payload = json.loads(transformed)
+
+        self.assertFalse(payload["store"])
+        self.assertTrue(payload["stream"])
+        self.assertNotIn("max_output_tokens", payload)
+
+    def test_official_body_downgrades_invalid_function_call_names(self):
+        upstream = choose_upstream("gpt-5.5")
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [
+                    {"type": "message", "role": "user", "content": "test"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_bad",
+                        "name": "[Codex",
+                        "arguments": "{\"tool search call]\":\"\"}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_bad",
+                        "output": "unsupported call: [Codex",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_good",
+                        "name": "shell_command",
+                        "arguments": "{\"command\":\"echo ok\"}",
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, upstream)
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][1]["type"], "message")
+        self.assertEqual(payload["input"][1]["role"], "system")
+        self.assertIn("Invalid Codex function call transcript", payload["input"][1]["content"])
+        self.assertIn("[Codex", payload["input"][1]["content"])
+        self.assertEqual(payload["input"][2]["type"], "message")
+        self.assertEqual(payload["input"][2]["role"], "system")
+        self.assertIn("Invalid Codex function result transcript", payload["input"][2]["content"])
+        self.assertEqual(payload["input"][3]["type"], "function_call")
+        self.assertEqual(payload["input"][3]["name"], "shell_command")
 
     def test_external_body_rewrites_model_and_clamps_output_tokens(self):
         upstream = choose_upstream("volc/glm-5.2")
@@ -488,6 +549,40 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(payload["model"], "glm-5.2")
         self.assertEqual(payload["max_output_tokens"], 4096)
+
+    def test_responses_request_converts_to_chat_completions_shape(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Use get_weather."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "name": "get_weather"},
+                "max_output_tokens": 64,
+                "stream": True,
+            }
+        ).encode("utf-8")
+
+        transformed = _responses_request_to_chat_completion_body(body)
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["model"], "glm-5.2")
+        self.assertEqual(payload["messages"], [{"role": "user", "content": "Use get_weather."}])
+        self.assertEqual(payload["max_tokens"], 64)
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["tools"][0]["type"], "function")
+        self.assertEqual(payload["tools"][0]["function"]["name"], "get_weather")
+        self.assertEqual(payload["tool_choice"]["function"]["name"], "get_weather")
 
     def test_external_body_converts_compaction_input_to_system_message(self):
         for model_id, upstream_model in (
@@ -552,12 +647,12 @@ class RoutingTests(unittest.TestCase):
                 self.assertEqual(payload["model"], upstream_model)
                 self.assertEqual(payload["input"][0]["type"], "message")
                 self.assertEqual(payload["input"][0]["role"], "system")
-                self.assertIn("[Codex tool call]", payload["input"][0]["content"])
+                self.assertIn("Read-only Codex tool call transcript", payload["input"][0]["content"])
                 self.assertIn("shell_command", payload["input"][0]["content"])
                 self.assertIn("rg custom_tool_call", payload["input"][0]["content"])
                 self.assertEqual(payload["input"][1]["type"], "message")
                 self.assertEqual(payload["input"][1]["role"], "system")
-                self.assertIn("[Codex tool result]", payload["input"][1]["content"])
+                self.assertIn("Read-only Codex tool result transcript", payload["input"][1]["content"])
                 self.assertIn("match", payload["input"][1]["content"])
                 self.assertNotIn('"type":"custom_tool_call"', raw)
                 self.assertNotIn('"type":"custom_tool_call_output"', raw)
@@ -608,11 +703,11 @@ class RoutingTests(unittest.TestCase):
 
                 self.assertEqual(payload["model"], upstream_model)
                 self.assertTrue(all(item["type"] == "message" for item in payload["input"]))
-                self.assertIn("[Codex function call]", payload["input"][0]["content"])
-                self.assertIn("[Codex function result]", payload["input"][1]["content"])
-                self.assertIn("[Codex web search call]", payload["input"][2]["content"])
-                self.assertIn("[Codex tool search call]", payload["input"][3]["content"])
-                self.assertIn("[Codex tool search result]", payload["input"][4]["content"])
+                self.assertIn("Read-only Codex function call transcript", payload["input"][0]["content"])
+                self.assertIn("Read-only Codex function result transcript", payload["input"][1]["content"])
+                self.assertIn("Read-only Codex web search call transcript", payload["input"][2]["content"])
+                self.assertIn("Read-only Codex tool search call transcript", payload["input"][3]["content"])
+                self.assertIn("Read-only Codex tool search result transcript", payload["input"][4]["content"])
                 for forbidden in (
                     '"type":"reasoning"',
                     '"type":"function_call"',
@@ -770,19 +865,58 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(sent[0][0], 400)
         self.assertIn("decode failed", sent[0][1]["error"])
 
-    def test_official_auth_preserves_incoming_auth(self):
+    def test_chat_completions_upstream_posts_to_chat_endpoint_and_body(self):
+        self.external_model["upstream_format"] = "chat_completions"
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Window-Id": "thread:turn",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        handler._safe_send_json = lambda status, payload, request_id: None
+        relayed = []
+        handler._relay_upstream_response = lambda response, upstream_name, **kwargs: relayed.append(kwargs) or 200
+
+        with patch("codex_proxy.urlopen", return_value=FakeContextResponse(b'{"id":"chatcmpl_1","choices":[]}')) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        payload = json.loads(request.data)
+        self.assertEqual(request.full_url, "https://ark.example.test/v1/chat/completions")
+        self.assertEqual(payload["model"], "glm-5.2")
+        self.assertEqual(payload["messages"], [{"role": "user", "content": "hi"}])
+        self.assertFalse(payload["stream"])
+        self.assertEqual(relayed[0]["upstream_format"], "chat_completions")
+
+    def test_official_auth_injects_codex_subscription_token(self):
         upstream = choose_upstream("gpt-5.5")
-        headers = upstream_headers({"Authorization": "Bearer openai-token", "Content-Type": "application/json"}, upstream)
-        self.assertEqual(headers["Authorization"], "Bearer openai-token")
+        with patch("codex_proxy.codex_access_token", return_value="sub-token-from-auth-json"), \
+             patch("codex_proxy.codex_account_id", return_value="acct-123"):
+            headers = upstream_headers({"Authorization": "Bearer caller-token", "Content-Type": "application/json"}, upstream)
+        self.assertEqual(headers["Authorization"], "Bearer sub-token-from-auth-json")
+        self.assertEqual(headers["Chatgpt-account-id"], "acct-123")
+        self.assertNotIn("caller-token", str(headers))
 
     def test_official_auth_ignores_ollama_api_key(self):
         upstream = choose_upstream("gpt-5.5")
-        with patch.dict(os.environ, {"OLLAMA_API_KEY": "ollama-token"}, clear=False):
+        with patch("codex_proxy.codex_access_token", return_value="sub-token-from-auth-json"), \
+             patch("codex_proxy.codex_account_id", return_value="acct-123"), \
+             patch.dict(os.environ, {"OLLAMA_API_KEY": "ollama-token"}, clear=False):
             headers = upstream_headers(
-                {"Authorization": "Bearer openai-token", "Content-Type": "application/json"},
+                {"Authorization": "Bearer caller-token", "Content-Type": "application/json"},
                 upstream,
             )
-        self.assertEqual(headers["Authorization"], "Bearer openai-token")
+        self.assertEqual(headers["Authorization"], "Bearer sub-token-from-auth-json")
         self.assertNotIn("ollama-token", str(headers))
 
     def test_external_auth_replaces_incoming_auth_with_provider_key(self):
@@ -880,6 +1014,93 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(handler.wfile.writes[0], b"")
 
+    def test_external_sse_relay_downgrades_invalid_function_call_name(self):
+        handler = FakeHandler()
+        event = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_bad",
+                "name": "Codex function call]<tool_call>shell_command",
+                "arguments": "{\"command\":\"echo bad\"}",
+            },
+        }
+        response = FakeSseResponse([f"data: {json.dumps(event)}\n".encode("utf-8"), b"\n", b""])
+
+        CodexProxyHandler._relay_upstream_response(handler, response, "ollama_cloud")
+
+        data_line = handler.wfile.writes[0].decode("utf-8")
+        payload = json.loads(data_line.removeprefix("data: "))
+        self.assertEqual(payload["item"]["type"], "message")
+        self.assertEqual(payload["item"]["role"], "assistant")
+        self.assertIn("Invalid third-party function call transcript", payload["item"]["content"][0]["text"])
+        self.assertIn("Codex function call]", payload["item"]["content"][0]["text"])
+
+    def test_chat_tool_call_chunks_preserve_first_call_id_in_responses_events(self):
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_spawn",
+                                    "type": "function",
+                                    "function": {"name": "spawn_agent", "arguments": ""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "",
+                                    "function": {"arguments": "{\"message\":\"hi\""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+
+        events = _chat_stream_chunks_to_response_events(chunks)
+
+        event_types = [event["type"] for event in events]
+        self.assertIn("response.output_item.added", event_types)
+        self.assertIn("response.function_call_arguments.done", event_types)
+        self.assertIn("response.output_item.done", event_types)
+        self.assertIn("response.completed", event_types)
+
+        done = next(event for event in events if event["type"] == "response.output_item.done")
+        completed = next(event for event in events if event["type"] == "response.completed")
+        self.assertEqual(done["item"]["call_id"], "call_spawn")
+        self.assertEqual(done["item"]["name"], "spawn_agent")
+        self.assertEqual(done["item"]["arguments"], "{\"message\":\"hi\"}")
+        self.assertEqual(completed["response"]["output"][0]["call_id"], "call_spawn")
+
 
     def test_non_sse_relay_bulk_writes_body(self):
         handler = FakeHandler()
@@ -892,6 +1113,128 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(handler.wfile.writes, [body])
         self.assertEqual(handler.wfile.flush_count, 1)
         self.assertTrue(handler.close_connection)
+
+    def test_chat_completions_non_sse_relay_converts_tool_calls_to_responses_body(self):
+        handler = FakeHandler()
+        body = json.dumps(
+            {
+                "id": "chatcmpl_1",
+                "model": "glm-5.2",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_spawn",
+                                    "type": "function",
+                                    "function": {"name": "spawn_agent", "arguments": "{\"message\":\"hi\"}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        response = FakeResponse(body)
+
+        CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            upstream_format="chat_completions",
+        )
+
+        payload = json.loads(handler.wfile.writes[0])
+        self.assertEqual(payload["object"], "response")
+        self.assertEqual(payload["output"][0]["type"], "function_call")
+        self.assertEqual(payload["output"][0]["call_id"], "call_spawn")
+        self.assertEqual(payload["output"][0]["name"], "spawn_agent")
+
+    def test_chat_completions_sse_relay_converts_tool_call_stream_to_responses_events(self):
+        handler = FakeHandler()
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_spawn",
+                                    "type": "function",
+                                    "function": {"name": "spawn_agent", "arguments": ""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "{\"message\":\"hi\"}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+        )
+
+        CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            upstream_format="chat_completions",
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        done = next(payload for payload in payloads if payload["type"] == "response.output_item.done")
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+        self.assertEqual(done["item"]["call_id"], "call_spawn")
+        self.assertEqual(done["item"]["arguments"], "{\"message\":\"hi\"}")
+        self.assertEqual(completed["response"]["output"][0]["call_id"], "call_spawn")
+
+    def test_chat_completions_sse_relay_converts_text_stream_to_responses_message(self):
+        handler = FakeHandler()
+        chunks = [
+            {"choices": [{"delta": {"content": "hel"}}]},
+            {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]},
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+        )
+
+        CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            upstream_format="chat_completions",
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+        output = completed["response"]["output"][0]
+        self.assertEqual(output["type"], "message")
+        self.assertEqual(output["content"][0]["text"], "hello")
 
     def test_ollama_non_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
         handler = FakeHandler()
@@ -934,6 +1277,30 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(handler.wfile.writes[0])
         self.assertEqual(payload["output"][0]["summary"], [])
         self.assertNotIn("content", payload["output"][0])
+
+    def test_external_non_sse_relay_downgrades_invalid_function_call_name(self):
+        handler = FakeHandler()
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_bad",
+                        "name": "shell_command` <- malformed name",
+                        "arguments": "{\"command\":\"echo bad\"}",
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        response = FakeResponse(body)
+
+        CodexProxyHandler._relay_upstream_response(handler, response, "volcengine")
+
+        payload = json.loads(handler.wfile.writes[0])
+        self.assertEqual(payload["output"][0]["type"], "message")
+        self.assertEqual(payload["output"][0]["role"], "assistant")
+        self.assertIn("Invalid third-party function call transcript", payload["output"][0]["content"][0]["text"])
+        self.assertIn("shell_command`", payload["output"][0]["content"][0]["text"])
 
     def test_response_header_filter_omits_hop_by_hop(self):
         headers = {
