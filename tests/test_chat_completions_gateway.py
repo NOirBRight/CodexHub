@@ -197,12 +197,13 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
 
         chunks = _response_events_to_chat_stream_chunks(events)
 
-        # 2 text chunks + 1 finish chunk
-        self.assertEqual(len(chunks), 3)
-        self.assertEqual(chunks[0]["choices"][0]["delta"]["content"], "Hello")
-        self.assertEqual(chunks[1]["choices"][0]["delta"]["content"], " world")
-        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
-        self.assertIsNone(chunks[0]["choices"][0]["finish_reason"])
+        # 1 role chunk + 2 text chunks + 1 finish chunk
+        self.assertEqual(len(chunks), 4)
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant"})
+        self.assertEqual(chunks[1]["choices"][0]["delta"]["content"], "Hello")
+        self.assertEqual(chunks[2]["choices"][0]["delta"]["content"], " world")
+        self.assertEqual(chunks[3]["choices"][0]["finish_reason"], "stop")
+        self.assertIsNone(chunks[1]["choices"][0]["finish_reason"])
 
     def test_function_call_delta_events(self):
         events = [
@@ -243,14 +244,15 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
 
         chunks = _response_events_to_chat_stream_chunks(events)
 
-        # header chunk + 2 argument delta chunks + finish chunk
-        self.assertEqual(len(chunks), 4)
-        header = chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+        # 1 role chunk + header chunk + 2 argument delta chunks + finish chunk
+        self.assertEqual(len(chunks), 5)
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant"})
+        header = chunks[1]["choices"][0]["delta"]["tool_calls"][0]
         self.assertEqual(header["id"], "call_1")
         self.assertEqual(header["function"]["name"], "get_weather")
-        self.assertEqual(chunks[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], '{"city":')
-        self.assertEqual(chunks[2]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], '"NYC"}')
-        self.assertEqual(chunks[3]["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(chunks[2]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], '{"city":')
+        self.assertEqual(chunks[3]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], '"NYC"}')
+        self.assertEqual(chunks[4]["choices"][0]["finish_reason"], "tool_calls")
 
     def test_no_events_produces_finish_chunk(self):
         chunks = _response_events_to_chat_stream_chunks([])
@@ -438,11 +440,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         written = b"".join(handler.wfile.writes)
         lines = [l for l in written.split(b"\n") if l.startswith(b"data: ")]
-        # 2 text chunks + 1 finish chunk + [DONE]
-        self.assertGreaterEqual(len(lines), 3)
+        # 1 role chunk + 2 text chunks + 1 finish chunk + [DONE]
+        self.assertGreaterEqual(len(lines), 4)
         first_chunk = json.loads(lines[0].removeprefix(b"data: "))
         self.assertEqual(first_chunk["object"], "chat.completion.chunk")
-        self.assertEqual(first_chunk["choices"][0]["delta"]["content"], "Hello")
+        self.assertEqual(first_chunk["choices"][0]["delta"], {"role": "assistant"})
         # Last line should be [DONE]
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
 
