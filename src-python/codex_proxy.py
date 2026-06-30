@@ -1089,6 +1089,15 @@ def _response_events_to_chat_stream_chunks(events: list[Mapping[str, Any]]) -> l
             if isinstance(response_obj, Mapping):
                 response_id = response_obj.get("id") or response_id
                 model = response_obj.get("model") or model
+            # Emit an initial role chunk — many OpenAI-compatible clients
+            # (including ZCode) expect the first delta to carry {"role":"assistant"}.
+            chunks.append({
+                "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            })
             continue
         if event_type == "response.output_text.delta":
             delta_text = event.get("delta")
@@ -2353,9 +2362,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if isinstance(event, dict):
                         events.append(event)
                 for chunk in _response_events_to_chat_stream_chunks(events):
-                    self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + line_ending)
+                    self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                     self.wfile.flush()
-                self.wfile.write(b"data: [DONE]" + line_ending)
+                self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 self.close_connection = True
                 return status
@@ -2380,14 +2389,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if want_chat_output:
                     # Inbound and upstream are both Chat Completions; pass through.
                     for chunk in chunks:
-                        self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + line_ending)
+                        self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                         self.wfile.flush()
                 else:
                     for event in _chat_stream_chunks_to_response_events(chunks):
                         event, _ = _downgrade_invalid_third_party_tool_calls(event)
                         self.wfile.write(_sse_json_line(event, line_ending))
                     self.wfile.flush()
-                self.wfile.write(b"data: [DONE]" + line_ending)
+                self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 self.close_connection = True
                 return status
