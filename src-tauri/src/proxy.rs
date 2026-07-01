@@ -98,6 +98,15 @@ struct SettingsDocument {
     auto_sync_history: Option<bool>,
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
+    auto_sync_catalog: Option<bool>,
+    default_codex_route: Option<String>,
+    gateway_bind_address: Option<String>,
+    gateway_client_key: Option<String>,
+    gateway_enable_models: Option<bool>,
+    gateway_enable_responses: Option<bool>,
+    gateway_enable_chat_completions: Option<bool>,
+    official_model_sort_order: Option<Vec<String>>,
+    official_provider_sort_order: Option<i32>,
     proxy_port: Option<u16>,
 }
 
@@ -110,6 +119,34 @@ impl SettingsDocument {
             include_official_models: self
                 .include_official_models
                 .unwrap_or(defaults.include_official_models),
+            auto_sync_catalog: self.auto_sync_catalog.unwrap_or(defaults.auto_sync_catalog),
+            default_codex_route: self
+                .default_codex_route
+                .filter(|value| matches!(value.as_str(), "official" | "hub"))
+                .unwrap_or(defaults.default_codex_route),
+            gateway_bind_address: self
+                .gateway_bind_address
+                .filter(|value| value == "127.0.0.1")
+                .unwrap_or(defaults.gateway_bind_address),
+            gateway_client_key: self
+                .gateway_client_key
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(defaults.gateway_client_key),
+            gateway_enable_models: self
+                .gateway_enable_models
+                .unwrap_or(defaults.gateway_enable_models),
+            gateway_enable_responses: self
+                .gateway_enable_responses
+                .unwrap_or(defaults.gateway_enable_responses),
+            gateway_enable_chat_completions: self
+                .gateway_enable_chat_completions
+                .unwrap_or(defaults.gateway_enable_chat_completions),
+            official_model_sort_order: self
+                .official_model_sort_order
+                .unwrap_or(defaults.official_model_sort_order),
+            official_provider_sort_order: self
+                .official_provider_sort_order
+                .unwrap_or(defaults.official_provider_sort_order),
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }

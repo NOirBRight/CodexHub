@@ -1,0 +1,42 @@
+{
+  "tabs": [
+    { "id": "codexhub", "label": "CodexHub" },
+    { "id": "gateway", "label": "Gateway" }
+  ],
+  "gatewayClients": [
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "kind": "Terminal client",
+      "description": "Terminal client route target",
+      "config_path": "~/.config/opencode/config.json"
+    },
+    {
+      "id": "zcode",
+      "name": "ZCode",
+      "kind": "IDE extension",
+      "description": "IDE extension route target",
+      "config_path": "%APPDATA%/ZCode/settings.json"
+    },
+    {
+      "id": "pi",
+      "name": "Pi",
+      "kind": "Compact CLI",
+      "description": "Compact CLI route target",
+      "config_path": "~/.config/pi/config.json"
+    },
+    {
+      "id": "omp",
+      "name": "OMP",
+      "kind": "Prompt runtime",
+      "description": "Prompt runtime route target",
+      "config_path": "~/.config/omp/settings.json"
+    }
+  ],
+  "pendingBackend": {
+    "label": "pending backend",
+    "usage": "Usage telemetry and cost aggregation are waiting for the Gateway usage backend.",
+    "clients": "Client detection, managed writes, restore, version checks, and upgrades are waiting for the client manager backend.",
+    "models": "Model metadata, pricing provenance, and exported-model management are waiting for the metadata backend."
+  }
+}

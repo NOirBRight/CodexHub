@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from providers_config import (
+    DEFAULT_PROVIDERS_PATH,
     ModelConfig,
     ProviderConfig,
     build_external_model_index,
@@ -261,10 +262,14 @@ enabled = true
                 name="Case Provider",
                 base_url="https://case.example/v1",
                 api_key="case-secret",
+                upstream_format="chat_completions",
                 models=[
                     ModelConfig(
                         id="alias-model",
                         upstream_model="Live-Case-Model",
+                        input_modalities=("text", "image"),
+                        supported_reasoning_levels=("low", "high", "xhigh"),
+                        default_reasoning_level="high",
                         sort_order=1,
                     ),
                     ModelConfig(
@@ -282,11 +287,23 @@ enabled = true
             raw_toml = path.read_text(encoding="utf-8")
 
         self.assertEqual(loaded[0].models[0].upstream_model, "Live-Case-Model")
+        self.assertEqual(loaded[0].models[0].input_modalities, ("text", "image"))
+        self.assertEqual(loaded[0].models[0].supported_reasoning_levels, ("low", "high", "xhigh"))
+        self.assertEqual(loaded[0].models[0].default_reasoning_level, "high")
+        self.assertEqual(loaded[0].upstream_format, "chat_completions")
         self.assertIsNone(loaded[0].models[1].upstream_model)
         self.assertIn('upstream_model = "Live-Case-Model"', raw_toml)
+        self.assertIn('input_modalities = ["text", "image"]', raw_toml)
+        self.assertIn('supported_reasoning_levels = ["low", "high", "xhigh"]', raw_toml)
+        self.assertIn('default_reasoning_level = "high"', raw_toml)
+        self.assertIn('upstream_format = "chat_completions"', raw_toml)
 
         index = build_external_model_index(loaded)
         self.assertEqual(index["case-provider/alias-model"]["upstream_model"], "Live-Case-Model")
+        self.assertEqual(index["case-provider/alias-model"]["upstream_format"], "chat_completions")
+        self.assertEqual(index["case-provider/alias-model"]["input_modalities"], ("text", "image"))
+        self.assertEqual(index["case-provider/alias-model"]["supported_reasoning_levels"], ("low", "high", "xhigh"))
+        self.assertEqual(index["case-provider/alias-model"]["default_reasoning_level"], "high")
         self.assertEqual(index["case-provider/fallback-model"]["upstream_model"], "Fallback-Model")
 
     def test_build_external_model_index_skips_disabled_providers_and_models(self):
@@ -315,6 +332,33 @@ enabled = true
 
         self.assertEqual(sorted(index), ["enabled-provider/enabled-model"])
 
+    def test_build_external_model_index_skips_hidden_and_not_exported_models(self):
+        providers = [
+            ProviderConfig(
+                id="visible-provider",
+                name="Visible Provider",
+                base_url="https://visible.example/v1",
+                api_key="secret",
+                models=[
+                    ModelConfig(id="exported", gateway_exported=True, hidden=False),
+                    ModelConfig(id="not-exported", gateway_exported=False, hidden=False),
+                    ModelConfig(id="hidden", gateway_exported=True, hidden=True),
+                ],
+            ),
+            ProviderConfig(
+                id="hidden-provider",
+                name="Hidden Provider",
+                base_url="https://hidden.example/v1",
+                api_key="secret",
+                hidden=True,
+                models=[ModelConfig(id="exported")],
+            ),
+        ]
+
+        index = build_external_model_index(providers)
+
+        self.assertEqual(sorted(index), ["visible-provider/exported"])
+
     def test_build_external_model_index_skips_missing_env_keys_and_resolves_present_env_keys(self):
         providers = [
             ProviderConfig(
@@ -342,6 +386,23 @@ enabled = true
 
         self.assertEqual(sorted(index), ["present-key/model"])
         self.assertEqual(index["present-key/model"]["api_key"], "present-secret")
+
+    def test_build_external_model_index_can_include_models_without_api_keys_for_catalogs(self):
+        providers = [
+            ProviderConfig(
+                id="missing-key",
+                name="Missing Key",
+                base_url="https://missing.example/v1",
+                api_key="{env:PROVIDERS_CONFIG_MISSING_EXTERNAL_KEY}",
+                models=[ModelConfig(id="model")],
+            ),
+        ]
+
+        with patch.dict("os.environ", {}, clear=True):
+            index = build_external_model_index(providers, require_api_key=False)
+
+        self.assertEqual(sorted(index), ["missing-key/model"])
+        self.assertIsNone(index["missing-key/model"]["api_key"])
 
     def test_build_external_model_index_skips_whitespace_env_keys_and_invalid_routing_primitives(self):
         providers = [
@@ -458,7 +519,7 @@ enabled = true
             self.assertEqual(load_providers(path), [])
 
     def test_default_config_uses_provider_ids_that_match_model_slug_prefixes(self):
-        providers = load_providers()
+        providers = load_providers(DEFAULT_PROVIDERS_PATH)
 
         self.assertEqual([provider.id for provider in providers], ["ollama-cloud", "volc", "minimax-cn"])
 
@@ -472,12 +533,13 @@ enabled = true
             },
             clear=True,
         ):
-            index = build_external_model_index(load_providers())
-            volc_minimax = resolve_external_model_alias("volc/minimax-m3")
+            index = build_external_model_index(load_providers(DEFAULT_PROVIDERS_PATH))
+            volc_minimax = resolve_external_model_alias("volc/minimax-m3", providers_path=DEFAULT_PROVIDERS_PATH)
 
-        self.assertEqual(sorted(index), ["minimax-cn/minimax-m3", "volc/glm-5.2"])
+        self.assertEqual(sorted(index), ["minimax-cn/minimax-m3", "volc/glm-5.2", "volc/kimi-k2.6"])
         self.assertNotIn("volc/minimax-m3", index)
         self.assertEqual(index["minimax-cn/minimax-m3"]["upstream_model"], "MiniMax-M3")
+        self.assertEqual(index["volc/kimi-k2.6"]["upstream_model"], "kimi-k2.6")
         self.assertIsNone(volc_minimax)
 
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):

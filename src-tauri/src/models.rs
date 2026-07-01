@@ -1,4 +1,4 @@
-use crate::Model;
+use crate::{MetadataProvenance, Model, ModelPricing};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde_json::Value;
@@ -27,6 +27,48 @@ pub fn discover_provider_models(base_url: &str, api_key: &str) -> Result<Vec<Mod
     discover_provider_models_with_timeout(base_url, api_key, DISCOVERY_TIMEOUT)
 }
 
+pub fn probe_upstream_format(
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+) -> Result<Value, String> {
+    let paths = ModelPaths::runtime()?;
+    let python = find_python();
+    let script = paths.upstream_format_probe_script();
+    if !script.exists() {
+        return Err(format!(
+            "upstream format probe script not found: {}",
+            script.display()
+        ));
+    }
+
+    let mut command = Command::new(&python);
+    command
+        .arg(&script)
+        .arg("--base-url")
+        .arg(base_url)
+        .env("CODEXHUB_PROBE_API_KEY", api_key.trim());
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        command.arg("--model").arg(model);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start upstream format probe: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        return Err(format!(
+            "upstream format probe failed with {}\nstdout:\n{}\nstderr:\n{}",
+            format_exit_code(output.status.code()),
+            stdout.trim_end(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        ));
+    }
+
+    serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("upstream format probe returned invalid JSON: {error}"))
+}
+
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
     let python = find_python();
@@ -43,6 +85,32 @@ pub fn list_models() -> Result<Vec<Model>, String> {
     }
 
     read_catalog_models(&catalog_path)
+}
+
+pub fn list_model_metadata() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    let cached = read_metadata_cache(&paths).unwrap_or_else(|_| builtin_model_metadata());
+    let overrides = read_metadata_overrides(&paths).unwrap_or_default();
+    Ok(merge_metadata_with_overrides(cached, overrides))
+}
+
+pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    let metadata = builtin_model_metadata();
+    write_models_json(&paths.metadata_cache_path(), &metadata)?;
+    list_model_metadata()
+}
+
+pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
+    let paths = ModelPaths::runtime()?;
+    let mut overrides = read_metadata_overrides(&paths).unwrap_or_default();
+    if let Some(existing) = overrides.iter_mut().find(|item| item.id == model.id) {
+        *existing = model.clone();
+    } else {
+        overrides.push(model.clone());
+    }
+    write_models_json(&paths.metadata_overrides_path(), &overrides)?;
+    Ok(model)
 }
 
 fn refresh_official_models_from_endpoint(
@@ -208,8 +276,7 @@ fn model_from_discovered_item(id: String, item: &Value) -> Model {
             "context",
         ),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
-        sort_order: None,
-        enabled: true,
+        ..Model::default()
     }
 }
 
@@ -284,10 +351,28 @@ impl ModelPaths {
         self.repo_root.join("src-python").join("catalog_sync.py")
     }
 
+    fn upstream_format_probe_script(&self) -> PathBuf {
+        self.repo_root
+            .join("src-python")
+            .join("probe_upstream_format.py")
+    }
+
     fn generated_catalog_path(&self) -> PathBuf {
         self.codex_dir
             .join("model-catalogs")
             .join(GENERATED_CATALOG_FILE)
+    }
+
+    fn metadata_cache_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("proxy")
+            .join("model-metadata-cache.json")
+    }
+
+    fn metadata_overrides_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("proxy")
+            .join("model-metadata-overrides.json")
     }
 }
 
@@ -396,6 +481,190 @@ fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
     Ok(models)
 }
 
+fn read_metadata_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    read_models_json(&paths.metadata_cache_path())
+}
+
+fn read_metadata_overrides(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    read_models_json(&paths.metadata_overrides_path())
+}
+
+fn read_models_json(path: &Path) -> Result<Vec<Model>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read model metadata {}: {error}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|error| format!("failed to parse model metadata {}: {error}", path.display()))
+}
+
+fn write_models_json(path: &Path, models: &[Model]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create model metadata directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let text = serde_json::to_string_pretty(models)
+        .map_err(|error| format!("failed to serialize model metadata: {error}"))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| format!("failed to write model metadata {}: {error}", path.display()))
+}
+
+fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) -> Vec<Model> {
+    for mut override_model in overrides {
+        override_model.metadata_provenance = Some(MetadataProvenance {
+            source: "user_override".to_string(),
+            source_url: None,
+            fetched_at: None,
+            confidence: "user".to_string(),
+        });
+        if let Some(existing) = base.iter_mut().find(|model| model.id == override_model.id) {
+            merge_model_override(existing, override_model);
+        } else {
+            base.push(override_model);
+        }
+    }
+    base.sort_by(|left, right| left.id.cmp(&right.id));
+    base
+}
+
+fn merge_model_override(base: &mut Model, override_model: Model) {
+    let original_enabled = base.enabled;
+    let original_codex_enabled = base.codex_enabled;
+    let original_gateway_exported = base.gateway_exported;
+    let original_hidden = base.hidden;
+    *base = Model {
+        id: override_model.id,
+        display_name: override_model.display_name.or(base.display_name.take()),
+        upstream_model: override_model.upstream_model.or(base.upstream_model.take()),
+        source_kind: override_model.source_kind.or(base.source_kind.take()),
+        locked: base.locked || override_model.locked,
+        hidden: override_model.hidden || original_hidden,
+        codex_enabled: override_model.codex_enabled && original_codex_enabled,
+        gateway_exported: override_model.gateway_exported && original_gateway_exported,
+        context_window: override_model.context_window.or(base.context_window),
+        max_output_tokens: override_model.max_output_tokens.or(base.max_output_tokens),
+        input_modalities: override_model.input_modalities.or(base.input_modalities.take()),
+        supported_reasoning_levels: override_model
+            .supported_reasoning_levels
+            .or(base.supported_reasoning_levels.take()),
+        default_reasoning_level: override_model
+            .default_reasoning_level
+            .or(base.default_reasoning_level.take()),
+        pricing: override_model.pricing.or(base.pricing.take()),
+        metadata_provenance: override_model.metadata_provenance,
+        sort_order: override_model.sort_order.or(base.sort_order),
+        enabled: override_model.enabled && original_enabled,
+    };
+}
+
+fn builtin_model_metadata() -> Vec<Model> {
+    vec![
+        official_metadata("openai/gpt-5.5", "GPT-5.5", 272_000),
+        official_metadata("openai/gpt-5.4", "GPT-5.4", 272_000),
+        official_metadata("openai/gpt-5.4-mini", "GPT-5.4 mini", 272_000),
+        official_metadata("openai/gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
+        priced_metadata(
+            "zai/glm-5.2",
+            "GLM 5.2",
+            "external",
+            1_000_000,
+            "https://docs.z.ai/guides/llm/glm-5.2",
+            Some((0.30, 0.03, 1.20)),
+        ),
+        priced_metadata(
+            "moonshot/kimi-k2.7-code",
+            "Kimi K2.7 Code",
+            "external",
+            256_000,
+            "https://platform.kimi.ai/docs/guide/kimi-k2-7-code-quickstart",
+            None,
+        ),
+        priced_metadata(
+            "minimax/minimax-m3",
+            "MiniMax M3",
+            "external",
+            1_000_000,
+            "https://platform.minimax.io/docs/guides/text-generation",
+            None,
+        ),
+        priced_metadata(
+            "deepseek/deepseek-chat",
+            "DeepSeek Chat",
+            "external",
+            128_000,
+            "https://api-docs.deepseek.com/quick_start/pricing",
+            Some((0.27, 0.07, 1.10)),
+        ),
+        Model {
+            id: "ollama/glm-5.2".to_string(),
+            display_name: Some("GLM 5.2 via Ollama".to_string()),
+            source_kind: Some("external".to_string()),
+            context_window: Some(128_000),
+            pricing: None,
+            metadata_provenance: Some(MetadataProvenance {
+                source: "official".to_string(),
+                source_url: Some("https://docs.ollama.com/api/openai-compatibility".to_string()),
+                fetched_at: None,
+                confidence: "medium".to_string(),
+            }),
+            ..Model::default()
+        },
+    ]
+}
+
+fn official_metadata(id: &str, display_name: &str, context_window: u32) -> Model {
+    Model {
+        id: id.to_string(),
+        display_name: Some(display_name.to_string()),
+        source_kind: Some("official".to_string()),
+        locked: true,
+        context_window: Some(context_window),
+        metadata_provenance: Some(MetadataProvenance {
+            source: "official".to_string(),
+            source_url: Some("https://developers.openai.com/api/docs/models".to_string()),
+            fetched_at: None,
+            confidence: "high".to_string(),
+        }),
+        ..Model::default()
+    }
+}
+
+fn priced_metadata(
+    id: &str,
+    display_name: &str,
+    source_kind: &str,
+    context_window: u32,
+    source_url: &str,
+    pricing: Option<(f64, f64, f64)>,
+) -> Model {
+    Model {
+        id: id.to_string(),
+        display_name: Some(display_name.to_string()),
+        source_kind: Some(source_kind.to_string()),
+        context_window: Some(context_window),
+        pricing: pricing.map(|(input, cached, output)| ModelPricing {
+            input_per_million: Some(input),
+            cached_input_per_million: Some(cached),
+            output_per_million: Some(output),
+            currency: "USD".to_string(),
+            source: "official".to_string(),
+            estimate: true,
+        }),
+        metadata_provenance: Some(MetadataProvenance {
+            source: "official".to_string(),
+            source_url: Some(source_url.to_string()),
+            fetched_at: None,
+            confidence: "medium".to_string(),
+        }),
+        ..Model::default()
+    }
+}
+
 fn catalog_model_from_item(item: &Value) -> Option<Model> {
     let object = item.as_object()?;
     let id = object
@@ -430,9 +699,62 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             "context",
         ),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
+        input_modalities: object.get("input_modalities").and_then(string_array),
+        supported_reasoning_levels: object
+            .get("supported_reasoning_levels")
+            .and_then(reasoning_efforts),
+        default_reasoning_level: object
+            .get("default_reasoning_level")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
         sort_order: object.get("priority").and_then(optional_i32),
-        enabled: true,
+        enabled: object.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        source_kind: object
+            .get("source_kind")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        locked: object.get("locked").and_then(Value::as_bool).unwrap_or(false),
+        hidden: object.get("hidden").and_then(Value::as_bool).unwrap_or(false),
+        codex_enabled: object
+            .get("codex_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        gateway_exported: object
+            .get("gateway_exported")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        pricing: None,
+        metadata_provenance: None,
     })
+}
+
+fn string_array(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(nonblank)
+            .collect(),
+    )
+}
+
+fn reasoning_efforts(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(|item| {
+                if let Some(text) = item.as_str() {
+                    return nonblank(text);
+                }
+                item.as_object()
+                    .and_then(|object| object.get("effort"))
+                    .and_then(Value::as_str)
+                    .and_then(nonblank)
+            })
+            .collect(),
+    )
 }
 
 fn format_exit_code(code: Option<i32>) -> String {
@@ -452,10 +774,11 @@ fn find_python() -> PathBuf {
 mod tests {
     use super::{
         discover_provider_models_with_timeout, generate_catalog_with_runner, list_models,
+        merge_metadata_with_overrides,
         refresh_official_models_from_endpoint, CatalogCommandOutcome, CatalogSyncRunner,
         ModelPaths,
     };
-    use crate::Model;
+    use crate::{MetadataProvenance, Model};
     use std::cell::RefCell;
     use std::fs;
     use std::io::{Read, Write};
@@ -577,6 +900,36 @@ mod tests {
                 .contains("authorization: bearer provider-secret"));
             server.join();
         }
+    }
+
+    #[test]
+    fn metadata_overrides_win_over_registry_values() {
+        let base = vec![Model {
+            id: "minimax/minimax-m3".to_string(),
+            context_window: Some(1_000_000),
+            metadata_provenance: Some(MetadataProvenance {
+                source: "official".to_string(),
+                source_url: Some("https://platform.minimax.io/docs".to_string()),
+                fetched_at: None,
+                confidence: "high".to_string(),
+            }),
+            ..Model::default()
+        }];
+        let overrides = vec![Model {
+            id: "minimax/minimax-m3".to_string(),
+            context_window: Some(245_000),
+            display_name: Some("MiniMax M3 Custom".to_string()),
+            ..Model::default()
+        }];
+
+        let merged = merge_metadata_with_overrides(base, overrides);
+
+        assert_eq!(merged[0].context_window, Some(245_000));
+        assert_eq!(merged[0].display_name.as_deref(), Some("MiniMax M3 Custom"));
+        assert_eq!(
+            merged[0].metadata_provenance.as_ref().unwrap().source,
+            "user_override"
+        );
     }
 
     #[test]

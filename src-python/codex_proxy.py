@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -34,12 +35,161 @@ DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is 
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
-PROXY_BUILD = "2026-06-29-tool-name-guard"
+PROXY_BUILD = "2026-06-30-subagent-single-loop-completion-gate"
+PROXY_FEATURES = [
+    "compressed-request-routing",
+    "provider-alias-routing",
+    "local-responses-probe-fast-reject",
+    "internal-history-item-normalization",
+    "external-reasoning-hidden",
+    "tool-name-guard",
+    "third-party-subagent-tool-alias",
+    "third-party-tool-search-call-shim",
+    "third-party-multi-agent-discovery-shim",
+    "third-party-multi-agent-namespace-shim",
+    "third-party-multi-agent-wait-close-argument-shim",
+    "third-party-explicit-codex-native-tools",
+    "third-party-json-schema-type-array-guard",
+    "third-party-multi-agent-discovery-fallback",
+    "third-party-native-tools-stay-visible",
+    "third-party-multi-agent-discovery-guidance",
+    "third-party-tool-search-hidden-after-discovery",
+    "third-party-spawn-hidden-while-agent-open",
+    "third-party-multi-agent-status-guidance",
+    "third-party-unsupported-reasoning-strip",
+    "third-party-subagent-observability",
+    "official-invalid-tool-assistant-shim",
+    "upstream-incomplete-read-guard",
+    "chat-completions-gateway",
+    "third-party-open-agent-id-schema-guidance",
+    "third-party-ordered-agent-lifecycle-guidance",
+    "third-party-single-loop-completion-gate",
+    "ollama-output-token-cap",
+    "official-upstream-open-retry",
+]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
 OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
+UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6",)
+UPSTREAM_MAX_OUTPUT_TOKEN_CAPS = {
+    "minimax-m3": 131072,
+    "deepseek-v4-pro": 65536,
+    "deepseek-v4-flash": 65536,
+}
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
 TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+MULTI_AGENT_TOOL_NAMES = {
+    "spawn_agent",
+    "wait_agent",
+    "close_agent",
+    "resume_agent",
+    "send_input",
+}
+MULTI_AGENT_NAMESPACE_ALIASES = {
+    "multi_agent_v1",
+    "mcp__multi_agent_v1",
+}
+THIRD_PARTY_TOOL_NAME_ALIASES = {
+    f"multi_agent_v1__{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES
+}
+THIRD_PARTY_TOOL_NAME_ALIASES.update(
+    {f"multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
+)
+THIRD_PARTY_TOOL_NAME_ALIASES.update(
+    {f"mcp__multi_agent_v1__{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
+)
+THIRD_PARTY_TOOL_NAME_ALIASES.update(
+    {f"mcp__multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
+)
+MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
+MULTI_AGENT_DISCOVERY_TOOLS = [
+    {
+        "type": "namespace",
+        "name": "multi_agent_v1",
+        "description": "Tools for spawning and managing Codex sub-agents.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "description": "Spawn a sub-agent. Use namespace multi_agent_v1 and function name spawn_agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_type": {"type": "string"},
+                        "fork_context": {"type": "boolean"},
+                        "message": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            {
+                "type": "function",
+                "name": "wait_agent",
+                "description": "Wait for one or more spawned sub-agents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "targets": {"type": "array", "items": {"type": "string"}},
+                        "timeout_ms": {"type": "number"},
+                    },
+                    "required": ["targets"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "close_agent",
+                "description": "Close a spawned sub-agent when it is no longer needed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "resume_agent",
+                "description": "Resume a previously closed sub-agent by id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "send_input",
+                "description": "Send a message to an existing sub-agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "message": {"type": "string"},
+                        "interrupt": {"type": "boolean"},
+                    },
+                    "required": ["target"],
+                    "additionalProperties": True,
+                },
+            },
+        ],
+    }
+]
+TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
+    "type": "function",
+    "name": "tool_search",
+    "description": "Discover deferred Codex tools by keyword. Use this before calling a tool that is not already visible.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+}
 INTERNAL_INPUT_ITEM_TYPES = {
     "compaction",
     "reasoning",
@@ -85,6 +235,7 @@ PROXY_EVENT_LOG_PATH = PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = PROXY_DIR / "codex-proxy.log"
 PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
+DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 
 logger = logging.getLogger("codex_proxy")
 
@@ -100,6 +251,17 @@ def upstream_timeout_seconds() -> int:
     return value if value > 0 else DEFAULT_UPSTREAM_TIMEOUT_SECONDS
 
 
+def official_upstream_open_attempts() -> int:
+    raw_value = os.environ.get("CODEX_PROXY_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS")
+    if not raw_value:
+        return DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
+    return value if value > 0 else DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
+
+
 def write_proxy_event(event: str, **fields: Any) -> None:
     payload = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -113,6 +275,111 @@ def write_proxy_event(event: str, **fields: Any) -> None:
                 handle.write(line + "\n")
     except OSError as exc:
         logger.warning("failed to write proxy event log: %s", type(exc).__name__)
+
+
+def _usage_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _usage_nested_int(usage: Mapping[str, Any], object_key: str, value_key: str) -> int | None:
+    value = usage.get(object_key)
+    if not isinstance(value, Mapping):
+        return None
+    return _usage_int(value.get(value_key))
+
+
+def _normalize_usage_for_event(
+    usage: Mapping[str, Any] | None,
+    *,
+    missing_reason: str = "upstream_missing_usage",
+) -> dict[str, Any]:
+    if not isinstance(usage, Mapping):
+        return {
+            "usage_source": "missing",
+            "usage_missing_reason": missing_reason,
+        }
+
+    input_tokens = _usage_int(usage.get("input_tokens"))
+    if input_tokens is None:
+        input_tokens = _usage_int(usage.get("prompt_tokens"))
+    output_tokens = _usage_int(usage.get("output_tokens"))
+    if output_tokens is None:
+        output_tokens = _usage_int(usage.get("completion_tokens"))
+    total_tokens = _usage_int(usage.get("total_tokens"))
+    cached_input_tokens = _usage_nested_int(usage, "input_tokens_details", "cached_tokens")
+    if cached_input_tokens is None:
+        cached_input_tokens = _usage_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+    reasoning_tokens = _usage_nested_int(usage, "output_tokens_details", "reasoning_tokens")
+    if reasoning_tokens is None:
+        reasoning_tokens = _usage_nested_int(usage, "completion_tokens_details", "reasoning_tokens")
+
+    fields: dict[str, Any] = {"usage_source": "upstream"}
+    if input_tokens is not None:
+        fields["usage_input_tokens"] = input_tokens
+    if output_tokens is not None:
+        fields["usage_output_tokens"] = output_tokens
+    if total_tokens is not None:
+        fields["usage_total_tokens"] = total_tokens
+    elif input_tokens is not None and output_tokens is not None:
+        fields["usage_total_tokens"] = input_tokens + output_tokens
+    if cached_input_tokens is not None:
+        fields["usage_cached_input_tokens"] = cached_input_tokens
+    if reasoning_tokens is not None:
+        fields["usage_reasoning_tokens"] = reasoning_tokens
+    if len(fields) == 1:
+        return {
+            "usage_source": "missing",
+            "usage_missing_reason": "upstream_usage_unrecognized",
+        }
+    return fields
+
+
+def _usage_from_payload(payload: Any) -> Mapping[str, Any] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    usage = payload.get("usage")
+    return usage if isinstance(usage, Mapping) else None
+
+
+def _usage_from_json_body(body: bytes) -> Mapping[str, Any] | None:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return _usage_from_payload(payload)
+
+
+def _usage_from_response_event(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    if event.get("type") != "response.completed":
+        return None
+    response = event.get("response")
+    return _usage_from_payload(response)
+
+
+def _capture_usage(
+    usage_capture: dict[str, Any] | None,
+    usage: Mapping[str, Any] | None,
+    *,
+    missing_reason: str = "upstream_missing_usage",
+) -> None:
+    if usage_capture is None:
+        return
+    if usage_capture.get("usage_source") == "upstream":
+        return
+    usage_capture.clear()
+    usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
+
+
+def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
+    if event_context is None:
+        return
+    payload = dict(event_context)
+    payload.update(fields)
+    write_proxy_event(event, **payload)
 
 
 def load_routing_config(path: Path = POLICY_PATH) -> dict[str, Any]:
@@ -155,11 +422,17 @@ def generated_catalog_by_slug(path: Path = GENERATED_CATALOG_PATH) -> dict[str, 
 
 
 def catalog_max_output_tokens(model_id: str) -> int | None:
-    model = generated_catalog_by_slug().get(canonical_model_id(model_id))
+    slug = canonical_model_id(model_id)
+    model = generated_catalog_by_slug().get(slug)
     if not model:
-        return None
+        cap = UPSTREAM_MAX_OUTPUT_TOKEN_CAPS.get(slug)
+        return cap if isinstance(cap, int) and cap > 0 else None
     value = model.get("max_output_tokens")
-    return value if isinstance(value, int) and value > 0 else None
+    catalog_value = value if isinstance(value, int) and value > 0 else None
+    cap = UPSTREAM_MAX_OUTPUT_TOKEN_CAPS.get(slug)
+    if isinstance(cap, int) and cap > 0:
+        return min(catalog_value, cap) if catalog_value is not None else cap
+    return catalog_value
 
 
 def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
@@ -226,6 +499,18 @@ def official_upstream() -> dict[str, Any]:
         "base_url": official_base_url(),
         "auth": "codex_auth",
     }
+
+
+def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, upstream_model: Any) -> bool:
+    if upstream_name == "official":
+        return False
+    for model in (upstream_model, requested_model):
+        if not isinstance(model, str) or not model:
+            continue
+        model_key = canonical_model_id(model).lower()
+        if any(model_key.startswith(prefix) for prefix in UNSUPPORTED_REASONING_MODEL_PREFIXES):
+            return True
+    return False
 
 
 def decoded_request_body(body: bytes, content_encoding: str | None = None) -> tuple[bytes, bool, str | None]:
@@ -530,6 +815,12 @@ def _responses_request_to_chat_completion_body(body: bytes) -> bytes:
     for key in ("stream", "temperature", "top_p", "presence_penalty", "frequency_penalty", "parallel_tool_calls"):
         if key in payload:
             chat_payload[key] = payload[key]
+    if payload.get("stream") is True:
+        stream_options = chat_payload.get("stream_options")
+        if not isinstance(stream_options, dict):
+            stream_options = {}
+        stream_options["include_usage"] = True
+        chat_payload["stream_options"] = stream_options
     if "max_output_tokens" in payload:
         chat_payload["max_tokens"] = payload["max_output_tokens"]
 
@@ -621,6 +912,7 @@ def _chat_completion_to_response_body(body: bytes) -> bytes:
         response_payload["usage"] = payload["usage"]
 
     _hide_reasoning_text(response_payload)
+    response_payload, _ = _normalize_third_party_tool_call(response_payload)
     response_payload, _ = _downgrade_invalid_third_party_tool_calls(response_payload)
     return json.dumps(response_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
@@ -1232,6 +1524,7 @@ def _events_to_responses_body(events: list[Mapping[str, Any]]) -> bytes:
     model: str | None = None
     text_parts: list[str] = []
     current_item: dict[str, Any] | None = None
+    usage: Mapping[str, Any] | None = None
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -1265,6 +1558,7 @@ def _events_to_responses_body(events: list[Mapping[str, Any]]) -> bytes:
             if isinstance(resp, Mapping):
                 response_id = resp.get("id") or response_id
                 model = resp.get("model") or model
+                usage = _usage_from_payload(resp) or usage
                 resp_output = resp.get("output")
                 if isinstance(resp_output, list) and not output:
                     output = [dict(i) for i in resp_output if isinstance(i, dict)]
@@ -1285,6 +1579,8 @@ def _events_to_responses_body(events: list[Mapping[str, Any]]) -> bytes:
         "model": model,
         "output": output,
     }
+    if usage is not None:
+        payload["usage"] = dict(usage)
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -1331,6 +1627,14 @@ def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | 
     }
 
 
+def _system_text_message(content: str) -> dict[str, str]:
+    return {"type": "message", "role": "system", "content": content}
+
+
+def _developer_text_message(content: str) -> dict[str, str]:
+    return {"type": "message", "role": "developer", "content": content}
+
+
 def _stringify_internal_field(value: Any) -> str:
     if value is None:
         return ""
@@ -1350,12 +1654,18 @@ def _append_internal_field(lines: list[str], label: str, value: Any) -> None:
     lines.append(text)
 
 
+def _single_line_internal_field(value: Any) -> str:
+    text = _stringify_internal_field(value)
+    return " ".join(text.split()) if text else ""
+
+
 def _valid_tool_name(value: Any) -> bool:
     return isinstance(value, str) and bool(TOOL_NAME_RE.fullmatch(value))
 
 
 def _is_tool_call_item(item: Mapping[str, Any]) -> bool:
-    return item.get("type") in {"function_call", "custom_tool_call"}
+    item_type = item.get("type")
+    return isinstance(item_type, str) and item_type in {"function_call", "custom_tool_call"}
 
 
 def _has_invalid_tool_name(item: Mapping[str, Any]) -> bool:
@@ -1366,6 +1676,7 @@ def _transcript_text(title: str, item: Mapping[str, Any]) -> str:
     lines = [title]
     for label, key in (
         ("type", "type"),
+        ("namespace", "namespace"),
         ("name", "name"),
         ("call_id", "call_id"),
         ("status", "status"),
@@ -1392,6 +1703,769 @@ def _assistant_transcript_message(title: str, item: Mapping[str, Any]) -> dict[s
         "role": "assistant",
         "content": [{"type": "output_text", "text": _transcript_text(title, item)}],
     }
+
+
+def _json_object_from_arguments(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _dump_arguments_like(original: Any, arguments: Mapping[str, Any]) -> Any:
+    if isinstance(original, str):
+        return json.dumps(arguments, ensure_ascii=True, separators=(",", ":"))
+    return dict(arguments)
+
+
+def _tool_schema_name(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    name = value.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _tool_parameters_schema(value: Mapping[str, Any]) -> dict[str, Any]:
+    for key in ("parameters", "inputSchema", "input_schema"):
+        schema = value.get(key)
+        if isinstance(schema, dict):
+            return dict(schema)
+    return {"type": "object", "properties": {}, "additionalProperties": True}
+
+
+def _explicit_function_tool(name: str, description: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": dict(parameters),
+    }
+
+
+def _multi_agent_explicit_function_tools(
+    include_spawn_agent: bool = True,
+    include_wait_agent: bool = True,
+    include_close_agent: bool = True,
+    open_agent_ids: list[str] | None = None,
+    wait_agent_ids: list[str] | None = None,
+    close_agent_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    namespace = MULTI_AGENT_DISCOVERY_TOOLS[0]
+    tools = namespace.get("tools") if isinstance(namespace, Mapping) else None
+    if not isinstance(tools, list):
+        return []
+
+    result: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            continue
+        name = _tool_schema_name(tool)
+        if not name or name not in MULTI_AGENT_TOOL_NAMES:
+            continue
+        if name == "spawn_agent" and not include_spawn_agent:
+            continue
+        if name == "wait_agent" and not include_wait_agent:
+            continue
+        if name == "close_agent" and not include_close_agent:
+            continue
+        alias = f"multi_agent_v1__{name}"
+        description = str(tool.get("description") or f"Invoke Codex multi_agent_v1.{name}.")
+        parameters = json.loads(json.dumps(_tool_parameters_schema(tool)))
+        target_agent_ids = open_agent_ids
+        if name == "wait_agent" and wait_agent_ids is not None:
+            target_agent_ids = wait_agent_ids
+        elif name == "close_agent" and close_agent_ids is not None:
+            target_agent_ids = close_agent_ids
+        if target_agent_ids and name in {"wait_agent", "close_agent"}:
+            ids_text = ", ".join(target_agent_ids)
+            description += f" Current open agent_id target(s): {ids_text}. Use these id(s) next."
+            properties = parameters.setdefault("properties", {})
+            if isinstance(properties, dict):
+                if name == "wait_agent":
+                    targets = properties.get("targets")
+                    if isinstance(targets, dict):
+                        targets["description"] = (
+                            f"MUST be exactly this list for the currently open Codex child agent(s): {list(target_agent_ids)!r}."
+                        )
+                        targets.setdefault("default", list(target_agent_ids))
+                        items = targets.setdefault("items", {})
+                        if isinstance(items, dict):
+                            items["enum"] = list(target_agent_ids)
+                    timeout_ms = properties.get("timeout_ms")
+                    if isinstance(timeout_ms, dict):
+                        timeout_ms.setdefault("description", "Use 60000 for the standard Codex subagent test.")
+                        timeout_ms.setdefault("default", 60000)
+                elif name == "close_agent":
+                    target = properties.get("target")
+                    if isinstance(target, dict):
+                        target["description"] = (
+                            f"MUST be one of the already-waited open Codex child agent id(s): {', '.join(target_agent_ids)}."
+                        )
+                        if len(target_agent_ids) == 1:
+                            target.setdefault("default", target_agent_ids[0])
+                        target["enum"] = list(target_agent_ids)
+        result.append(_explicit_function_tool(alias, description, parameters))
+    return result
+
+
+def _supports_explicit_namespace_alias(namespace_name: str) -> bool:
+    return namespace_name == "codex_app" or namespace_name.startswith("mcp__")
+
+
+def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for namespace in tools:
+        if not isinstance(namespace, Mapping) or namespace.get("type") != "namespace":
+            continue
+        namespace_name = _tool_schema_name(namespace)
+        namespace_tools = namespace.get("tools")
+        if (
+            not namespace_name
+            or not _valid_tool_name(namespace_name)
+            or not _supports_explicit_namespace_alias(namespace_name)
+            or not isinstance(namespace_tools, list)
+        ):
+            continue
+        for tool in namespace_tools:
+            if not isinstance(tool, Mapping) or tool.get("type") != "function":
+                continue
+            tool_name = _tool_schema_name(tool)
+            if not tool_name or not _valid_tool_name(tool_name):
+                continue
+            alias = f"{namespace_name}__{tool_name}"
+            description = str(tool.get("description") or f"Invoke Codex namespace {namespace_name}.{tool_name}.")
+            result.append(_explicit_function_tool(alias, description, _tool_parameters_schema(tool)))
+    return result
+
+
+def _multi_agent_function_call_name(item: Mapping[str, Any]) -> str | None:
+    if item.get("type") != "function_call":
+        return None
+
+    namespace = item.get("namespace")
+    name = item.get("name")
+    if namespace == "multi_agent_v1" and isinstance(name, str) and name in MULTI_AGENT_TOOL_NAMES:
+        return name
+    if isinstance(name, str):
+        alias = THIRD_PARTY_TOOL_NAME_ALIASES.get(name)
+        if alias:
+            return alias
+    return None
+
+
+def _inject_explicit_codex_tools(
+    payload: dict[str, Any],
+    include_tool_search: bool = True,
+    include_multi_agent_tools: bool = True,
+    include_spawn_agent: bool = True,
+    include_wait_agent: bool = True,
+    include_close_agent: bool = True,
+    open_agent_ids: list[str] | None = None,
+    wait_agent_ids: list[str] | None = None,
+    close_agent_ids: list[str] | None = None,
+) -> bool:
+    tools = payload.get("tools")
+    if tools is None:
+        tools = []
+        payload["tools"] = tools
+    if not isinstance(tools, list):
+        return False
+
+    changed = False
+    excluded_tool_names = set()
+    if not include_tool_search:
+        excluded_tool_names.add(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"])
+    if not include_multi_agent_tools:
+        excluded_tool_names.update(f"multi_agent_v1__{tool_name}" for tool_name in MULTI_AGENT_TOOL_NAMES)
+    if not include_spawn_agent:
+        excluded_tool_names.add("multi_agent_v1__spawn_agent")
+    if not include_wait_agent:
+        excluded_tool_names.add("multi_agent_v1__wait_agent")
+    if not include_close_agent:
+        excluded_tool_names.add("multi_agent_v1__close_agent")
+    if excluded_tool_names:
+        filtered_tools = [
+            tool
+            for tool in tools
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("type") == "function"
+                and tool.get("name") in excluded_tool_names
+            )
+        ]
+        if len(filtered_tools) != len(tools):
+            tools[:] = filtered_tools
+            changed = True
+
+    existing_names = {_tool_schema_name(tool) for tool in tools}
+    existing_names.discard(None)
+    additions = []
+    if include_tool_search:
+        additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
+    if include_multi_agent_tools:
+        additions.extend(
+            _multi_agent_explicit_function_tools(
+                include_spawn_agent=include_spawn_agent,
+                include_wait_agent=include_wait_agent,
+                include_close_agent=include_close_agent,
+                open_agent_ids=open_agent_ids,
+                wait_agent_ids=wait_agent_ids,
+                close_agent_ids=close_agent_ids,
+            )
+        )
+    additions.extend(_flatten_namespace_function_tools(tools))
+
+    for tool in additions:
+        name = _tool_schema_name(tool)
+        if not name or name in existing_names:
+            continue
+        tools.append(tool)
+        existing_names.add(name)
+        changed = True
+    return changed
+
+
+def _function_tool_names(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {
+        name
+        for tool in value
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "function"
+        and isinstance((name := tool.get("name")), str)
+    }
+
+
+def _json_string_value(value: str) -> Any:
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
+def _coerce_targets(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        parsed = _json_string_value(value)
+        if isinstance(parsed, list):
+            return parsed, True
+        if isinstance(parsed, str):
+            return [parsed], True
+        return [value], True
+    return value, False
+
+
+def _coerce_target(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        parsed = _json_string_value(value)
+        if isinstance(parsed, list) and parsed:
+            return parsed[0], True
+        if isinstance(parsed, str) and parsed != value:
+            return parsed, True
+        return value, False
+    if isinstance(value, list) and value:
+        return value[0], True
+    return value, False
+
+
+def _coerce_number(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"[+-]?\d+", text):
+            return int(text), True
+        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\d*\.\d+)", text):
+            return float(text), True
+    return value, False
+
+
+def _infer_multi_agent_tool_name(arguments: Mapping[str, Any]) -> str | None:
+    if "targets" in arguments:
+        return "wait_agent"
+    if "target" in arguments:
+        return "send_input" if "message" in arguments else "close_agent"
+    if "id" in arguments:
+        return "resume_agent"
+    if any(key in arguments for key in ("agent_type", "fork_context", "message")):
+        return "spawn_agent"
+    return None
+
+
+def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
+    if not isinstance(name, str):
+        return None
+    for separator in ("__", "."):
+        namespace, found, tool_name = name.rpartition(separator)
+        if not found:
+            continue
+        if (
+            _valid_tool_name(namespace)
+            and _supports_explicit_namespace_alias(namespace)
+            and _valid_tool_name(tool_name)
+        ):
+            return namespace, tool_name
+    return None
+
+
+def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
+    arguments = _json_object_from_arguments(value)
+    if arguments is None:
+        return None
+
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return None
+
+    normalized: dict[str, Any] = {"query": query}
+    limit = arguments.get("limit")
+    if isinstance(limit, str) and limit.strip().isdigit():
+        limit = int(limit.strip())
+    if isinstance(limit, int) and limit > 0:
+        normalized["limit"] = limit
+    return normalized
+
+
+def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
+    if not arguments:
+        return False
+    query = arguments.get("query")
+    if not isinstance(query, str):
+        return False
+    lowered = query.lower()
+    return all(term in lowered for term in ("spawn_agent", "multi_agent", "subagent"))
+
+
+def _multi_agent_discovery_arguments(value: Any) -> dict[str, Any] | None:
+    arguments = _json_object_from_arguments(value)
+    if arguments is None:
+        return None
+
+    if arguments:
+        return None
+
+    return {"query": MULTI_AGENT_DISCOVERY_QUERY, "limit": 8}
+
+
+def _normalize_multi_agent_arguments(
+    value: Any,
+    tool_name: str | None,
+) -> tuple[Any, str | None, bool]:
+    arguments = _json_object_from_arguments(value)
+    if arguments is None:
+        return value, tool_name, False
+
+    changed = False
+    resolved_tool_name = tool_name
+    if resolved_tool_name is None:
+        for key in ("", "tool", "function", "name", "action", "ns_tool", "operation", "method", "tool_name"):
+            candidate = arguments.get(key)
+            if isinstance(candidate, str) and candidate in MULTI_AGENT_TOOL_NAMES:
+                resolved_tool_name = candidate
+                arguments.pop(key, None)
+                changed = True
+                break
+    if resolved_tool_name is None:
+        resolved_tool_name = _infer_multi_agent_tool_name(arguments)
+
+    for key in ("fork_context", "interrupt"):
+        item = arguments.get(key)
+        if isinstance(item, str) and item.lower() in {"true", "false"}:
+            arguments[key] = item.lower() == "true"
+            changed = True
+
+    if "targets" in arguments:
+        coerced, item_changed = _coerce_targets(arguments["targets"])
+        if item_changed:
+            arguments["targets"] = coerced
+            changed = True
+    if "target" in arguments:
+        coerced, item_changed = _coerce_target(arguments["target"])
+        if item_changed:
+            arguments["target"] = coerced
+            changed = True
+    if "timeout_ms" in arguments:
+        coerced, item_changed = _coerce_number(arguments["timeout_ms"])
+        if item_changed:
+            arguments["timeout_ms"] = coerced
+            changed = True
+
+    if not changed:
+        return value, resolved_tool_name, False
+    return _dump_arguments_like(value, arguments), resolved_tool_name, True
+
+
+def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _normalize_third_party_tool_call(item)
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    changed = False
+    rewritten = dict(value)
+    if value.get("type") == "function_call" and value.get("name") == "tool_search":
+        arguments = _normalize_tool_search_arguments(value.get("arguments"))
+        if arguments is not None:
+            rewritten["type"] = "tool_search_call"
+            rewritten["arguments"] = arguments
+            rewritten.pop("name", None)
+            rewritten.setdefault("execution", "client")
+            rewritten.setdefault("status", "completed")
+            changed = True
+    elif (
+        value.get("type") == "function_call"
+        and value.get("name") in MULTI_AGENT_NAMESPACE_ALIASES
+        and _multi_agent_discovery_arguments(value.get("arguments")) is not None
+    ):
+        arguments = _multi_agent_discovery_arguments(value.get("arguments"))
+        rewritten["type"] = "tool_search_call"
+        rewritten["arguments"] = arguments
+        rewritten.pop("name", None)
+        rewritten.setdefault("execution", "client")
+        rewritten.setdefault("status", "completed")
+        changed = True
+    elif _is_tool_call_item(value):
+        original_name = value.get("name")
+        tool_name = THIRD_PARTY_TOOL_NAME_ALIASES.get(original_name) if isinstance(original_name, str) else None
+        namespace_alias = None
+        if tool_name is None and isinstance(original_name, str) and original_name in MULTI_AGENT_TOOL_NAMES:
+            tool_name = original_name
+        if tool_name is None:
+            namespace_alias = _split_namespace_tool_alias(original_name)
+        argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
+        if original_name in MULTI_AGENT_NAMESPACE_ALIASES and argument_key is not None:
+            normalized, tool_name, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), None)
+            if args_changed:
+                rewritten[argument_key] = normalized
+                changed = True
+        elif tool_name is not None and argument_key is not None:
+            normalized, _, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), tool_name)
+            if args_changed:
+                rewritten[argument_key] = normalized
+                changed = True
+
+        if tool_name is not None:
+            rewritten["name"] = tool_name
+            rewritten["namespace"] = "multi_agent_v1"
+            changed = True
+        elif namespace_alias is not None:
+            namespace_name, namespaced_tool_name = namespace_alias
+            rewritten["name"] = namespaced_tool_name
+            rewritten["namespace"] = namespace_name
+            changed = True
+
+    for key, item in list(rewritten.items()):
+        replacement, item_changed = _normalize_third_party_tool_call(item)
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+
+    return (rewritten if changed else value), changed
+
+
+def _compatible_multi_agent_call_message(item: Mapping[str, Any], tool_name: str) -> dict[str, str]:
+    lines = [f"Previous real Codex native multi_agent_v1.{tool_name} call transcript"]
+    value = _stringify_internal_field(item.get("call_id"))
+    if value:
+        lines.append(f"call_id: {value}")
+    _append_internal_field(lines, "arguments", item.get("arguments"))
+    return _system_text_message("\n".join(lines))
+
+
+def _status_completed_agent_ids(status: Any) -> list[str]:
+    if not isinstance(status, Mapping):
+        return []
+    return [
+        agent_id
+        for agent_id, value in status.items()
+        if isinstance(agent_id, str) and isinstance(value, Mapping) and "completed" in value
+    ]
+
+
+def _status_not_found_agent_ids(status: Any) -> list[str]:
+    if not isinstance(status, Mapping):
+        return []
+    return [
+        agent_id
+        for agent_id, value in status.items()
+        if isinstance(agent_id, str) and isinstance(value, str) and value == "not_found"
+    ]
+
+
+def _has_multi_agent_discovery_tools(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and item.get("type") == "namespace"
+        and item.get("name") == "multi_agent_v1"
+        for item in value
+    )
+
+
+def _text_contains_multi_agent_discovery(value: Any) -> bool:
+    if isinstance(value, str):
+        return "discovered_codex_native_multi_agent_tools" in value
+    if isinstance(value, Mapping):
+        return any(_text_contains_multi_agent_discovery(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_text_contains_multi_agent_discovery(child) for child in value)
+    return False
+
+
+def _has_multi_agent_discovery_context(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("type") == "tool_search_output" and _has_multi_agent_discovery_tools(item.get("tools")):
+            return True
+        if item.get("type") == "message" and _text_contains_multi_agent_discovery(item.get("content")):
+            return True
+    return False
+
+
+def _joined_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        return "\n".join(_joined_text(child) for child in value.values())
+    if isinstance(value, list):
+        return "\n".join(_joined_text(child) for child in value)
+    return ""
+
+
+def _line_value(text: str, prefix: str) -> str | None:
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(prefix):
+            value = line[len(prefix) :].strip()
+            return value or None
+    return None
+
+
+def _open_multi_agent_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    open_agent_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        text = _joined_text(item.get("content"))
+        if "Codex native multi_agent_v1.spawn_agent result" in text and "status: succeeded" in text:
+            agent_id = _line_value(text, "agent_id:")
+            if agent_id:
+                open_agent_ids.add(agent_id)
+        if "Codex native multi_agent_v1.close_agent result" in text and "status: closed" in text:
+            closed_agent_id = _line_value(text, "closed_agent_id:")
+            if closed_agent_id:
+                open_agent_ids.discard(closed_agent_id)
+            else:
+                open_agent_ids.clear()
+    return sorted(open_agent_ids)
+
+
+def _split_agent_id_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item for item in re.split(r"[\s,]+", value.strip()) if item]
+
+
+def _completed_multi_agent_wait_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    completed_agent_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        text = _joined_text(item.get("content"))
+        if "Codex native multi_agent_v1.wait_agent result" not in text or "status: completed" not in text:
+            continue
+        for agent_id in _split_agent_id_list(_line_value(text, "completed_agent_ids:")):
+            completed_agent_ids.add(agent_id)
+    return sorted(completed_agent_ids)
+
+
+def _closed_multi_agent_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    closed_agent_ids: set[str] = set()
+    closed_unknown = False
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        text = _joined_text(item.get("content"))
+        if "Codex native multi_agent_v1.close_agent result" not in text or "status: closed" not in text:
+            continue
+        closed_agent_id = _line_value(text, "closed_agent_id:")
+        if closed_agent_id:
+            closed_agent_ids.add(closed_agent_id)
+        else:
+            closed_unknown = True
+    if closed_unknown and not closed_agent_ids:
+        return ["<unknown>"]
+    return sorted(closed_agent_ids)
+
+
+def _has_single_loop_multi_agent_request(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    text = _joined_text(value).lower()
+    if not any(token in text for token in ("spawn_agent", "multi_agent", "subagent", "子代理")):
+        return False
+    return any(
+        token in text
+        for token in (
+            "只执行一次",
+            "不要再 spawn",
+            "不要重复验证",
+            "不要重复",
+            "only once",
+            "single spawn",
+            "single loop",
+            "do not spawn again",
+            "don't spawn again",
+            "do not repeat",
+        )
+    )
+
+
+def _has_completed_single_loop_multi_agent_context(value: Any) -> bool:
+    return _has_single_loop_multi_agent_request(value) and bool(_closed_multi_agent_ids(value)) and not _has_open_multi_agent_context(value)
+
+
+def _has_open_multi_agent_context(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    if _open_multi_agent_ids(value):
+        return True
+    unknown_open_agent = False
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        text = _joined_text(item.get("content"))
+        if "Codex native multi_agent_v1.spawn_agent result" in text and "status: succeeded" in text:
+            if not _line_value(text, "agent_id:"):
+                unknown_open_agent = True
+        if "Codex native multi_agent_v1.close_agent result" in text and "status: closed" in text:
+            if not _line_value(text, "closed_agent_id:"):
+                unknown_open_agent = False
+    return unknown_open_agent
+
+
+def _multi_agent_lifecycle_complete_message(closed_agent_ids: list[str]) -> dict[str, str]:
+    lines = ["Codex native multi_agent_v1 current state"]
+    lines.append("status: lifecycle_complete")
+    if closed_agent_ids:
+        lines.append(f"closed_agent_ids: {', '.join(closed_agent_ids)}")
+    lines.append(
+        "required_next_action: write the final concise report now. Do not call tool_search or any multi_agent_v1 tool again for this single-loop request."
+    )
+    return _developer_text_message("\n".join(lines))
+
+
+def _multi_agent_current_state_message(
+    wait_agent_ids: list[str],
+    close_agent_ids: list[str],
+) -> dict[str, str] | None:
+    lines = ["Codex native multi_agent_v1 current state"]
+    if wait_agent_ids:
+        ids_text = ", ".join(wait_agent_ids)
+        lines.append("status: spawned_child_wait_required")
+        lines.append(f"open_agent_ids_requiring_wait: {ids_text}")
+        lines.append(
+            "required_next_action: call multi_agent_v1__wait_agent with targets set to these agent_id values and timeout_ms=60000 before writing the final report."
+        )
+        lines.append(
+            "note: spawn_agent already succeeded; spawn_agent is intentionally hidden while a child agent is open."
+        )
+        return _developer_text_message("\n".join(lines))
+    if close_agent_ids:
+        ids_text = ", ".join(close_agent_ids)
+        lines.append("status: wait_completed_close_required")
+        lines.append(f"open_agent_ids_requiring_close: {ids_text}")
+        lines.append(
+            "required_next_action: call multi_agent_v1__close_agent with target set to one of these agent_id values before writing the final report."
+        )
+        return _developer_text_message("\n".join(lines))
+    return None
+
+
+def _compatible_multi_agent_output_message(
+    item: Mapping[str, Any],
+    tool_name: str,
+    arguments: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    lines = [f"Codex native multi_agent_v1.{tool_name} result"]
+    call_id = _single_line_internal_field(item.get("call_id"))
+    if call_id:
+        lines.append(f"call_id: {call_id}")
+
+    output = item.get("output")
+    output_object = _json_object_from_arguments(output)
+
+    if tool_name == "spawn_agent":
+        agent_id = output_object.get("agent_id") if output_object else None
+        if isinstance(agent_id, str) and agent_id:
+            lines.append("status: succeeded")
+            lines.append(f"agent_id: {agent_id}")
+            nickname = output_object.get("nickname")
+            if isinstance(nickname, str) and nickname:
+                lines.append(f"nickname: {nickname}")
+            lines.append(
+                "next_action: call multi_agent_v1__wait_agent with this agent_id when you need the child result; do not spawn another agent for the same child request."
+            )
+        elif isinstance(output, str) and "agent thread limit reached" in output.lower():
+            lines.append("status: failed")
+            lines.append("reason: agent thread limit reached")
+            lines.append("next_action: wait or close an existing agent before spawning another one.")
+
+    elif tool_name == "wait_agent":
+        timed_out = output_object.get("timed_out") if output_object else None
+        status = output_object.get("status") if output_object else None
+        completed_agent_ids = _status_completed_agent_ids(status)
+        not_found_agent_ids = _status_not_found_agent_ids(status)
+        if timed_out is False and completed_agent_ids:
+            lines.append("status: completed")
+            lines.append(f"completed_agent_ids: {', '.join(completed_agent_ids)}")
+            lines.append("next_action: call multi_agent_v1__close_agent for completed agents when they are no longer needed.")
+        elif timed_out is True:
+            lines.append("status: timed_out")
+            lines.append("next_action: call multi_agent_v1__wait_agent again for the same target if the child result is still needed.")
+        elif not_found_agent_ids:
+            lines.append("status: not_found")
+            lines.append(f"not_found_agent_ids: {', '.join(not_found_agent_ids)}")
+            lines.append("next_action: do not wait for these not_found agents again; use a known open agent_id or continue.")
+
+    elif tool_name == "close_agent":
+        target = arguments.get("target") if arguments else None
+        if output_object and "previous_status" in output_object:
+            lines.append("status: closed")
+            if isinstance(target, str) and target:
+                lines.append(f"closed_agent_id: {target}")
+            lines.append("next_action: do not wait or close this agent again.")
+        elif isinstance(output, str) and "not found" in output.lower():
+            lines.append("status: not_found")
+            if isinstance(target, str) and target:
+                lines.append(f"target_agent_id: {target}")
+            lines.append("next_action: do not retry close for this same target; if it was already closed, continue.")
+
+    _append_internal_field(lines, "raw_output", output)
+    return _system_text_message("\n".join(lines))
 
 
 def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
@@ -1443,6 +2517,14 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
             if value:
                 lines.append(f"{label}: {value}")
         _append_internal_field(lines, "execution", item.get("execution"))
+        if _has_multi_agent_discovery_tools(item.get("tools")):
+            lines.append("status: discovered_codex_native_multi_agent_tools")
+            lines.append(
+                "available_function_tools: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent, multi_agent_v1__resume_agent, multi_agent_v1__send_input"
+            )
+            lines.append(
+                "next_action: call multi_agent_v1__spawn_agent to create the child agent; do not call tool_search again for the same multi-agent query."
+            )
         _append_internal_field(lines, "tools", item.get("tools"))
     else:
         return None
@@ -1460,15 +2542,68 @@ def _compatible_internal_message(item: Mapping[str, Any]) -> dict[str, str] | No
     return _compatible_tool_message(item)
 
 
-def _rewrite_internal_input_items(payload: dict[str, Any]) -> bool:
+def _multi_agent_discovery_output_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    rewritten = dict(item)
+    rewritten["tools"] = MULTI_AGENT_DISCOVERY_TOOLS
+    rewritten.setdefault("status", "completed")
+    rewritten.setdefault("execution", "client")
+    return rewritten
+
+
+def _rewrite_internal_input_items(
+    payload: dict[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+    upstream_name: str | None = None,
+) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
         return False
 
     changed = False
     rewritten_items: list[Any] = []
+    multi_agent_search_call_ids: set[str] = set()
+    multi_agent_calls_by_call_id: dict[str, tuple[str, dict[str, Any] | None]] = {}
     for item in input_items:
-        if isinstance(item, dict) and item.get("type") in INTERNAL_INPUT_ITEM_TYPES:
+        item_type = item.get("type") if isinstance(item, dict) else None
+        if isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
+            call_id = item.get("call_id")
+            if item_type == "function_call" and isinstance(call_id, str):
+                tool_name = _multi_agent_function_call_name(item)
+                if tool_name is not None:
+                    arguments = _json_object_from_arguments(item.get("arguments"))
+                    multi_agent_calls_by_call_id[call_id] = (tool_name, arguments)
+                    rewritten_items.append(_compatible_multi_agent_call_message(item, tool_name))
+                    changed = True
+                    continue
+            if (
+                item_type == "function_call_output"
+                and isinstance(call_id, str)
+                and call_id in multi_agent_calls_by_call_id
+            ):
+                tool_name, arguments = multi_agent_calls_by_call_id[call_id]
+                rewritten_items.append(_compatible_multi_agent_output_message(item, tool_name, arguments))
+                changed = True
+                continue
+            if (
+                item_type == "tool_search_call"
+                and isinstance(call_id, str)
+                and _is_multi_agent_discovery_arguments(_json_object_from_arguments(item.get("arguments")))
+            ):
+                multi_agent_search_call_ids.add(call_id)
+            elif (
+                item_type == "tool_search_output"
+                and isinstance(call_id, str)
+                and call_id in multi_agent_search_call_ids
+                and not item.get("tools")
+            ):
+                item = _multi_agent_discovery_output_item(item)
+                _write_adapter_event(
+                    event_context,
+                    "tool_search_discovery_fallback_applied",
+                    upstream=upstream_name,
+                    call_id=call_id,
+                )
+
             replacement = _compatible_internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
@@ -1509,17 +2644,17 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
                 if item_type == "custom_tool_call"
                 else "Invalid Codex function call transcript"
             )
-            rewritten_items.append(_system_transcript_message(title, item))
+            rewritten_items.append(_assistant_transcript_message(title, item))
             changed = True
             continue
 
         if item_type == "function_call_output" and isinstance(call_id, str) and call_id in bad_function_call_ids:
-            rewritten_items.append(_system_transcript_message("Invalid Codex function result transcript", item))
+            rewritten_items.append(_assistant_transcript_message("Invalid Codex function result transcript", item))
             changed = True
             continue
 
         if item_type == "custom_tool_call_output" and isinstance(call_id, str) and call_id in bad_custom_call_ids:
-            rewritten_items.append(_system_transcript_message("Invalid Codex tool result transcript", item))
+            rewritten_items.append(_assistant_transcript_message("Invalid Codex tool result transcript", item))
             changed = True
             continue
 
@@ -1574,7 +2709,12 @@ def _replace_embedded_model(body: bytes, model_id: str, upstream_model: str) -> 
     return EMBEDDED_MODEL_RE.sub(replace_match, body)
 
 
-def compatible_request_body(body: bytes, upstream: Mapping[str, Any], model_id: str | None = None) -> bytes:
+def compatible_request_body(
+    body: bytes,
+    upstream: Mapping[str, Any],
+    model_id: str | None = None,
+    event_context: Mapping[str, Any] | None = None,
+) -> bytes:
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1588,6 +2728,7 @@ def compatible_request_body(body: bytes, upstream: Mapping[str, Any], model_id: 
 
     upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
+    requested_model = payload.get("model")
     if upstream_name == "official":
         changed = _sanitize_official_reasoning_items(payload)
         if _sanitize_official_invalid_tool_calls(payload):
@@ -1612,7 +2753,63 @@ def compatible_request_body(body: bytes, upstream: Mapping[str, Any], model_id: 
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
-    changed = _rewrite_internal_input_items(payload)
+    changed = _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name)
+    input_items = payload.get("input")
+    include_tool_search = not _has_multi_agent_discovery_context(input_items)
+    open_agent_ids = _open_multi_agent_ids(input_items)
+    completed_wait_agent_ids = set(_completed_multi_agent_wait_ids(input_items))
+    closed_agent_ids = _closed_multi_agent_ids(input_items)
+    wait_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id not in completed_wait_agent_ids]
+    close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
+    has_open_agent = _has_open_multi_agent_context(input_items)
+    lifecycle_complete = _has_completed_single_loop_multi_agent_context(input_items)
+    if lifecycle_complete:
+        include_tool_search = False
+    include_spawn_agent = not has_open_agent
+    include_wait_agent = (not has_open_agent) or not open_agent_ids or bool(wait_agent_ids)
+    include_close_agent = (not has_open_agent) or not open_agent_ids or bool(close_agent_ids)
+    if lifecycle_complete:
+        include_spawn_agent = False
+        include_wait_agent = False
+        include_close_agent = False
+        state_hint = _multi_agent_lifecycle_complete_message(closed_agent_ids)
+    else:
+        state_hint = _multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
+    if state_hint is not None and isinstance(input_items, list):
+        input_items.append(state_hint)
+        _write_adapter_event(
+            event_context,
+            "multi_agent_current_state_guidance_injected",
+            upstream=upstream_name,
+            model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+            wait_agent_ids=wait_agent_ids,
+            close_agent_ids=close_agent_ids,
+            closed_agent_ids=closed_agent_ids,
+            lifecycle_complete=lifecycle_complete,
+        )
+        changed = True
+    tool_names_before = _function_tool_names(payload.get("tools"))
+    if _inject_explicit_codex_tools(
+        payload,
+        include_tool_search=include_tool_search,
+        include_multi_agent_tools=not lifecycle_complete,
+        include_spawn_agent=include_spawn_agent,
+        include_wait_agent=include_wait_agent,
+        include_close_agent=include_close_agent,
+        open_agent_ids=open_agent_ids,
+        wait_agent_ids=wait_agent_ids,
+        close_agent_ids=close_agent_ids,
+    ):
+        added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
+        _write_adapter_event(
+            event_context,
+            "explicit_codex_tools_injected",
+            upstream=upstream_name,
+            model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+            added_tool_count=len(added_tool_names),
+            added_tool_names=added_tool_names,
+        )
+        changed = True
     model_id = payload.get("model")
     max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
     if max_output_tokens is not None:
@@ -1623,6 +2820,17 @@ def compatible_request_body(body: bytes, upstream: Mapping[str, Any], model_id: 
 
     if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
         payload["model"] = upstream_model
+        changed = True
+
+    if "reasoning" in payload and _reasoning_param_is_unsupported(upstream_name, requested_model, upstream_model):
+        del payload["reasoning"]
+        _write_adapter_event(
+            event_context,
+            "unsupported_reasoning_removed",
+            upstream=upstream_name,
+            model=requested_model if isinstance(requested_model, str) else None,
+            upstream_model=upstream_model if isinstance(upstream_model, str) else None,
+        )
         changed = True
 
     if upstream_name == "ollama_cloud":
@@ -1644,7 +2852,11 @@ def compatible_request_body(body: bytes, upstream: Mapping[str, Any], model_id: 
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
-def compatible_response_body(body: bytes, upstream_name: str) -> bytes:
+def compatible_response_body(
+    body: bytes,
+    upstream_name: str,
+    event_context: Mapping[str, Any] | None = None,
+) -> bytes:
     if upstream_name == "official":
         return body
 
@@ -1654,6 +2866,15 @@ def compatible_response_body(body: bytes, upstream_name: str) -> bytes:
         return body
 
     changed = _hide_reasoning_text(payload)
+    payload, alias_changed = _normalize_third_party_tool_call(payload)
+    if alias_changed:
+        _write_adapter_event(
+            event_context,
+            "third_party_tool_call_alias_normalized",
+            upstream=upstream_name,
+            surface="body",
+        )
+    changed = changed or alias_changed
     payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
     changed = changed or invalid_tool_changed
     if not changed:
@@ -1661,7 +2882,11 @@ def compatible_response_body(body: bytes, upstream_name: str) -> bytes:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
-def compatible_sse_line(line: bytes, upstream_name: str) -> bytes:
+def compatible_sse_line(
+    line: bytes,
+    upstream_name: str,
+    event_context: Mapping[str, Any] | None = None,
+) -> bytes:
     if upstream_name == "official" or not line.startswith(b"data:"):
         return line
 
@@ -1679,6 +2904,15 @@ def compatible_sse_line(line: bytes, upstream_name: str) -> bytes:
         return b""
 
     changed = _hide_reasoning_text(payload)
+    payload, alias_changed = _normalize_third_party_tool_call(payload)
+    if alias_changed:
+        _write_adapter_event(
+            event_context,
+            "third_party_tool_call_alias_normalized",
+            upstream=upstream_name,
+            surface="sse",
+        )
+    changed = changed or alias_changed
     payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
     changed = changed or invalid_tool_changed
     if not changed:
@@ -1879,6 +3113,37 @@ def _chat_completions_url(upstream: Mapping[str, Any]) -> str:
     return upstream["base_url"].rstrip("/") + "/chat/completions"
 
 
+def _open_upstream_response(
+    request: Request,
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    timeout: int,
+    event_context: Mapping[str, Any] | None = None,
+) -> Any:
+    max_attempts = official_upstream_open_attempts() if upstream_name == "official" else 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return urlopen(request, timeout=timeout)
+        except HTTPError:
+            raise
+        except (OSError, URLError) as exc:
+            if attempt >= max_attempts:
+                raise
+            _write_adapter_event(
+                event_context,
+                "upstream_open_retry",
+                upstream=upstream_name,
+                upstream_format=upstream_format,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+            )
+            time.sleep(min(0.25 * attempt, 1.0))
+    raise RuntimeError("unreachable upstream retry state")
+
+
 class CodexProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1890,14 +3155,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "build": PROXY_BUILD,
-                    "features": [
-                        "compressed-request-routing",
-                        "provider-alias-routing",
-                        "local-responses-probe-fast-reject",
-                        "internal-history-item-normalization",
-                        "external-reasoning-hidden",
-                        "tool-name-guard",
-                    ],
+                    "features": PROXY_FEATURES,
                 },
             )
             return
@@ -1988,14 +3246,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 decode_error=decode_error[:160] if decode_error else None,
                 **request_context,
             )
-            body = compatible_request_body(body, upstream, model_id=model)
+            adapter_event_context = {
+                "request_id": request_id,
+                "model": canonical_model_id(model) if model else None,
+                **request_context,
+            }
+            usage_capture: dict[str, Any] = {}
+            body = compatible_request_body(body, upstream, model_id=model, event_context=adapter_event_context)
             upstream_url = _responses_url(upstream, "/v1/responses")
             if upstream_format == "chat_completions":
                 body = _responses_request_to_chat_completion_body(body)
                 upstream_url = _chat_completions_url(upstream)
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
             request = Request(upstream_url, data=body, headers=headers, method="POST")
-            with urlopen(request, timeout=upstream_timeout_seconds()) as response:
+            with _open_upstream_response(
+                request,
+                upstream_name=upstream_name,
+                upstream_format=upstream_format,
+                timeout=upstream_timeout_seconds(),
+                event_context=adapter_event_context,
+            ) as response:
                 status = self._relay_upstream_response(
                     response,
                     upstream_name,
@@ -2004,6 +3274,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream_format=upstream_format,
                     inbound_format=inbound_format,
                     caller_stream=caller_stream,
+                    event_context=adapter_event_context,
+                    usage_capture=usage_capture,
                 )
             write_proxy_event(
                 "request_complete",
@@ -2016,6 +3288,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 route_reason=route_reason,
                 status=status,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
+                **usage_capture,
                 **request_context,
             )
         except ValueError as exc:
@@ -2035,12 +3308,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._safe_send_json(400, {"error": str(exc)}, request_id)
         except HTTPError as exc:
             try:
+                adapter_event_context = {
+                    "request_id": request_id,
+                    "model": canonical_model_id(model) if model else None,
+                    **request_context,
+                }
                 status = self._relay_upstream_response(
                     exc,
                     "upstream_error",
                     request_id=request_id,
                     model=canonical_model_id(model) if model else None,
                     inbound_format=inbound_format,
+                    event_context=adapter_event_context,
                 )
             except OSError as relay_exc:
                 self.close_connection = True
@@ -2069,6 +3348,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
+        except IncompleteRead as exc:
+            detail = safe_upstream_error_detail(exc)
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                upstream=upstream_name,
+                upstream_format=upstream_format,
+                status=502,
+                error=type(exc).__name__,
+                detail=detail,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
         except (OSError, URLError) as exc:
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
@@ -2285,6 +3579,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         upstream_format: str = "responses",
         inbound_format: str = "responses",
         caller_stream: bool = True,
+        event_context: Mapping[str, Any] | None = None,
+        usage_capture: dict[str, Any] | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -2314,6 +3610,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         events.append(event)
                 # Reconstruct a Responses-format body from the events.
                 body = _events_to_responses_body(events)
+                _capture_usage(usage_capture, _usage_from_json_body(body))
                 is_event_stream = False
             else:
                 body = b""
@@ -2332,7 +3629,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             elif upstream_format == "chat_completions":
                 body = _chat_completion_to_response_body(body)
             else:
-                body = compatible_response_body(body, upstream_name)
+                body = compatible_response_body(body, upstream_name, event_context=event_context)
+            _capture_usage(usage_capture, _usage_from_json_body(body))
 
         self.send_response(status)
         content_length = None if is_event_stream else len(body)
@@ -2361,12 +3659,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         continue
                     if isinstance(event, dict):
                         events.append(event)
+                        _capture_usage(usage_capture, _usage_from_response_event(event))
                 for chunk in _response_events_to_chat_stream_chunks(events):
                     self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 self.close_connection = True
+                _capture_usage(usage_capture, None)
                 return status
 
             if upstream_format == "chat_completions":
@@ -2386,6 +3686,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         continue
                     if isinstance(payload, dict):
                         chunks.append(payload)
+                        _capture_usage(usage_capture, _usage_from_payload(payload))
                 if want_chat_output:
                     # Inbound and upstream are both Chat Completions; pass through.
                     for chunk in chunks:
@@ -2393,12 +3694,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                 else:
                     for event in _chat_stream_chunks_to_response_events(chunks):
+                        event, _ = _normalize_third_party_tool_call(event)
                         event, _ = _downgrade_invalid_third_party_tool_calls(event)
                         self.wfile.write(_sse_json_line(event, line_ending))
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 self.close_connection = True
+                _capture_usage(usage_capture, None)
                 return status
 
             reasoning_stats: dict[str, Any] = {
@@ -2408,17 +3711,34 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "delta_events": 0,
                 "delta_chars": 0,
             }
-            while True:
-                line = response.readline()
-                if not line:
-                    break
-                original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
-                line = compatible_sse_line(line, upstream_name)
-                rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
-                _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
+            try:
+                while True:
+                    line = response.readline()
+                    if not line:
+                        break
+                    original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
+                    usage_payload = _parse_sse_json_payload(line)
+                    if isinstance(usage_payload, Mapping):
+                        _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
+                    line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                    rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
+                    _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
 
-                self.wfile.write(line)
-                self.wfile.flush()
+                    self.wfile.write(line)
+                    self.wfile.flush()
+            except IncompleteRead as exc:
+                self.close_connection = True
+                write_proxy_event(
+                    "upstream_stream_interrupted",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=502,
+                    error=type(exc).__name__,
+                    detail=safe_upstream_error_detail(exc),
+                )
+                _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                return 502
             if upstream_name != "official" and reasoning_stats["seen"]:
                 write_proxy_event(
                     "sse_reasoning_summary",
@@ -2431,11 +3751,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     delta_chars=reasoning_stats["delta_chars"],
                 )
             self.close_connection = True
+            _capture_usage(usage_capture, None)
             return status
 
         self.wfile.write(body)
         self.wfile.flush()
         self.close_connection = True
+        _capture_usage(usage_capture, None)
         return status
 
     def log_message(self, format: str, *args: Any) -> None:

@@ -156,6 +156,15 @@ struct SettingsDocument {
     auto_sync_history: Option<bool>,
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
+    auto_sync_catalog: Option<bool>,
+    default_codex_route: Option<String>,
+    gateway_bind_address: Option<String>,
+    gateway_client_key: Option<String>,
+    gateway_enable_models: Option<bool>,
+    gateway_enable_responses: Option<bool>,
+    gateway_enable_chat_completions: Option<bool>,
+    official_model_sort_order: Option<Vec<String>>,
+    official_provider_sort_order: Option<i32>,
     proxy_port: Option<u16>,
 }
 
@@ -168,6 +177,34 @@ impl SettingsDocument {
             include_official_models: self
                 .include_official_models
                 .unwrap_or(defaults.include_official_models),
+            auto_sync_catalog: self.auto_sync_catalog.unwrap_or(defaults.auto_sync_catalog),
+            default_codex_route: self
+                .default_codex_route
+                .filter(|value| matches!(value.as_str(), "official" | "hub"))
+                .unwrap_or(defaults.default_codex_route),
+            gateway_bind_address: self
+                .gateway_bind_address
+                .filter(|value| value == "127.0.0.1")
+                .unwrap_or(defaults.gateway_bind_address),
+            gateway_client_key: self
+                .gateway_client_key
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(defaults.gateway_client_key),
+            gateway_enable_models: self
+                .gateway_enable_models
+                .unwrap_or(defaults.gateway_enable_models),
+            gateway_enable_responses: self
+                .gateway_enable_responses
+                .unwrap_or(defaults.gateway_enable_responses),
+            gateway_enable_chat_completions: self
+                .gateway_enable_chat_completions
+                .unwrap_or(defaults.gateway_enable_chat_completions),
+            official_model_sort_order: self
+                .official_model_sort_order
+                .unwrap_or(defaults.official_model_sort_order),
+            official_provider_sort_order: self
+                .official_provider_sort_order
+                .unwrap_or(defaults.official_provider_sort_order),
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }
@@ -438,7 +475,7 @@ mod tests {
         save_settings_with_paths, switch_mode_with_paths, CommandOutcome, CommandRunner,
         ConfigPaths,
     };
-    use crate::{Model, Provider, Settings};
+    use crate::{Model, Provider, Settings, UpstreamFormat};
     use std::cell::RefCell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -458,9 +495,12 @@ mod tests {
             name: "Volcengine".to_string(),
             base_url: "https://ark.cn-beijing.volces.com/api/coding/v3".to_string(),
             api_key: Some("{env:VOLCENGINE_API_KEY}".to_string()),
+            upstream_format: Some(UpstreamFormat::ChatCompletions),
             display_prefix: Some("Volc".to_string()),
             sort_order: Some(2),
             enabled: true,
+            hidden: false,
+            locked: false,
             models: vec![
                 Model {
                     id: "glm-5.2".to_string(),
@@ -468,8 +508,17 @@ mod tests {
                     upstream_model: Some("ep-20260629".to_string()),
                     context_window: Some(1_024_000),
                     max_output_tokens: Some(8_192),
+                    input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+                    supported_reasoning_levels: Some(vec![
+                        "low".to_string(),
+                        "medium".to_string(),
+                        "high".to_string(),
+                        "xhigh".to_string(),
+                    ]),
+                    default_reasoning_level: Some("high".to_string()),
                     sort_order: Some(1),
                     enabled: true,
+                    ..Model::default()
                 },
                 Model {
                     id: "minimax-m3".to_string(),
@@ -477,8 +526,12 @@ mod tests {
                     upstream_model: None,
                     context_window: None,
                     max_output_tokens: Some(8_192),
+                    input_modalities: None,
+                    supported_reasoning_levels: None,
+                    default_reasoning_level: None,
                     sort_order: Some(2),
                     enabled: false,
+                    ..Model::default()
                 },
             ],
         }];
@@ -491,7 +544,13 @@ mod tests {
         let written = fs::read_to_string(paths.runtime_providers_path()).expect("providers text");
         assert!(written.contains("[[providers]]"));
         assert!(written.contains("[[providers.models]]"));
+        assert!(written.contains("upstream_format = \"chat_completions\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
+        assert!(written.contains("input_modalities"));
+        assert!(written.contains("\"image\""));
+        assert!(written.contains("supported_reasoning_levels"));
+        assert!(written.contains("\"xhigh\""));
+        assert!(written.contains("default_reasoning_level = \"high\""));
     }
 
     #[test]
@@ -537,6 +596,18 @@ sort_order = 7
             auto_sync_history: false,
             auto_start_proxy: false,
             include_official_models: false,
+            auto_sync_catalog: false,
+            default_codex_route: "official".to_string(),
+            gateway_bind_address: "127.0.0.1".to_string(),
+            gateway_client_key: "local-test-key".to_string(),
+            gateway_enable_models: false,
+            gateway_enable_responses: true,
+            gateway_enable_chat_completions: false,
+            official_model_sort_order: vec![
+                "openai/gpt-5.4".to_string(),
+                "openai/gpt-5.5".to_string(),
+            ],
+            official_provider_sort_order: 3,
             proxy_port: 4555,
         };
         let saved = save_settings_with_paths(custom.clone(), &paths).expect("settings save");
@@ -546,6 +617,8 @@ sort_order = 7
         assert_settings_eq(&loaded, &custom);
         let written = fs::read_to_string(paths.settings_path()).expect("settings text");
         assert!(written.contains("\"proxy_port\": 4555"));
+        assert!(written.contains("\"official_model_sort_order\""));
+        assert!(written.contains("\"official_provider_sort_order\": 3"));
     }
 
     #[test]
@@ -780,6 +853,24 @@ sort_order = 7
         assert_eq!(left.auto_sync_history, right.auto_sync_history);
         assert_eq!(left.auto_start_proxy, right.auto_start_proxy);
         assert_eq!(left.include_official_models, right.include_official_models);
+        assert_eq!(left.auto_sync_catalog, right.auto_sync_catalog);
+        assert_eq!(left.default_codex_route, right.default_codex_route);
+        assert_eq!(left.gateway_bind_address, right.gateway_bind_address);
+        assert_eq!(left.gateway_client_key, right.gateway_client_key);
+        assert_eq!(left.gateway_enable_models, right.gateway_enable_models);
+        assert_eq!(left.gateway_enable_responses, right.gateway_enable_responses);
+        assert_eq!(
+            left.gateway_enable_chat_completions,
+            right.gateway_enable_chat_completions
+        );
+        assert_eq!(
+            left.official_model_sort_order,
+            right.official_model_sort_order
+        );
+        assert_eq!(
+            left.official_provider_sort_order,
+            right.official_provider_sort_order
+        );
         assert_eq!(left.proxy_port, right.proxy_port);
     }
 

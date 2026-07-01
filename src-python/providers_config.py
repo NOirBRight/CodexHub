@@ -43,6 +43,7 @@ EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
     "volc": "volcengine",
 }
 EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
+UPSTREAM_FORMATS = {"auto", "responses", "chat_completions"}
 
 
 @dataclass
@@ -52,8 +53,14 @@ class ModelConfig:
     display_name: str | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
+    input_modalities: tuple[str, ...] = ("text",)
+    supported_reasoning_levels: tuple[str, ...] = ()
+    default_reasoning_level: str | None = None
     sort_order: int = 0
     enabled: bool = True
+    hidden: bool = False
+    codex_enabled: bool = True
+    gateway_exported: bool = True
 
 
 @dataclass
@@ -62,9 +69,11 @@ class ProviderConfig:
     name: str
     base_url: str
     api_key: str
+    upstream_format: str = "auto"
     display_prefix: str | None = None
     sort_order: int = 0
     enabled: bool = True
+    hidden: bool = False
     models: list[ModelConfig] = field(default_factory=list)
 
     def resolved_api_key(self) -> str | None:
@@ -149,11 +158,20 @@ def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int =
     return models
 
 
-def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str, dict[str, Any]]:
+def build_external_model_index(
+    providers: Iterable[ProviderConfig],
+    *,
+    require_api_key: bool = True,
+) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for provider in providers:
         provider_id = canonical_model_id(provider.id).lower()
-        if not provider.enabled or not provider_id or provider_id in EXTERNAL_PROVIDER_EXCLUDED_IDS:
+        if (
+            not provider.enabled
+            or provider.hidden
+            or not provider_id
+            or provider_id in EXTERNAL_PROVIDER_EXCLUDED_IDS
+        ):
             continue
 
         base_url = provider.base_url.strip()
@@ -161,11 +179,11 @@ def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str,
             continue
 
         api_key = provider.resolved_api_key()
-        if not api_key:
+        if require_api_key and not api_key:
             continue
 
         for model in provider.models:
-            if not model.enabled:
+            if not model.enabled or model.hidden or not model.gateway_exported:
                 continue
 
             model_id = canonical_model_id(model.id).lower()
@@ -180,10 +198,13 @@ def build_external_model_index(providers: Iterable[ProviderConfig]) -> dict[str,
                 "display_prefix": provider.display_prefix or provider.name,
                 "base_url": base_url,
                 "api_key": api_key,
+                "upstream_format": provider.upstream_format,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
-                "input_modalities": ("text",),
+                "input_modalities": model.input_modalities or ("text",),
+                "supported_reasoning_levels": model.supported_reasoning_levels,
+                "default_reasoning_level": model.default_reasoning_level,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -230,8 +251,14 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
                 display_name=_optional_string_field(raw_model.get("display_name")),
                 context_window=_optional_int_field(raw_model.get("context_window")),
                 max_output_tokens=_optional_int_field(raw_model.get("max_output_tokens")),
+                input_modalities=_string_tuple_field(raw_model.get("input_modalities"), ("text",)),
+                supported_reasoning_levels=_string_tuple_field(raw_model.get("supported_reasoning_levels"), ()),
+                default_reasoning_level=_optional_string_field(raw_model.get("default_reasoning_level")),
                 sort_order=_int_field(raw_model.get("sort_order"), 0),
                 enabled=_bool_field(raw_model.get("enabled"), True),
+                hidden=_bool_field(raw_model.get("hidden"), False),
+                codex_enabled=_bool_field(raw_model.get("codex_enabled"), True),
+                gateway_exported=_bool_field(raw_model.get("gateway_exported"), True),
             )
             indexed_models.append((model_index, model))
 
@@ -240,9 +267,11 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             name=_string_field(raw_provider.get("name")),
             base_url=_string_field(raw_provider.get("base_url")),
             api_key=_string_field(raw_provider.get("api_key")),
+            upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
+            hidden=_bool_field(raw_provider.get("hidden"), False),
             models=_sort_by_order(indexed_models),
         )
         indexed_providers.append((provider_index, provider))
@@ -269,10 +298,13 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
         )
         if provider.display_prefix is not None:
             chunks.append(_toml_string_line("display_prefix", provider.display_prefix))
+        if provider.upstream_format:
+            chunks.append(_toml_string_line("upstream_format", provider.upstream_format))
         chunks.extend(
             [
                 _toml_int_line("sort_order", provider.sort_order),
                 _toml_bool_line("enabled", provider.enabled),
+                _toml_bool_line("hidden", provider.hidden),
             ]
         )
 
@@ -293,10 +325,19 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                 chunks.append(_toml_int_line("context_window", model.context_window, indent="  "))
             if model.max_output_tokens is not None:
                 chunks.append(_toml_int_line("max_output_tokens", model.max_output_tokens, indent="  "))
+            if model.input_modalities and model.input_modalities != ("text",):
+                chunks.append(_toml_string_list_line("input_modalities", model.input_modalities, indent="  "))
+            if model.supported_reasoning_levels:
+                chunks.append(_toml_string_list_line("supported_reasoning_levels", model.supported_reasoning_levels, indent="  "))
+            if model.default_reasoning_level is not None:
+                chunks.append(_toml_string_line("default_reasoning_level", model.default_reasoning_level, indent="  "))
             chunks.extend(
                 [
                     _toml_int_line("sort_order", model.sort_order, indent="  "),
                     _toml_bool_line("enabled", model.enabled, indent="  "),
+                    _toml_bool_line("hidden", model.hidden, indent="  "),
+                    _toml_bool_line("codex_enabled", model.codex_enabled, indent="  "),
+                    _toml_bool_line("gateway_exported", model.gateway_exported, indent="  "),
                 ]
             )
 
@@ -392,6 +433,24 @@ def _optional_string_field(value: Any) -> str | None:
     return _string_field(value)
 
 
+def _string_tuple_field(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else default
+    if not isinstance(value, list):
+        return default
+    items = tuple(_string_field(item).strip() for item in value)
+    items = tuple(item for item in items if item)
+    return items or default
+
+
+def _upstream_format_field(value: Any) -> str:
+    upstream_format = _string_field(value, "auto").strip().lower()
+    return upstream_format if upstream_format in UPSTREAM_FORMATS else "auto"
+
+
 def _int_field(value: Any, default: int) -> int:
     if isinstance(value, bool):
         return default
@@ -442,3 +501,8 @@ def _toml_int_line(key: str, value: int, indent: str = "") -> str:
 
 def _toml_bool_line(key: str, value: bool, indent: str = "") -> str:
     return f"{indent}{key} = {'true' if value else 'false'}"
+
+
+def _toml_string_list_line(key: str, values: Iterable[str], indent: str = "") -> str:
+    encoded = ", ".join(json.dumps(value, ensure_ascii=False) for value in values)
+    return f"{indent}{key} = [{encoded}]"
