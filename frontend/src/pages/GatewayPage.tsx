@@ -205,7 +205,7 @@ export function GatewayPage({
   }
 
   async function switchClientMode(clientId: string, mode: "official" | "hub") {
-    setClientBusy(`${clientId}:switch`);
+    setClientBusy(`${clientId}:switch:${mode}`);
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const routeName = mode === "hub" ? "CodexHub" : "Official";
@@ -225,7 +225,7 @@ export function GatewayPage({
   async function refreshGatewayClients() {
     setClientRefreshBusy(true);
     try {
-      await onRefreshClients();
+      await onRefreshClients({ includeClientVersions: true });
       setMessage("Gateway clients refreshed");
       setError(null);
     } catch (err) {
@@ -454,7 +454,7 @@ export function GatewayPage({
               className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-panel text-slate-600 hover:bg-slate-100 disabled:text-slate-300"
               disabled={clientRefreshBusy}
               aria-label="Refresh gateway clients"
-              title="Refresh installed clients"
+              title="Refresh installed clients and version checks"
               onClick={() => void refreshGatewayClients()}
             >
               <RefreshCcw size={14} className={clientRefreshBusy ? "animate-spin" : undefined} />
@@ -473,6 +473,13 @@ export function GatewayPage({
                 client={client}
                 info={clientInfoById.get(client.id)}
                 busy={Boolean(clientBusy?.startsWith(client.id))}
+                busyMode={
+                  clientBusy === `${client.id}:switch:official`
+                    ? "official"
+                    : clientBusy === `${client.id}:switch:hub`
+                      ? "hub"
+                      : null
+                }
                 onSwitchMode={(mode) => void switchClientMode(client.id, mode)}
               />
             ))}

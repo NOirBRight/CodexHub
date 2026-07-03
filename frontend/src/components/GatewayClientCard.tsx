@@ -4,22 +4,28 @@ import opencodeIcon from "../assets/opencode-icon.png";
 import piIcon from "../assets/pi-icon.png";
 import zcodeIcon from "../assets/zcode-icon.png";
 import { cx } from "../lib/format";
-import { SegmentedSwitch } from "./SegmentedSwitch";
+import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
+
+type RouteMode = "official" | "hub";
+type DisplayRouteMode = RouteMode | "unknown";
 
 interface GatewayClientCardProps {
   busy?: boolean;
+  busyMode?: RouteMode | null;
   client: GatewayClientContract;
   info?: GatewayClientInfo;
-  onSwitchMode: (mode: "official" | "hub") => void;
+  onSwitchMode: (mode: RouteMode) => void;
 }
 
 export function GatewayClientCard({
   busy,
+  busyMode,
   client,
   info,
   onSwitchMode,
 }: GatewayClientCardProps) {
-  const routeMode = info?.route_mode === "hub" ? "hub" : "official";
+  const routeMode = busyMode ?? routeModeFromInfo(info);
+  const routeValue = routeMode === "unknown" ? null : routeMode;
   const hasInfo = Boolean(info);
   const installed = Boolean(info?.installed);
   const autoApplySupported = Boolean(info?.auto_apply_supported);
@@ -33,11 +39,28 @@ export function GatewayClientCard({
     : !autoApplySupported
       ? "Managed config switching is not available for this client."
       : undefined;
-  const statusLabel = !hasInfo
+  const routeTitle = busy
+    ? `Switching ${info?.name ?? client.name} route...`
+    : routeDisabledReason ??
+      (routeMode === "unknown" ? "Current route could not be detected from the config file." : undefined);
+  const statusLabel = busy
+    ? "Switching"
+    : !hasInfo
     ? "Checking"
-    : installed
-      ? "Installed"
-      : "Not installed";
+    : !installed
+      ? "Not installed"
+      : routeMode === "unknown"
+        ? "Route unknown"
+        : "Installed";
+  const statusClass = busy
+    ? "border-amber-200 bg-amber-50 text-amber-700"
+    : !hasInfo
+      ? "border-line bg-panel text-slate-500"
+      : !installed
+        ? "border-line bg-panel text-slate-500"
+        : routeMode === "unknown"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-blue-200 bg-blue-50 text-blue-700";
   const versionLabel = !hasInfo
     ? "Checking version"
     : !installed
@@ -56,27 +79,20 @@ export function GatewayClientCard({
         <span
           className={cx(
             "rounded-sm border px-1.5 py-0.5 text-[11px] font-semibold",
-            !hasInfo
-              ? "border-line bg-panel text-slate-500"
-              : installed
-                ? "border-blue-200 bg-blue-50 text-blue-700"
-                : "border-line bg-panel text-slate-500",
+            statusClass,
           )}
         >
           {statusLabel}
         </span>
       </div>
 
-      <div title={routeDisabledReason}>
+      <div title={routeTitle}>
         <SegmentedSwitch
           ariaLabel={`${client.name} route mode`}
           className="grid-cols-2 [&_button]:min-h-7 [&_button]:py-1 [&_button]:text-xs"
           disabled={busy || Boolean(routeDisabledReason)}
-          value={routeMode}
-          options={[
-            { value: "official", label: "Official" },
-            { value: "hub", label: "CodexHub" },
-          ]}
+          value={routeValue}
+          options={routeOptions}
           onChange={onSwitchMode}
         />
       </div>
@@ -106,6 +122,18 @@ export function GatewayClientCard({
       </div>
     </section>
   );
+}
+
+const routeOptions: Array<SegmentedOption<RouteMode>> = [
+  { value: "official", label: "Official" },
+  { value: "hub", label: "CodexHub" },
+];
+
+function routeModeFromInfo(info?: GatewayClientInfo): DisplayRouteMode {
+  if (info?.route_mode === "official" || info?.route_mode === "hub") {
+    return info.route_mode;
+  }
+  return "unknown";
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {

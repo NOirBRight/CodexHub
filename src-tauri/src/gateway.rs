@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(900);
@@ -45,6 +46,8 @@ const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
     ("openai/gpt-5.5-fast", 12.50, 1.25, 75.00),
     ("openai/gpt-5.4-fast", 5.00, 0.50, 30.00),
 ];
+
+static GATEWAY_CLIENT_CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[allow(dead_code)]
 const SUBAGENT_FEATURES: &[&str] = &[
@@ -673,6 +676,9 @@ pub fn apply_gateway_client_config(
     client_id: String,
     model: Option<String>,
 ) -> Result<GatewayClientApplyResult, String> {
+    let _guard = gateway_client_config_write_lock()
+        .lock()
+        .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
@@ -734,6 +740,9 @@ pub fn apply_gateway_client_config(
 pub fn restore_gateway_client_config(
     client_id: String,
 ) -> Result<GatewayClientApplyResult, String> {
+    let _guard = gateway_client_config_write_lock()
+        .lock()
+        .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let id = normalize_client_id(&client_id);
     match id.as_str() {
         "opencode" => {
@@ -769,6 +778,10 @@ pub fn restore_gateway_client_config(
             message: "Restore is not available for this copy-only client.".to_string(),
         }),
     }
+}
+
+fn gateway_client_config_write_lock() -> &'static Mutex<()> {
+    GATEWAY_CLIENT_CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub fn switch_gateway_client_route(

@@ -22,7 +22,9 @@ pub fn run(args: &[String]) -> i32 {
             println!("CodexHub web bridge listening on http://{addr}");
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => handle_stream(stream),
+                    Ok(stream) => {
+                        std::thread::spawn(move || handle_stream(stream));
+                    }
                     Err(error) => eprintln!("web bridge connection failed: {error}"),
                 }
             }

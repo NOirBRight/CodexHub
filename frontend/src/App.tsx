@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { cx } from "./lib/format";
@@ -86,15 +86,25 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() => defaultUsageWindow());
+  const gatewayClientLoadSeq = useRef(0);
 
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
+    const requestSeq = ++gatewayClientLoadSeq.current;
     try {
       const clients = await api.listGatewayClients(Boolean(options?.includeClientVersions));
-      setRuntime((current) => ({
-        ...current,
-        gatewayClients: mergeGatewayClients(current.gatewayClients, clients),
-      }));
+      setRuntime((current) => {
+        if (requestSeq !== gatewayClientLoadSeq.current) {
+          return current;
+        }
+        return {
+          ...current,
+          gatewayClients: mergeGatewayClients(current.gatewayClients, clients),
+        };
+      });
     } catch (err) {
+      if (requestSeq !== gatewayClientLoadSeq.current) {
+        return;
+      }
       setBanner(messageFromError(err));
       throw err;
     }

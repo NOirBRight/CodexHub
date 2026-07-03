@@ -12,7 +12,7 @@ interface SegmentedSwitchProps<T extends string> {
   className?: string;
   disabled?: boolean;
   options: Array<SegmentedOption<T>>;
-  value: T;
+  value: T | null;
   onChange?: (value: T) => void;
 }
 
