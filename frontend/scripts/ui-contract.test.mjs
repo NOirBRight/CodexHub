@@ -5,6 +5,7 @@ import { test } from "node:test";
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
+const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
@@ -31,11 +32,12 @@ test("gateway client rail is limited to the four planned clients", async () => {
   );
 });
 
-test("unwired gateway capabilities are rendered as pending backend", async () => {
+test("gateway empty states do not claim missing backends", async () => {
   const contract = await readContract();
 
-  assert.equal(contract.pendingBackend.label, "pending backend");
+  assert.equal(contract.pendingBackend.label, "no data");
   assert.match(contract.pendingBackend.usage, /Usage/i);
+  assert.doesNotMatch(contract.pendingBackend.usage, /waiting|pending backend/i);
   assert.match(contract.pendingBackend.clients, /client/i);
 });
 
@@ -76,6 +78,23 @@ test("gateway client route switching reports completion", async () => {
 
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
   assert.ok(gatewaySource.includes("setMessage(`${clientName} switched to ${routeName}`)"));
+});
+
+test("settings drawer hides non-functional route and endpoint toggles", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+
+  assert.doesNotMatch(drawerSource, /Default Codex route/);
+  assert.doesNotMatch(drawerSource, /Enable \/v1\/models/);
+  assert.doesNotMatch(drawerSource, /Enable \/v1\/responses/);
+  assert.doesNotMatch(drawerSource, /Enable \/v1\/chat\/completions/);
+});
+
+test("gateway client card does not render a disabled fake updater", async () => {
+  const cardSource = await readFile(gatewayClientCardPath, "utf8");
+
+  assert.match(cardSource, /Manual update available/);
+  assert.doesNotMatch(cardSource, /<button[\s\S]*?\{hasUpdate \? "Manual" : "Update"\}/);
+  assert.doesNotMatch(cardSource, /safe updater is not exposed by the backend/);
 });
 
 test("provider model removal persists through provider save path", async () => {

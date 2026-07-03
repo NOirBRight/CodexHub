@@ -27,6 +27,7 @@ export function GatewayClientCard({
   const currentVersion = info?.current_version?.trim() || null;
   const latestVersion = info?.latest_version?.trim() || null;
   const hasUpdate = Boolean(currentVersion && latestVersion && currentVersion !== latestVersion);
+  const updateLabel = hasUpdate ? "Manual update available" : "No update action";
   const routeDisabledReason = !installed
     ? `${info?.name ?? client.name} is not installed.`
     : !autoApplySupported
@@ -90,18 +91,17 @@ export function GatewayClientCard({
           <span className="truncate" title={versionLabel}>
             {versionLabel}
           </span>
-          <button
-            type="button"
-            className="focus-ring inline-flex h-6 items-center justify-center rounded-md border border-line bg-panel px-2 text-[11px] font-semibold text-slate-400"
-            disabled
-            title={
+          <span
+            className={cx(
+              "inline-flex h-6 items-center justify-center rounded-md border px-2 text-[11px] font-semibold",
               hasUpdate
-                ? "A newer version is available, but a safe updater is not exposed by the backend yet."
-                : "No client update is available."
-            }
+                ? "border-amber-200 bg-amber-50 text-amber-700"
+                : "border-line bg-panel text-slate-400",
+            )}
+            title={hasUpdate ? "Install the client update manually." : "No client update action is available."}
           >
-            {hasUpdate ? "Manual" : "Update"}
-          </button>
+            {updateLabel}
+          </span>
         </div>
       </div>
     </section>

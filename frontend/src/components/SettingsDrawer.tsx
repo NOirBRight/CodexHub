@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
 import type { Settings } from "../lib/types";
 import { PendingPanel } from "./PendingPanel";
-import { SegmentedSwitch } from "./SegmentedSwitch";
 
 interface SettingsDrawerProps {
   busy?: string | null;
@@ -77,19 +76,6 @@ export function SettingsDrawer({
             <section className="grid gap-3">
               <h3 className="text-sm font-semibold text-ink">CodexHub</h3>
               <div className="grid gap-3 rounded-md border border-line bg-panel p-3">
-                <div className="grid gap-2">
-                  <span className="text-xs font-semibold text-slate-600">Default Codex route</span>
-                  <SegmentedSwitch
-                    ariaLabel="Default Codex route"
-                    className="grid-cols-2 bg-white"
-                    value={draft.default_codex_route === "official" ? "official" : "hub"}
-                    options={[
-                      { value: "official", label: "Official" },
-                      { value: "hub", label: "Hub" },
-                    ]}
-                    onChange={(value) => setDraft({ ...draft, default_codex_route: value })}
-                  />
-                </div>
                 <Toggle
                   checked={draft.include_official_models}
                   label="Include official models"
@@ -147,21 +133,6 @@ export function SettingsDrawer({
                     Local compatibility key only; not an upstream provider or OpenAI key.
                   </span>
                 </label>
-                <Toggle
-                  checked={draft.gateway_enable_models}
-                  label="Enable /v1/models"
-                  onChange={(value) => setDraft({ ...draft, gateway_enable_models: value })}
-                />
-                <Toggle
-                  checked={draft.gateway_enable_responses}
-                  label="Enable /v1/responses"
-                  onChange={(value) => setDraft({ ...draft, gateway_enable_responses: value })}
-                />
-                <Toggle
-                  checked={draft.gateway_enable_chat_completions}
-                  label="Enable /v1/chat/completions"
-                  onChange={(value) => setDraft({ ...draft, gateway_enable_chat_completions: value })}
-                />
                 <Toggle
                   checked={draft.auto_start_proxy}
                   label="Auto-start runtime"

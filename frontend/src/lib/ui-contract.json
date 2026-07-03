@@ -34,9 +34,9 @@
     }
   ],
   "pendingBackend": {
-    "label": "pending backend",
-    "usage": "Usage telemetry and cost aggregation are waiting for the Gateway usage backend.",
-    "clients": "Client detection, managed writes, restore, version checks, and upgrades are waiting for the client manager backend.",
-    "models": "Model metadata, pricing provenance, and exported-model management are waiting for the metadata backend."
+    "label": "no data",
+    "usage": "No Gateway usage events match the selected range yet.",
+    "clients": "No Gateway clients are available for managed routing yet.",
+    "models": "No Gateway models are available yet."
   }
 }

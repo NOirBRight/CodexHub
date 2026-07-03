@@ -101,21 +101,6 @@ export function SettingsPage() {
             checked={settings.auto_sync_catalog}
             onChange={(value) => void save({ ...settings, auto_sync_catalog: value })}
           />
-          <Toggle
-            label="Enable /v1/models"
-            checked={settings.gateway_enable_models}
-            onChange={(value) => void save({ ...settings, gateway_enable_models: value })}
-          />
-          <Toggle
-            label="Enable Responses"
-            checked={settings.gateway_enable_responses}
-            onChange={(value) => void save({ ...settings, gateway_enable_responses: value })}
-          />
-          <Toggle
-            label="Enable Chat Completions"
-            checked={settings.gateway_enable_chat_completions}
-            onChange={(value) => void save({ ...settings, gateway_enable_chat_completions: value })}
-          />
           <label className="grid gap-1 text-sm font-medium text-slate-700">
             Proxy port
             <input
@@ -128,19 +113,6 @@ export function SettingsPage() {
                 setSettings({ ...settings, proxy_port: Number(event.target.value) })
               }
             />
-          </label>
-          <label className="grid gap-1 text-sm font-medium text-slate-700">
-            Default Codex route
-            <select
-              className="field max-w-[220px]"
-              value={settings.default_codex_route}
-              onChange={(event) =>
-                setSettings({ ...settings, default_codex_route: event.target.value })
-              }
-            >
-              <option value="hub">Hub</option>
-              <option value="official">Official</option>
-            </select>
           </label>
           <label className="grid gap-1 text-sm font-medium text-slate-700">
             Bind address
