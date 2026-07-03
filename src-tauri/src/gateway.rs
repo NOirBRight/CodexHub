@@ -3810,33 +3810,18 @@ fn zcode_model_value(model: &GatewayModel) -> Value {
 }
 
 fn zcode_v2_config_text(
-    config_path: &Path,
+    _config_path: &Path,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let mut value = read_json_file_or_empty(config_path, "ZCode v2 config")?;
-    if !value.is_object() {
-        value = json!({});
-    }
     let gateway_models = gateway_client_models(settings, providers, &model)?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "ZCode v2 config root must be a JSON object".to_string())?;
-    let provider_root = object
-        .entry("provider".to_string())
-        .or_insert_with(|| json!({}));
-    if !provider_root.is_object() {
-        *provider_root = json!({});
-    }
-    provider_root
-        .as_object_mut()
-        .ok_or_else(|| "ZCode v2 provider root must be a JSON object".to_string())?
-        .insert(
-            "codexhub".to_string(),
-            zcode_v2_provider_value(settings, &gateway_models),
-        );
+    let value = json!({
+        "provider": {
+            "codexhub": zcode_v2_provider_value(settings, &gateway_models),
+        },
+    });
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))
@@ -5616,7 +5601,7 @@ mod tests {
     }
 
     #[test]
-    fn zcode_v2_config_writes_codexhub_provider_to_active_config() {
+    fn zcode_v2_config_replaces_active_config_with_codexhub_provider() {
         let root = unique_temp_dir("codexhub-zcode-v2-config");
         let config_path = root.join("config.json");
         fs::create_dir_all(root.as_path()).unwrap();
@@ -5638,7 +5623,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let provider = value.pointer("/provider/codexhub").unwrap();
 
-        assert!(value.pointer("/provider/builtin:test").is_some());
+        assert!(value.pointer("/provider/builtin:test").is_none());
         assert_eq!(
             provider.get("name").and_then(serde_json::Value::as_str),
             Some("CodexHub Gateway")
