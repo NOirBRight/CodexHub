@@ -3112,6 +3112,7 @@ fn apply_opencode_config_with_paths(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     if !config_path.exists() {
         return Ok(GatewayClientApplyResult {
             client_id: "opencode".to_string(),
@@ -3146,7 +3147,7 @@ fn apply_opencode_config_with_paths(
         })?;
         Some(path)
     };
-    let next = opencode_config_text(settings, providers, model)?;
+    let next = opencode_config_text(settings, providers, &model)?;
     write_text_replace(config_path, &next)?;
     Ok(GatewayClientApplyResult {
         client_id: "opencode".to_string(),
@@ -3165,6 +3166,7 @@ fn apply_pi_config_with_paths(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let current_settings = fs::read_to_string(settings_path).unwrap_or_default();
     let current_models = fs::read_to_string(models_path).unwrap_or_default();
     let backup_path = create_snapshot_backup(
@@ -3176,8 +3178,8 @@ fn apply_pi_config_with_paths(
         ],
         is_pi_codexhub_config(&current_settings, &current_models),
     )?;
-    let next_settings = pi_settings_text(settings_path, settings, providers, model)?;
-    let next_models = pi_models_text(models_path, settings, providers, model)?;
+    let next_settings = pi_settings_text(settings_path, settings, providers, &model)?;
+    let next_models = pi_models_text(models_path, settings, providers, &model)?;
     write_text_replace(settings_path, &next_settings)?;
     write_text_replace(models_path, &next_models)?;
     Ok(GatewayClientApplyResult {
@@ -3197,6 +3199,7 @@ fn apply_omp_config_with_paths(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let current_config = fs::read_to_string(config_path).unwrap_or_default();
     let current_models = fs::read_to_string(models_path).unwrap_or_default();
     let backup_path = create_snapshot_backup(
@@ -3205,7 +3208,6 @@ fn apply_omp_config_with_paths(
         &[("config.yml", config_path), ("models.yml", models_path)],
         is_omp_codexhub_config(&current_config, &current_models),
     )?;
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let next_config = omp_config_text(Some(&current_config), &model);
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     write_text_replace(config_path, &next_config)?;
@@ -3226,6 +3228,7 @@ fn apply_zcode_config_with_path(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let current = fs::read_to_string(catalog_path).unwrap_or_default();
     let backup_path = create_snapshot_backup(
         "zcode",
@@ -3233,7 +3236,7 @@ fn apply_zcode_config_with_path(
         &[("codexhub.json", catalog_path)],
         is_zcode_codexhub_config(&current),
     )?;
-    let next = zcode_catalog_text(settings, providers, model)?;
+    let next = zcode_catalog_text(settings, providers, &model)?;
     write_text_replace(catalog_path, &next)?;
     Ok(GatewayClientApplyResult {
         client_id: "zcode".to_string(),
@@ -4873,6 +4876,31 @@ mod tests {
     }
 
     #[test]
+    fn opencode_apply_rejects_invalid_model_before_backup_side_effects() {
+        let root = unique_temp_dir("codexhub-opencode-invalid-model");
+        let config_path = root.join("opencode.json");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+        let original = fs::read_to_string(&config_path).unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let error = apply_opencode_config_with_paths(
+            &config_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "minimax-cn/MINIMAX-M3",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
+        assert!(!backup_root.exists());
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    }
+
+    #[test]
     fn opencode_restore_skips_managed_backups_and_strips_invalid_keys() {
         let root = unique_temp_dir("codexhub-opencode-restore");
         let config_path = root.join("opencode.json");
@@ -4990,6 +5018,47 @@ mod tests {
     }
 
     #[test]
+    fn pi_apply_rejects_invalid_model_before_backup_side_effects() {
+        let root = unique_temp_dir("codexhub-pi-invalid-model");
+        let settings_path = root.join("settings.json");
+        let models_path = root.join("models.json");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4"}"#,
+        )
+        .unwrap();
+        fs::write(
+            &models_path,
+            r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-4"}]}}}"#,
+        )
+        .unwrap();
+        let original_settings = fs::read_to_string(&settings_path).unwrap();
+        let original_models = fs::read_to_string(&models_path).unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let error = super::apply_pi_config_with_paths(
+            &settings_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "minimax-cn/MINIMAX-M3",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
+        assert!(!backup_root.exists());
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
+        assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
+    }
+
+    #[test]
     fn pi_restore_skips_managed_snapshot_and_restores_clean_pair() {
         let root = unique_temp_dir("codexhub-pi-restore");
         let settings_path = root.join("settings.json");
@@ -5094,6 +5163,44 @@ mod tests {
     }
 
     #[test]
+    fn omp_apply_rejects_invalid_model_before_backup_side_effects() {
+        let root = unique_temp_dir("codexhub-omp-invalid-model");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &config_path,
+            "modelRoles:\n  default: anthropic/claude-sonnet-4\n",
+        )
+        .unwrap();
+        fs::write(
+            &models_path,
+            "providers:\n  anthropic:\n    models:\n      - id: claude-sonnet-4\n",
+        )
+        .unwrap();
+        let original_config = fs::read_to_string(&config_path).unwrap();
+        let original_models = fs::read_to_string(&models_path).unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let error = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "minimax-cn/MINIMAX-M3",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
+        assert!(!backup_root.exists());
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), original_config);
+        assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
+    }
+
+    #[test]
     fn zcode_apply_writes_user_catalog_with_schema_safe_provider() {
         let root = unique_temp_dir("codexhub-zcode");
         let catalog_path = root.join("model-providers").join("codexhub.json");
@@ -5159,6 +5266,35 @@ mod tests {
         assert!(!fs::read_to_string(&catalog_path)
             .unwrap()
             .contains("codexhub_managed"));
+    }
+
+    #[test]
+    fn zcode_apply_rejects_invalid_model_before_backup_side_effects() {
+        let root = unique_temp_dir("codexhub-zcode-invalid-model");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[]}"#,
+        )
+        .unwrap();
+        let original = fs::read_to_string(&catalog_path).unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let error = super::apply_zcode_config_with_path(
+            &catalog_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "minimax-cn/MINIMAX-M3",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
+        assert!(!backup_root.exists());
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), original);
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
