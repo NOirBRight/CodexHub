@@ -3615,16 +3615,12 @@ fn pi_settings_text(
     if !value.is_object() {
         value = json!({});
     }
-    let enabled_models = gateway_client_models(settings, providers, &model)?
-        .iter()
-        .map(|gateway_model| format!("codexhub/{}", gateway_model.id))
-        .collect::<Vec<_>>();
     let object = value
         .as_object_mut()
         .ok_or_else(|| "Pi settings root must be a JSON object".to_string())?;
     object.insert("defaultProvider".to_string(), json!("codexhub"));
     object.insert("defaultModel".to_string(), json!(model));
-    object.insert("enabledModels".to_string(), json!(enabled_models));
+    object.remove("enabledModels");
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize Pi settings: {error}"))
@@ -4645,6 +4641,7 @@ mod tests {
     fn pi_and_omp_configs_keep_duplicate_glm_models_distinct() {
         let root = unique_temp_dir("codexhub-client-case");
         let settings_path = root.join("settings.json");
+        let models_path = root.join("models.json");
         fs::create_dir_all(root.as_path()).unwrap();
         let settings = Settings::default();
         let providers = case_sensitive_client_export_test_providers();
@@ -4656,15 +4653,22 @@ mod tests {
             "ollama-cloud/glm-5.2",
         )
         .unwrap();
+        let pi_models_text =
+            pi_models_text(&models_path, &settings, &providers, "ollama-cloud/glm-5.2").unwrap();
         let omp_text = omp_models_yml_text(&settings, &providers, "ollama-cloud/glm-5.2").unwrap();
         let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
-        let enabled = pi_value["enabledModels"].as_array().unwrap();
+        let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
+        let pi_models = pi_models_value
+            .pointer("/providers/codexhub/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
 
         assert_eq!(pi_value["defaultModel"], "ollama-cloud/glm-5.2");
-        assert!(enabled
+        assert!(pi_value.get("enabledModels").is_none());
+        assert!(pi_models
             .iter()
-            .any(|value| value == "codexhub/ollama-cloud/glm-5.2"));
-        assert!(enabled.iter().any(|value| value == "codexhub/volc/glm-5.2"));
+            .any(|model| model["id"] == "ollama-cloud/glm-5.2"));
+        assert!(pi_models.iter().any(|model| model["id"] == "volc/glm-5.2"));
         assert!(omp_text.contains("id: ollama-cloud/glm-5.2"));
         assert!(omp_text.contains("id: volc/glm-5.2"));
     }
@@ -4695,27 +4699,47 @@ mod tests {
             pi_models_text(&models_path, &settings, &providers, "openai/gpt-5.5").unwrap();
         let settings_value: serde_json::Value = serde_json::from_str(&settings_text).unwrap();
         let models_value: serde_json::Value = serde_json::from_str(&models_text).unwrap();
-        let enabled = settings_value["enabledModels"].as_array().unwrap();
         let models = models_value
             .pointer("/providers/codexhub/models")
             .and_then(serde_json::Value::as_array)
             .unwrap();
 
-        assert!(enabled
-            .iter()
-            .any(|value| value == "codexhub/openai/gpt-5.5"));
-        assert!(enabled
-            .iter()
-            .any(|value| value == "codexhub/minimax/minimax-m3"));
-        assert!(!enabled
-            .iter()
-            .any(|value| value == "codexhub/minimax/minimax-m3-lite"));
+        assert!(settings_value.get("enabledModels").is_none());
+        assert!(models.iter().any(|model| model["id"] == "openai/gpt-5.5"));
         assert!(models
             .iter()
             .any(|model| model["id"] == "minimax/minimax-m3"));
         assert!(!models
             .iter()
             .any(|model| model["id"] == "minimax/minimax-m3-lite"));
+    }
+
+    #[test]
+    fn pi_settings_remove_enabled_model_patterns_for_gateway_exports() {
+        let root = unique_temp_dir("codexhub-pi-enabled-models");
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"enabledModels":["codexhub/minimax-cn/MiniMax-M3"],"theme":"dark"}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let text = pi_settings_text(
+            &settings_path,
+            &settings,
+            &providers,
+            "ollama-cloud/glm-5.2",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert!(value.get("enabledModels").is_none());
+        assert_eq!(value["defaultProvider"], "codexhub");
+        assert_eq!(value["defaultModel"], "ollama-cloud/glm-5.2");
+        assert_eq!(value["theme"], "dark");
     }
 
     #[test]
@@ -5292,12 +5316,7 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("dark")
         );
-        assert!(written_settings
-            .get("enabledModels")
-            .and_then(serde_json::Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|value| value.as_str() == Some("codexhub/openai/gpt-5.5")));
+        assert!(written_settings.get("enabledModels").is_none());
 
         let written_models: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
