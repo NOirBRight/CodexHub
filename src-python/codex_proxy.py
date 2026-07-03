@@ -481,6 +481,8 @@ def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
     if not slug.startswith(OFFICIAL_ALIAS_PREFIX):
         return None
     upstream_model = slug[len(OFFICIAL_ALIAS_PREFIX) :]
+    if policy_denies_any_model((slug, upstream_model), policy):
+        raise ValueError(f"model is not allowed: {slug}")
     if upstream_model.startswith(official_prefixes()) and should_include_model(upstream_model, policy):
         return upstream_model
     return None

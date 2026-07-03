@@ -208,6 +208,19 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body)["model"], "gpt-5.5")
 
+    def test_denied_openai_alias_is_rejected_even_when_bare_model_allowed(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"openai/gpt-5.5"},
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("openai/gpt-5.5")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
     def test_ollama_routes_to_cloud(self):
         upstream = choose_upstream("glm-5.2")
         self.assertEqual(upstream["name"], "ollama_cloud")
