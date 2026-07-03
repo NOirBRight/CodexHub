@@ -87,9 +87,9 @@ export function SettingsDrawer({
                   onChange={(value) => setDraft({ ...draft, auto_sync_history: value })}
                 />
                 <Toggle
-                  checked={draft.auto_sync_catalog}
-                  label="Auto-sync catalog"
-                  onChange={(value) => setDraft({ ...draft, auto_sync_catalog: value })}
+                  checked={draft.auto_sync_clients}
+                  label="Auto-sync bound clients"
+                  onChange={(value) => setDraft({ ...draft, auto_sync_clients: value })}
                 />
               </div>
             </section>

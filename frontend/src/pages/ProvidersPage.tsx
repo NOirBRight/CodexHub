@@ -21,6 +21,7 @@ import { api, messageFromError } from "../lib/tauri";
 import type {
   AppStatus,
   GatewayStatus,
+  GatewayClientSyncSummary,
   Model,
   Provider,
   Settings,
@@ -56,7 +57,13 @@ type CodexAuthState = "authorized" | "missing" | "unknown";
 type ToastTone = "info" | "error" | "loading";
 type ToastState = { tone: ToastTone; text: string };
 
-export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewayStatus?: GatewayStatus | null }) {
+export function ProvidersPage({
+  gatewayStatus: gatewayStatusSnapshot,
+  onGatewayChanged,
+}: {
+  gatewayStatus?: GatewayStatus | null;
+  onGatewayChanged?: () => Promise<void>;
+}) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
@@ -167,6 +174,46 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     setToastState((current) => (current?.tone === "error" ? null : current));
   }
 
+  async function refreshGatewayState() {
+    try {
+      await onGatewayChanged?.();
+    } catch {
+      // Refresh failures are surfaced by the owning runtime loader.
+    }
+  }
+
+  async function updateGatewayAfterCatalog(activeSettings?: Settings | null) {
+    await api.generateCatalog();
+    const syncSettings = activeSettings ?? settingsDraft ?? settings;
+    let syncResult: GatewayClientSyncSummary | null = null;
+    if (syncSettings?.auto_sync_clients) {
+      syncResult = await api.syncGatewayClients().catch((err) => ({
+        applied: 0,
+        skipped: 0,
+        failed: 1,
+        results: [],
+        message: `Client sync failed: ${messageFromError(err)}`,
+      }));
+    }
+    await refreshGatewayState();
+    return syncResult;
+  }
+
+  function catalogSyncToastMessage(
+    baseMessage: string | undefined,
+    syncResult: GatewayClientSyncSummary | null,
+  ) {
+    if (syncResult?.failed) {
+      const syncMessage = `${syncResult.failed} bound client sync failed`;
+      return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
+    }
+    if (syncResult?.applied) {
+      const syncMessage = `${syncResult.applied} bound client${syncResult.applied === 1 ? "" : "s"} synced`;
+      return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
+    }
+    return baseMessage ?? null;
+  }
+
   async function load() {
     setBusy("load");
     try {
@@ -208,11 +255,17 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     try {
       const saved = await api.saveProviders(next);
       setProviders(saved);
+      let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
-        await api.generateCatalog();
+        syncResult = await updateGatewayAfterCatalog();
       }
-      setMessage(successMessage ?? null);
-      setError(null);
+      const toastMessage = catalogSyncToastMessage(successMessage, syncResult);
+      if (syncResult?.failed) {
+        setError(toastMessage);
+      } else {
+        setMessage(toastMessage);
+        setError(null);
+      }
       return saved;
     } catch (err) {
       setError(messageFromError(err));
@@ -228,11 +281,17 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
       const saved = await api.saveSettings(next);
       setSettings(saved);
       setSettingsDraft(saved);
+      let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
-        await api.generateCatalog();
+        syncResult = await updateGatewayAfterCatalog(saved);
       }
-      setMessage(successMessage ?? null);
-      setError(null);
+      const toastMessage = catalogSyncToastMessage(successMessage, syncResult);
+      if (syncResult?.failed) {
+        setError(toastMessage);
+      } else {
+        setMessage(toastMessage);
+        setError(null);
+      }
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -393,9 +452,14 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
       setOfficialModels(sortOfficialModels(refreshed, settingsDraft?.official_model_sort_order ?? []));
-      await api.generateCatalog();
-      setMessage("Official models refreshed");
-      setError(null);
+      const syncResult = await updateGatewayAfterCatalog();
+      const toastMessage = catalogSyncToastMessage("Official models refreshed", syncResult);
+      if (syncResult?.failed) {
+        setError(toastMessage);
+      } else {
+        setMessage(toastMessage);
+        setError(null);
+      }
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -1733,6 +1797,7 @@ function modelIdMatches(left: string, right: string) {
 function withDefaultFastVariants(settings: Settings): Settings {
   const base = {
     ...settings,
+    auto_sync_clients: settings.auto_sync_clients ?? settings.auto_sync_catalog ?? true,
     official_disabled_models: settings.official_disabled_models ?? [],
   };
   if (settings.gateway_fast_model_variants?.length) {

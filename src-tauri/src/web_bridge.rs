@@ -329,6 +329,14 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
                 .map(ToOwned::to_owned);
             to_value(gateway::switch_gateway_client_route(client_id, mode, model))
         }
+        "sync_gateway_clients" => {
+            let model = request
+                .args
+                .get("model")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            to_value(gateway::sync_gateway_clients(model))
+        }
         "subagent_matrix_status" => to_value(gateway::subagent_matrix_status()),
         "generate_catalog" => to_value(catalog::generate_catalog()),
         "list_models" => to_value(models::list_models()),

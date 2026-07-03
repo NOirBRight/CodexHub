@@ -127,6 +127,8 @@ pub struct Settings {
     pub auto_start_proxy: bool,
     pub include_official_models: bool,
     pub auto_sync_catalog: bool,
+    #[serde(default = "default_enabled")]
+    pub auto_sync_clients: bool,
     pub default_codex_route: String,
     pub gateway_bind_address: String,
     pub gateway_client_key: String,
@@ -154,6 +156,7 @@ impl Default for Settings {
             auto_start_proxy: true,
             include_official_models: true,
             auto_sync_catalog: true,
+            auto_sync_clients: true,
             default_codex_route: "hub".to_string(),
             gateway_bind_address: "127.0.0.1".to_string(),
             gateway_client_key: "codexhub-proxy".to_string(),
@@ -322,6 +325,13 @@ fn switch_gateway_client_route(
 }
 
 #[tauri::command]
+fn sync_gateway_clients(
+    model: Option<String>,
+) -> Result<gateway::GatewayClientSyncSummary, String> {
+    gateway::sync_gateway_clients(model)
+}
+
+#[tauri::command]
 fn subagent_matrix_status() -> Result<gateway::SubagentMatrixStatus, String> {
     gateway::subagent_matrix_status()
 }
@@ -399,6 +409,7 @@ fn run_gui() {
             apply_gateway_client_config,
             restore_gateway_client_config,
             switch_gateway_client_route,
+            sync_gateway_clients,
             subagent_matrix_status,
             generate_catalog,
             list_models,

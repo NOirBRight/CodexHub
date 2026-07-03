@@ -97,9 +97,9 @@ export function SettingsPage() {
             onChange={(value) => void save({ ...settings, include_official_models: value })}
           />
           <Toggle
-            label="Auto-sync catalog"
-            checked={settings.auto_sync_catalog}
-            onChange={(value) => void save({ ...settings, auto_sync_catalog: value })}
+            label="Auto-sync bound clients"
+            checked={settings.auto_sync_clients}
+            onChange={(value) => void save({ ...settings, auto_sync_clients: value })}
           />
           <label className="grid gap-1 text-sm font-medium text-slate-700">
             Proxy port

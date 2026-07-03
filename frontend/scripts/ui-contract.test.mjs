@@ -89,6 +89,18 @@ test("settings drawer hides non-functional route and endpoint toggles", async ()
   assert.doesNotMatch(drawerSource, /Enable \/v1\/chat\/completions/);
 });
 
+test("settings exposes bound client auto-sync instead of catalog auto-sync", async () => {
+  const [drawerSource, settingsSource] = await Promise.all([
+    readFile(settingsDrawerPath, "utf8"),
+    readFile(new URL("../src/pages/SettingsPage.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(drawerSource, /Auto-sync bound clients/);
+  assert.match(drawerSource, /auto_sync_clients/);
+  assert.doesNotMatch(drawerSource, /Auto-sync catalog/);
+  assert.match(settingsSource, /Auto-sync bound clients/);
+});
+
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
@@ -194,6 +206,19 @@ test("provider write actions keep explicit success feedback", async () => {
   assert.match(providersSource, /`\$\{target\.name\} deleted`/);
   assert.match(providersSource, /onChange\(draft, `\$\{draft\.name\} saved`\)/);
   assert.match(providersSource, /onChange\(next, "Model removed"\)/);
+});
+
+test("provider catalog writes trigger best-effort bound client sync", async () => {
+  const [providersSource, tauriSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(new URL("../src/lib/tauri.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(tauriSource, /syncGatewayClients/);
+  assert.match(tauriSource, /"sync_gateway_clients"/);
+  assert.match(providersSource, /updateGatewayAfterCatalog/);
+  assert.match(providersSource, /api\.syncGatewayClients\(\)/);
+  assert.match(providersSource, /auto_sync_clients/);
 });
 
 test("settings drawer reports the backend sync result", async () => {

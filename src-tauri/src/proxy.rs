@@ -99,6 +99,7 @@ struct SettingsDocument {
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
     auto_sync_catalog: Option<bool>,
+    auto_sync_clients: Option<bool>,
     default_codex_route: Option<String>,
     gateway_bind_address: Option<String>,
     gateway_client_key: Option<String>,
@@ -123,6 +124,10 @@ impl SettingsDocument {
                 .include_official_models
                 .unwrap_or(defaults.include_official_models),
             auto_sync_catalog: self.auto_sync_catalog.unwrap_or(defaults.auto_sync_catalog),
+            auto_sync_clients: self
+                .auto_sync_clients
+                .or(self.auto_sync_catalog)
+                .unwrap_or(defaults.auto_sync_clients),
             default_codex_route: self
                 .default_codex_route
                 .filter(|value| matches!(value.as_str(), "official" | "hub"))

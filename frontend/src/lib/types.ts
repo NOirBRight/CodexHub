@@ -256,6 +256,7 @@ export interface Settings {
   auto_start_proxy: boolean;
   include_official_models: boolean;
   auto_sync_catalog: boolean;
+  auto_sync_clients: boolean;
   default_codex_route: string;
   gateway_bind_address: string;
   gateway_client_key: string;
@@ -280,4 +281,23 @@ export interface GatewayClientContract {
   kind: string;
   description: string;
   config_path: string;
+}
+
+export interface GatewayClientSyncItem {
+  client_id: string;
+  name: string;
+  status: "applied" | "skipped" | "failed" | string;
+  applied: boolean;
+  skipped: boolean;
+  message: string;
+  config_path?: string | null;
+  backup_path?: string | null;
+}
+
+export interface GatewayClientSyncSummary {
+  applied: number;
+  skipped: number;
+  failed: number;
+  results: GatewayClientSyncItem[];
+  message: string;
 }

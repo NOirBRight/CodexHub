@@ -5,6 +5,7 @@ import type {
   GatewayClientApplyResult,
   GatewayClientConfigPreview,
   GatewayClientInfo,
+  GatewayClientSyncSummary,
   GatewayEvent,
   GatewayStatus,
   GatewayTestKind,
@@ -119,6 +120,8 @@ export const api = {
       mode,
       model: model ?? null,
     }),
+  syncGatewayClients: (model?: string | null) =>
+    call<GatewayClientSyncSummary>("sync_gateway_clients", { model: model ?? null }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>("subagent_matrix_status"),
   generateCatalog: () => call<Model[]>("generate_catalog"),
   listModels: () => call<Model[]>("list_models"),

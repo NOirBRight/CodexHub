@@ -245,7 +245,13 @@ export default function App() {
 
       <div className="min-h-0 overflow-hidden p-4">
         {activeTab === "codexhub" ? (
-          <ProvidersPage gatewayStatus={runtime.gatewayStatus} />
+          <ProvidersPage
+            gatewayStatus={runtime.gatewayStatus}
+            onGatewayChanged={async () => {
+              await loadRuntime();
+              await loadGatewayClients();
+            }}
+          />
         ) : (
           <GatewayPage
             settings={runtime.settings}

@@ -157,6 +157,7 @@ struct SettingsDocument {
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
     auto_sync_catalog: Option<bool>,
+    auto_sync_clients: Option<bool>,
     default_codex_route: Option<String>,
     gateway_bind_address: Option<String>,
     gateway_client_key: Option<String>,
@@ -181,6 +182,10 @@ impl SettingsDocument {
                 .include_official_models
                 .unwrap_or(defaults.include_official_models),
             auto_sync_catalog: self.auto_sync_catalog.unwrap_or(defaults.auto_sync_catalog),
+            auto_sync_clients: self
+                .auto_sync_clients
+                .or(self.auto_sync_catalog)
+                .unwrap_or(defaults.auto_sync_clients),
             default_codex_route: self
                 .default_codex_route
                 .filter(|value| matches!(value.as_str(), "official" | "hub"))
@@ -633,6 +638,7 @@ sort_order = 7
             auto_start_proxy: false,
             include_official_models: false,
             auto_sync_catalog: false,
+            auto_sync_clients: false,
             default_codex_route: "official".to_string(),
             gateway_bind_address: "127.0.0.1".to_string(),
             gateway_client_key: "local-test-key".to_string(),
@@ -661,6 +667,28 @@ sort_order = 7
         assert!(written.contains("\"official_disabled_models\""));
         assert!(written.contains("\"official_model_sort_order\""));
         assert!(written.contains("\"official_provider_sort_order\": 3"));
+        assert!(written.contains("\"auto_sync_clients\": false"));
+    }
+
+    #[test]
+    fn legacy_auto_sync_catalog_loads_as_auto_sync_clients() {
+        let root = temp_root("legacy-auto-sync-catalog");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "auto_sync_catalog": false,
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("legacy settings load");
+
+        assert!(!loaded.auto_sync_catalog);
+        assert!(!loaded.auto_sync_clients);
+        assert_eq!(loaded.proxy_port, 4555);
     }
 
     #[test]
@@ -896,6 +924,7 @@ sort_order = 7
         assert_eq!(left.auto_start_proxy, right.auto_start_proxy);
         assert_eq!(left.include_official_models, right.include_official_models);
         assert_eq!(left.auto_sync_catalog, right.auto_sync_catalog);
+        assert_eq!(left.auto_sync_clients, right.auto_sync_clients);
         assert_eq!(left.default_codex_route, right.default_codex_route);
         assert_eq!(left.gateway_bind_address, right.gateway_bind_address);
         assert_eq!(left.gateway_client_key, right.gateway_client_key);

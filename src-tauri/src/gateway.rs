@@ -214,6 +214,27 @@ pub struct GatewayClientApplyResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayClientSyncItem {
+    pub client_id: String,
+    pub name: String,
+    pub status: String,
+    pub applied: bool,
+    pub skipped: bool,
+    pub message: String,
+    pub config_path: Option<PathBuf>,
+    pub backup_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayClientSyncSummary {
+    pub applied: u32,
+    pub skipped: u32,
+    pub failed: u32,
+    pub results: Vec<GatewayClientSyncItem>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 struct PiConfigPaths {
     settings_path: PathBuf,
@@ -711,6 +732,119 @@ pub fn switch_gateway_client_route(
     } else {
         apply_gateway_client_config(client_id, model)
     }
+}
+
+pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSummary, String> {
+    let clients = list_gateway_clients(false)?;
+    Ok(sync_gateway_clients_from_infos(
+        clients,
+        model,
+        |client_id, model| apply_gateway_client_config(client_id, model),
+    ))
+}
+
+fn sync_gateway_clients_from_infos<F>(
+    clients: Vec<GatewayClientInfo>,
+    model: Option<String>,
+    mut apply_client: F,
+) -> GatewayClientSyncSummary
+where
+    F: FnMut(String, Option<String>) -> Result<GatewayClientApplyResult, String>,
+{
+    let mut applied = 0_u32;
+    let mut skipped = 0_u32;
+    let mut failed = 0_u32;
+    let mut results = Vec::new();
+
+    for client in clients {
+        let skip_reason = gateway_client_sync_skip_reason(&client);
+        if let Some(message) = skip_reason {
+            skipped = skipped.saturating_add(1);
+            results.push(GatewayClientSyncItem {
+                client_id: client.id,
+                name: client.name,
+                status: "skipped".to_string(),
+                applied: false,
+                skipped: true,
+                message,
+                config_path: client.config_path,
+                backup_path: None,
+            });
+            continue;
+        }
+
+        match apply_client(client.id.clone(), model.clone()) {
+            Ok(result) => {
+                if result.applied {
+                    applied = applied.saturating_add(1);
+                    results.push(GatewayClientSyncItem {
+                        client_id: result.client_id,
+                        name: client.name,
+                        status: "applied".to_string(),
+                        applied: true,
+                        skipped: false,
+                        message: result.message,
+                        config_path: result.config_path,
+                        backup_path: result.backup_path,
+                    });
+                } else {
+                    skipped = skipped.saturating_add(1);
+                    results.push(GatewayClientSyncItem {
+                        client_id: result.client_id,
+                        name: client.name,
+                        status: "skipped".to_string(),
+                        applied: false,
+                        skipped: true,
+                        message: result.message,
+                        config_path: result.config_path,
+                        backup_path: result.backup_path,
+                    });
+                }
+            }
+            Err(error) => {
+                failed = failed.saturating_add(1);
+                results.push(GatewayClientSyncItem {
+                    client_id: client.id,
+                    name: client.name,
+                    status: "failed".to_string(),
+                    applied: false,
+                    skipped: false,
+                    message: error,
+                    config_path: client.config_path,
+                    backup_path: None,
+                });
+            }
+        }
+    }
+
+    let message = if failed > 0 {
+        format!("Synced {applied} bound Gateway client(s); {failed} failed; skipped {skipped}")
+    } else if applied > 0 {
+        format!("Synced {applied} bound Gateway client(s); skipped {skipped}")
+    } else {
+        "No bound Gateway clients needed sync".to_string()
+    };
+
+    GatewayClientSyncSummary {
+        applied,
+        skipped,
+        failed,
+        results,
+        message,
+    }
+}
+
+fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String> {
+    if !client.installed {
+        return Some("Client is not installed.".to_string());
+    }
+    if !client.auto_apply_supported {
+        return Some("Client does not support automatic config sync.".to_string());
+    }
+    if client.route_mode != "hub" {
+        return Some("Client is not bound to CodexHub.".to_string());
+    }
+    None
 }
 
 pub fn provider_probe_upstream_format(
@@ -3727,6 +3861,27 @@ mod tests {
         }]
     }
 
+    fn sync_test_client(
+        id: &str,
+        name: &str,
+        installed: bool,
+        auto_apply_supported: bool,
+        route_mode: &str,
+    ) -> super::GatewayClientInfo {
+        super::GatewayClientInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: "Test".to_string(),
+            installed,
+            auto_apply_supported,
+            config_path: Some(PathBuf::from(format!("{id}.json"))),
+            route_mode: route_mode.to_string(),
+            status: "test".to_string(),
+            current_version: None,
+            latest_version: None,
+        }
+    }
+
     #[test]
     fn sanitizes_sensitive_text() {
         assert_eq!(
@@ -3755,6 +3910,51 @@ mod tests {
             super::classify_event(&json!({"event": "upstream_stream_interrupted"})),
             "streaming"
         );
+    }
+
+    #[test]
+    fn sync_gateway_clients_applies_only_hub_bound_supported_clients() {
+        let clients = vec![
+            sync_test_client("generic", "Generic", true, false, "copy_only"),
+            sync_test_client("official", "Official Client", true, true, "official"),
+            sync_test_client("missing", "Missing Client", false, true, "hub"),
+            sync_test_client("hub-ok", "Hub OK", true, true, "hub"),
+            sync_test_client("hub-fail", "Hub Fail", true, true, "hub"),
+        ];
+        let mut attempted = Vec::new();
+
+        let summary = super::sync_gateway_clients_from_infos(
+            clients,
+            Some("openai/gpt-5.5".to_string()),
+            |client_id, model| {
+                attempted.push((client_id.clone(), model.clone()));
+                if client_id == "hub-fail" {
+                    return Err("write failed".to_string());
+                }
+                Ok(super::GatewayClientApplyResult {
+                    client_id,
+                    applied: true,
+                    config_path: Some(PathBuf::from("config.json")),
+                    backup_path: Some(PathBuf::from("backup.json")),
+                    message: "applied".to_string(),
+                })
+            },
+        );
+
+        assert_eq!(
+            attempted,
+            vec![
+                ("hub-ok".to_string(), Some("openai/gpt-5.5".to_string())),
+                ("hub-fail".to_string(), Some("openai/gpt-5.5".to_string())),
+            ]
+        );
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.skipped, 3);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.results[0].status, "skipped");
+        assert_eq!(summary.results[3].status, "applied");
+        assert_eq!(summary.results[4].status, "failed");
+        assert!(summary.message.contains("1 failed"));
     }
 
     #[test]
