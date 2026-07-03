@@ -1261,8 +1261,13 @@ fn official_model_disabled(settings: &Settings, id: &str) -> bool {
 
 fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Vec<GatewayModel> {
     let mut output = Vec::new();
+    let mut exported_ids = HashSet::new();
     if settings.include_official_models {
-        output.extend(official_models(settings));
+        for model in official_models(settings) {
+            if exported_ids.insert(model.id.to_ascii_lowercase()) {
+                output.push(model);
+            }
+        }
     }
     for provider in providers {
         if !provider.enabled {
@@ -1273,6 +1278,9 @@ fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Ve
                 continue;
             }
             let model_id = provider_qualified_model_id(&provider.id, &model.id);
+            if !exported_ids.insert(model_id.to_ascii_lowercase()) {
+                continue;
+            }
             output.push(GatewayModel {
                 id: model_id.clone(),
                 display_name: model
@@ -3857,6 +3865,7 @@ fn zcode_v2_provider_value(settings: &Settings, models: &[GatewayModel]) -> Valu
     json!({
         "name": "CodexHub Gateway",
         "kind": "openai-compatible",
+        "enabled": true,
         "source": "custom",
         "options": {
             "baseURL": endpoints(settings.proxy_port).base_url,
@@ -4330,6 +4339,36 @@ mod tests {
         ]
     }
 
+    fn case_collision_client_export_test_providers() -> Vec<Provider> {
+        vec![Provider {
+            id: "minimax-cn".to_string(),
+            name: "MiniMax.cn".to_string(),
+            base_url: "https://api.minimaxi.com/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            display_prefix: Some("MiniMax.cn".to_string()),
+            sort_order: Some(1),
+            enabled: true,
+            locked: false,
+            models: vec![
+                Model {
+                    id: "MiniMax-M3".to_string(),
+                    display_name: Some("MiniMax-M3".to_string()),
+                    context_window: Some(1_000_000),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "minimax-m3".to_string(),
+                    display_name: Some("MiniMax-M3 lowercase legacy".to_string()),
+                    context_window: Some(1_000_000),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+            ],
+        }]
+    }
+
     fn sync_test_client(
         id: &str,
         name: &str,
@@ -4591,6 +4630,30 @@ mod tests {
         assert_eq!(value["model"], "codexhub/minimax-cn/MiniMax-M3");
         assert!(exported.contains_key("minimax-cn/MiniMax-M3"));
         assert!(!exported.contains_key("minimax-cn/minimax-m3"));
+    }
+
+    #[test]
+    fn client_configs_drop_case_insensitive_export_collisions() {
+        let settings = Settings::default();
+        let providers = case_collision_client_export_test_providers();
+
+        let text = opencode_config_text(&settings, &providers, "minimax-cn/MiniMax-M3").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let exported = value
+            .pointer("/provider/codexhub/models")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        let exported_ids = exported.keys().map(String::as_str).collect::<Vec<_>>();
+
+        assert!(exported.contains_key("minimax-cn/MiniMax-M3"));
+        assert!(!exported.contains_key("minimax-cn/minimax-m3"));
+        assert_eq!(
+            exported_ids
+                .iter()
+                .filter(|id| id.eq_ignore_ascii_case("minimax-cn/minimax-m3"))
+                .count(),
+            1
+        );
     }
 
     #[test]

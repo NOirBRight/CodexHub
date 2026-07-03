@@ -164,12 +164,9 @@ export default function App() {
 
   useEffect(() => {
     void loadRuntime();
-    void loadGatewayClients({ includeClientVersions: true });
+    void loadGatewayClients();
     const timer = window.setInterval(() => void loadRuntime(), 5000);
-    const clientTimer = window.setInterval(
-      () => void loadGatewayClients({ includeClientVersions: true }),
-      12 * 60 * 60 * 1000,
-    );
+    const clientTimer = window.setInterval(() => void loadGatewayClients(), 12 * 60 * 60 * 1000);
     return () => {
       window.clearInterval(timer);
       window.clearInterval(clientTimer);

@@ -209,6 +209,7 @@ export function GatewayPage({
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const routeName = mode === "hub" ? "CodexHub" : "Official";
+    setMessage(`Switching ${clientName} to ${routeName}...`);
     try {
       await api.switchGatewayClientRoute(clientId, mode, defaultModel);
       await onRefreshClients();

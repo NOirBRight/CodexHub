@@ -138,8 +138,21 @@ test("gateway copy actions use inline copied state instead of success toasts", a
 test("gateway client route switching reports completion", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
+  assert.match(gatewaySource, /Switching \$\{clientName\} to \$\{routeName\}/);
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
   assert.ok(gatewaySource.includes("setMessage(`${clientName} switched to ${routeName}`)"));
+});
+
+test("gateway client route switching refreshes without version probes", async () => {
+  const [appSource, gatewaySource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /await onRefreshClients\(\)/);
+  assert.doesNotMatch(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)[\s\S]*setMessage\(`\$\{clientName\} switched/);
+  assert.match(appSource, /void loadGatewayClients\(\)/);
+  assert.doesNotMatch(appSource, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
 });
 
 test("gateway toast uses the shared dismissible page toast", async () => {
