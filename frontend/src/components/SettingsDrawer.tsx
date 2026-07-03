@@ -1,8 +1,7 @@
-import { RefreshCcw, Save, X } from "lucide-react";
+import { Eye, EyeOff, RefreshCcw, Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
 import type { Settings } from "../lib/types";
-import { PendingPanel } from "./PendingPanel";
 
 interface SettingsDrawerProps {
   busy?: string | null;
@@ -23,10 +22,12 @@ export function SettingsDrawer({
 }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [message, setMessage] = useState<string | null>(null);
+  const [showClientKey, setShowClientKey] = useState(false);
 
   useEffect(() => {
     setDraft(settings);
     setMessage(null);
+    setShowClientKey(false);
   }, [settings, open]);
 
   async function saveDraft() {
@@ -91,6 +92,15 @@ export function SettingsDrawer({
                   label="Auto-sync bound clients"
                   onChange={(value) => setDraft({ ...draft, auto_sync_clients: value })}
                 />
+                <button
+                  type="button"
+                  className="focus-ring flex min-h-9 items-center justify-between gap-4 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
+                  disabled={Boolean(busy)}
+                  onClick={() => void syncHistory()}
+                >
+                  <span className="min-w-0 truncate">Repair Conversation History</span>
+                  <RefreshCcw size={15} />
+                </button>
               </div>
             </section>
 
@@ -120,31 +130,37 @@ export function SettingsDrawer({
                     onChange={(event) => setDraft({ ...draft, proxy_port: Number(event.target.value) })}
                   />
                 </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Local client key
-                  <input
-                    className="field h-9"
-                    type="text"
-                    autoComplete="off"
-                    value={draft.gateway_client_key}
-                    onChange={(event) => setDraft({ ...draft, gateway_client_key: event.target.value })}
-                  />
+                <div className="grid gap-1 text-sm font-medium text-slate-700">
+                  <label htmlFor="settings-local-client-key">Local client key</label>
+                  <div className="relative min-w-0">
+                    <input
+                      id="settings-local-client-key"
+                      className="field h-9 w-full pr-9"
+                      type={showClientKey ? "text" : "password"}
+                      autoComplete="off"
+                      value={draft.gateway_client_key}
+                      onChange={(event) => setDraft({ ...draft, gateway_client_key: event.target.value })}
+                    />
+                    <button
+                      type="button"
+                      className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-slate-500 hover:bg-panel hover:text-ink"
+                      aria-label={showClientKey ? "Hide local client key" : "Show local client key"}
+                      title={showClientKey ? "Hide local client key" : "Show local client key"}
+                      onClick={() => setShowClientKey((value) => !value)}
+                    >
+                      {showClientKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
                   <span className="text-xs font-normal text-slate-500">
                     Local compatibility key only; not an upstream provider or OpenAI key.
                   </span>
-                </label>
+                </div>
                 <Toggle
                   checked={draft.auto_start_proxy}
                   label="Auto-start runtime"
                   onChange={(value) => setDraft({ ...draft, auto_start_proxy: value })}
                 />
               </div>
-              <PendingPanel
-                compact
-                label="partial support"
-                title="Client adapters"
-                message="OpenCode, ZCode, Pi, and OMP can switch between official routing and CodexHub-managed Gateway config with backups where native files are overwritten."
-              />
             </section>
           </div>
         )}
@@ -153,15 +169,6 @@ export function SettingsDrawer({
       <div className="border-t border-line px-5 py-4">
         {message && <div className="mb-3 text-sm text-slate-600">{message}</div>}
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100"
-            disabled={Boolean(busy)}
-            onClick={() => void syncHistory()}
-          >
-            <RefreshCcw size={15} />
-            Sync history
-          </button>
           <button
             type="button"
             className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-semibold text-white disabled:bg-slate-300"
@@ -187,9 +194,18 @@ function Toggle({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-9 items-center justify-between gap-4 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-slate-700">
+    <label className="flex min-h-9 cursor-pointer items-center justify-between gap-4 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-slate-700">
       <span className="min-w-0 truncate">{label}</span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
+        <input
+          type="checkbox"
+          className="peer sr-only"
+          checked={checked}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        <span className="absolute inset-0 rounded-full border border-line bg-slate-200 transition-colors peer-checked:border-action peer-checked:bg-action" />
+        <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
+      </span>
     </label>
   );
 }

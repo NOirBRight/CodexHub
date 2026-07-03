@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { PageToast } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import { api, messageFromError } from "../lib/tauri";
@@ -28,6 +29,7 @@ import type {
   UpstreamFormat,
   UpstreamFormatProbeResult,
 } from "../lib/types";
+import type { PageToastState, PageToastTone } from "../components/PageToast";
 
 const OFFICIAL_ID = "__official__";
 const ADD_ID = "__add__";
@@ -54,8 +56,6 @@ const reasoningLevelOptions = ["low", "medium", "high", "xhigh", "max"];
 type ProviderNavItem =
   { id: string; sort_order: number; provider: Provider };
 type CodexAuthState = "authorized" | "missing" | "unknown";
-type ToastTone = "info" | "error" | "loading";
-type ToastState = { tone: ToastTone; text: string };
 
 export function ProvidersPage({
   gatewayStatus: gatewayStatusSnapshot,
@@ -75,7 +75,7 @@ export function ProvidersPage({
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
   const [busy, setBusy] = useState<string | null>("load");
-  const [toast, setToastState] = useState<ToastState | null>(null);
+  const [toast, setToastState] = useState<PageToastState | null>(null);
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -150,7 +150,7 @@ export function ProvidersPage({
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  function showToast(text: string, tone: ToastTone = "info") {
+  function showToast(text: string, tone: PageToastTone = "info") {
     setToastState({ text, tone });
   }
 
@@ -664,31 +664,7 @@ export function ProvidersPage({
 
         </div>
       </section>
-      {toast && (
-        <div
-          className={cx(
-            "absolute bottom-3 left-3 z-50 grid max-w-[420px] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border px-3 py-2 text-sm shadow-lg",
-            toast.tone === "error"
-              ? "border-red-200 bg-red-50 text-danger"
-              : "border-line bg-white text-slate-700",
-          )}
-        >
-          {toast.tone === "loading" ? (
-            <RefreshCcw size={14} className="animate-spin text-action" />
-          ) : (
-            <span className="h-2 w-2 rounded-full bg-action" />
-          )}
-          <span className="min-w-0 truncate">{toast.text}</span>
-          <button
-            type="button"
-            className="focus-ring grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-slate-100 hover:text-ink"
-            aria-label="Dismiss notification"
-            onClick={dismissToast}
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
+      {toast && <PageToast toast={toast} onDismiss={dismissToast} />}
     </main>
   );
 }

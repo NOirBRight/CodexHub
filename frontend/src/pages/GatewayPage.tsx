@@ -2,6 +2,7 @@ import { Check, Copy, Eye, EyeOff, Play, RefreshCcw, Save, Square } from "lucide
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
+import { PageToast } from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { StatusCard } from "../components/StatusCard";
@@ -17,6 +18,7 @@ import type {
   Settings,
   UsageQueryWindow,
 } from "../lib/types";
+import type { PageToastState, PageToastTone } from "../components/PageToast";
 
 interface GatewayPageProps {
   busy?: string | null;
@@ -63,8 +65,7 @@ export function GatewayPage({
   const [draftTimeout, setDraftTimeout] = useState(settings?.gateway_request_timeout_seconds ?? 120);
   const [clientBusy, setClientBusy] = useState<string | null>(null);
   const [clientRefreshBusy, setClientRefreshBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [toast, setToastState] = useState<PageToastState | null>(null);
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const copyResetTimer = useRef<number | null>(null);
@@ -83,6 +84,14 @@ export function GatewayPage({
     },
     [],
   );
+
+  useEffect(() => {
+    if (!toast || toast.tone === "loading") {
+      return;
+    }
+    const timer = window.setTimeout(() => dismissToast(), 8000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const endpoints = useMemo(
     () =>
@@ -110,6 +119,30 @@ export function GatewayPage({
       setCopiedTarget((current) => (current === target ? null : current));
       copyResetTimer.current = null;
     }, 1200);
+  }
+
+  function showToast(text: string, tone: PageToastTone = "info") {
+    setToastState({ text, tone });
+  }
+
+  function dismissToast() {
+    setToastState(null);
+  }
+
+  function setMessage(value: string | null) {
+    if (value) {
+      showToast(value, "info");
+      return;
+    }
+    setToastState((current) => (current?.tone === "info" ? null : current));
+  }
+
+  function setError(value: string | null) {
+    if (value) {
+      showToast(value, "error");
+      return;
+    }
+    setToastState((current) => (current?.tone === "error" ? null : current));
   }
 
   async function copyText(target: string, value: string) {
@@ -217,7 +250,7 @@ export function GatewayPage({
   }
 
   return (
-    <main className="grid h-full min-h-0 min-w-[1200px] grid-cols-[minmax(0,1fr)_390px] gap-4">
+    <main className="relative grid h-full min-h-0 min-w-[1200px] grid-cols-[minmax(0,1fr)_390px] gap-4">
       <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
         <section className="grid gap-3 rounded-md border border-line bg-white p-3 shadow-subtle">
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-stretch gap-3">
@@ -406,16 +439,6 @@ export function GatewayPage({
           summary={usageSummary}
         />
 
-        {(message || error) && (
-          <div
-            className={cx(
-              "fixed bottom-4 left-4 z-50 max-w-[420px] rounded-md border bg-white px-3 py-2 text-sm shadow-xl",
-              error ? "border-danger/30 text-danger" : "border-line text-ink",
-            )}
-          >
-            {error || message}
-          </div>
-        )}
       </section>
 
       <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md border border-line bg-white shadow-subtle">
@@ -454,6 +477,7 @@ export function GatewayPage({
           </div>
         </div>
       </aside>
+      {toast && <PageToast toast={toast} onDismiss={dismissToast} />}
     </main>
   );
 }
