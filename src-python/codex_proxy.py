@@ -487,6 +487,16 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "upstream_model": official_alias,
         }
 
+    if not should_include_model(slug, policy):
+        raise ValueError(f"model is not allowed: {slug}")
+
+    if slug.startswith(official_prefixes()):
+        return {
+            "name": "official",
+            "base_url": official_base_url(),
+            "auth": "codex_auth",
+        }
+
     external_model = resolve_external_model_alias(slug)
     if external_model is not None:
         return {
@@ -496,16 +506,6 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "api_key": external_model["api_key"],
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
-        }
-
-    if not should_include_model(slug, policy):
-        raise ValueError(f"model is not allowed: {slug}")
-
-    if slug.startswith(official_prefixes()):
-        return {
-            "name": "official",
-            "base_url": official_base_url(),
-            "auth": "codex_auth",
         }
 
     if "/" in slug:
