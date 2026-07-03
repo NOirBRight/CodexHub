@@ -9,6 +9,23 @@ mod proxy;
 mod web_bridge;
 
 use serde::{Deserialize, Serialize};
+use std::process::Command;
+use tauri::{AppHandle, Manager, Window, WindowEvent};
+
+#[cfg(desktop)]
+use tauri::{
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+
+const TRAY_SHOW: &str = "show";
+const TRAY_CONNECT_OFFICIAL: &str = "connect_official";
+const TRAY_CONNECT_HUB: &str = "connect_hub";
+const TRAY_START_GATEWAY: &str = "start_gateway";
+const TRAY_STOP_GATEWAY: &str = "stop_gateway";
+const TRAY_RESTART_GATEWAY: &str = "restart_gateway";
+const TRAY_RESTART_CODEX_APP: &str = "restart_codex_app";
+const TRAY_EXIT: &str = "exit";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
@@ -388,9 +405,191 @@ fn remove_autostart() -> Result<String, String> {
     autostart::remove_autostart()
 }
 
+#[tauri::command]
+fn window_minimize(window: Window) -> Result<(), String> {
+    window
+        .minimize()
+        .map_err(|error| format!("failed to minimize window: {error}"))
+}
+
+#[tauri::command]
+fn window_toggle_maximize(window: Window) -> Result<(), String> {
+    let maximized = window
+        .is_maximized()
+        .map_err(|error| format!("failed to read window state: {error}"))?;
+    if maximized {
+        window
+            .unmaximize()
+            .map_err(|error| format!("failed to restore window: {error}"))
+    } else {
+        window
+            .maximize()
+            .map_err(|error| format!("failed to maximize window: {error}"))
+    }
+}
+
+#[tauri::command]
+fn window_close_to_tray(window: Window) -> Result<(), String> {
+    window
+        .hide()
+        .map_err(|error| format!("failed to hide window to tray: {error}"))
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn codex_auto_sync_history() -> bool {
+    config::get_settings()
+        .map(|settings| settings.auto_sync_history)
+        .unwrap_or(true)
+}
+
+fn run_tray_action(app: &AppHandle, id: &str) {
+    match id {
+        TRAY_SHOW => show_main_window(app),
+        TRAY_CONNECT_OFFICIAL => {
+            let _ = config::switch_mode("official", codex_auto_sync_history());
+        }
+        TRAY_CONNECT_HUB => {
+            let _ = config::switch_mode("custom", codex_auto_sync_history());
+        }
+        TRAY_START_GATEWAY => {
+            let _ = proxy::start();
+        }
+        TRAY_STOP_GATEWAY => {
+            let _ = proxy::stop();
+        }
+        TRAY_RESTART_GATEWAY => {
+            let _ = proxy::restart();
+        }
+        TRAY_RESTART_CODEX_APP => {
+            let _ = restart_codex_app();
+        }
+        TRAY_EXIT => app.exit(0),
+        _ => {}
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn restart_codex_app() -> Result<String, String> {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$app = Get-StartApps |
+  Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } |
+  Select-Object -First 1
+if (-not $app) {
+  throw 'Codex App is not installed or does not expose a Start menu AppID.'
+}
+Get-Process -Name Codex -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 800
+Start-Process ('shell:AppsFolder\' + $app.AppID)
+Write-Output ('Restarted Codex App via ' + $app.AppID)
+"#;
+
+    let mut command = Command::new("powershell");
+    command.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run Codex App restart command: {error}"))?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(if stdout.is_empty() {
+            "Restarted Codex App".to_string()
+        } else {
+            stdout
+        })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!(
+                "Codex App restart failed with exit code {}",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            stderr
+        })
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restart_codex_app() -> Result<String, String> {
+    Err("Restart Codex App is currently implemented on Windows only.".to_string())
+}
+
+#[cfg(desktop)]
+fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = MenuBuilder::new(app)
+        .text(TRAY_SHOW, "Show CodexHub")
+        .separator()
+        .text(TRAY_CONNECT_OFFICIAL, "Connect Codex to Official")
+        .text(TRAY_CONNECT_HUB, "Connect Codex to CodexHub")
+        .separator()
+        .text(TRAY_START_GATEWAY, "Start Gateway")
+        .text(TRAY_STOP_GATEWAY, "Stop Gateway")
+        .text(TRAY_RESTART_GATEWAY, "Restart Gateway")
+        .separator()
+        .text(TRAY_RESTART_CODEX_APP, "Restart Codex App")
+        .text(TRAY_EXIT, "Exit")
+        .build()?;
+
+    let mut tray = TrayIconBuilder::with_id("codexhub")
+        .tooltip("CodexHub")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| run_tray_action(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => show_main_window(tray.app_handle()),
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
 fn run_gui() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            #[cfg(desktop)]
+            setup_tray(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_status,
             switch_mode,
@@ -426,7 +625,10 @@ fn run_gui() {
             sync_history,
             sync_catalog,
             set_autostart,
-            remove_autostart
+            remove_autostart,
+            window_minimize,
+            window_toggle_maximize,
+            window_close_to_tray
         ])
         .run(tauri::generate_context!())
         .expect("error while running CodexHub Tauri application");

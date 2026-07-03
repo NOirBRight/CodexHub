@@ -39,6 +39,13 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return bridgeInvoke<T>(command, args);
 }
 
+async function desktopCall<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
+  if (!window.__TAURI_INTERNALS__) {
+    return null;
+  }
+  return invoke<T>(command, args);
+}
+
 async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const response = await fetch(bridgeUrl(), {
     method: "POST",
@@ -153,6 +160,9 @@ export const api = {
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),
+  windowMinimize: () => desktopCall<void>("window_minimize"),
+  windowToggleMaximize: () => desktopCall<void>("window_toggle_maximize"),
+  windowCloseToTray: () => desktopCall<void>("window_close_to_tray"),
 };
 
 export function messageFromError(error: unknown): string {

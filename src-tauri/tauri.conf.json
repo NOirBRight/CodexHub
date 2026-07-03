@@ -15,6 +15,7 @@
         "height": 800,
         "minWidth": 1024,
         "minHeight": 768,
+        "decorations": false,
         "resizable": true
       }
     ],
@@ -24,6 +25,8 @@
   },
   "bundle": {
     "active": false,
-    "icon": []
+    "icon": [
+      "icons/icon.ico"
+    ]
   }
 }

@@ -1,13 +1,13 @@
-import { Play, Settings as SettingsIcon, Square } from "lucide-react";
+import { Minus, Play, Settings as SettingsIcon, Square, X } from "lucide-react";
+import type { ReactNode } from "react";
 import codexLogo from "../assets/codex-logo.svg";
 import { cx } from "../lib/format";
+import { api } from "../lib/tauri";
 import type { AppStatus, Settings } from "../lib/types";
 
 interface RuntimeBarProps {
   busy?: string | null;
-  exportedCount: number;
   message?: string | null;
-  providerSourceCount: number;
   settings: Settings | null;
   status: AppStatus | null;
   onOpenSettings: () => void;
@@ -17,12 +17,10 @@ interface RuntimeBarProps {
 
 export function RuntimeBar({
   busy,
-  exportedCount,
   message,
   onOpenSettings,
   onStart,
   onStop,
-  providerSourceCount,
   settings,
   status,
 }: RuntimeBarProps) {
@@ -32,7 +30,10 @@ export function RuntimeBar({
   const runtimeHint = formatRuntimeHint(message);
 
   return (
-    <header className="flex min-h-[56px] items-center gap-3 overflow-hidden border-b border-line bg-white px-4 shadow-subtle">
+    <header
+      className="flex min-h-[56px] items-center gap-3 overflow-hidden border-b border-line bg-white pl-4 shadow-subtle"
+      data-tauri-drag-region
+    >
       <div className="flex shrink-0 items-center gap-2">
         <span className="grid h-8 w-8 place-items-center rounded-full border border-line bg-white shadow-subtle">
           <img src={codexLogo} alt="" className="h-5 w-5" aria-hidden="true" />
@@ -40,20 +41,7 @@ export function RuntimeBar({
         <span className="truncate text-base font-semibold text-ink">CodexHub</span>
       </div>
 
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-        <FlowChip
-          ok={providerSourceCount > 0}
-          label="Providers"
-          value={`Hub · ${providerSourceCount} sources`}
-          title="External providers feed the Hub catalog used by Codex App"
-        />
-        <FlowChip
-          ok={exportedCount > 0}
-          label="Gateway"
-          value={`Clients · ${exportedCount} exported`}
-          title="Hub models exposed to external OpenAI-compatible clients"
-        />
-      </div>
+      <div className="min-w-0 flex-1" data-tauri-drag-region />
 
       <div className="flex shrink-0 items-center gap-2">
         <div
@@ -87,6 +75,30 @@ export function RuntimeBar({
         >
           <SettingsIcon size={15} />
         </button>
+        <div className="ml-1 flex h-10 items-center border-l border-line pl-1">
+          <WindowControlButton
+            label="Minimize"
+            title="Minimize"
+            onClick={() => void api.windowMinimize()}
+          >
+            <Minus size={14} />
+          </WindowControlButton>
+          <WindowControlButton
+            label="Maximize or restore"
+            title="Maximize or restore"
+            onClick={() => void api.windowToggleMaximize()}
+          >
+            <Square size={12} />
+          </WindowControlButton>
+          <WindowControlButton
+            label="Close to tray"
+            title="Close to tray"
+            danger
+            onClick={() => void api.windowCloseToTray()}
+          >
+            <X size={14} />
+          </WindowControlButton>
+        </div>
       </div>
     </header>
   );
@@ -103,26 +115,31 @@ function formatRuntimeHint(message?: string | null) {
   return message;
 }
 
-function FlowChip({
+function WindowControlButton({
+  children,
+  danger = false,
   label,
-  ok,
+  onClick,
   title,
-  value,
 }: {
+  children: ReactNode;
+  danger?: boolean;
   label: string;
-  ok: boolean;
+  onClick: () => void;
   title: string;
-  value: string;
 }) {
   return (
-    <span
-      className="inline-flex h-8 min-w-0 max-w-[220px] shrink items-center gap-1.5 rounded-full border border-line bg-white px-3 text-xs text-slate-600"
+    <button
+      type="button"
+      className={cx(
+        "focus-ring grid h-9 w-10 place-items-center text-slate-600 hover:bg-panel hover:text-ink",
+        danger && "hover:bg-red-50 hover:text-danger",
+      )}
+      aria-label={label}
       title={title}
+      onClick={onClick}
     >
-      <span className={cx("h-2 w-2 rounded-full", ok ? "bg-ok" : "bg-slate-300")} />
-      <span className="font-semibold text-ink">{label}</span>
-      <span className="text-slate-400">-&gt;</span>
-      <span className="truncate">{value}</span>
-    </span>
+      {children}
+    </button>
   );
 }

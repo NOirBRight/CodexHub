@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { cx } from "./lib/format";
@@ -176,11 +176,6 @@ export default function App() {
     };
   }, [loadGatewayClients, loadRuntime]);
 
-  const providerSourceCount = useMemo(() => {
-    const official = runtime.settings?.include_official_models ? 1 : 0;
-    return official + runtime.providers.filter((provider) => provider.enabled).length;
-  }, [runtime.providers, runtime.settings?.include_official_models]);
-
   const exportedCount = runtime.gatewayStatus?.official_models.length ?? 0;
 
   async function runRuntimeAction(label: string, action: () => Promise<AppStatus>) {
@@ -237,8 +232,6 @@ export default function App() {
     <div className="grid h-screen min-h-[768px] min-w-[1024px] grid-rows-[auto_auto_minmax(0,1fr)] bg-panel text-ink">
       <RuntimeBar
         busy={busy}
-        exportedCount={exportedCount}
-        providerSourceCount={providerSourceCount}
         message={banner}
         settings={runtime.settings}
         status={runtime.status}

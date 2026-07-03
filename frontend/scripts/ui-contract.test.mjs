@@ -7,9 +7,13 @@ const appPath = new URL("../src/App.tsx", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
+const pageToastPath = new URL("../src/components/PageToast.tsx", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
+const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
 const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
+const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
+const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 
 async function readContract() {
   return JSON.parse(await readFile(contractPath, "utf8"));
@@ -22,6 +26,29 @@ test("main navigation exposes only CodexHub and Gateway", async () => {
     contract.tabs.map((tab) => tab.label),
     ["CodexHub", "Gateway"],
   );
+});
+
+test("runtime header removes flow chips and exposes desktop window controls", async () => {
+  const [runtimeSource, tauriSource, tauriConfig] = await Promise.all([
+    readFile(runtimeBarPath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriConfigPath, "utf8"),
+  ]);
+
+  assert.doesNotMatch(runtimeSource, /FlowChip/);
+  assert.doesNotMatch(runtimeSource, /Hub ·|Clients ·/);
+  assert.match(runtimeSource, /data-tauri-drag-region/);
+  assert.match(runtimeSource, /windowMinimize/);
+  assert.match(runtimeSource, /windowToggleMaximize/);
+  assert.match(runtimeSource, /windowCloseToTray/);
+  assert.match(runtimeSource, /Close to tray/);
+  assert.match(tauriSource, /WindowEvent::CloseRequested/);
+  assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
+  assert.match(tauriSource, /Connect Codex to CodexHub/);
+  assert.match(tauriSource, /Restart Codex App/);
+  assert.match(tauriSource, /Get-StartApps/);
+  assert.doesNotMatch(tauriSource, /Restart CodexHub/);
+  assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
 });
 
 test("gateway client rail is limited to the four planned clients", async () => {
@@ -101,6 +128,20 @@ test("gateway client route switching reports completion", async () => {
   assert.ok(gatewaySource.includes("setMessage(`${clientName} switched to ${routeName}`)"));
 });
 
+test("gateway toast uses the shared dismissible page toast", async () => {
+  const [gatewaySource, pageToastSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(pageToastPath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /<PageToast toast=\{toast\} onDismiss=\{dismissToast\} \/>/);
+  assert.match(gatewaySource, /window\.setTimeout\(\(\) => dismissToast\(\), 8000\)/);
+  assert.match(gatewaySource, /<main className="relative grid/);
+  assert.doesNotMatch(gatewaySource, /"fixed bottom-4 left-4/);
+  assert.match(pageToastSource, /"absolute bottom-3 left-3 z-50/);
+  assert.match(pageToastSource, /aria-label="Dismiss notification"/);
+});
+
 test("settings drawer hides non-functional route and endpoint toggles", async () => {
   const drawerSource = await readFile(settingsDrawerPath, "utf8");
 
@@ -120,6 +161,26 @@ test("settings exposes bound client auto-sync instead of catalog auto-sync", asy
   assert.match(drawerSource, /auto_sync_clients/);
   assert.doesNotMatch(drawerSource, /Auto-sync catalog/);
   assert.match(settingsSource, /Auto-sync bound clients/);
+});
+
+test("settings drawer hides the local client key without adapter explainer copy", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+
+  assert.match(drawerSource, /type=\{showClientKey \? "text" : "password"\}/);
+  assert.match(drawerSource, /Show local client key/);
+  assert.match(drawerSource, /Hide local client key/);
+  assert.doesNotMatch(drawerSource, /Client adapters/);
+  assert.doesNotMatch(drawerSource, /partial support/);
+});
+
+test("settings drawer uses switch toggles and exposes history repair as a settings action", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+
+  assert.match(drawerSource, /className="peer sr-only"/);
+  assert.match(drawerSource, /peer-checked:bg-action/);
+  assert.match(drawerSource, /Repair Conversation History/);
+  assert.match(drawerSource, /onClick=\{\(\) => void syncHistory\(\)\}/);
+  assert.doesNotMatch(drawerSource, />\s*Sync history\s*</);
 });
 
 test("gateway client card does not render a disabled fake updater", async () => {
@@ -201,12 +262,16 @@ test("provider discovery preserves missing API key environment variable names", 
 });
 
 test("providers toast is locally anchored, dismissible, and auto-dismisses", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const [providersSource, pageToastSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(pageToastPath, "utf8"),
+  ]);
 
   assert.match(providersSource, /window\.setTimeout\(\(\) => dismissToast\(\), 8000\)/);
-  assert.match(providersSource, /"absolute bottom-3 left-3 z-50/);
-  assert.match(providersSource, /aria-label="Dismiss notification"/);
-  assert.match(providersSource, /animate-spin/);
+  assert.match(providersSource, /<PageToast toast=\{toast\} onDismiss=\{dismissToast\} \/>/);
+  assert.match(pageToastSource, /"absolute bottom-3 left-3 z-50/);
+  assert.match(pageToastSource, /aria-label="Dismiss notification"/);
+  assert.match(pageToastSource, /animate-spin/);
   assert.doesNotMatch(providersSource, /"fixed bottom-4 left-4/);
 });
 
