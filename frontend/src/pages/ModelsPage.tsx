@@ -284,7 +284,7 @@ function ModelGrid({
               <span>{priceLabel(metadataFor?.(model.id) ?? model)}</span>
             </span>
           </span>
-          <span className="grid grid-cols-4 gap-3 text-xs text-slate-600 sm:grid-cols-4">
+          <span className="grid grid-cols-3 gap-3 text-xs text-slate-600 sm:grid-cols-3">
             <ToggleCell
               label="Enabled"
               checked={disabled ? true : model.enabled}
@@ -302,12 +302,6 @@ function ModelGrid({
               checked={model.gateway_exported ?? true}
               disabled={disabled}
               onChange={(checked) => onPatch?.(model.id, { gateway_exported: checked })}
-            />
-            <ToggleCell
-              label="Hidden"
-              checked={model.hidden ?? false}
-              disabled={disabled}
-              onChange={(checked) => onPatch?.(model.id, { hidden: checked })}
             />
           </span>
         </div>

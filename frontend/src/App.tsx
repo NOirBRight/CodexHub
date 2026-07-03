@@ -7,7 +7,10 @@ import contract from "./lib/ui-contract.json";
 import type {
   AppStatus,
   GatewayClientContract,
+  GatewayClientInfo,
   GatewayStatus,
+  GatewayUsageEvent,
+  GatewayUsageSummary,
   Provider,
   Settings,
   TabId,
@@ -20,7 +23,32 @@ type RuntimeSnapshot = {
   settings: Settings | null;
   providers: Provider[];
   gatewayStatus: GatewayStatus | null;
+  gatewayUsageSummary: GatewayUsageSummary | null;
+  gatewayUsageEvents: GatewayUsageEvent[];
+  gatewayClients: GatewayClientInfo[];
 };
+
+type LoadRuntimeOptions = {
+  includeClientVersions?: boolean;
+};
+
+function mergeGatewayClients(
+  previous: GatewayClientInfo[],
+  next: GatewayClientInfo[],
+): GatewayClientInfo[] {
+  const previousById = new Map(previous.map((client) => [client.id, client]));
+  return next.map((client) => {
+    const previousClient = previousById.get(client.id);
+    if (!client.installed) {
+      return { ...client, current_version: null, latest_version: null };
+    }
+    return {
+      ...client,
+      current_version: client.current_version ?? previousClient?.current_version ?? null,
+      latest_version: client.latest_version ?? previousClient?.latest_version ?? null,
+    };
+  });
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
@@ -29,31 +57,70 @@ export default function App() {
     settings: null,
     providers: [],
     gatewayStatus: null,
+    gatewayUsageSummary: null,
+    gatewayUsageEvents: [],
+    gatewayClients: [],
   });
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
 
+  const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
+    try {
+      const clients = await api.listGatewayClients(Boolean(options?.includeClientVersions));
+      setRuntime((current) => ({
+        ...current,
+        gatewayClients: mergeGatewayClients(current.gatewayClients, clients),
+      }));
+    } catch (err) {
+      setBanner(messageFromError(err));
+      throw err;
+    }
+  }, []);
+
   const loadRuntime = useCallback(async () => {
     try {
-      const [statusResult, settingsResult, providersResult, gatewayResult] =
+      const [
+        statusResult,
+        settingsResult,
+        providersResult,
+        gatewayResult,
+        usageSummaryResult,
+        usageEventsResult,
+      ] =
         await Promise.allSettled([
           api.getStatus(),
           api.getSettings(),
           api.getProviders(),
           api.gatewayStatus(),
+          api.gatewayUsageSummary(),
+          api.gatewayUsageEvents(100),
         ]);
 
       setRuntime((current) => ({
+        ...current,
         status: statusResult.status === "fulfilled" ? statusResult.value : current.status,
         settings: settingsResult.status === "fulfilled" ? settingsResult.value : current.settings,
         providers: providersResult.status === "fulfilled" ? providersResult.value : current.providers,
         gatewayStatus: gatewayResult.status === "fulfilled" ? gatewayResult.value : current.gatewayStatus,
+        gatewayUsageSummary:
+          usageSummaryResult.status === "fulfilled"
+            ? usageSummaryResult.value
+            : current.gatewayUsageSummary,
+        gatewayUsageEvents:
+          usageEventsResult.status === "fulfilled"
+            ? usageEventsResult.value
+            : current.gatewayUsageEvents,
       }));
 
-      const rejected = [statusResult, settingsResult, providersResult, gatewayResult].find(
-        (result) => result.status === "rejected",
-      );
+      const rejected = [
+        statusResult,
+        settingsResult,
+        providersResult,
+        gatewayResult,
+        usageSummaryResult,
+        usageEventsResult,
+      ].find((result) => result.status === "rejected");
       if (rejected?.status === "rejected") {
         setBanner(messageFromError(rejected.reason));
       }
@@ -66,43 +133,24 @@ export default function App() {
 
   useEffect(() => {
     void loadRuntime();
+    void loadGatewayClients({ includeClientVersions: true });
     const timer = window.setInterval(() => void loadRuntime(), 5000);
-    return () => window.clearInterval(timer);
-  }, [loadRuntime]);
+    const clientTimer = window.setInterval(
+      () => void loadGatewayClients({ includeClientVersions: true }),
+      12 * 60 * 60 * 1000,
+    );
+    return () => {
+      window.clearInterval(timer);
+      window.clearInterval(clientTimer);
+    };
+  }, [loadGatewayClients, loadRuntime]);
 
   const providerSourceCount = useMemo(() => {
     const official = runtime.settings?.include_official_models ? 1 : 0;
-    return official + runtime.providers.filter((provider) => provider.enabled && !provider.hidden).length;
+    return official + runtime.providers.filter((provider) => provider.enabled).length;
   }, [runtime.providers, runtime.settings?.include_official_models]);
 
   const exportedCount = runtime.gatewayStatus?.official_models.length ?? 0;
-
-  async function switchMode(next: "official" | "custom") {
-    const current = runtime.status?.mode === "custom" ? "custom" : "official";
-    if (current === next) {
-      return;
-    }
-
-    setBusy("switch");
-    try {
-      const settings = runtime.settings ?? (await api.getSettings());
-      const label = next === "custom" ? "Hub" : "Official";
-      const historyLine = settings.auto_sync_history
-        ? "History sync is enabled and will run before the config switch."
-        : "History sync is disabled for this switch.";
-      if (!window.confirm(`Switch Codex to ${label} mode?\n\n${historyLine}`)) {
-        return;
-      }
-      const status = await api.switchMode(next, settings.auto_sync_history);
-      setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
-      setBanner(status.message);
-      await loadRuntime();
-    } catch (err) {
-      setBanner(messageFromError(err));
-    } finally {
-      setBusy(null);
-    }
-  }
 
   async function runRuntimeAction(label: string, action: () => Promise<AppStatus>) {
     setBusy(label);
@@ -153,17 +201,17 @@ export default function App() {
   }
 
   return (
-    <div className="grid h-screen min-h-[620px] grid-rows-[auto_auto_minmax(0,1fr)] bg-panel text-ink">
+    <div className="grid h-screen min-h-[768px] min-w-[1024px] grid-rows-[auto_auto_minmax(0,1fr)] bg-panel text-ink">
       <RuntimeBar
         busy={busy}
         exportedCount={exportedCount}
         providerSourceCount={providerSourceCount}
+        message={banner}
         settings={runtime.settings}
         status={runtime.status}
         onOpenSettings={() => setSettingsOpen(true)}
         onStart={() => void runRuntimeAction("start", api.startProxy)}
         onStop={() => void runRuntimeAction("stop", api.stopProxy)}
-        onSwitchMode={(mode) => void switchMode(mode)}
       />
 
       <nav className="flex min-h-[45px] items-center gap-1 border-b border-line bg-white px-4">
@@ -193,24 +241,25 @@ export default function App() {
         </span>
       </nav>
 
-      <div className="min-h-0 overflow-auto p-4">
-        {banner && (
-          <div className="mb-3 rounded-md border border-line bg-white px-3 py-2 text-sm text-slate-700 shadow-subtle">
-            {banner}
-          </div>
-        )}
+      <div className="min-h-0 overflow-hidden p-4">
         {activeTab === "codexhub" ? (
-          <ProvidersPage />
+          <ProvidersPage gatewayStatus={runtime.gatewayStatus} />
         ) : (
           <GatewayPage
             settings={runtime.settings}
+            providers={runtime.providers}
             status={runtime.gatewayStatus}
+            usageSummary={runtime.gatewayUsageSummary}
+            usageEvents={runtime.gatewayUsageEvents}
+            clientInfos={runtime.gatewayClients}
             busy={busy}
             pending={contract.pendingBackend}
             clients={contract.gatewayClients as GatewayClientContract[]}
             onApplySettings={saveSettings}
-            onRefresh={loadRuntime}
+            onRefreshClients={loadGatewayClients}
             onRestartProxy={() => runRuntimeAction("restart", api.restartProxy)}
+            onStartProxy={() => runRuntimeAction("start", api.startProxy)}
+            onStopProxy={() => runRuntimeAction("stop", api.stopProxy)}
           />
         )}
       </div>

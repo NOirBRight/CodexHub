@@ -35,12 +35,29 @@ input:disabled {
   opacity: 0.55;
 }
 
+[data-sortable-handle="true"],
+[data-sortable-handle="true"] * {
+  cursor: grab !important;
+  touch-action: none;
+  user-select: none;
+}
+
+html.sortable-list-dragging,
+html.sortable-list-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
 .focus-ring {
   @apply outline-none ring-action/30 focus-visible:ring-2 focus-visible:ring-offset-2;
 }
 
 .field {
   @apply focus-ring h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink shadow-subtle placeholder:text-slate-400;
+}
+
+.field-compact {
+  @apply h-9;
 }
 
 .mini-button {

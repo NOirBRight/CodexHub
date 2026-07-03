@@ -4,7 +4,6 @@ export interface Model {
   upstream_model?: string | null;
   source_kind?: string | null;
   locked?: boolean;
-  hidden?: boolean;
   codex_enabled?: boolean;
   gateway_exported?: boolean;
   context_window?: number | null;
@@ -45,7 +44,6 @@ export interface Provider {
   display_prefix?: string | null;
   sort_order?: number | null;
   enabled: boolean;
-  hidden?: boolean;
   locked?: boolean;
   models: Model[];
 }
@@ -264,6 +262,9 @@ export interface Settings {
   gateway_enable_models: boolean;
   gateway_enable_responses: boolean;
   gateway_enable_chat_completions: boolean;
+  gateway_request_timeout_seconds: number;
+  gateway_fast_model_variants: string[];
+  official_disabled_models: string[];
   official_model_sort_order: string[];
   official_provider_sort_order: number;
   proxy_port: number;

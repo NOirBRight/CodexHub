@@ -53,7 +53,6 @@ export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
         previous?.default_reasoning_level ?? model.default_reasoning_level ?? null,
       source_kind: previous?.source_kind ?? model.source_kind ?? null,
       locked: previous?.locked ?? model.locked ?? false,
-      hidden: previous?.hidden ?? model.hidden ?? false,
       codex_enabled: previous?.codex_enabled ?? model.codex_enabled ?? true,
       gateway_exported: previous?.gateway_exported ?? model.gateway_exported ?? true,
       pricing: previous?.pricing ?? model.pricing ?? null,

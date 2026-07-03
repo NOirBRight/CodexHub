@@ -96,7 +96,11 @@ export const api = {
       clientKind,
       model: model ?? null,
     }),
-  listGatewayClients: () => call<GatewayClientInfo[]>("list_gateway_clients"),
+  listGatewayClients: (includeVersions = false) =>
+    call<GatewayClientInfo[]>("list_gateway_clients", {
+      includeVersions,
+      include_versions: includeVersions,
+    }),
   previewGatewayClientConfig: (clientId: string, model?: string | null) =>
     call<GatewayClientConfigPreview>("preview_gateway_client_config", {
       clientId,

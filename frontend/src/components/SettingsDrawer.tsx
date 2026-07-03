@@ -171,8 +171,9 @@ export function SettingsDrawer({
               </div>
               <PendingPanel
                 compact
+                label="partial support"
                 title="Client adapters"
-                message="Client detection, managed writes, restore, and version checks are exposed as UI placeholders until backend commands land."
+                message="OpenCode, ZCode, Pi, and OMP can switch between official routing and CodexHub-managed Gateway config with backups where native files are overwritten."
               />
             </section>
           </div>

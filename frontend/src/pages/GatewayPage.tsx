@@ -1,4 +1,4 @@
-import { RefreshCcw, Save } from "lucide-react";
+import { Copy, Eye, EyeOff, Play, RefreshCcw, Save, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
@@ -6,8 +6,16 @@ import { PendingPanel } from "../components/PendingPanel";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { StatusCard } from "../components/StatusCard";
 import { cx } from "../lib/format";
-import { messageFromError } from "../lib/tauri";
-import type { GatewayClientContract, GatewayStatus, Settings } from "../lib/types";
+import { api, messageFromError } from "../lib/tauri";
+import type {
+  GatewayClientContract,
+  GatewayClientInfo,
+  GatewayStatus,
+  GatewayUsageEvent,
+  GatewayUsageSummary,
+  Provider,
+  Settings,
+} from "../lib/types";
 
 interface GatewayPageProps {
   busy?: string | null;
@@ -18,43 +26,65 @@ interface GatewayPageProps {
     clients: string;
     models: string;
   };
+  providers: Provider[];
   settings: Settings | null;
   status: GatewayStatus | null;
+  usageEvents: GatewayUsageEvent[];
+  usageSummary: GatewayUsageSummary | null;
+  clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<void>;
-  onRefresh: () => Promise<void>;
+  onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
   onRestartProxy: () => Promise<void>;
+  onStartProxy: () => Promise<void>;
+  onStopProxy: () => Promise<void>;
 }
 
 export function GatewayPage({
   busy,
   clients,
   onApplySettings,
-  onRefresh,
+  onRefreshClients,
   onRestartProxy,
+  onStartProxy,
+  onStopProxy,
   pending,
+  providers,
   settings,
   status,
+  usageEvents,
+  usageSummary,
+  clientInfos,
 }: GatewayPageProps) {
   const [draftPort, setDraftPort] = useState(settings?.proxy_port ?? status?.port ?? 9099);
   const [draftKey, setDraftKey] = useState(settings?.gateway_client_key ?? "");
+  const [draftTimeout, setDraftTimeout] = useState(settings?.gateway_request_timeout_seconds ?? 120);
+  const [clientBusy, setClientBusy] = useState<string | null>(null);
+  const [clientRefreshBusy, setClientRefreshBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showDraftKey, setShowDraftKey] = useState(false);
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
     setDraftKey(settings?.gateway_client_key ?? "");
+    setDraftTimeout(settings?.gateway_request_timeout_seconds ?? 120);
   }, [settings, status?.port]);
 
   const endpoints = useMemo(
     () =>
       status
         ? [
-            { label: "Models", meta: "catalog", value: status.endpoints.models },
-            { label: "Responses", meta: "native", value: status.endpoints.responses },
-            { label: "Chat", meta: "fallback", value: status.endpoints.chat_completions },
+            { label: "Models", meta: "GET /v1/models", value: status.endpoints.models },
+            { label: "Completions", meta: "POST /v1/chat/completions", value: status.endpoints.chat_completions },
+            { label: "Responses", meta: "POST /v1/responses", value: status.endpoints.responses },
           ]
         : [],
     [status],
+  );
+  const defaultModel = status?.official_models[0]?.id ?? null;
+  const clientInfoById = useMemo(
+    () => new Map(clientInfos.map((client) => [client.id, client])),
+    [clientInfos],
   );
 
   async function copyText(label: string, value: string) {
@@ -73,142 +103,238 @@ export function GatewayPage({
       return;
     }
     const cleanPort = Number.isFinite(draftPort) ? draftPort : settings.proxy_port;
+    const cleanTimeout = Number.isFinite(draftTimeout)
+      ? draftTimeout
+      : settings.gateway_request_timeout_seconds;
     const next = {
       ...settings,
       gateway_client_key: draftKey,
       proxy_port: Math.min(65535, Math.max(1024, cleanPort)),
+      gateway_request_timeout_seconds: Math.min(600, Math.max(5, cleanTimeout)),
     };
     const portChanged = next.proxy_port !== settings.proxy_port;
+    const timeoutChanged = next.gateway_request_timeout_seconds !== settings.gateway_request_timeout_seconds;
+    const keyChanged = next.gateway_client_key !== settings.gateway_client_key;
+    const restartRequired = running && (portChanged || timeoutChanged);
 
     try {
       await onApplySettings(next);
-      if (portChanged) {
+      if (restartRequired) {
         await onRestartProxy();
       }
-      setMessage(portChanged ? "Gateway settings saved and runtime restarted" : "Gateway settings saved");
+      setMessage(
+        restartRequired
+          ? "Gateway settings saved and runtime restarted"
+          : keyChanged && !portChanged && !timeoutChanged
+            ? "API key saved; Gateway restart not required"
+            : "Gateway settings saved",
+      );
       setError(null);
     } catch (err) {
       setError(messageFromError(err));
     }
   }
 
+  function regenerateClientKey() {
+    const bytes = new Uint8Array(18);
+    window.crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    setDraftKey(`codexhub-${token}`);
+    setShowDraftKey(false);
+    setMessage("New API key generated; apply settings to save. Gateway restart is not required.");
+    setError(null);
+  }
+
+  async function switchClientMode(clientId: string, mode: "official" | "hub") {
+    setClientBusy(`${clientId}:switch`);
+    try {
+      await api.switchGatewayClientRoute(clientId, mode, defaultModel);
+      setMessage(null);
+      setError(null);
+      await onRefreshClients();
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setClientBusy(null);
+    }
+  }
+
+  async function refreshGatewayClients() {
+    setClientRefreshBusy(true);
+    try {
+      await onRefreshClients({ includeClientVersions: true });
+      setMessage("Gateway clients refreshed");
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setClientRefreshBusy(false);
+    }
+  }
+
   const running = status?.proxy_running ?? false;
   const authPresent = Boolean(status?.codex_auth.logged_in && status.codex_auth.account_id_present);
-  const refreshState = status?.codex_auth.token_refresh_status ?? "unknown";
   const bindAddress = `${status?.host ?? settings?.gateway_bind_address ?? "127.0.0.1"}:${status?.port ?? settings?.proxy_port ?? 9099}`;
+  const actionableDiagnostics = status?.diagnostics.filter((item) => item.level !== "ok") ?? [];
+  const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
+
+  async function toggleRuntime() {
+    if (running) {
+      await onStopProxy();
+      return;
+    }
+    await onStartProxy();
+  }
 
   return (
-    <main className="grid h-full min-h-0 min-w-[980px] grid-cols-[minmax(0,1fr)_390px] gap-4">
-      <section className="grid min-h-0 gap-4">
-        <section className="grid gap-4 rounded-md border border-line bg-white p-5 shadow-subtle">
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.8fr)] xl:items-start">
-            <div className="grid gap-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
+    <main className="grid h-full min-h-0 min-w-[1200px] grid-cols-[minmax(0,1fr)_390px] gap-4">
+      <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
+        <section className="grid gap-3 rounded-md border border-line bg-white p-3 shadow-subtle">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-stretch gap-3">
+            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3 rounded-md border border-line bg-panel p-3">
+              <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
-                    Local OpenAI-compatible runtime
-                  </div>
-                  <h2 className="mt-1 text-xl font-semibold text-ink">For other Agent Clients</h2>
-                  <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-                    CodexHub exposes the selected Hub catalog through local <code className="font-mono">/v1</code> endpoints while official models keep using this machine&apos;s Codex auth.
+                  <h2 className="text-base font-semibold text-ink">Local OpenAI-compatible endpoint</h2>
+                  <p className="mt-1 max-w-xl text-xs leading-4 text-slate-600">
+                    Set the local API key, port, and timeout. Clients discover models from <code className="font-mono">GET /v1/models</code> on the Base URL.
                   </p>
                 </div>
                 <button
                   type="button"
-                  className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100"
-                  disabled={busy === "load"}
-                  onClick={() => void onRefresh()}
+                  className={cx(
+                    "focus-ring inline-flex h-7 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold",
+                    running
+                      ? "border border-line bg-white text-slate-700 hover:bg-slate-100"
+                      : "bg-ink text-white hover:bg-slate-800",
+                  )}
+                  disabled={runtimeActionBusy || busy === "load"}
+                  onClick={() => void toggleRuntime()}
                 >
-                  <RefreshCcw size={15} />
-                  Refresh
+                  {running ? <Square size={13} /> : <Play size={14} />}
+                  {running ? "Stop" : "Start"}
                 </button>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <StatusCard
-                  label="Service"
-                  value={running ? "Running" : "Stopped"}
-                  detail={status?.build ?? "Build unknown"}
-                  tone={running ? "ok" : "danger"}
-                />
-                <StatusCard
-                  label="Bind"
-                  value={bindAddress}
-                  detail="local only"
-                  tone={running ? "ok" : "idle"}
-                />
-                <StatusCard
-                  label="Auth"
-                  value={authPresent ? "Present" : "Missing"}
-                  detail={status?.codex_auth.issue ?? "Account id checked without exposing tokens"}
-                  tone={authPresent ? "ok" : "warn"}
-                />
-                <StatusCard
-                  label="Refresh"
-                  value={refreshState}
-                  detail={status?.codex_auth.last_refresh ?? "No timestamp exposed"}
-                  tone={refreshState.includes("fail") ? "warn" : "ok"}
-                />
+              <div className="grid h-full content-start gap-2 rounded-md border border-line bg-white p-3">
+                <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                  <span>API Key</span>
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+                    <div className="relative min-w-0">
+                      <input
+                        className="focus-ring h-8 w-full rounded-md border border-line bg-white px-2.5 pr-9 text-sm font-normal text-ink shadow-subtle"
+                        type={showDraftKey ? "text" : "password"}
+                        autoComplete="off"
+                        value={draftKey}
+                        placeholder="empty"
+                        onChange={(event) => setDraftKey(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-slate-500 hover:bg-panel hover:text-ink"
+                        aria-label={showDraftKey ? "Hide API key" : "Show API key"}
+                        onClick={() => setShowDraftKey((show) => !show)}
+                      >
+                        {showDraftKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                      disabled={!draftKey}
+                      onClick={() => void copyText("API key", draftKey)}
+                    >
+                      <Copy size={14} />
+                      Copy
+                    </button>
+                    <button
+                      type="button"
+                      className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                      onClick={regenerateClientKey}
+                    >
+                      <RefreshCcw size={14} />
+                      Regenerate
+                    </button>
+                  </div>
+                </label>
+                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
+                  <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                    <span>Listen Port</span>
+                    <input
+                      className="focus-ring h-8 w-full rounded-md border border-line bg-white px-2.5 text-sm font-normal text-ink shadow-subtle"
+                      type="number"
+                      min={1024}
+                      max={65535}
+                      value={draftPort}
+                      onChange={(event) => setDraftPort(Number(event.target.value))}
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                    <span>Request Timeout</span>
+                    <input
+                      className="focus-ring h-8 w-full rounded-md border border-line bg-white px-2.5 text-sm font-normal text-ink shadow-subtle"
+                      type="number"
+                      min={5}
+                      max={600}
+                      value={draftTimeout}
+                      onChange={(event) => setDraftTimeout(Number(event.target.value))}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md bg-ink px-3 text-xs font-semibold text-white disabled:bg-slate-300"
+                    disabled={Boolean(busy) || !settings}
+                    onClick={() => void applyGatewaySettings()}
+                  >
+                    <Save size={14} />
+                    Apply Settings
+                  </button>
+                </div>
               </div>
             </div>
 
-            <div className="grid gap-3 rounded-md border border-line bg-panel p-4">
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_120px_auto] lg:items-end">
-                <label className="grid gap-1 text-xs font-semibold text-slate-600">
-                  API Key
-                  <input
-                    className="field h-9 bg-white font-normal"
-                    type="text"
-                    autoComplete="off"
-                    value={draftKey}
-                    placeholder="empty"
-                    onChange={(event) => setDraftKey(event.target.value)}
-                  />
-                </label>
-                <label className="grid gap-1 text-xs font-semibold text-slate-600">
-                  Port
-                  <input
-                    className="field h-9 bg-white font-normal"
-                    type="number"
-                    min={1024}
-                    max={65535}
-                    value={draftPort}
-                    onChange={(event) => setDraftPort(Number(event.target.value))}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-semibold text-white disabled:bg-slate-300"
-                  disabled={Boolean(busy) || !settings}
-                  onClick={() => void applyGatewaySettings()}
-                >
-                  <Save size={15} />
-                  Apply
-                </button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span className="rounded-sm border border-line bg-white px-2 py-1">local only</span>
-                <span className="rounded-sm border border-line bg-white px-2 py-1">{pending.label}</span>
-                <span>Client key is a local compatibility field, not an upstream key.</span>
+            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-md border border-line bg-panel p-3">
+              <div className="grid gap-2 sm:grid-cols-3">
+                <StatusCard
+                  compact
+                  label="Gateway"
+                  value={running ? "Running" : "Stopped"}
+                  tone={running ? "ok" : "danger"}
+                />
+                <StatusCard
+                  compact
+                  label="Bind"
+                  value={bindAddress}
+                  tone={running ? "ok" : "idle"}
+                />
+                <StatusCard
+                  compact
+                  label="OpenAI Auth"
+                  value={authPresent ? "Present" : "Missing"}
+                  tone={authPresent ? "ok" : "warn"}
+                />
               </div>
 
-              <div className="grid gap-2">
+              <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
                 <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-ink">Published endpoints</h3>
-                  <span className="text-xs text-slate-500">OpenAI-compatible local routes</span>
+                  <h3 className="text-sm font-semibold text-ink">Copy connection</h3>
+                  <span className="text-xs text-slate-500">OpenAI-compatible routes</span>
                 </div>
                 {endpoints.length > 0 ? (
-                  endpoints.map((endpoint) => (
-                    <EndpointRow
-                      key={endpoint.label}
-                      label={endpoint.label}
-                      meta={endpoint.meta}
-                      value={endpoint.value}
-                      onCopy={() => void copyText(endpoint.label, endpoint.value)}
-                    />
-                  ))
+                  <div className="grid h-full grid-rows-3 gap-2">
+                    {endpoints.map((endpoint) => (
+                      <EndpointRow
+                        key={endpoint.label}
+                        compact
+                        label={endpoint.label}
+                        meta={endpoint.meta}
+                        value={endpoint.value}
+                        onCopy={() => void copyText(endpoint.label, endpoint.value)}
+                      />
+                    ))}
+                  </div>
                 ) : (
                   <PendingPanel
+                    compact
                     title="Gateway status"
                     message="Runtime status is still loading; endpoints will appear from gatewayStatus once available."
                   />
@@ -217,13 +343,13 @@ export function GatewayPage({
             </div>
           </div>
 
-          {status?.diagnostics.length ? (
-            <div className="grid gap-2 border-t border-line pt-4">
-              {status.diagnostics.map((item) => (
+          {actionableDiagnostics.length ? (
+            <div className="flex flex-wrap gap-2 border-t border-line pt-2">
+              {actionableDiagnostics.map((item) => (
                 <div
                   key={`${item.category}-${item.message}`}
                   className={cx(
-                    "rounded-md px-3 py-2 text-sm",
+                    "rounded-md px-2 py-1 text-xs",
                     item.level === "error"
                       ? "bg-red-50 text-danger"
                       : item.level === "warning"
@@ -238,32 +364,56 @@ export function GatewayPage({
           ) : null}
         </section>
 
-        <StackedUsageChartShell pendingMessage={pending.usage} />
+        <StackedUsageChartShell
+          events={usageEvents}
+          pendingMessage={pending.usage}
+          providers={providers}
+          summary={usageSummary}
+        />
 
         {(message || error) && (
-          <div className="rounded-md border border-line bg-white px-3 py-2 text-sm shadow-subtle">
-            {error ? <span className="text-danger">{error}</span> : <span>{message}</span>}
+          <div
+            className={cx(
+              "fixed bottom-4 left-4 z-50 max-w-[420px] rounded-md border bg-white px-3 py-2 text-sm shadow-xl",
+              error ? "border-danger/30 text-danger" : "border-line text-ink",
+            )}
+          >
+            {error || message}
           </div>
         )}
       </section>
 
       <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md border border-line bg-white shadow-subtle">
-        <div className="border-b border-line p-5">
-          <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
-            Gateway settings
+        <div className="border-b border-line p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-500">
+              Gateway clients
+            </div>
+            <button
+              type="button"
+              className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-panel text-slate-600 hover:bg-slate-100 disabled:text-slate-300"
+              disabled={clientRefreshBusy}
+              aria-label="Refresh gateway clients"
+              title="Refresh installed clients and version checks"
+              onClick={() => void refreshGatewayClients()}
+            >
+              <RefreshCcw size={14} className={clientRefreshBusy ? "animate-spin" : undefined} />
+            </button>
           </div>
-          <h2 className="mt-1 text-base font-semibold text-ink">Client routing</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-600">
-            Choose whether each client keeps its official config or routes through CodexHub Gateway once the backend client manager is available.
-          </p>
+          <div className="mt-1 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-ink">Client routing</h2>
+            <span className="text-xs text-slate-500">Official / CodexHub</span>
+          </div>
         </div>
-        <div className="min-h-0 overflow-auto bg-panel p-4">
-          <div className="grid gap-3">
+        <div className="min-h-0 overflow-auto bg-panel p-3">
+          <div className="grid min-h-full auto-rows-fr gap-2">
             {clients.map((client) => (
               <GatewayClientCard
                 key={client.id}
                 client={client}
-                pendingMessage={pending.clients}
+                info={clientInfoById.get(client.id)}
+                busy={Boolean(clientBusy?.startsWith(client.id))}
+                onSwitchMode={(mode) => void switchClientMode(client.id, mode)}
               />
             ))}
           </div>
