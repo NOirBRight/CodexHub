@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,9 +23,10 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from catalog import canonical_model_id, load_catalog_models, load_policy, should_include_model
-from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, sync_catalog
+from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias
+import proxy_telemetry
 
 try:
     import zstandard
@@ -231,8 +233,18 @@ HOP_BY_HOP_RESPONSE_HEADERS = {
 }
 
 PROXY_DIR = Path(__file__).resolve().parent
-PROXY_EVENT_LOG_PATH = PROXY_DIR / "codex-proxy-events.jsonl"
-PROXY_TEXT_LOG_PATH = PROXY_DIR / "codex-proxy.log"
+def _runtime_codex_dir() -> Path:
+    codex_home_env = os.environ.get("CODEX_HOME")
+    if codex_home_env:
+        return Path(codex_home_env)
+    return Path.home() / ".codex"
+
+
+RUNTIME_CODEX_DIR = _runtime_codex_dir()
+RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
+PROXY_TELEMETRY_DB_PATH = proxy_telemetry.telemetry_db_path(RUNTIME_CODEX_DIR)
+PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
@@ -263,16 +275,28 @@ def official_upstream_open_attempts() -> int:
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
-    payload = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "event": event,
-        **fields,
-    }
+    payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
     line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     try:
         with PROXY_EVENT_LOG_LOCK:
+            PROXY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with PROXY_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+                handle.flush()
+                try:
+                    proxy_telemetry.write_event_to_sqlite(PROXY_TELEMETRY_DB_PATH, payload)
+                except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+                    failure_payload = proxy_telemetry.prepare_event_payload(
+                        "telemetry_sqlite_write_failed",
+                        {
+                            "request_id": fields.get("request_id"),
+                            "error": type(exc).__name__,
+                            "detail": str(exc)[:240],
+                        },
+                        RUNTIME_CODEX_DIR,
+                    )
+                    handle.write(json.dumps(failure_payload, ensure_ascii=True, separators=(",", ":")) + "\n")
+                    logger.warning("failed to write proxy telemetry sqlite: %s", type(exc).__name__)
     except OSError as exc:
         logger.warning("failed to write proxy event log: %s", type(exc).__name__)
 
@@ -409,12 +433,16 @@ def ollama_cloud_base_url() -> str:
 
 
 def generated_catalog_slugs(path: Path = GENERATED_CATALOG_PATH) -> set[str]:
-    return {canonical_model_id(str(model["slug"])) for model in load_catalog_models(path) if model.get("slug")}
+    return {
+        canonical_model_id(str(model["slug"]))
+        for model in load_catalog_models(existing_generated_catalog_path(path))
+        if model.get("slug")
+    }
 
 
 def generated_catalog_by_slug(path: Path = GENERATED_CATALOG_PATH) -> dict[str, dict[str, Any]]:
     models: dict[str, dict[str, Any]] = {}
-    for model in load_catalog_models(path):
+    for model in load_catalog_models(existing_generated_catalog_path(path)):
         slug = canonical_model_id(str(model.get("slug", "")))
         if slug:
             models[slug] = model
@@ -2963,11 +2991,14 @@ def request_context_from_headers(headers: Mapping[str, str] | Any) -> dict[str, 
         "x-codex-thread-id": "thread_id",
         "x-codex-session-id": "session_id",
         "x-codex-window-id": "window_id",
+        "x-codex-client-id": "client_id",
     }
     for header_name, field_name in direct_headers.items():
         value = _get_header(headers, header_name)
         if value:
             context[field_name] = value[:200]
+            if field_name == "client_id":
+                context["client_inference_source"] = "header"
 
     for header_name in ("x-codex-client-metadata", "x-codex-metadata"):
         value = _get_header(headers, header_name)
@@ -2979,11 +3010,50 @@ def request_context_from_headers(headers: Mapping[str, str] | Any) -> dict[str, 
             continue
         if not isinstance(metadata, dict):
             continue
-        for key in ("session_id", "thread_id", "turn_id", "window_id", "request_kind", "thread_source"):
+        for key in (
+            "client_id",
+            "session_id",
+            "thread_id",
+            "turn_id",
+            "window_id",
+            "request_kind",
+            "thread_source",
+        ):
             item = metadata.get(key)
             if isinstance(item, str) and item and key not in context:
                 context[key] = item[:200]
+                if key == "client_id":
+                    context["client_inference_source"] = "metadata"
+    user_agent = _get_header(headers, "User-Agent")
+    if user_agent:
+        context["user_agent_hash"] = proxy_telemetry.telemetry_hmac(
+            RUNTIME_CODEX_DIR,
+            b"user-agent",
+            user_agent[:500].encode("utf-8", errors="ignore"),
+        )
+    if "client_id" not in context:
+        inferred = _infer_client_id(user_agent)
+        if inferred:
+            context["client_id"] = inferred
+            context["client_inference_source"] = "user_agent"
+    context.setdefault("client_id", "unknown")
+    context.setdefault("client_inference_source", "unknown")
     return context
+
+
+def _infer_client_id(user_agent: str | None) -> str | None:
+    if not user_agent:
+        return None
+    value = user_agent.lower()
+    if "opencode" in value:
+        return "opencode"
+    if "zcode" in value:
+        return "zcode"
+    if "omp" in value:
+        return "omp"
+    if "codex" in value:
+        return "codex-app"
+    return None
 
 
 def _is_event_stream(headers: Mapping[str, str] | Any) -> bool:
@@ -3087,9 +3157,10 @@ def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("catalog sync failed before /v1/models: %s", type(exc).__name__)
 
-    if not GENERATED_CATALOG_PATH.exists():
+    catalog_path = existing_generated_catalog_path()
+    if not catalog_path.exists():
         return {"models": []}
-    return json.loads(GENERATED_CATALOG_PATH.read_text(encoding="utf-8-sig"))
+    return json.loads(catalog_path.read_text(encoding="utf-8-sig"))
 
 
 def _json_response_bytes(payload: dict[str, Any]) -> bytes:
@@ -3228,27 +3299,39 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream = choose_upstream(model) if model else official_upstream()
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
+            model_canonical = canonical_model_id(model) if model else None
+            request_observability = proxy_telemetry.enrich_request_observability(
+                body=body,
+                codex_home=RUNTIME_CODEX_DIR,
+                upstream=upstream,
+            )
             write_proxy_event(
                 "request_start",
                 request_id=request_id,
                 path=self.path,
                 method="POST",
-                model=canonical_model_id(model) if model else None,
+                model=model_canonical,
+                model_requested=model,
+                model_canonical=model_canonical,
                 upstream=upstream_name,
+                provider_id=upstream_name,
                 upstream_format=upstream_format,
                 route_reason=route_reason,
+                route_mode="official" if upstream_name == "official" else "codexhub",
                 inbound_format=inbound_format,
+                is_stream=caller_stream,
                 content_length=content_length,
                 decoded_content_length=len(body) if content_decoded else None,
                 content_type=content_type[:120] if content_type else None,
                 content_encoding=content_encoding[:80] if content_encoding else None,
                 content_decoded=content_decoded,
                 decode_error=decode_error[:160] if decode_error else None,
+                **request_observability,
                 **request_context,
             )
             adapter_event_context = {
                 "request_id": request_id,
-                "model": canonical_model_id(model) if model else None,
+                "model": model_canonical,
                 **request_context,
             }
             usage_capture: dict[str, Any] = {}
@@ -3270,7 +3353,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response,
                     upstream_name,
                     request_id=request_id,
-                    model=canonical_model_id(model) if model else None,
+                    model=model_canonical,
                     upstream_format=upstream_format,
                     inbound_format=inbound_format,
                     caller_stream=caller_stream,
@@ -3281,13 +3364,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "request_complete",
                 request_id=request_id,
                 method="POST",
-                model=canonical_model_id(model) if model else None,
+                model=model_canonical,
+                model_requested=model,
+                model_canonical=model_canonical,
                 upstream=upstream_name,
+                provider_id=upstream_name,
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 route_reason=route_reason,
+                route_mode="official" if upstream_name == "official" else "codexhub",
+                is_stream=caller_stream,
                 status=status,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_observability,
                 **usage_capture,
                 **request_context,
             )
@@ -3765,6 +3854,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str, port: int) -> None:
+    PROXY_TEXT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
