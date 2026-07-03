@@ -1,9 +1,11 @@
 import io
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from urllib.error import URLError
 
+import codex_proxy
 from codex_proxy import (
     CodexProxyHandler,
     _chat_completions_request_to_responses_body,
@@ -523,6 +525,149 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         written = b"".join(handler.wfile.writes)
         result = json.loads(written)
         self.assertEqual(result["choices"][0]["message"]["content"], "Recovered")
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_provider_scoped_chat_completions_routes_short_model(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "model": "glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://ark.example.test/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2")
+        self.assertIn("messages", sent_payload)
+        self.assertNotIn("input", sent_payload)
+
+        written = b"".join(handler.wfile.writes)
+        result = json.loads(written)
+        self.assertEqual(result["object"], "chat.completion")
+        self.assertEqual(result["choices"][0]["message"]["content"], "Hi")
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_provider_scoped_chat_completions_requires_model(self):
+        body = json.dumps({
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+
+        with patch("codex_proxy.urlopen") as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        mock_urlopen.assert_not_called()
+        written = b"".join(handler.wfile.writes)
+        result = json.loads(written)
+        self.assertIn("model is required", result["error"])
+        self.assertEqual(handler._fake.status, 400)
+
+    def test_provider_scoped_chat_completions_routes_slash_model_as_provider_relative(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "openrouter/anthropic/claude-sonnet-4",
+            "provider_alias": "openrouter",
+            "upstream_name": "openrouter",
+            "display_prefix": "OpenRouter",
+            "base_url": "https://openrouter.example.test/v1",
+            "api_key": "openrouter-test-token",
+            "upstream_model": "anthropic/claude-sonnet-4",
+            "upstream_format": "chat_completions",
+            "priority_base": 250,
+            "context_window": 200000,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "anthropic/claude-sonnet-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/openrouter/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "model": "anthropic/claude-sonnet-4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models
+                    + ("openrouter/anthropic/claude-sonnet-4",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://openrouter.example.test/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "anthropic/claude-sonnet-4")
         self.assertEqual(handler._fake.status, 200)
 
     def test_post_chat_completions_streaming_converts_responses_sse_to_chat_sse(self):

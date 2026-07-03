@@ -104,6 +104,30 @@ pub struct GatewayModel {
     pub context_window: u32,
 }
 
+#[derive(Debug, Clone)]
+struct GatewayClientProviderGroups {
+    default_provider_id: String,
+    default_model_id: String,
+    default_selector: String,
+    providers: Vec<GatewayClientProviderGroup>,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayClientProviderGroup {
+    client_provider_id: String,
+    display_name: String,
+    base_url: String,
+    chat_completions_path: String,
+    models: Vec<GatewayClientProviderModel>,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayClientProviderModel {
+    id: String,
+    display_name: String,
+    context_window: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayUsageSummary {
     pub requests: u64,
@@ -1410,6 +1434,255 @@ fn gateway_client_models(
         );
     }
     Ok(output)
+}
+
+fn split_gateway_model_id(model_id: &str) -> (String, String) {
+    let model_id = model_id.trim();
+    if let Some((provider_id, short_id)) = model_id.split_once('/') {
+        let provider_id = provider_id.trim();
+        let short_id = short_id.trim();
+        if !provider_id.is_empty() && !short_id.is_empty() {
+            return (provider_id.to_string(), short_id.to_string());
+        }
+    }
+    ("ollama-cloud".to_string(), model_id.to_string())
+}
+
+fn codexhub_client_provider_id(provider_id: &str) -> String {
+    let suffix = provider_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if suffix.is_empty() {
+        "codexhub-provider".to_string()
+    } else {
+        format!("codexhub-{suffix}")
+    }
+}
+
+fn is_codexhub_client_provider_id(provider_id: &str) -> bool {
+    provider_id == "codexhub" || provider_id.starts_with("codexhub-")
+}
+
+fn is_builtin_codexhub_client_provider_id(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        "codexhub"
+            | "codexhub-openai"
+            | "codexhub-ollama-cloud"
+            | "codexhub-minimax-cn"
+            | "codexhub-volc"
+            | "codexhub-xunfei"
+    )
+}
+
+fn is_recognized_codexhub_client_provider_id(provider_id: &str) -> bool {
+    if is_builtin_codexhub_client_provider_id(provider_id) {
+        return true;
+    }
+    config::get_providers().ok().is_some_and(|providers| {
+        providers
+            .iter()
+            .any(|provider| codexhub_client_provider_id(&provider.id) == provider_id)
+    })
+}
+
+fn selector_provider_id(selector: &str) -> Option<&str> {
+    selector.split_once('/').map(|(provider_id, _)| provider_id)
+}
+
+fn is_codexhub_client_model_selector(model: &str) -> bool {
+    selector_provider_id(model).is_some_and(is_recognized_codexhub_client_provider_id)
+}
+
+fn is_local_gateway_url(url: &str) -> bool {
+    let value = url.trim().trim_matches('"').trim_matches('\'');
+    value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:")
+}
+
+fn provider_entry_base_url(entry: &Value) -> Option<&str> {
+    entry
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .or_else(|| entry.pointer("/options/baseURL").and_then(Value::as_str))
+        .or_else(|| entry.pointer("/endpoints/baseURL").and_then(Value::as_str))
+}
+
+fn provider_entry_has_gateway_path(entry: &Value) -> bool {
+    provider_entry_base_url(entry).is_some_and(|url| {
+        let url = url.trim_end_matches('/');
+        url.contains("/v1/providers/") || url.ends_with("/v1")
+    }) || entry
+        .pointer("/endpoints/paths/openai-compatible")
+        .and_then(Value::as_str)
+        .is_some_and(|path| path == "/v1/chat/completions" || path.starts_with("/v1/providers/"))
+}
+
+fn provider_entry_has_codexhub_name(entry: &Value) -> bool {
+    entry
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name == "CodexHub Gateway" || name.starts_with("CodexHub "))
+}
+
+fn is_managed_codexhub_provider_entry(provider_id: &str, entry: &Value) -> bool {
+    if !is_codexhub_client_provider_id(provider_id) {
+        return false;
+    }
+    if provider_id == "codexhub" && provider_entry_has_codexhub_name(entry) {
+        return true;
+    }
+    if is_builtin_codexhub_client_provider_id(provider_id)
+        && provider_entry_has_codexhub_name(entry)
+        && provider_entry_base_url(entry).is_none()
+    {
+        return true;
+    }
+    let local_gateway = provider_entry_base_url(entry).is_some_and(is_local_gateway_url);
+    if !local_gateway {
+        return false;
+    }
+    provider_entry_has_gateway_path(entry)
+        || provider_entry_has_codexhub_name(entry)
+        || entry
+            .get("api")
+            .and_then(Value::as_str)
+            .is_some_and(|api| api == "openai-completions")
+        || entry
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "openai-compatible")
+}
+
+fn remove_codexhub_client_provider_entries(providers: &mut Map<String, Value>) -> bool {
+    let keys = providers
+        .iter()
+        .filter(|(key, value)| is_managed_codexhub_provider_entry(key, value))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let removed = !keys.is_empty();
+    for key in keys {
+        providers.remove(&key);
+    }
+    removed
+}
+
+fn gateway_provider_path_segment(provider_id: &str) -> String {
+    let mut output = String::new();
+    for byte in provider_id.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                output.push(*byte as char);
+            }
+            _ => output.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    output
+}
+
+fn gateway_client_provider_base_url(settings: &Settings, provider_id: &str) -> String {
+    format!(
+        "{}/providers/{}",
+        endpoints(settings.proxy_port)
+            .base_url
+            .trim_end_matches('/'),
+        gateway_provider_path_segment(provider_id)
+    )
+}
+
+fn gateway_client_provider_chat_path(provider_id: &str) -> String {
+    format!(
+        "/v1/providers/{}/chat/completions",
+        gateway_provider_path_segment(provider_id)
+    )
+}
+
+fn gateway_client_provider_label(provider_id: &str, providers: &[Provider]) -> String {
+    if provider_id == "openai" {
+        return "OpenAI".to_string();
+    }
+    if let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) {
+        let name = provider.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    provider_id
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn gateway_client_provider_groups(
+    settings: &Settings,
+    providers: &[Provider],
+    default_model: &str,
+) -> Result<GatewayClientProviderGroups, String> {
+    let default_model = resolve_gateway_client_model_id(settings, providers, default_model)?;
+    let (default_provider_id, default_model_id) = split_gateway_model_id(&default_model);
+    let default_client_provider_id = codexhub_client_provider_id(&default_provider_id);
+    let default_selector = format!("{default_client_provider_id}/{default_model_id}");
+    let mut groups = Vec::<GatewayClientProviderGroup>::new();
+    let mut group_indices = HashMap::<String, usize>::new();
+
+    for model in gateway_client_models(settings, providers, &default_model)? {
+        let (provider_id, short_id) = split_gateway_model_id(&model.id);
+        let group_index = if let Some(index) = group_indices.get(&provider_id) {
+            *index
+        } else {
+            let label = gateway_client_provider_label(&provider_id, providers);
+            let index = groups.len();
+            group_indices.insert(provider_id.clone(), index);
+            groups.push(GatewayClientProviderGroup {
+                client_provider_id: codexhub_client_provider_id(&provider_id),
+                display_name: format!("CodexHub {label}"),
+                base_url: gateway_client_provider_base_url(settings, &provider_id),
+                chat_completions_path: gateway_client_provider_chat_path(&provider_id),
+                models: Vec::new(),
+            });
+            index
+        };
+        let group = &mut groups[group_index];
+        if group.models.iter().any(|existing| existing.id == short_id) {
+            continue;
+        }
+        group.models.push(GatewayClientProviderModel {
+            id: short_id,
+            display_name: model.display_name,
+            context_window: model.context_window,
+        });
+    }
+
+    Ok(GatewayClientProviderGroups {
+        default_provider_id,
+        default_model_id,
+        default_selector,
+        providers: groups,
+    })
+}
+
+fn gateway_client_model_selector(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
+    gateway_client_provider_groups(settings, providers, model).map(|groups| groups.default_selector)
 }
 
 fn gateway_diagnostics(
@@ -2745,7 +3018,7 @@ fn omp_route_mode(paths: &OmpConfigPaths) -> &'static str {
             }
         }
         (Some(config), None) => {
-            if config.contains("codexhub/") {
+            if is_omp_codexhub_config(config, "") {
                 "hub"
             } else {
                 "official"
@@ -3179,7 +3452,8 @@ fn preview_omp_config_with_paths(
         combined_current_preview(&[("config.yml", config_path), ("models.yml", models_path)]);
     let current_config = fs::read_to_string(config_path).ok();
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let next_config = omp_config_text(current_config.as_deref(), &model);
+    let selector = gateway_client_model_selector(settings, providers, &model)?;
+    let next_config = omp_config_text(current_config.as_deref(), &selector);
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "omp".to_string(),
@@ -3335,7 +3609,8 @@ fn apply_omp_config_with_paths(
         &[("config.yml", config_path), ("models.yml", models_path)],
         is_omp_codexhub_config(&current_config, &current_models),
     )?;
-    let next_config = omp_config_text(Some(&current_config), &model);
+    let selector = gateway_client_model_selector(settings, providers, &model)?;
+    let next_config = omp_config_text(Some(&current_config), &selector);
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     write_text_replace(config_path, &next_config)?;
     write_text_replace(models_path, &next_models)?;
@@ -3605,8 +3880,7 @@ fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String>
     let removed = value
         .get_mut("provider")
         .and_then(Value::as_object_mut)
-        .and_then(|providers| providers.remove("codexhub"))
-        .is_some();
+        .is_some_and(remove_codexhub_client_provider_entries);
     if removed {
         let next = serde_json::to_string_pretty(&value)
             .map(|text| format!("{text}\n"))
@@ -3621,32 +3895,36 @@ fn opencode_config_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let base_url = endpoints(settings.proxy_port).base_url;
-    let mut models = Map::new();
-    for gateway_model in gateway_client_models(settings, providers, &model)? {
-        models.insert(
-            gateway_model.id.clone(),
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
+    let mut provider_map = Map::new();
+    for group in &groups.providers {
+        let mut models = Map::new();
+        for gateway_model in &group.models {
+            models.insert(
+                gateway_model.id.clone(),
+                json!({
+                    "name": gateway_model.display_name,
+                }),
+            );
+        }
+        provider_map.insert(
+            group.client_provider_id.clone(),
             json!({
-                "name": gateway_model.display_name,
+                "name": group.display_name.clone(),
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": group.base_url.clone(),
+                    "apiKey": settings.gateway_client_key,
+                },
+                "models": Value::Object(models),
             }),
         );
     }
     let body = json!({
         "$schema": "https://opencode.ai/config.json",
-        "model": format!("codexhub/{model}"),
-        "small_model": format!("codexhub/{model}"),
-        "provider": {
-            "codexhub": {
-                "name": "CodexHub Gateway",
-                "npm": "@ai-sdk/openai-compatible",
-                "options": {
-                    "baseURL": base_url,
-                    "apiKey": settings.gateway_client_key,
-                },
-                "models": Value::Object(models),
-            }
-        }
+        "model": groups.default_selector,
+        "small_model": groups.default_selector,
+        "provider": Value::Object(provider_map),
     });
     serde_json::to_string_pretty(&body)
         .map(|text| format!("{text}\n"))
@@ -3659,7 +3937,7 @@ fn pi_settings_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
     let mut value = read_json_file_or_empty(settings_path, "Pi settings")?;
     if !value.is_object() {
         value = json!({});
@@ -3667,8 +3945,11 @@ fn pi_settings_text(
     let object = value
         .as_object_mut()
         .ok_or_else(|| "Pi settings root must be a JSON object".to_string())?;
-    object.insert("defaultProvider".to_string(), json!("codexhub"));
-    object.insert("defaultModel".to_string(), json!(model));
+    object.insert(
+        "defaultProvider".to_string(),
+        json!(codexhub_client_provider_id(&groups.default_provider_id)),
+    );
+    object.insert("defaultModel".to_string(), json!(groups.default_model_id));
     object.remove("enabledModels");
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
@@ -3681,7 +3962,7 @@ fn pi_models_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
     let mut value = read_json_file_or_empty(models_path, "Pi models")?;
     if !value.is_object() {
         value = json!({});
@@ -3695,28 +3976,29 @@ fn pi_models_text(
     if !provider_root.is_object() {
         *provider_root = json!({});
     }
-    provider_root
+    let providers_object = provider_root
         .as_object_mut()
-        .ok_or_else(|| "Pi providers root must be a JSON object".to_string())?
-        .insert(
-            "codexhub".to_string(),
-            codexhub_pi_provider_value(
-                settings,
-                &gateway_client_models(settings, providers, &model)?,
-            ),
+        .ok_or_else(|| "Pi providers root must be a JSON object".to_string())?;
+    remove_codexhub_client_provider_entries(providers_object);
+    for group in &groups.providers {
+        providers_object.insert(
+            group.client_provider_id.clone(),
+            codexhub_pi_provider_value(settings, group),
         );
+    }
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize Pi models: {error}"))
 }
 
-fn codexhub_pi_provider_value(settings: &Settings, models: &[GatewayModel]) -> Value {
-    let models = models
+fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProviderGroup) -> Value {
+    let models = group
+        .models
         .iter()
         .map(codexhub_pi_model_value)
         .collect::<Vec<_>>();
     json!({
-        "baseUrl": endpoints(settings.proxy_port).base_url,
+        "baseUrl": group.base_url.clone(),
         "api": "openai-completions",
         "apiKey": settings.gateway_client_key,
         "authHeader": true,
@@ -3729,7 +4011,7 @@ fn codexhub_pi_provider_value(settings: &Settings, models: &[GatewayModel]) -> V
     })
 }
 
-fn codexhub_pi_model_value(model: &GatewayModel) -> Value {
+fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
@@ -3746,8 +4028,7 @@ fn codexhub_pi_model_value(model: &GatewayModel) -> Value {
     })
 }
 
-fn omp_config_text(current: Option<&str>, model: &str) -> String {
-    let selector = format!("codexhub/{model}");
+fn omp_config_text(current: Option<&str>, selector: &str) -> String {
     let block = [
         "modelRoles:".to_string(),
         format!("  default: {selector}"),
@@ -3785,18 +4066,23 @@ fn omp_models_yml_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
-    let base_url = yaml_scalar(&endpoints(settings.proxy_port).base_url);
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
     let api_key = yaml_scalar(&settings.gateway_client_key);
-    let mut output = format!(
-        "providers:\n  codexhub:\n    baseUrl: {base_url}\n    api: openai-completions\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n"
-    );
-    for gateway_model in gateway_client_models(settings, providers, model)? {
-        let model_id = yaml_scalar(&gateway_model.id);
-        let model_name = yaml_scalar(&gateway_model.display_name);
-        let context_window = gateway_model.context_window;
+    let mut output = "providers:\n".to_string();
+    for group in &groups.providers {
+        let base_url = yaml_scalar(&group.base_url);
         output.push_str(&format!(
+            "  {}:\n    baseUrl: {base_url}\n    api: openai-completions\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
+            group.client_provider_id
+        ));
+        for gateway_model in &group.models {
+            let model_id = yaml_scalar(&gateway_model.id);
+            let model_name = yaml_scalar(&gateway_model.display_name);
+            let context_window = gateway_model.context_window;
+            output.push_str(&format!(
             "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
+        }
     }
     Ok(output)
 }
@@ -3806,40 +4092,53 @@ fn zcode_catalog_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let base_url = gateway_base_without_v1(settings);
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
     let now = timestamp_millis() as u64;
-    let models = gateway_client_models(settings, providers, &model)?
+    let catalog_providers = groups
+        .providers
         .iter()
-        .map(zcode_model_value)
+        .map(|group| zcode_catalog_provider_value(settings, group, now))
         .collect::<Vec<_>>();
     let body = json!({
         "schemaVersion": "zcode.model-providers.v2",
-        "providers": [{
-            "id": "codexhub",
-            "name": "CodexHub Gateway",
-            "enabled": true,
-            "source": "custom",
-            "endpoints": {
-                "baseURL": base_url,
-                "paths": {
-                    "openai-compatible": "/v1/chat/completions",
-                },
-            },
-            "apiKeyRequired": true,
-            "apiKey": settings.gateway_client_key,
-            "defaultKind": "openai-compatible",
-            "models": models,
-            "createdAt": now,
-            "updatedAt": now,
-        }],
+        "providers": catalog_providers,
     });
     serde_json::to_string_pretty(&body)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize ZCode catalog: {error}"))
 }
 
-fn zcode_model_value(model: &GatewayModel) -> Value {
+fn zcode_catalog_provider_value(
+    settings: &Settings,
+    group: &GatewayClientProviderGroup,
+    now: u64,
+) -> Value {
+    let models = group
+        .models
+        .iter()
+        .map(zcode_model_value)
+        .collect::<Vec<_>>();
+    json!({
+        "id": group.client_provider_id.clone(),
+        "name": group.display_name.clone(),
+        "enabled": true,
+        "source": "custom",
+        "endpoints": {
+            "baseURL": gateway_base_without_v1(settings),
+            "paths": {
+                "openai-compatible": group.chat_completions_path.clone(),
+            },
+        },
+        "apiKeyRequired": true,
+        "apiKey": settings.gateway_client_key,
+        "defaultKind": "openai-compatible",
+        "models": models,
+        "createdAt": now,
+        "updatedAt": now,
+    })
+}
+
+fn zcode_model_value(model: &GatewayClientProviderModel) -> Value {
     json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
@@ -3860,20 +4159,28 @@ fn zcode_v2_config_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let gateway_models = gateway_client_models(settings, providers, &model)?;
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
+    let provider_map = groups
+        .providers
+        .iter()
+        .map(|group| {
+            (
+                group.client_provider_id.clone(),
+                zcode_v2_provider_value(settings, group),
+            )
+        })
+        .collect::<Map<_, _>>();
     let value = json!({
-        "provider": {
-            "codexhub": zcode_v2_provider_value(settings, &gateway_models),
-        },
+        "provider": Value::Object(provider_map),
     });
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))
 }
 
-fn zcode_v2_provider_value(settings: &Settings, models: &[GatewayModel]) -> Value {
-    let models = models
+fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGroup) -> Value {
+    let models = group
+        .models
         .iter()
         .map(|model| {
             (
@@ -3893,12 +4200,12 @@ fn zcode_v2_provider_value(settings: &Settings, models: &[GatewayModel]) -> Valu
         })
         .collect::<Map<_, _>>();
     json!({
-        "name": "CodexHub Gateway",
+        "name": group.display_name.clone(),
         "kind": "openai-compatible",
         "enabled": true,
         "source": "custom",
         "options": {
-            "baseURL": endpoints(settings.proxy_port).base_url,
+            "baseURL": group.base_url.clone(),
             "apiKey": settings.gateway_client_key,
             "apiKeyRequired": true,
         },
@@ -3908,7 +4215,9 @@ fn zcode_v2_provider_value(settings: &Settings, models: &[GatewayModel]) -> Valu
 
 fn is_opencode_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub_managed\"") || text.contains("\"codexhub\"");
+        return text.contains("\"codexhub_managed\"")
+            || text.contains("\"codexhub\"")
+            || text.contains("\"codexhub-");
     };
     value
         .get("codexhub_managed")
@@ -3917,15 +4226,19 @@ fn is_opencode_codexhub_config(text: &str) -> bool {
         || value
             .get("model")
             .and_then(Value::as_str)
-            .is_some_and(|model| model.starts_with("codexhub/"))
+            .is_some_and(is_codexhub_client_model_selector)
         || value
             .get("small_model")
             .and_then(Value::as_str)
-            .is_some_and(|model| model.starts_with("codexhub/"))
+            .is_some_and(is_codexhub_client_model_selector)
         || value
             .get("provider")
-            .and_then(|provider| provider.get("codexhub"))
-            .is_some()
+            .and_then(Value::as_object)
+            .is_some_and(|providers| {
+                providers
+                    .iter()
+                    .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
+            })
 }
 
 fn strip_opencode_invalid_keys(text: &str) -> Result<String, String> {
@@ -3945,12 +4258,12 @@ fn is_pi_codexhub_config(settings_text: &str, models_text: &str) -> bool {
 
 fn is_pi_settings_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"");
+        return text.contains("\"codexhub\"") || text.contains("\"codexhub-");
     };
     value
         .get("defaultProvider")
         .and_then(Value::as_str)
-        .is_some_and(|provider| provider == "codexhub")
+        .is_some_and(is_recognized_codexhub_client_provider_id)
         || value
             .get("enabledModels")
             .and_then(Value::as_array)
@@ -3958,35 +4271,67 @@ fn is_pi_settings_codexhub_config(text: &str) -> bool {
                 models
                     .iter()
                     .filter_map(Value::as_str)
-                    .any(|model| model.starts_with("codexhub/"))
+                    .any(is_codexhub_client_model_selector)
             })
 }
 
 fn is_pi_models_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"");
+        return text.contains("\"codexhub\"") || text.contains("\"codexhub-");
     };
     value
         .get("providers")
-        .and_then(|providers| providers.get("codexhub"))
-        .is_some()
+        .and_then(Value::as_object)
+        .is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
+        })
 }
 
 fn is_omp_codexhub_config(config_text: &str, models_text: &str) -> bool {
-    config_text.contains("codexhub/") || is_omp_models_codexhub_config(models_text)
+    config_text
+        .lines()
+        .filter_map(|line| line.split_once(':').map(|(_, value)| value.trim()))
+        .any(is_codexhub_client_model_selector)
+        || is_omp_models_codexhub_config(models_text)
 }
 
 fn is_omp_models_codexhub_config(text: &str) -> bool {
-    text.lines().any(|line| {
-        line.trim_start().starts_with("codexhub:")
-            || line.contains("codexhub/")
-            || line.contains("CodexHub Gateway")
-    })
+    let mut in_candidate = false;
+    let mut has_local_gateway_url = false;
+    for line in text.lines() {
+        let starts_provider_entry =
+            line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':');
+        if starts_provider_entry {
+            if in_candidate && has_local_gateway_url {
+                return true;
+            }
+            let provider_id = line.trim().trim_end_matches(':');
+            in_candidate = is_codexhub_client_provider_id(provider_id);
+            has_local_gateway_url = false;
+            continue;
+        }
+        if in_candidate {
+            let trimmed = line.trim();
+            if let Some(url) = trimmed.strip_prefix("baseUrl:") {
+                has_local_gateway_url = is_local_gateway_url(url.trim())
+                    && (url.contains("/v1/providers/")
+                        || url.trim().trim_end_matches('/').ends_with("/v1"));
+            }
+            if trimmed.contains("CodexHub Gateway") || trimmed.contains("CodexHub ") {
+                return true;
+            }
+        }
+    }
+    in_candidate && has_local_gateway_url
 }
 
 fn is_zcode_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"") || text.contains("CodexHub Gateway");
+        return text.contains("\"codexhub\"")
+            || text.contains("\"codexhub-")
+            || text.contains("CodexHub");
     };
     value
         .get("providers")
@@ -3996,20 +4341,32 @@ fn is_zcode_codexhub_config(text: &str) -> bool {
                 provider
                     .get("id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| id == "codexhub")
-                    || provider
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| name == "CodexHub Gateway")
+                    .is_some_and(|id| {
+                        is_managed_codexhub_provider_entry(id, provider)
+                            || (is_builtin_codexhub_client_provider_id(id)
+                                && provider_entry_base_url(provider).is_none())
+                    })
+                    || (provider_entry_has_codexhub_name(provider)
+                        && provider_entry_base_url(provider).is_some_and(is_local_gateway_url)
+                        && provider_entry_has_gateway_path(provider))
             })
         })
 }
 
 fn is_zcode_v2_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"") || text.contains("CodexHub Gateway");
+        return text.contains("\"codexhub\"")
+            || text.contains("\"codexhub-")
+            || text.contains("CodexHub");
     };
-    value.pointer("/provider/codexhub").is_some()
+    value
+        .get("provider")
+        .and_then(Value::as_object)
+        .is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
+        })
 }
 
 fn read_json_file_or_empty(path: &Path, label: &str) -> Result<Value, String> {
@@ -4633,16 +4990,26 @@ mod tests {
 
         let text = opencode_config_text(&settings, &providers, "openai/gpt-5.5").unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let exported = value
-            .pointer("/provider/codexhub/models")
+        let openai_models = value
+            .pointer("/provider/codexhub-openai/models")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        let minimax_models = value
+            .pointer("/provider/codexhub-minimax/models")
             .and_then(serde_json::Value::as_object)
             .unwrap();
 
-        assert_eq!(value["model"], "codexhub/openai/gpt-5.5");
-        assert!(exported.contains_key("openai/gpt-5.5"));
-        assert!(exported.contains_key("minimax/minimax-m3"));
-        assert!(!exported.contains_key("minimax/minimax-m3-lite"));
-        assert_eq!(exported["minimax/minimax-m3"]["name"], "MiniMax M3");
+        assert_eq!(value["model"], "codexhub-openai/gpt-5.5");
+        assert!(openai_models.contains_key("gpt-5.5"));
+        assert!(minimax_models.contains_key("minimax-m3"));
+        assert!(!minimax_models.contains_key("minimax-m3-lite"));
+        assert_eq!(minimax_models["minimax-m3"]["name"], "MiniMax M3");
+        assert_eq!(
+            value
+                .pointer("/provider/codexhub-minimax/options/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/minimax")
+        );
     }
 
     #[test]
@@ -4653,13 +5020,13 @@ mod tests {
         let text = opencode_config_text(&settings, &providers, "minimax-cn/minimax-m3").unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let exported = value
-            .pointer("/provider/codexhub/models")
+            .pointer("/provider/codexhub-minimax-cn/models")
             .and_then(serde_json::Value::as_object)
             .unwrap();
 
-        assert_eq!(value["model"], "codexhub/minimax-cn/MiniMax-M3");
-        assert!(exported.contains_key("minimax-cn/MiniMax-M3"));
-        assert!(!exported.contains_key("minimax-cn/minimax-m3"));
+        assert_eq!(value["model"], "codexhub-minimax-cn/MiniMax-M3");
+        assert!(exported.contains_key("MiniMax-M3"));
+        assert!(!exported.contains_key("minimax-m3"));
     }
 
     #[test]
@@ -4670,17 +5037,17 @@ mod tests {
         let text = opencode_config_text(&settings, &providers, "minimax-cn/MiniMax-M3").unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let exported = value
-            .pointer("/provider/codexhub/models")
+            .pointer("/provider/codexhub-minimax-cn/models")
             .and_then(serde_json::Value::as_object)
             .unwrap();
         let exported_ids = exported.keys().map(String::as_str).collect::<Vec<_>>();
 
-        assert!(exported.contains_key("minimax-cn/MiniMax-M3"));
-        assert!(!exported.contains_key("minimax-cn/minimax-m3"));
+        assert!(exported.contains_key("MiniMax-M3"));
+        assert!(!exported.contains_key("minimax-m3"));
         assert_eq!(
             exported_ids
                 .iter()
-                .filter(|id| id.eq_ignore_ascii_case("minimax-cn/minimax-m3"))
+                .filter(|id| id.eq_ignore_ascii_case("minimax-m3"))
                 .count(),
             1
         );
@@ -4707,19 +5074,25 @@ mod tests {
         let omp_text = omp_models_yml_text(&settings, &providers, "ollama-cloud/glm-5.2").unwrap();
         let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
         let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
-        let pi_models = pi_models_value
-            .pointer("/providers/codexhub/models")
+        let ollama_models = pi_models_value
+            .pointer("/providers/codexhub-ollama-cloud/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let volc_models = pi_models_value
+            .pointer("/providers/codexhub-volc/models")
             .and_then(serde_json::Value::as_array)
             .unwrap();
 
-        assert_eq!(pi_value["defaultModel"], "ollama-cloud/glm-5.2");
+        assert_eq!(pi_value["defaultProvider"], "codexhub-ollama-cloud");
+        assert_eq!(pi_value["defaultModel"], "glm-5.2");
         assert!(pi_value.get("enabledModels").is_none());
-        assert!(pi_models
-            .iter()
-            .any(|model| model["id"] == "ollama-cloud/glm-5.2"));
-        assert!(pi_models.iter().any(|model| model["id"] == "volc/glm-5.2"));
-        assert!(omp_text.contains("id: ollama-cloud/glm-5.2"));
-        assert!(omp_text.contains("id: volc/glm-5.2"));
+        assert!(ollama_models.iter().any(|model| model["id"] == "glm-5.2"));
+        assert!(volc_models.iter().any(|model| model["id"] == "glm-5.2"));
+        assert!(omp_text.contains("codexhub-ollama-cloud:"));
+        assert!(omp_text.contains("baseUrl: http://127.0.0.1:9099/v1/providers/ollama-cloud"));
+        assert!(omp_text.contains("codexhub-volc:"));
+        assert!(omp_text.contains("baseUrl: http://127.0.0.1:9099/v1/providers/volc"));
+        assert!(omp_text.contains("id: glm-5.2"));
     }
 
     #[test]
@@ -4748,19 +5121,44 @@ mod tests {
             pi_models_text(&models_path, &settings, &providers, "openai/gpt-5.5").unwrap();
         let settings_value: serde_json::Value = serde_json::from_str(&settings_text).unwrap();
         let models_value: serde_json::Value = serde_json::from_str(&models_text).unwrap();
-        let models = models_value
-            .pointer("/providers/codexhub/models")
+        let openai_models = models_value
+            .pointer("/providers/codexhub-openai/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let minimax_models = models_value
+            .pointer("/providers/codexhub-minimax/models")
             .and_then(serde_json::Value::as_array)
             .unwrap();
 
         assert!(settings_value.get("enabledModels").is_none());
-        assert!(models.iter().any(|model| model["id"] == "openai/gpt-5.5"));
-        assert!(models
+        assert_eq!(settings_value["defaultProvider"], "codexhub-openai");
+        assert_eq!(settings_value["defaultModel"], "gpt-5.5");
+        assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
+        assert!(minimax_models
             .iter()
-            .any(|model| model["id"] == "minimax/minimax-m3"));
-        assert!(!models
+            .any(|model| model["id"] == "minimax-m3"));
+        assert!(!minimax_models
             .iter()
-            .any(|model| model["id"] == "minimax/minimax-m3-lite"));
+            .any(|model| model["id"] == "minimax-m3-lite"));
+    }
+
+    #[test]
+    fn pi_models_preserve_unmanaged_codexhub_prefix_provider() {
+        let root = unique_temp_dir("codexhub-pi-unmanaged-prefix");
+        let models_path = root.join("models.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &models_path,
+            r#"{"providers":{"codexhub-labs":{"baseUrl":"https://labs.example.test/v1","api":"openai-completions","models":[{"id":"custom"}]}}}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+
+        let models_text = pi_models_text(&models_path, &settings, &[], "openai/gpt-5.5").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&models_text).unwrap();
+
+        assert!(value.pointer("/providers/codexhub-labs").is_some());
+        assert!(value.pointer("/providers/codexhub-openai").is_some());
     }
 
     #[test]
@@ -4786,8 +5184,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
         assert!(value.get("enabledModels").is_none());
-        assert_eq!(value["defaultProvider"], "codexhub");
-        assert_eq!(value["defaultModel"], "ollama-cloud/glm-5.2");
+        assert_eq!(value["defaultProvider"], "codexhub-ollama-cloud");
+        assert_eq!(value["defaultModel"], "glm-5.2");
         assert_eq!(value["theme"], "dark");
     }
 
@@ -4798,8 +5196,10 @@ mod tests {
 
         let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
 
-        assert!(text.contains("id: openai/gpt-5.5"));
-        assert!(text.contains("id: minimax/minimax-m3"));
+        assert!(text.contains("codexhub-openai:"));
+        assert!(text.contains("id: gpt-5.5"));
+        assert!(text.contains("codexhub-minimax:"));
+        assert!(text.contains("id: minimax-m3"));
         assert!(text.contains("name: \"MiniMax M3\""));
         assert!(!text.contains("minimax/minimax-m3-lite"));
     }
@@ -4831,7 +5231,8 @@ mod tests {
         let text =
             omp_models_yml_text(&settings, &providers, "ollama-cloud/nemotron-3-nano:30b").unwrap();
 
-        assert!(text.contains("id: ollama-cloud/nemotron-3-nano:30b"));
+        assert!(text.contains("codexhub-ollama-cloud:"));
+        assert!(text.contains("id: nemotron-3-nano:30b"));
         assert!(text.contains("contextWindow: 200000"));
         assert!(!text.contains("contextWindow: 0"));
     }
@@ -4843,18 +5244,34 @@ mod tests {
 
         let text = zcode_catalog_text(&settings, &providers, "openai/gpt-5.5").unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let models = value
-            .pointer("/providers/0/models")
+        let providers = value
+            .pointer("/providers")
             .and_then(serde_json::Value::as_array)
             .unwrap();
+        let openai = providers
+            .iter()
+            .find(|provider| provider["id"] == "codexhub-openai")
+            .unwrap();
+        let minimax = providers
+            .iter()
+            .find(|provider| provider["id"] == "codexhub-minimax")
+            .unwrap();
+        let openai_models = openai["models"].as_array().unwrap();
+        let minimax_models = minimax["models"].as_array().unwrap();
 
-        assert!(models.iter().any(|model| model["id"] == "openai/gpt-5.5"));
-        assert!(models
+        assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
+        assert!(minimax_models
             .iter()
-            .any(|model| model["id"] == "minimax/minimax-m3"));
-        assert!(!models
+            .any(|model| model["id"] == "minimax-m3"));
+        assert!(!minimax_models
             .iter()
-            .any(|model| model["id"] == "minimax/minimax-m3-lite"));
+            .any(|model| model["id"] == "minimax-m3-lite"));
+        assert_eq!(
+            minimax
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/v1/providers/minimax/chat/completions")
+        );
     }
 
     #[test]
@@ -5280,6 +5697,36 @@ mod tests {
     }
 
     #[test]
+    fn opencode_apply_backs_up_unmanaged_codexhub_prefix_provider() {
+        let root = unique_temp_dir("codexhub-opencode-unmanaged-prefix");
+        let config_path = root.join("opencode.json");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &config_path,
+            r#"{"model":"codexhub-labs/custom","provider":{"codexhub-labs":{"name":"CodexHub Labs","options":{"baseURL":"https://labs.example.test/v1","apiKey":"labs-key"},"models":{"custom":{"name":"Custom"}}}}}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+
+        let result = apply_opencode_config_with_paths(
+            &config_path,
+            &backup_root,
+            &settings,
+            &[],
+            "openai/gpt-5.5",
+        )
+        .unwrap();
+
+        assert!(result.backup_path.is_some());
+        let backup_path = result.backup_path.unwrap();
+        assert!(backup_path.exists());
+        assert!(fs::read_to_string(backup_path)
+            .unwrap()
+            .contains("codexhub-labs"));
+    }
+
+    #[test]
     fn opencode_restore_skips_managed_backups_and_strips_invalid_keys() {
         let root = unique_temp_dir("codexhub-opencode-restore");
         let config_path = root.join("opencode.json");
@@ -5351,13 +5798,13 @@ mod tests {
             written_settings
                 .get("defaultProvider")
                 .and_then(serde_json::Value::as_str),
-            Some("codexhub")
+            Some("codexhub-openai")
         );
         assert_eq!(
             written_settings
                 .get("defaultModel")
                 .and_then(serde_json::Value::as_str),
-            Some("openai/gpt-5.5")
+            Some("gpt-5.5")
         );
         assert_eq!(
             written_settings
@@ -5370,10 +5817,12 @@ mod tests {
         let written_models: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
         assert!(written_models.pointer("/providers/ollama").is_some());
-        let provider = written_models.pointer("/providers/codexhub").unwrap();
+        let provider = written_models
+            .pointer("/providers/codexhub-openai")
+            .unwrap();
         assert_eq!(
             provider.get("baseUrl").and_then(serde_json::Value::as_str),
-            Some("http://127.0.0.1:9099/v1")
+            Some("http://127.0.0.1:9099/v1/providers/openai")
         );
         assert_eq!(
             provider.get("api").and_then(serde_json::Value::as_str),
@@ -5387,7 +5836,7 @@ mod tests {
             provider
                 .pointer("/models/0/id")
                 .and_then(serde_json::Value::as_str),
-            Some("openai/gpt-5.5")
+            Some("gpt-5.5")
         );
     }
 
@@ -5526,14 +5975,14 @@ mod tests {
         assert!(backup_path.join("models.yml").exists());
         let config = fs::read_to_string(&config_path).unwrap();
         assert!(config.contains("symbolPreset: unicode"));
-        assert!(config.contains("modelRoles:\n  default: codexhub/openai/gpt-5.5"));
-        assert!(config.contains("  vision: codexhub/openai/gpt-5.5"));
+        assert!(config.contains("modelRoles:\n  default: codexhub-openai/gpt-5.5"));
+        assert!(config.contains("  vision: codexhub-openai/gpt-5.5"));
         let models = fs::read_to_string(&models_path).unwrap();
-        assert!(models.contains("providers:\n  codexhub:"));
-        assert!(models.contains("baseUrl: http://127.0.0.1:9099/v1"));
+        assert!(models.contains("providers:\n  codexhub-openai:"));
+        assert!(models.contains("baseUrl: http://127.0.0.1:9099/v1/providers/openai"));
         assert!(models.contains("api: openai-completions"));
         assert!(models.contains("apiKey: codexhub-proxy"));
-        assert!(models.contains("id: openai/gpt-5.5"));
+        assert!(models.contains("id: gpt-5.5"));
     }
 
     #[test]
@@ -5572,6 +6021,25 @@ mod tests {
         assert!(!backup_root.exists());
         assert_eq!(fs::read_to_string(&config_path).unwrap(), original_config);
         assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
+    }
+
+    #[test]
+    fn omp_route_mode_detects_split_provider_from_config_without_models_file() {
+        let root = unique_temp_dir("codexhub-omp-route-mode");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &config_path,
+            "modelRoles:\n  default: codexhub-openai/gpt-5.5\n  vision: codexhub-openai/gpt-5.5\n",
+        )
+        .unwrap();
+        let paths = super::OmpConfigPaths {
+            config_path,
+            models_path,
+        };
+
+        assert_eq!(super::omp_route_mode(&paths), "hub");
     }
 
     #[test]
@@ -5614,7 +6082,7 @@ mod tests {
         let provider = catalog.pointer("/providers/0").unwrap();
         assert_eq!(
             provider.get("id").and_then(serde_json::Value::as_str),
-            Some("codexhub")
+            Some("codexhub-openai")
         );
         assert_eq!(
             provider.get("source").and_then(serde_json::Value::as_str),
@@ -5634,13 +6102,13 @@ mod tests {
             provider
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
-            Some("/v1/chat/completions")
+            Some("/v1/providers/openai/chat/completions")
         );
         assert_eq!(
             provider
                 .pointer("/models/0/id")
                 .and_then(serde_json::Value::as_str),
-            Some("openai/gpt-5.5")
+            Some("gpt-5.5")
         );
         assert_eq!(
             provider
@@ -5655,12 +6123,12 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
         assert_eq!(
             v2_config
-                .pointer("/provider/codexhub/options/baseURL")
+                .pointer("/provider/codexhub-openai/options/baseURL")
                 .and_then(serde_json::Value::as_str),
-            Some("http://127.0.0.1:9099/v1")
+            Some("http://127.0.0.1:9099/v1/providers/openai")
         );
         assert!(v2_config
-            .pointer("/provider/codexhub/models/openai~1gpt-5.5")
+            .pointer("/provider/codexhub-openai/models/gpt-5.5")
             .is_some());
         assert_eq!(
             fs::read_to_string(&v2_cache_path).unwrap(),
@@ -5689,12 +6157,12 @@ mod tests {
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let provider = value.pointer("/provider/codexhub").unwrap();
+        let provider = value.pointer("/provider/codexhub-ollama-cloud").unwrap();
 
         assert!(value.pointer("/provider/builtin:test").is_none());
         assert_eq!(
             provider.get("name").and_then(serde_json::Value::as_str),
-            Some("CodexHub Gateway")
+            Some("CodexHub Ollama Cloud")
         );
         assert_eq!(
             provider.get("kind").and_then(serde_json::Value::as_str),
@@ -5704,19 +6172,34 @@ mod tests {
             provider
                 .pointer("/options/baseURL")
                 .and_then(serde_json::Value::as_str),
-            Some("http://127.0.0.1:9099/v1")
+            Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
         );
         assert_eq!(
             provider
-                .pointer("/models/ollama-cloud~1glm-5.2/limit/context")
+                .pointer("/models/glm-5.2/limit/context")
                 .and_then(serde_json::Value::as_u64),
             Some(131_072)
         );
         assert_eq!(
-            provider
-                .pointer("/models/volc~1glm-5.2/limit/context")
+            value
+                .pointer("/provider/codexhub-volc/models/glm-5.2/limit/context")
                 .and_then(serde_json::Value::as_u64),
             Some(1_024_000)
+        );
+    }
+
+    #[test]
+    fn provider_scoped_gateway_urls_percent_encode_path_segments() {
+        let settings = Settings::default();
+        let provider_id = "odd/provider?x#frag %";
+
+        assert_eq!(
+            super::gateway_client_provider_base_url(&settings, provider_id),
+            "http://127.0.0.1:9099/v1/providers/odd%2Fprovider%3Fx%23frag%20%25"
+        );
+        assert_eq!(
+            super::gateway_client_provider_chat_path(provider_id),
+            "/v1/providers/odd%2Fprovider%3Fx%23frag%20%25/chat/completions"
         );
     }
 
@@ -5734,7 +6217,7 @@ mod tests {
         fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
         fs::write(
             &catalog_path,
-            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub-openai"}]}"#,
         )
         .unwrap();
         fs::write(
@@ -5747,7 +6230,7 @@ mod tests {
 
         fs::write(
             &v2_config_path,
-            r#"{"provider":{"codexhub":{"name":"CodexHub Gateway","models":{}}}}"#,
+            r#"{"provider":{"codexhub-openai":{"name":"CodexHub OpenAI","models":{}}}}"#,
         )
         .unwrap();
 
@@ -5846,17 +6329,17 @@ mod tests {
         fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
         fs::write(
             &catalog_path,
-            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub-openai"}]}"#,
         )
         .unwrap();
         fs::write(
             &v2_config_path,
-            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}},"codexhub":{"name":"CodexHub Gateway","models":{}}}}"#,
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}},"codexhub-labs":{"name":"CodexHub Labs","options":{"baseURL":"https://labs.example.test/v1"},"models":{}},"codexhub-openai":{"name":"CodexHub OpenAI","options":{"baseURL":"http://127.0.0.1:9099/v1/providers/openai"},"models":{}},"codexhub-volc":{"name":"CodexHub Volcengine","options":{"baseURL":"http://127.0.0.1:9099/v1/providers/volc"},"models":{}}}}"#,
         )
         .unwrap();
         fs::write(
             &v2_cache_path,
-            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub-openai"}]}"#,
         )
         .unwrap();
 
@@ -5870,7 +6353,9 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
         assert!(value.pointer("/provider/builtin:test").is_some());
-        assert!(value.pointer("/provider/codexhub").is_none());
+        assert!(value.pointer("/provider/codexhub-labs").is_some());
+        assert!(value.pointer("/provider/codexhub-openai").is_none());
+        assert!(value.pointer("/provider/codexhub-volc").is_none());
     }
 
     #[test]

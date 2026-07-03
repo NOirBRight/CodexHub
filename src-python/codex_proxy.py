@@ -19,7 +19,7 @@ from typing import Any, Mapping
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from urllib.request import Request, urlopen
 
 from catalog import canonical_model_id, deny_match_model_id, load_catalog_models, load_policy, should_include_model
@@ -489,6 +489,34 @@ def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
 
 
 OLLAMA_CLOUD_ALIAS_PREFIX = "ollama-cloud/"
+
+
+def provider_scoped_path(path: str, endpoint_suffix: str) -> str | None:
+    prefix = "/v1/providers/"
+    suffix = "/" + endpoint_suffix.strip("/")
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    provider_part = path[len(prefix) : -len(suffix)]
+    if not provider_part or "/" in provider_part:
+        return None
+    provider = unquote(provider_part).strip()
+    if not provider:
+        return None
+    return provider
+
+
+def provider_scoped_route_model(model_id: str | None, provider_hint: str | None) -> str | None:
+    if not model_id:
+        return None
+    slug = canonical_model_id(str(model_id))
+    if not slug or not provider_hint:
+        return slug
+    provider = canonical_model_id(str(provider_hint))
+    if not provider:
+        return slug
+    if slug.startswith(f"{provider}/"):
+        return slug
+    return f"{provider}/{slug}"
 
 
 def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> str | None:
@@ -3305,14 +3333,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/responses":
             self._proxy_post_request(inbound_format="responses")
             return
+        provider_hint = provider_scoped_path(parsed.path, "responses")
+        if provider_hint is not None:
+            self._proxy_post_request(inbound_format="responses", provider_hint=provider_hint)
+            return
 
         if parsed.path == "/v1/chat/completions":
             self._proxy_post_request(inbound_format="chat_completions")
             return
+        provider_hint = provider_scoped_path(parsed.path, "chat/completions")
+        if provider_hint is not None:
+            self._proxy_post_request(inbound_format="chat_completions", provider_hint=provider_hint)
+            return
 
         self._send_json(404, {"error": "not found"})
 
-    def _proxy_post_request(self, *, inbound_format: str) -> None:
+    def _proxy_post_request(self, *, inbound_format: str, provider_hint: str | None = None) -> None:
         """Shared POST handler for inbound Responses and Chat Completions requests.
 
         ``inbound_format`` is the wire format the *caller* used.  When it is
@@ -3324,6 +3360,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         model = None
+        model_requested = None
         upstream_name = None
         upstream_format = "responses"
 
@@ -3344,8 +3381,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 caller_stream = json.loads(body.decode("utf-8-sig")).get("stream") is True
             except (UnicodeDecodeError, json.JSONDecodeError):
                 caller_stream = True
-            model = try_extract_model(body)
-            route_reason = "model" if model else "official_control_fallback"
+            model_requested = try_extract_model(body)
+            model = provider_scoped_route_model(model_requested, provider_hint)
+            if provider_hint is not None and not model:
+                raise ValueError(f"model is required for provider path: {provider_hint}")
+            route_reason = "provider_path" if provider_hint and model else "model" if model else "official_control_fallback"
             upstream = choose_upstream(model) if model else official_upstream()
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
@@ -3361,10 +3401,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 path=self.path,
                 method="POST",
                 model=model_canonical,
-                model_requested=model,
+                model_requested=model_requested,
                 model_canonical=model_canonical,
                 upstream=upstream_name,
                 provider_id=upstream_name,
+                provider_hint=provider_hint,
                 upstream_format=upstream_format,
                 route_reason=route_reason,
                 route_mode="official" if upstream_name == "official" else "codexhub",
@@ -3415,10 +3456,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_id=request_id,
                 method="POST",
                 model=model_canonical,
-                model_requested=model,
+                model_requested=model_requested,
                 model_canonical=model_canonical,
                 upstream=upstream_name,
                 provider_id=upstream_name,
+                provider_hint=provider_hint,
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 route_reason=route_reason,
@@ -3435,7 +3477,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "request_error",
                 request_id=request_id,
                 model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
                 upstream=upstream_name,
+                provider_hint=provider_hint,
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 status=400,

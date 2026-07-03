@@ -251,6 +251,50 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["upstream_model"], "glm-5.2")
         self.assertEqual(upstream["upstream_format"], "chat_completions")
 
+    def test_provider_scoped_short_model_routes_to_external_provider(self):
+        route_model = codex_proxy.provider_scoped_route_model("glm-5.2", "volc")
+
+        self.assertEqual(route_model, "volc/glm-5.2")
+        upstream = choose_upstream(route_model)
+        self.assertEqual(upstream["name"], "volcengine")
+        self.assertEqual(upstream["upstream_model"], "glm-5.2")
+
+    def test_provider_scoped_short_model_preserves_exact_case(self):
+        route_model = codex_proxy.provider_scoped_route_model("MiniMax-M3", "minimax-cn")
+
+        self.assertEqual(route_model, "minimax-cn/MiniMax-M3")
+        upstream = choose_upstream(route_model)
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+
+    def test_provider_scoped_slash_model_is_provider_relative(self):
+        route_model = codex_proxy.provider_scoped_route_model("anthropic/claude-sonnet-4", "openrouter")
+
+        self.assertEqual(route_model, "openrouter/anthropic/claude-sonnet-4")
+
+    def test_provider_scoped_canonical_model_for_same_provider_is_preserved(self):
+        route_model = codex_proxy.provider_scoped_route_model("minimax-cn/MiniMax-M3", "minimax-cn")
+
+        self.assertEqual(route_model, "minimax-cn/MiniMax-M3")
+
+    def test_provider_scoped_path_extracts_provider(self):
+        self.assertEqual(
+            codex_proxy.provider_scoped_path("/v1/providers/minimax-cn/chat/completions", "chat/completions"),
+            "minimax-cn",
+        )
+        self.assertEqual(
+            codex_proxy.provider_scoped_path("/v1/providers/volc/responses", "responses"),
+            "volc",
+        )
+        self.assertEqual(
+            codex_proxy.provider_scoped_path(
+                "/v1/providers/odd%2Fprovider%3Fx%23frag%20%25/chat/completions",
+                "chat/completions",
+            ),
+            "odd/provider?x#frag %",
+        )
+        self.assertIsNone(codex_proxy.provider_scoped_path("/v1/chat/completions", "chat/completions"))
+
     def test_external_provider_model_routes_with_exact_case(self):
         upstream = choose_upstream("minimax-cn/MiniMax-M3")
 
