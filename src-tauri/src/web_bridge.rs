@@ -288,7 +288,15 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
                 .map(ToOwned::to_owned);
             to_value(gateway::gateway_copy_client_config(client_kind, model))
         }
-        "list_gateway_clients" => to_value(gateway::list_gateway_clients()),
+        "list_gateway_clients" => {
+            let include_versions = request
+                .args
+                .get("includeVersions")
+                .or_else(|| request.args.get("include_versions"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            to_value(gateway::list_gateway_clients(include_versions))
+        }
         "preview_gateway_client_config" => {
             let client_id = string_arg(&request.args, "clientId")?;
             let model = request

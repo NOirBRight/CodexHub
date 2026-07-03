@@ -18,8 +18,6 @@ pub struct Model {
     pub source_kind: Option<String>,
     #[serde(default)]
     pub locked: bool,
-    #[serde(default)]
-    pub hidden: bool,
     #[serde(default = "default_enabled")]
     pub codex_enabled: bool,
     #[serde(default = "default_enabled")]
@@ -44,7 +42,6 @@ impl Default for Model {
             upstream_model: None,
             source_kind: None,
             locked: false,
-            hidden: false,
             codex_enabled: true,
             gateway_exported: true,
             context_window: None,
@@ -89,8 +86,6 @@ pub struct Provider {
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default)]
-    pub hidden: bool,
     #[serde(default)]
     pub locked: bool,
     #[serde(default)]
@@ -138,9 +133,18 @@ pub struct Settings {
     pub gateway_enable_models: bool,
     pub gateway_enable_responses: bool,
     pub gateway_enable_chat_completions: bool,
+    pub gateway_request_timeout_seconds: u32,
+    #[serde(default = "default_fast_model_variants")]
+    pub gateway_fast_model_variants: Vec<String>,
+    #[serde(default)]
+    pub official_disabled_models: Vec<String>,
     pub official_model_sort_order: Vec<String>,
     pub official_provider_sort_order: i32,
     pub proxy_port: u16,
+}
+
+fn default_fast_model_variants() -> Vec<String> {
+    vec!["openai/gpt-5.5".to_string(), "openai/gpt-5.4".to_string()]
 }
 
 impl Default for Settings {
@@ -156,6 +160,9 @@ impl Default for Settings {
             gateway_enable_models: true,
             gateway_enable_responses: true,
             gateway_enable_chat_completions: true,
+            gateway_request_timeout_seconds: 120,
+            gateway_fast_model_variants: default_fast_model_variants(),
+            official_disabled_models: Vec::new(),
             official_model_sort_order: Vec::new(),
             official_provider_sort_order: 0,
             proxy_port: 9099,
@@ -276,8 +283,10 @@ fn gateway_copy_client_config(
 }
 
 #[tauri::command]
-fn list_gateway_clients() -> Result<Vec<gateway::GatewayClientInfo>, String> {
-    gateway::list_gateway_clients()
+fn list_gateway_clients(
+    include_versions: Option<bool>,
+) -> Result<Vec<gateway::GatewayClientInfo>, String> {
+    gateway::list_gateway_clients(include_versions.unwrap_or(false))
 }
 
 #[tauri::command]
