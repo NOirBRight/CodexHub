@@ -578,11 +578,31 @@ enabled = true
             index = build_external_model_index(load_providers(DEFAULT_PROVIDERS_PATH))
             volc_minimax = resolve_external_model_alias("volc/minimax-m3", providers_path=DEFAULT_PROVIDERS_PATH)
 
-        self.assertEqual(sorted(index), ["minimax-cn/minimax-m3", "volc/glm-5.2", "volc/kimi-k2.6"])
+        self.assertEqual(
+            sorted(index),
+            [
+                "minimax-cn/MiniMax-M3",
+                "minimax-cn/minimax-m3",
+                "volc/glm-5.2",
+                "volc/kimi-k2.6",
+            ],
+        )
         self.assertNotIn("volc/minimax-m3", index)
-        self.assertEqual(index["minimax-cn/minimax-m3"]["upstream_model"], "MiniMax-M3")
+        self.assertEqual(index["minimax-cn/MiniMax-M3"]["upstream_model"], "MiniMax-M3")
+        self.assertEqual(index["minimax-cn/minimax-m3"]["alias"], "minimax-cn/MiniMax-M3")
         self.assertEqual(index["volc/kimi-k2.6"]["upstream_model"], "kimi-k2.6")
         self.assertIsNone(volc_minimax)
+
+    def test_default_policy_lists_provider_qualified_ollama_cloud_models(self):
+        from catalog import load_policy
+
+        policy = load_policy(Path("config/catalog_policy.toml"))
+
+        self.assertIn("ollama-cloud/glm-5.2", policy.allowed_provider_models)
+        self.assertIn("ollama-cloud/minimax-m3", policy.allowed_provider_models)
+        self.assertIn("volc/glm-5.2", policy.allowed_provider_models)
+        self.assertIn("minimax-cn/MiniMax-M3", policy.allowed_provider_models)
+        self.assertIn("glm-5.2", policy.allowed_ollama_cloud_models)
 
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:

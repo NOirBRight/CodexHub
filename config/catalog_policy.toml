@@ -23,15 +23,12 @@ allowed_ollama_cloud_models = [
   "deepseek-v4-flash",
 ]
 allowed_provider_models = [
-  "volc/ark-code-latest",
-  "volc/doubao-seed-2.0-code",
-  "volc/doubao-seed-2.0-pro",
-  "volc/doubao-seed-2.0-lite",
+  "ollama-cloud/minimax-m3",
+  "ollama-cloud/glm-5.2",
+  "ollama-cloud/kimi-k2.6",
   "volc/glm-5.2",
-  "volc/deepseek-v4-pro",
-  "volc/deepseek-v4-flash",
-  "volc/minimax-m3",
   "volc/kimi-k2.6",
+  "minimax-cn/MiniMax-M3",
   "minimax-cn/minimax-m3",
   "xunfei/xsparkx2",
   "xunfei/xopglm5",
@@ -68,6 +65,9 @@ denied_substrings = ["embedding"]
 "glm-5.2" = "Ollama GLM-5.2"
 "minimax-m3" = "Ollama MiniMax-M3"
 "kimi-k2.6" = "Ollama Kimi K2.6"
+"ollama-cloud/glm-5.2" = "Ollama GLM-5.2"
+"ollama-cloud/minimax-m3" = "Ollama MiniMax-M3"
+"ollama-cloud/kimi-k2.6" = "Ollama Kimi K2.6"
 "kimi-k2.7-code" = "Ollama Kimi K2.7 Code"
 "deepseek-v4-pro" = "Ollama DeepSeek V4 Pro"
 "deepseek-v4-flash" = "Ollama DeepSeek V4 Flash"
@@ -81,6 +81,7 @@ denied_substrings = ["embedding"]
 "volc/deepseek-v4-flash" = "Volc DeepSeek V4 Flash"
 "volc/minimax-m3" = "Volc MiniMax-M3"
 "volc/kimi-k2.6" = "Volc Kimi K2.6"
+"minimax-cn/MiniMax-M3" = "MiniMax.cn MiniMax-M3"
 "minimax-cn/minimax-m3" = "MiniMax.cn MiniMax-M3"
 "xunfei/xsparkx2" = "Xunfei Spark X2"
 "xunfei/xopglm5" = "Xunfei GLM-5"
