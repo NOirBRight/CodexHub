@@ -1291,12 +1291,64 @@ fn provider_qualified_model_id(provider_id: &str, model_id: &str) -> String {
     format!("{provider_id}/{model_id}")
 }
 
+fn gateway_model_alias_map(providers: &[Provider]) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for provider in providers {
+        if !provider.enabled {
+            continue;
+        }
+        for model in &provider.models {
+            if !model.enabled || !model.gateway_exported {
+                continue;
+            }
+            let canonical = provider_qualified_model_id(&provider.id, &model.id);
+            for alias in &model.aliases {
+                let alias = alias.trim();
+                if alias.is_empty() {
+                    continue;
+                }
+                let qualified_alias = if alias.contains('/') {
+                    alias.to_string()
+                } else {
+                    provider_qualified_model_id(&provider.id, alias)
+                };
+                aliases
+                    .entry(qualified_alias)
+                    .or_insert_with(|| canonical.clone());
+            }
+        }
+    }
+    aliases
+}
+
+fn resolve_gateway_client_model_id(
+    settings: &Settings,
+    providers: &[Provider],
+    requested: &str,
+) -> Result<String, String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err("Gateway model is required".to_string());
+    }
+    let exported = gateway_models_from_config(settings, providers)
+        .into_iter()
+        .map(|model| model.id)
+        .collect::<HashSet<_>>();
+    if exported.contains(requested) {
+        return Ok(requested.to_string());
+    }
+    if let Some(canonical) = gateway_model_alias_map(providers).get(requested) {
+        return Ok(canonical.clone());
+    }
+    Err(format!("Gateway model is not exported: {requested}"))
+}
+
 fn gateway_client_models(
     settings: &Settings,
     providers: &[Provider],
     default_model: &str,
-) -> Vec<GatewayModel> {
-    let default_model = default_model.trim();
+) -> Result<Vec<GatewayModel>, String> {
+    let default_model = resolve_gateway_client_model_id(settings, providers, default_model)?;
     let mut seen = HashSet::new();
     let mut output = Vec::new();
     for model in gateway_models_from_config(settings, providers) {
@@ -1305,21 +1357,21 @@ fn gateway_client_models(
         }
     }
 
-    if !default_model.is_empty() && !seen.contains(default_model) {
+    if !seen.contains(&default_model) {
         output.insert(
             0,
             GatewayModel {
-                id: default_model.to_string(),
-                display_name: gateway_model_display_name(default_model),
+                id: default_model.clone(),
+                display_name: gateway_model_display_name(&default_model),
                 source: "Gateway default".to_string(),
                 source_kind: "default".to_string(),
                 supports_responses: true,
                 supports_chat_completions: true,
-                context_window: gateway_model_context_window(default_model),
+                context_window: gateway_model_context_window(&default_model),
             },
         );
     }
-    output
+    Ok(output)
 }
 
 fn gateway_diagnostics(
@@ -3011,8 +3063,9 @@ fn preview_omp_config_with_paths(
     let current =
         combined_current_preview(&[("config.yml", config_path), ("models.yml", models_path)]);
     let current_config = fs::read_to_string(config_path).ok();
-    let next_config = omp_config_text(current_config.as_deref(), model);
-    let next_models = omp_models_yml_text(settings, providers, model);
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let next_config = omp_config_text(current_config.as_deref(), &model);
+    let next_models = omp_models_yml_text(settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "omp".to_string(),
         can_apply: true,
@@ -3152,8 +3205,9 @@ fn apply_omp_config_with_paths(
         &[("config.yml", config_path), ("models.yml", models_path)],
         is_omp_codexhub_config(&current_config, &current_models),
     )?;
-    let next_config = omp_config_text(Some(&current_config), model);
-    let next_models = omp_models_yml_text(settings, providers, model);
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let next_config = omp_config_text(Some(&current_config), &model);
+    let next_models = omp_models_yml_text(settings, providers, &model)?;
     write_text_replace(config_path, &next_config)?;
     write_text_replace(models_path, &next_models)?;
     Ok(GatewayClientApplyResult {
@@ -3322,9 +3376,10 @@ fn opencode_config_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let base_url = endpoints(settings.proxy_port).base_url;
     let mut models = Map::new();
-    for gateway_model in gateway_client_models(settings, providers, model) {
+    for gateway_model in gateway_client_models(settings, providers, &model)? {
         models.insert(
             gateway_model.id.clone(),
             json!({
@@ -3359,11 +3414,12 @@ fn pi_settings_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let mut value = read_json_file_or_empty(settings_path, "Pi settings")?;
     if !value.is_object() {
         value = json!({});
     }
-    let enabled_models = gateway_client_models(settings, providers, model)
+    let enabled_models = gateway_client_models(settings, providers, &model)?
         .iter()
         .map(|gateway_model| format!("codexhub/{}", gateway_model.id))
         .collect::<Vec<_>>();
@@ -3384,6 +3440,7 @@ fn pi_models_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let mut value = read_json_file_or_empty(models_path, "Pi models")?;
     if !value.is_object() {
         value = json!({});
@@ -3404,7 +3461,7 @@ fn pi_models_text(
             "codexhub".to_string(),
             codexhub_pi_provider_value(
                 settings,
-                &gateway_client_models(settings, providers, model),
+                &gateway_client_models(settings, providers, &model)?,
             ),
         );
     serde_json::to_string_pretty(&value)
@@ -3482,13 +3539,17 @@ fn omp_config_text(current: Option<&str>, model: &str) -> String {
     format!("{}\n", output.join("\n"))
 }
 
-fn omp_models_yml_text(settings: &Settings, providers: &[Provider], model: &str) -> String {
+fn omp_models_yml_text(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
     let base_url = yaml_scalar(&endpoints(settings.proxy_port).base_url);
     let api_key = yaml_scalar(&settings.gateway_client_key);
     let mut output = format!(
         "providers:\n  codexhub:\n    baseUrl: {base_url}\n    api: openai-completions\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n"
     );
-    for gateway_model in gateway_client_models(settings, providers, model) {
+    for gateway_model in gateway_client_models(settings, providers, model)? {
         let model_id = yaml_scalar(&gateway_model.id);
         let model_name = yaml_scalar(&gateway_model.display_name);
         let context_window = gateway_model.context_window;
@@ -3496,7 +3557,7 @@ fn omp_models_yml_text(settings: &Settings, providers: &[Provider], model: &str)
             "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
     }
-    output
+    Ok(output)
 }
 
 fn zcode_catalog_text(
@@ -3504,9 +3565,10 @@ fn zcode_catalog_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let base_url = gateway_base_without_v1(settings);
     let now = timestamp_millis() as u64;
-    let models = gateway_client_models(settings, providers, model)
+    let models = gateway_client_models(settings, providers, &model)?
         .iter()
         .map(zcode_model_value)
         .collect::<Vec<_>>();
@@ -3947,6 +4009,66 @@ mod tests {
         }]
     }
 
+    fn case_sensitive_client_export_test_providers() -> Vec<Provider> {
+        vec![
+            Provider {
+                id: "ollama-cloud".to_string(),
+                name: "Ollama Cloud".to_string(),
+                base_url: "https://ollama.com/v1".to_string(),
+                api_key: None,
+                upstream_format: None,
+                display_prefix: Some("Ollama".to_string()),
+                sort_order: Some(1),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Ollama GLM-5.2".to_string()),
+                    context_window: Some(131_072),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            },
+            Provider {
+                id: "volc".to_string(),
+                name: "Volcengine".to_string(),
+                base_url: "https://ark.example.test/v1".to_string(),
+                api_key: None,
+                upstream_format: None,
+                display_prefix: Some("Volc".to_string()),
+                sort_order: Some(2),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Volc GLM-5.2".to_string()),
+                    context_window: Some(1_024_000),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            },
+            Provider {
+                id: "minimax-cn".to_string(),
+                name: "MiniMax.cn".to_string(),
+                base_url: "https://api.minimaxi.com/v1".to_string(),
+                api_key: None,
+                upstream_format: None,
+                display_prefix: Some("MiniMax.cn".to_string()),
+                sort_order: Some(3),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "MiniMax-M3".to_string(),
+                    aliases: vec!["minimax-m3".to_string()],
+                    display_name: Some("MiniMax-M3".to_string()),
+                    context_window: Some(1_000_000),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            },
+        ]
+    }
+
     fn sync_test_client(
         id: &str,
         name: &str,
@@ -4194,6 +4316,62 @@ mod tests {
     }
 
     #[test]
+    fn opencode_config_resolves_selected_alias_and_exports_only_canonical_models() {
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let text = opencode_config_text(&settings, &providers, "minimax-cn/minimax-m3").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let exported = value
+            .pointer("/provider/codexhub/models")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+
+        assert_eq!(value["model"], "codexhub/minimax-cn/MiniMax-M3");
+        assert!(exported.contains_key("minimax-cn/MiniMax-M3"));
+        assert!(!exported.contains_key("minimax-cn/minimax-m3"));
+    }
+
+    #[test]
+    fn pi_and_omp_configs_keep_duplicate_glm_models_distinct() {
+        let root = unique_temp_dir("codexhub-client-case");
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let pi_text = pi_settings_text(
+            &settings_path,
+            &settings,
+            &providers,
+            "ollama-cloud/glm-5.2",
+        )
+        .unwrap();
+        let omp_text = omp_models_yml_text(&settings, &providers, "ollama-cloud/glm-5.2").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let enabled = pi_value["enabledModels"].as_array().unwrap();
+
+        assert_eq!(pi_value["defaultModel"], "ollama-cloud/glm-5.2");
+        assert!(enabled
+            .iter()
+            .any(|value| value == "codexhub/ollama-cloud/glm-5.2"));
+        assert!(enabled.iter().any(|value| value == "codexhub/volc/glm-5.2"));
+        assert!(omp_text.contains("id: ollama-cloud/glm-5.2"));
+        assert!(omp_text.contains("id: volc/glm-5.2"));
+    }
+
+    #[test]
+    fn client_config_rejects_unexported_selected_model_case() {
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let error =
+            opencode_config_text(&settings, &providers, "minimax-cn/MINIMAX-M3").unwrap_err();
+
+        assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
+    }
+
+    #[test]
     fn pi_config_exports_all_active_gateway_models() {
         let root = unique_temp_dir("codexhub-pi-export");
         let settings_path = root.join("settings.json");
@@ -4236,7 +4414,7 @@ mod tests {
         let settings = Settings::default();
         let providers = client_export_test_providers();
 
-        let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5");
+        let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
 
         assert!(text.contains("id: openai/gpt-5.5"));
         assert!(text.contains("id: minimax/minimax-m3"));
@@ -4268,7 +4446,8 @@ mod tests {
             }],
         }];
 
-        let text = omp_models_yml_text(&settings, &providers, "ollama-cloud/nemotron-3-nano:30b");
+        let text =
+            omp_models_yml_text(&settings, &providers, "ollama-cloud/nemotron-3-nano:30b").unwrap();
 
         assert!(text.contains("id: ollama-cloud/nemotron-3-nano:30b"));
         assert!(text.contains("contextWindow: 200000"));
