@@ -472,6 +472,20 @@ def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
     return None
 
 
+OLLAMA_CLOUD_ALIAS_PREFIX = "ollama-cloud/"
+
+
+def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> str | None:
+    if not slug.startswith(OLLAMA_CLOUD_ALIAS_PREFIX):
+        return None
+    upstream_model = slug[len(OLLAMA_CLOUD_ALIAS_PREFIX) :]
+    if not upstream_model:
+        return None
+    if should_include_model(slug, policy) or should_include_model(upstream_model, policy):
+        return upstream_model
+    return None
+
+
 def choose_upstream(model_id: str) -> dict[str, Any]:
     slug = canonical_model_id(str(model_id))
     if not slug:
@@ -487,10 +501,18 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "upstream_model": official_alias,
         }
 
-    if not should_include_model(slug, policy):
-        raise ValueError(f"model is not allowed: {slug}")
+    ollama_alias = ollama_cloud_alias_upstream_model(slug, policy)
+    if ollama_alias is not None:
+        return {
+            "name": "ollama_cloud",
+            "base_url": ollama_cloud_base_url(),
+            "auth": "ollama_api_key",
+            "upstream_model": ollama_alias,
+        }
 
     if slug.startswith(official_prefixes()):
+        if not should_include_model(slug, policy):
+            raise ValueError(f"model is not allowed: {slug}")
         return {
             "name": "official",
             "base_url": official_base_url(),
@@ -499,6 +521,9 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
 
     external_model = resolve_external_model_alias(slug)
     if external_model is not None:
+        policy_alias = external_model.get("alias", slug)
+        if not should_include_model(policy_alias, policy):
+            raise ValueError(f"model is not allowed: {slug}")
         return {
             "name": external_model["upstream_name"],
             "base_url": external_model["base_url"],
@@ -510,6 +535,9 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
 
     if "/" in slug:
         raise ValueError(f"external provider model is not configured: {slug}")
+
+    if not should_include_model(slug, policy):
+        raise ValueError(f"model is not allowed: {slug}")
 
     if slug in generated_catalog_slugs():
         return {

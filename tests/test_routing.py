@@ -2,6 +2,7 @@ import os
 import io
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import codex_proxy
@@ -102,11 +103,14 @@ class RoutingTests(unittest.TestCase):
                 "openai/gpt-5.5",
                 "minimax-m3",
                 "glm-5.2",
+                "ollama-cloud/glm-5.2",
+                "ollama-cloud/minimax-m3",
                 "kimi-k2.7-code",
                 "gemini-3-flash-preview",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
                 "volc/glm-5.2",
+                "minimax-cn/MiniMax-M3",
                 "minimax-cn/minimax-m3",
             },
         )
@@ -121,16 +125,29 @@ class RoutingTests(unittest.TestCase):
                 "openai/gpt-5.5": {"slug": "openai/gpt-5.5"},
                 "minimax-m3": {"slug": "minimax-m3", "max_output_tokens": 524288},
                 "glm-5.2": {"slug": "glm-5.2", "max_output_tokens": 131072},
+                "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "max_output_tokens": 131072},
+                "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "max_output_tokens": 524288},
                 "kimi-k2.7-code": {"slug": "kimi-k2.7-code", "max_output_tokens": 32768},
                 "gemini-3-flash-preview": {"slug": "gemini-3-flash-preview", "max_output_tokens": 65536},
                 "deepseek-v4-pro": {"slug": "deepseek-v4-pro", "max_output_tokens": 393216},
                 "deepseek-v4-flash": {"slug": "deepseek-v4-flash", "max_output_tokens": 393216},
                 "volc/glm-5.2": {"slug": "volc/glm-5.2", "max_output_tokens": 4096},
+                "minimax-cn/MiniMax-M3": {"slug": "minimax-cn/MiniMax-M3", "max_output_tokens": 524288},
                 "minimax-cn/minimax-m3": {"slug": "minimax-cn/minimax-m3", "max_output_tokens": 524288},
             },
         )
         self.catalog_by_slug_patch.start()
         self.addCleanup(self.catalog_by_slug_patch.stop)
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        self.policy_patch = patch(
+            "codex_proxy.load_policy",
+            return_value=replace(
+                policy,
+                allowed_provider_models=policy.allowed_provider_models + ("minimax-cn/MiniMax-M3",),
+            ),
+        )
+        self.policy_patch.start()
+        self.addCleanup(self.policy_patch.stop)
         self.external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -147,7 +164,7 @@ class RoutingTests(unittest.TestCase):
             "max_output_source": "providers_toml",
         }
         self.minimax_external_model = {
-            "alias": "minimax-cn/minimax-m3",
+            "alias": "minimax-cn/MiniMax-M3",
             "provider_alias": "minimax-cn",
             "upstream_name": "minimax_cn",
             "display_prefix": "MiniMax.cn",
@@ -165,6 +182,7 @@ class RoutingTests(unittest.TestCase):
             "codex_proxy.resolve_external_model_alias",
             side_effect=lambda slug: {
                 "volc/glm-5.2": self.external_model,
+                "minimax-cn/MiniMax-M3": self.minimax_external_model,
                 "minimax-cn/minimax-m3": self.minimax_external_model,
             }.get(slug),
         )
@@ -196,6 +214,21 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["auth"], "ollama_api_key")
         self.assertEqual(upstream["base_url"], "https://ollama.com/v1")
 
+    def test_ollama_provider_prefixed_model_routes_to_cloud_and_rewrites_body(self):
+        upstream = choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertEqual(upstream["name"], "ollama_cloud")
+        self.assertEqual(upstream["auth"], "ollama_api_key")
+        self.assertEqual(upstream["upstream_model"], "glm-5.2")
+
+        transformed = compatible_request_body(
+            b'{"model":"ollama-cloud/glm-5.2","input":"hi"}',
+            upstream,
+            "ollama-cloud/glm-5.2",
+        )
+
+        self.assertEqual(json.loads(transformed)["model"], "glm-5.2")
+
     def test_provider_prefixed_model_routes_to_external_provider(self):
         self.external_model["upstream_format"] = "chat_completions"
         upstream = choose_upstream("volc/glm-5.2")
@@ -204,6 +237,23 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["base_url"], "https://ark.example.test/v1")
         self.assertEqual(upstream["upstream_model"], "glm-5.2")
         self.assertEqual(upstream["upstream_format"], "chat_completions")
+
+    def test_external_provider_model_routes_with_exact_case(self):
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["auth"], "api_key")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+
+    def test_external_provider_explicit_alias_routes_without_lowercasing(self):
+        upstream = choose_upstream("minimax-cn/minimax-m3")
+
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+
+    def test_external_provider_unknown_case_is_rejected(self):
+        with self.assertRaises(ValueError):
+            choose_upstream("minimax-cn/MINIMAX-M3")
 
     def test_provider_prefixed_model_does_not_fall_back_to_ollama(self):
         with patch("codex_proxy.resolve_external_model_alias", return_value=None):
