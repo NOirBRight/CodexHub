@@ -60,6 +60,20 @@ test("gateway client rail is limited to the four planned clients", async () => {
   );
 });
 
+test("gateway client rail shows active managed config paths", async () => {
+  const contract = await readContract();
+
+  assert.deepEqual(
+    Object.fromEntries(contract.gatewayClients.map((client) => [client.id, client.config_path])),
+    {
+      opencode: "~/.config/opencode/opencode.json",
+      zcode: "~/.zcode/v2/config.json",
+      pi: "~/.pi/agent/settings.json",
+      omp: "~/.omp/agent/config.yml",
+    },
+  );
+});
+
 test("gateway empty states do not claim missing backends", async () => {
   const contract = await readContract();
 

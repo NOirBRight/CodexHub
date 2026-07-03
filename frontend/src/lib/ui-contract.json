@@ -9,28 +9,28 @@
       "name": "OpenCode",
       "kind": "Terminal client",
       "description": "Terminal client route target",
-      "config_path": "~/.config/opencode/config.json"
+      "config_path": "~/.config/opencode/opencode.json"
     },
     {
       "id": "zcode",
       "name": "ZCode",
       "kind": "IDE extension",
       "description": "IDE extension route target",
-      "config_path": "%APPDATA%/ZCode/settings.json"
+      "config_path": "~/.zcode/v2/config.json"
     },
     {
       "id": "pi",
       "name": "Pi",
       "kind": "Compact CLI",
       "description": "Compact CLI route target",
-      "config_path": "~/.config/pi/config.json"
+      "config_path": "~/.pi/agent/settings.json"
     },
     {
       "id": "omp",
       "name": "OMP",
       "kind": "Prompt runtime",
       "description": "Prompt runtime route target",
-      "config_path": "~/.config/omp/settings.json"
+      "config_path": "~/.omp/agent/config.yml"
     }
   ],
   "pendingBackend": {

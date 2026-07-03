@@ -266,6 +266,13 @@ struct OmpConfigPaths {
     models_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct ZcodeConfigTargets {
+    catalog_path: PathBuf,
+    v2_config_path: PathBuf,
+    v2_cache_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayEvent {
     pub ts: Option<String>,
@@ -523,21 +530,28 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .then(|| npm_latest_version("opencode-ai"))
             .flatten(),
     });
-    let zcode_path = detect_zcode_config_path();
+    let zcode_targets = detect_zcode_config_targets();
     let zcode_store_path = detect_zcode_store_path();
     let zcode_executable = detect_zcode_executable_path();
-    let zcode_installed = zcode_path.exists()
+    let zcode_installed = zcode_targets.catalog_path.exists()
+        || zcode_targets.v2_config_path.exists()
+        || zcode_targets.v2_cache_path.exists()
+        || zcode_targets
+            .v2_config_path
+            .parent()
+            .map(Path::exists)
+            .unwrap_or(false)
         || zcode_store_path.exists()
         || zcode_executable.is_some()
         || command_exists(&["zcode", "ZCode", "ZCode.exe"]);
-    let zcode_route_mode = route_mode_from_text_file(&zcode_path, is_zcode_codexhub_config);
+    let zcode_route_mode = zcode_route_mode(&zcode_targets);
     clients.push(GatewayClientInfo {
         id: "zcode".to_string(),
         name: "ZCode".to_string(),
         kind: "IDE extension".to_string(),
         installed: zcode_installed,
         auto_apply_supported: zcode_installed,
-        config_path: Some(zcode_path),
+        config_path: Some(zcode_targets.v2_config_path.clone()),
         route_mode: zcode_route_mode.to_string(),
         status: gateway_client_status(zcode_installed, zcode_route_mode),
         current_version: include_versions
@@ -639,8 +653,8 @@ pub fn preview_gateway_client_config(
         );
     }
     if id == "zcode" {
-        let path = detect_zcode_config_path();
-        return preview_zcode_config_with_path(&path, &settings, &providers, &model);
+        let targets = detect_zcode_config_targets();
+        return preview_zcode_config_with_targets(&targets, &settings, &providers, &model);
     }
     let config = gateway_copy_client_config(Some(id.clone()), Some(model))?;
     Ok(GatewayClientConfigPreview {
@@ -697,13 +711,16 @@ pub fn apply_gateway_client_config(
                 &model,
             )
         }
-        "zcode" => apply_zcode_config_with_path(
-            &detect_zcode_config_path(),
-            &client_backup_root("zcode"),
-            &settings,
-            &providers,
-            &model,
-        ),
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            apply_zcode_config_with_targets(
+                &targets,
+                &client_backup_root("zcode"),
+                &settings,
+                &providers,
+                &model,
+            )
+        }
         _ => Ok(GatewayClientApplyResult {
             client_id: id,
             applied: false,
@@ -740,10 +757,10 @@ pub fn restore_gateway_client_config(
                 &client_backup_root("omp"),
             )
         }
-        "zcode" => restore_zcode_config_with_path(
-            &detect_zcode_config_path(),
-            &client_backup_root("zcode"),
-        ),
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            restore_zcode_config_with_targets(&targets, &client_backup_root("zcode"))
+        }
         _ => Ok(GatewayClientApplyResult {
             client_id: id,
             applied: false,
@@ -2659,6 +2676,13 @@ fn route_mode_from_text_file(path: &Path, is_hub: fn(&str) -> bool) -> &'static 
         .unwrap_or("unknown")
 }
 
+fn zcode_route_mode(targets: &ZcodeConfigTargets) -> &'static str {
+    if targets.v2_config_path.exists() {
+        return route_mode_from_text_file(&targets.v2_config_path, is_zcode_v2_codexhub_config);
+    }
+    route_mode_from_text_file(&targets.catalog_path, is_zcode_codexhub_config)
+}
+
 fn pi_route_mode(paths: &PiConfigPaths) -> &'static str {
     let settings = fs::read_to_string(&paths.settings_path).ok();
     let models = fs::read_to_string(&paths.models_path).ok();
@@ -2744,6 +2768,40 @@ fn detect_zcode_config_path() -> PathBuf {
                 .join("codexhub.json")
         })
         .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode/model-providers/codexhub.json"))
+}
+
+fn detect_zcode_config_targets() -> ZcodeConfigTargets {
+    let catalog_override = std::env::var_os("CODEXHUB_ZCODE_CONFIG")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let catalog_path = catalog_override
+        .clone()
+        .unwrap_or_else(detect_zcode_config_path);
+    let v2_root = std::env::var_os("CODEXHUB_ZCODE_V2_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            catalog_override
+                .as_ref()
+                .and_then(|path| zcode_v2_root_from_catalog_path(path))
+        })
+        .unwrap_or_else(default_zcode_v2_root);
+    ZcodeConfigTargets {
+        catalog_path,
+        v2_config_path: v2_root.join("config.json"),
+        v2_cache_path: v2_root.join("bots-model-cache.v2.json"),
+    }
+}
+
+fn default_zcode_v2_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".zcode")
+        .join("v2")
+}
+
+fn zcode_v2_root_from_catalog_path(catalog_path: &Path) -> Option<PathBuf> {
+    catalog_path.parent()?.parent().map(|root| root.join("v2"))
 }
 
 fn detect_zcode_store_path() -> PathBuf {
@@ -3082,26 +3140,38 @@ fn preview_omp_config_with_paths(
     })
 }
 
-fn preview_zcode_config_with_path(
-    catalog_path: &Path,
+fn preview_zcode_config_with_targets(
+    targets: &ZcodeConfigTargets,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientConfigPreview, String> {
-    let current = fs::read_to_string(catalog_path)
-        .ok()
-        .map(|text| sanitize_text(&text));
-    let next = zcode_catalog_text(settings, providers, model)?;
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let current = combined_current_preview(&[
+        ("config.json", &targets.v2_config_path),
+        ("codexhub.json", &targets.catalog_path),
+        ("bots-model-cache.v2.json", &targets.v2_cache_path),
+    ])
+    .map(|text| sanitize_text(&text));
+    let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
+    let next_catalog = zcode_catalog_text(settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "zcode".to_string(),
         can_apply: true,
-        strategy: "managed_user_catalog".to_string(),
-        config_path: Some(catalog_path.to_path_buf()),
+        strategy: "managed_native_config".to_string(),
+        config_path: Some(targets.v2_config_path.clone()),
         current_redacted: current,
-        next_redacted: sanitize_text(&next),
-        backup_required: catalog_path.exists(),
-        message: "Apply will write a ZCode user model-provider catalog for CodexHub Gateway."
-            .to_string(),
+        next_redacted: sanitize_text(&combined_named_text(&[
+            ("config.json", &next_config),
+            ("codexhub.json", &next_catalog),
+            ("bots-model-cache.v2.json", &next_catalog),
+        ])),
+        backup_required: targets.v2_config_path.exists()
+            || targets.catalog_path.exists()
+            || targets.v2_cache_path.exists(),
+        message:
+            "Apply will snapshot ZCode v2 config/cache/catalog, then route ZCode through CodexHub Gateway."
+                .to_string(),
     })
 }
 
@@ -3221,29 +3291,31 @@ fn apply_omp_config_with_paths(
     })
 }
 
-fn apply_zcode_config_with_path(
-    catalog_path: &Path,
+fn apply_zcode_config_with_targets(
+    targets: &ZcodeConfigTargets,
     backup_root: &Path,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let current = fs::read_to_string(catalog_path).unwrap_or_default();
     let backup_path = create_snapshot_backup(
         "zcode",
         backup_root,
-        &[("codexhub.json", catalog_path)],
-        is_zcode_codexhub_config(&current),
+        &zcode_target_files(targets),
+        zcode_targets_current_is_managed(targets),
     )?;
-    let next = zcode_catalog_text(settings, providers, &model)?;
-    write_text_replace(catalog_path, &next)?;
+    let next_catalog = zcode_catalog_text(settings, providers, &model)?;
+    let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
+    write_text_replace(&targets.catalog_path, &next_catalog)?;
+    write_text_replace(&targets.v2_config_path, &next_config)?;
+    write_text_replace(&targets.v2_cache_path, &next_catalog)?;
     Ok(GatewayClientApplyResult {
         client_id: "zcode".to_string(),
         applied: true,
-        config_path: Some(catalog_path.to_path_buf()),
+        config_path: Some(targets.v2_config_path.clone()),
         backup_path,
-        message: "ZCode CodexHub user catalog has been written.".to_string(),
+        message: "ZCode now routes through CodexHub Gateway.".to_string(),
     })
 }
 
@@ -3334,44 +3406,157 @@ fn restore_omp_config_with_paths(
     })
 }
 
-fn restore_zcode_config_with_path(
-    catalog_path: &Path,
+fn restore_zcode_config_with_targets(
+    targets: &ZcodeConfigTargets,
     backup_root: &Path,
 ) -> Result<GatewayClientApplyResult, String> {
     let latest = latest_clean_snapshot_backup("zcode", backup_root, |path| {
-        let text = fs::read_to_string(path.join("codexhub.json")).unwrap_or_default();
-        is_zcode_codexhub_config(&text)
+        zcode_snapshot_contains_managed(path)
     });
     match latest {
         Ok(path) => {
-            restore_snapshot_files(&path, &[("codexhub.json", catalog_path)])?;
+            restore_snapshot_files(&path, &zcode_target_files(targets))?;
             Ok(GatewayClientApplyResult {
                 client_id: "zcode".to_string(),
                 applied: true,
-                config_path: Some(catalog_path.to_path_buf()),
+                config_path: Some(targets.v2_config_path.clone()),
                 backup_path: Some(path),
-                message: "ZCode user catalog restored.".to_string(),
+                message: "ZCode official config restored.".to_string(),
             })
         }
-        Err(_)
-            if is_zcode_codexhub_config(&fs::read_to_string(catalog_path).unwrap_or_default()) =>
-        {
-            fs::remove_file(catalog_path).map_err(|error| {
-                format!(
-                    "failed to remove ZCode CodexHub catalog {}: {error}",
-                    catalog_path.display()
+        Err(_) if zcode_targets_contain_managed(targets) => {
+            let mut removed_any = false;
+            if targets.catalog_path.exists()
+                && is_zcode_codexhub_config(
+                    &fs::read_to_string(&targets.catalog_path).unwrap_or_default(),
                 )
-            })?;
+            {
+                fs::remove_file(&targets.catalog_path).map_err(|error| {
+                    format!(
+                        "failed to remove ZCode CodexHub catalog {}: {error}",
+                        targets.catalog_path.display()
+                    )
+                })?;
+                removed_any = true;
+            }
+            if targets.v2_cache_path.exists()
+                && is_zcode_codexhub_config(
+                    &fs::read_to_string(&targets.v2_cache_path).unwrap_or_default(),
+                )
+            {
+                fs::remove_file(&targets.v2_cache_path).map_err(|error| {
+                    format!(
+                        "failed to remove ZCode CodexHub cache {}: {error}",
+                        targets.v2_cache_path.display()
+                    )
+                })?;
+                removed_any = true;
+            }
+            removed_any |= remove_zcode_v2_codexhub_provider(&targets.v2_config_path)?;
             Ok(GatewayClientApplyResult {
                 client_id: "zcode".to_string(),
                 applied: true,
-                config_path: Some(catalog_path.to_path_buf()),
+                config_path: Some(targets.v2_config_path.clone()),
                 backup_path: None,
-                message: "ZCode CodexHub user catalog removed.".to_string(),
+                message: if removed_any {
+                    "ZCode CodexHub config removed.".to_string()
+                } else {
+                    "ZCode CodexHub config was already absent.".to_string()
+                },
             })
         }
         Err(error) => Err(error),
     }
+}
+
+fn zcode_target_files<'a>(targets: &'a ZcodeConfigTargets) -> [(&'static str, &'a Path); 3] {
+    [
+        ("codexhub.json", targets.catalog_path.as_path()),
+        ("config.json", targets.v2_config_path.as_path()),
+        ("bots-model-cache.v2.json", targets.v2_cache_path.as_path()),
+    ]
+}
+
+fn zcode_targets_current_is_managed(targets: &ZcodeConfigTargets) -> bool {
+    let mut saw_existing = false;
+    let mut all_managed = true;
+    if targets.catalog_path.exists() {
+        saw_existing = true;
+        all_managed &= is_zcode_codexhub_config(
+            &fs::read_to_string(&targets.catalog_path).unwrap_or_default(),
+        );
+    }
+    if targets.v2_config_path.exists() {
+        saw_existing = true;
+        all_managed &= is_zcode_v2_codexhub_config(
+            &fs::read_to_string(&targets.v2_config_path).unwrap_or_default(),
+        );
+    }
+    if targets.v2_cache_path.exists() {
+        saw_existing = true;
+        all_managed &= is_zcode_codexhub_config(
+            &fs::read_to_string(&targets.v2_cache_path).unwrap_or_default(),
+        );
+    }
+    saw_existing && all_managed
+}
+
+fn zcode_targets_contain_managed(targets: &ZcodeConfigTargets) -> bool {
+    (targets.catalog_path.exists()
+        && is_zcode_codexhub_config(&fs::read_to_string(&targets.catalog_path).unwrap_or_default()))
+        || (targets.v2_config_path.exists()
+            && is_zcode_v2_codexhub_config(
+                &fs::read_to_string(&targets.v2_config_path).unwrap_or_default(),
+            ))
+        || (targets.v2_cache_path.exists()
+            && is_zcode_codexhub_config(
+                &fs::read_to_string(&targets.v2_cache_path).unwrap_or_default(),
+            ))
+}
+
+fn zcode_snapshot_contains_managed(snapshot_path: &Path) -> bool {
+    let catalog_path = snapshot_path.join("codexhub.json");
+    let v2_config_path = snapshot_path.join("config.json");
+    let v2_cache_path = snapshot_path.join("bots-model-cache.v2.json");
+    let targets = ZcodeConfigTargets {
+        catalog_path,
+        v2_config_path,
+        v2_cache_path,
+    };
+    zcode_targets_contain_managed(&targets)
+}
+
+fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String> {
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(config_path).map_err(|error| {
+        format!(
+            "failed to read ZCode v2 config {}: {error}",
+            config_path.display()
+        )
+    })?;
+    if !is_zcode_v2_codexhub_config(&text) {
+        return Ok(false);
+    }
+    let mut value = serde_json::from_str::<Value>(&text).map_err(|error| {
+        format!(
+            "failed to parse ZCode v2 config {}: {error}",
+            config_path.display()
+        )
+    })?;
+    let removed = value
+        .get_mut("provider")
+        .and_then(Value::as_object_mut)
+        .and_then(|providers| providers.remove("codexhub"))
+        .is_some();
+    if removed {
+        let next = serde_json::to_string_pretty(&value)
+            .map(|text| format!("{text}\n"))
+            .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))?;
+        write_text_replace(config_path, &next)?;
+    }
+    Ok(removed)
 }
 
 fn opencode_config_text(
@@ -3616,6 +3801,72 @@ fn zcode_model_value(model: &GatewayModel) -> Value {
     })
 }
 
+fn zcode_v2_config_text(
+    config_path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let mut value = read_json_file_or_empty(config_path, "ZCode v2 config")?;
+    if !value.is_object() {
+        value = json!({});
+    }
+    let gateway_models = gateway_client_models(settings, providers, &model)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "ZCode v2 config root must be a JSON object".to_string())?;
+    let provider_root = object
+        .entry("provider".to_string())
+        .or_insert_with(|| json!({}));
+    if !provider_root.is_object() {
+        *provider_root = json!({});
+    }
+    provider_root
+        .as_object_mut()
+        .ok_or_else(|| "ZCode v2 provider root must be a JSON object".to_string())?
+        .insert(
+            "codexhub".to_string(),
+            zcode_v2_provider_value(settings, &gateway_models),
+        );
+    serde_json::to_string_pretty(&value)
+        .map(|text| format!("{text}\n"))
+        .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))
+}
+
+fn zcode_v2_provider_value(settings: &Settings, models: &[GatewayModel]) -> Value {
+    let models = models
+        .iter()
+        .map(|model| {
+            (
+                model.id.clone(),
+                json!({
+                    "name": model.display_name.clone(),
+                    "limit": {
+                        "context": model.context_window,
+                        "output": 32768,
+                    },
+                    "modalities": {
+                        "input": ["text", "image"],
+                        "output": ["text"],
+                    },
+                }),
+            )
+        })
+        .collect::<Map<_, _>>();
+    json!({
+        "name": "CodexHub Gateway",
+        "kind": "openai-compatible",
+        "source": "custom",
+        "options": {
+            "baseURL": endpoints(settings.proxy_port).base_url,
+            "apiKey": settings.gateway_client_key,
+            "apiKeyRequired": true,
+        },
+        "models": Value::Object(models),
+    })
+}
+
 fn is_opencode_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return text.contains("\"codexhub_managed\"") || text.contains("\"codexhub\"");
@@ -3713,6 +3964,13 @@ fn is_zcode_codexhub_config(text: &str) -> bool {
                         .is_some_and(|name| name == "CodexHub Gateway")
             })
         })
+}
+
+fn is_zcode_v2_codexhub_config(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return text.contains("\"codexhub\"") || text.contains("CodexHub Gateway");
+    };
+    value.pointer("/provider/codexhub").is_some()
 }
 
 fn read_json_file_or_empty(path: &Path, label: &str) -> Result<Value, String> {
@@ -5204,11 +5462,18 @@ mod tests {
     fn zcode_apply_writes_user_catalog_with_schema_safe_provider() {
         let root = unique_temp_dir("codexhub-zcode");
         let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: v2_cache_path.clone(),
+        };
         let backup_root = root.join("backups");
         let settings = Settings::default();
 
-        let result = super::apply_zcode_config_with_path(
-            &catalog_path,
+        let result = super::apply_zcode_config_with_targets(
+            &targets,
             &backup_root,
             &settings,
             &[],
@@ -5218,6 +5483,10 @@ mod tests {
 
         assert!(result.applied);
         assert!(result.backup_path.is_none());
+        assert_eq!(
+            result.config_path.as_deref(),
+            Some(v2_config_path.as_path())
+        );
         let catalog: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
         assert_eq!(
@@ -5266,25 +5535,151 @@ mod tests {
         assert!(!fs::read_to_string(&catalog_path)
             .unwrap()
             .contains("codexhub_managed"));
+        let v2_config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
+        assert_eq!(
+            v2_config
+                .pointer("/provider/codexhub/options/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1")
+        );
+        assert!(v2_config
+            .pointer("/provider/codexhub/models/openai~1gpt-5.5")
+            .is_some());
+        assert_eq!(
+            fs::read_to_string(&v2_cache_path).unwrap(),
+            fs::read_to_string(&catalog_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn zcode_v2_config_writes_codexhub_provider_to_active_config() {
+        let root = unique_temp_dir("codexhub-zcode-v2-config");
+        let config_path = root.join("config.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &config_path,
+            r#"{"provider":{"builtin:test":{"name":"Existing","kind":"openai-compatible","options":{"baseURL":"https://example.test"},"models":{}}}}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let text = super::zcode_v2_config_text(
+            &config_path,
+            &settings,
+            &providers,
+            "ollama-cloud/glm-5.2",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let provider = value.pointer("/provider/codexhub").unwrap();
+
+        assert!(value.pointer("/provider/builtin:test").is_some());
+        assert_eq!(
+            provider.get("name").and_then(serde_json::Value::as_str),
+            Some("CodexHub Gateway")
+        );
+        assert_eq!(
+            provider.get("kind").and_then(serde_json::Value::as_str),
+            Some("openai-compatible")
+        );
+        assert_eq!(
+            provider
+                .pointer("/options/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1")
+        );
+        assert_eq!(
+            provider
+                .pointer("/models/ollama-cloud~1glm-5.2/limit/context")
+                .and_then(serde_json::Value::as_u64),
+            Some(131_072)
+        );
+        assert_eq!(
+            provider
+                .pointer("/models/volc~1glm-5.2/limit/context")
+                .and_then(serde_json::Value::as_u64),
+            Some(1_024_000)
+        );
+    }
+
+    #[test]
+    fn zcode_route_mode_prefers_v2_config_over_stale_catalog() {
+        let root = unique_temp_dir("codexhub-zcode-route-mode");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: root.join("v2").join("bots-model-cache.v2.json"),
+        };
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(super::zcode_route_mode(&targets), "official");
+
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"codexhub":{"name":"CodexHub Gateway","models":{}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(super::zcode_route_mode(&targets), "hub");
+    }
+
+    #[test]
+    fn zcode_catalog_override_derives_v2_root_from_same_profile() {
+        let root = unique_temp_dir("codexhub-zcode-profile-root");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+
+        assert_eq!(
+            super::zcode_v2_root_from_catalog_path(&catalog_path),
+            Some(root.join("v2"))
+        );
     }
 
     #[test]
     fn zcode_apply_rejects_invalid_model_before_backup_side_effects() {
         let root = unique_temp_dir("codexhub-zcode-invalid-model");
         let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: v2_cache_path.clone(),
+        };
         let backup_root = root.join("backups");
         fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
         fs::write(
             &catalog_path,
             r#"{"schemaVersion":"zcode.model-providers.v2","providers":[]}"#,
         )
         .unwrap();
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}}}}"#,
+        )
+        .unwrap();
         let original = fs::read_to_string(&catalog_path).unwrap();
+        let original_v2_config = fs::read_to_string(&v2_config_path).unwrap();
         let settings = Settings::default();
         let providers = case_sensitive_client_export_test_providers();
 
-        let error = super::apply_zcode_config_with_path(
-            &catalog_path,
+        let error = super::apply_zcode_config_with_targets(
+            &targets,
             &backup_root,
             &settings,
             &providers,
@@ -5295,6 +5690,112 @@ mod tests {
         assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
         assert!(!backup_root.exists());
         assert_eq!(fs::read_to_string(&catalog_path).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(&v2_config_path).unwrap(),
+            original_v2_config
+        );
+        assert!(!v2_cache_path.exists());
+    }
+
+    #[test]
+    fn zcode_restore_without_backup_removes_managed_v2_provider_only() {
+        let root = unique_temp_dir("codexhub-zcode-restore-managed");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: v2_cache_path.clone(),
+        };
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}},"codexhub":{"name":"CodexHub Gateway","models":{}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &v2_cache_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+        )
+        .unwrap();
+
+        let result =
+            super::restore_zcode_config_with_targets(&targets, &root.join("backups")).unwrap();
+
+        assert!(result.applied);
+        assert!(result.backup_path.is_none());
+        assert!(!catalog_path.exists());
+        assert!(!v2_cache_path.exists());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
+        assert!(value.pointer("/provider/builtin:test").is_some());
+        assert!(value.pointer("/provider/codexhub").is_none());
+    }
+
+    #[test]
+    fn zcode_restore_skips_mixed_snapshot_with_managed_v2_config() {
+        let root = unique_temp_dir("codexhub-zcode-restore-mixed-snapshot");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path,
+        };
+        let backup_root = root.join("backups");
+        let official_backup = backup_root.join("zcode-official");
+        let mixed_backup = backup_root.join("zcode-mixed");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(official_backup.as_path()).unwrap();
+        fs::create_dir_all(mixed_backup.as_path()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}},"codexhub":{"name":"CodexHub Gateway","models":{}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            official_backup.join("config.json"),
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}}}}"#,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        fs::write(
+            mixed_backup.join("codexhub.json"),
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            mixed_backup.join("config.json"),
+            r#"{"provider":{"builtin:test":{"name":"Existing","models":{}},"codexhub":{"name":"CodexHub Gateway","models":{}}}}"#,
+        )
+        .unwrap();
+
+        let result = super::restore_zcode_config_with_targets(&targets, &backup_root).unwrap();
+
+        assert!(result.applied);
+        assert_eq!(
+            result.backup_path.as_deref(),
+            Some(official_backup.as_path())
+        );
+        assert!(!catalog_path.exists());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
+        assert!(value.pointer("/provider/builtin:test").is_some());
+        assert!(value.pointer("/provider/codexhub").is_none());
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
