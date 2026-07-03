@@ -1,6 +1,6 @@
 use crate::{MetadataProvenance, Model, ModelPricing};
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, AUTHORIZATION};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -10,7 +10,8 @@ use std::time::Duration;
 
 const OFFICIAL_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
-const GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 
 pub fn refresh_official_models() -> Result<Vec<Model>, String> {
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -32,6 +33,7 @@ pub fn probe_upstream_format(
     api_key: &str,
     model: Option<&str>,
 ) -> Result<Value, String> {
+    let api_key = resolve_api_key(api_key)?.unwrap_or_default();
     let paths = ModelPaths::runtime()?;
     let python = find_python();
     let script = paths.upstream_format_probe_script();
@@ -47,7 +49,7 @@ pub fn probe_upstream_format(
         .arg(&script)
         .arg("--base-url")
         .arg(base_url)
-        .env("CODEXHUB_PROBE_API_KEY", api_key.trim());
+        .env("CODEXHUB_PROBE_API_KEY", api_key);
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         command.arg("--model").arg(model);
     }
@@ -79,7 +81,7 @@ pub fn generate_catalog() -> Result<Vec<Model>, String> {
 
 pub fn list_models() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
-    let catalog_path = paths.generated_catalog_path();
+    let catalog_path = paths.existing_generated_catalog_path();
     if !catalog_path.exists() {
         return Ok(Vec::new());
     }
@@ -89,7 +91,8 @@ pub fn list_models() -> Result<Vec<Model>, String> {
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
-    let cached = read_metadata_cache(&paths).unwrap_or_else(|_| builtin_model_metadata());
+    let cached = read_metadata_cache(&paths).unwrap_or_default();
+    let cached = merge_metadata_with_overrides(builtin_model_metadata(), cached);
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
     Ok(merge_metadata_with_overrides(cached, overrides))
 }
@@ -133,13 +136,23 @@ fn discover_provider_models_with_timeout(
     timeout: Duration,
 ) -> Result<Vec<Model>, String> {
     let endpoint = provider_models_endpoint(base_url)?;
-    discover_models_http(
+    let mut models = discover_models_http(
         &endpoint,
         api_key,
         timeout,
         DiscoveryKind::Provider,
         "provider models",
-    )
+    )?;
+    if let Some(show_endpoint) = ollama_show_endpoint(base_url) {
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|error| {
+                format!("failed to build HTTP client for Ollama model metadata: {error}")
+            })?;
+        enrich_models_with_ollama_show(&client, &show_endpoint, api_key, &mut models);
+    }
+    Ok(models)
 }
 
 fn discover_models_http(
@@ -154,8 +167,7 @@ fn discover_models_http(
         .build()
         .map_err(|error| format!("failed to build HTTP client for {label}: {error}"))?;
     let mut request = client.get(endpoint).header(ACCEPT, "application/json");
-    let api_key = api_key.trim();
-    if !api_key.is_empty() {
+    if let Some(api_key) = resolve_api_key(api_key)? {
         request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
 
@@ -194,6 +206,159 @@ fn provider_models_endpoint(base_url: &str) -> Result<String, String> {
     } else {
         Ok(format!("{base_url}/v1/models"))
     }
+}
+
+fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Ok(None);
+    }
+    let Some(env_name) = env_placeholder_name(api_key)? else {
+        return Ok(Some(api_key.to_string()));
+    };
+    let value = std::env::var(&env_name)
+        .map_err(|_| format!("{env_name} is not set"))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return Err(format!("{env_name} is empty"));
+    }
+    Ok(Some(value))
+}
+
+fn env_placeholder_name(value: &str) -> Result<Option<String>, String> {
+    if !value.starts_with("{env:") && !value.ends_with('}') {
+        return Ok(None);
+    }
+    if !value.starts_with("{env:") || !value.ends_with('}') {
+        return Err("invalid API key environment placeholder".to_string());
+    }
+    let name = &value[5..value.len() - 1];
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err("invalid API key environment placeholder".to_string());
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(format!("invalid API key environment placeholder: {name}"));
+    }
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        return Err(format!("invalid API key environment placeholder: {name}"));
+    }
+    Ok(Some(name.to_string()))
+}
+
+fn ollama_show_endpoint(base_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(base_url.trim()).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let is_ollama_cloud = host == "ollama.com";
+    let is_local_ollama =
+        matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") && url.port() == Some(11434);
+    if !is_ollama_cloud && !is_local_ollama {
+        return None;
+    }
+
+    let path = url.path().trim_end_matches('/');
+    let api_path = if let Some(prefix) = path.strip_suffix("/v1") {
+        format!("{prefix}/api/show")
+    } else if let Some(prefix) = path.strip_suffix("/api") {
+        format!("{prefix}/api/show")
+    } else {
+        "/api/show".to_string()
+    };
+    url.set_path(&api_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn enrich_models_with_ollama_show(
+    client: &Client,
+    show_endpoint: &str,
+    api_key: &str,
+    models: &mut [Model],
+) {
+    let api_key = resolve_api_key(api_key).ok().flatten();
+    for model in models {
+        let mut request = client
+            .post(show_endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({ "model": model.id }));
+        if let Some(api_key) = api_key.as_deref() {
+            request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+        }
+        let Ok(response) = request.send() else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(payload) = response.json::<Value>() else {
+            continue;
+        };
+        apply_ollama_show_metadata(model, &payload);
+    }
+}
+
+fn apply_ollama_show_metadata(model: &mut Model, payload: &Value) {
+    if let Some(context_window) = ollama_show_context_window(payload) {
+        model.context_window = Some(context_window);
+    }
+
+    let capabilities = string_array(payload.get("capabilities").unwrap_or(&Value::Null))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    if capabilities.contains("vision") {
+        model.input_modalities = Some(vec!["text".to_string(), "image".to_string()]);
+    }
+
+    if capabilities.contains("thinking") || known_ollama_thinking_model(&model.id) {
+        let levels = ollama_reasoning_levels(&model.id);
+        model.default_reasoning_level = levels
+            .iter()
+            .find(|level| level.as_str() == "medium")
+            .cloned()
+            .or_else(|| levels.first().cloned());
+        model.supported_reasoning_levels = Some(levels);
+    }
+}
+
+fn ollama_show_context_window(payload: &Value) -> Option<u32> {
+    let model_info = payload.get("model_info")?.as_object()?;
+    model_info
+        .iter()
+        .filter_map(|(key, value)| {
+            if key.ends_with(".context_length") || key == "context_length" {
+                optional_u32(value)
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+fn known_ollama_thinking_model(model_id: &str) -> bool {
+    let model_id = model_id.to_ascii_lowercase();
+    model_id.starts_with("qwen3")
+        || model_id.contains("/qwen3")
+        || model_id.starts_with("gpt-oss")
+        || model_id.contains("/gpt-oss")
+        || model_id.starts_with("deepseek-r1")
+        || model_id.contains("/deepseek-r1")
+        || model_id.starts_with("deepseek-v3.1")
+        || model_id.contains("/deepseek-v3.1")
+}
+
+fn ollama_reasoning_levels(model_id: &str) -> Vec<String> {
+    let model_id = model_id.to_ascii_lowercase();
+    let levels = if model_id.starts_with("gpt-oss") || model_id.contains("/gpt-oss") {
+        ["low", "medium", "high"].as_slice()
+    } else {
+        ["low", "medium", "high", "max"].as_slice()
+    };
+    levels.iter().map(|level| (*level).to_string()).collect()
 }
 
 fn safe_http_error(error: reqwest::Error) -> String {
@@ -361,6 +526,24 @@ impl ModelPaths {
         self.codex_dir
             .join("model-catalogs")
             .join(GENERATED_CATALOG_FILE)
+    }
+
+    fn legacy_generated_catalog_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join(LEGACY_GENERATED_CATALOG_FILE)
+    }
+
+    fn existing_generated_catalog_path(&self) -> PathBuf {
+        let catalog_path = self.generated_catalog_path();
+        if catalog_path.exists() {
+            return catalog_path;
+        }
+        let legacy_path = self.legacy_generated_catalog_path();
+        if legacy_path.exists() {
+            return legacy_path;
+        }
+        catalog_path
     }
 
     fn metadata_cache_path(&self) -> PathBuf {
@@ -536,19 +719,19 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
     let original_enabled = base.enabled;
     let original_codex_enabled = base.codex_enabled;
     let original_gateway_exported = base.gateway_exported;
-    let original_hidden = base.hidden;
     *base = Model {
         id: override_model.id,
         display_name: override_model.display_name.or(base.display_name.take()),
         upstream_model: override_model.upstream_model.or(base.upstream_model.take()),
         source_kind: override_model.source_kind.or(base.source_kind.take()),
         locked: base.locked || override_model.locked,
-        hidden: override_model.hidden || original_hidden,
         codex_enabled: override_model.codex_enabled && original_codex_enabled,
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
         context_window: override_model.context_window.or(base.context_window),
         max_output_tokens: override_model.max_output_tokens.or(base.max_output_tokens),
-        input_modalities: override_model.input_modalities.or(base.input_modalities.take()),
+        input_modalities: override_model
+            .input_modalities
+            .or(base.input_modalities.take()),
         supported_reasoning_levels: override_model
             .supported_reasoning_levels
             .or(base.supported_reasoning_levels.take()),
@@ -564,9 +747,33 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
 
 fn builtin_model_metadata() -> Vec<Model> {
     vec![
-        official_metadata("openai/gpt-5.5", "GPT-5.5", 272_000),
-        official_metadata("openai/gpt-5.4", "GPT-5.4", 272_000),
-        official_metadata("openai/gpt-5.4-mini", "GPT-5.4 mini", 272_000),
+        official_priced_metadata(
+            "openai/gpt-5.5",
+            "GPT-5.5",
+            272_000,
+            "https://developers.openai.com/api/docs/pricing",
+            5.00,
+            Some(0.50),
+            22.50,
+        ),
+        official_priced_metadata(
+            "openai/gpt-5.4",
+            "GPT-5.4",
+            272_000,
+            "https://developers.openai.com/api/docs/pricing",
+            2.50,
+            Some(0.25),
+            11.25,
+        ),
+        official_priced_metadata(
+            "openai/gpt-5.4-mini",
+            "GPT-5.4 mini",
+            272_000,
+            "https://developers.openai.com/api/docs/pricing",
+            0.375,
+            Some(0.0375),
+            2.25,
+        ),
         official_metadata("openai/gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
         priced_metadata(
             "zai/glm-5.2",
@@ -617,6 +824,33 @@ fn builtin_model_metadata() -> Vec<Model> {
     ]
 }
 
+fn official_priced_metadata(
+    id: &str,
+    display_name: &str,
+    context_window: u32,
+    source_url: &str,
+    input_per_million: f64,
+    cached_input_per_million: Option<f64>,
+    output_per_million: f64,
+) -> Model {
+    let mut model = official_metadata(id, display_name, context_window);
+    model.pricing = Some(ModelPricing {
+        input_per_million: Some(input_per_million),
+        cached_input_per_million,
+        output_per_million: Some(output_per_million),
+        currency: "USD".to_string(),
+        source: "official".to_string(),
+        estimate: true,
+    });
+    model.metadata_provenance = Some(MetadataProvenance {
+        source: "official".to_string(),
+        source_url: Some(source_url.to_string()),
+        fetched_at: None,
+        confidence: "medium".to_string(),
+    });
+    model
+}
+
 fn official_metadata(id: &str, display_name: &str, context_window: u32) -> Model {
     Model {
         id: id.to_string(),
@@ -624,6 +858,15 @@ fn official_metadata(id: &str, display_name: &str, context_window: u32) -> Model
         source_kind: Some("official".to_string()),
         locked: true,
         context_window: Some(context_window),
+        input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+        supported_reasoning_levels: Some(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ]),
+        default_reasoning_level: Some("medium".to_string()),
         metadata_provenance: Some(MetadataProvenance {
             source: "official".to_string(),
             source_url: Some("https://developers.openai.com/api/docs/models".to_string()),
@@ -708,13 +951,18 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .and_then(Value::as_str)
             .and_then(nonblank),
         sort_order: object.get("priority").and_then(optional_i32),
-        enabled: object.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        enabled: object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         source_kind: object
             .get("source_kind")
             .and_then(Value::as_str)
             .and_then(nonblank),
-        locked: object.get("locked").and_then(Value::as_bool).unwrap_or(false),
-        hidden: object.get("hidden").and_then(Value::as_bool).unwrap_or(false),
+        locked: object
+            .get("locked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         codex_enabled: object
             .get("codex_enabled")
             .and_then(Value::as_bool)
@@ -773,12 +1021,13 @@ fn find_python() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout, generate_catalog_with_runner, list_models,
-        merge_metadata_with_overrides,
-        refresh_official_models_from_endpoint, CatalogCommandOutcome, CatalogSyncRunner,
-        ModelPaths,
+        discover_provider_models_with_timeout, enrich_models_with_ollama_show,
+        generate_catalog_with_runner, list_model_metadata, list_models,
+        merge_metadata_with_overrides, ollama_show_endpoint, refresh_official_models_from_endpoint,
+        CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
     use crate::{MetadataProvenance, Model};
+    use reqwest::blocking::Client;
     use std::cell::RefCell;
     use std::fs;
     use std::io::{Read, Write};
@@ -963,6 +1212,102 @@ mod tests {
     }
 
     #[test]
+    fn provider_discovery_resolves_env_api_key_placeholders() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("MINIMAX_API_KEY");
+        std::env::set_var("MINIMAX_API_KEY", "resolved-minimax-secret");
+        let server = MockServer::json(r#"{"models":["minimax-m3"]}"#, Duration::ZERO);
+
+        let models = discover_provider_models_with_timeout(
+            &server.base_url(),
+            "{env:MINIMAX_API_KEY}",
+            Duration::from_secs(2),
+        )
+        .expect("provider discovery");
+
+        assert_eq!(model_ids(&models), ["minimax-m3"]);
+        let request = server.request();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer resolved-minimax-secret"));
+        assert!(!request.contains("{env:MINIMAX_API_KEY}"));
+        restore_env("MINIMAX_API_KEY", previous);
+        server.join();
+    }
+
+    #[test]
+    fn provider_discovery_reports_missing_env_api_key_placeholders() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("MINIMAX_API_KEY");
+        std::env::remove_var("MINIMAX_API_KEY");
+
+        let error = discover_provider_models_with_timeout(
+            "http://127.0.0.1:9/v1",
+            "{env:MINIMAX_API_KEY}",
+            Duration::from_millis(50),
+        )
+        .expect_err("missing env placeholder should fail before HTTP");
+
+        restore_env("MINIMAX_API_KEY", previous);
+        assert!(error.contains("MINIMAX_API_KEY"));
+        assert!(error.contains("not set"));
+    }
+
+    #[test]
+    fn ollama_show_endpoint_is_derived_only_for_ollama_hosts() {
+        assert_eq!(
+            ollama_show_endpoint("https://ollama.com/v1").as_deref(),
+            Some("https://ollama.com/api/show")
+        );
+        assert_eq!(
+            ollama_show_endpoint("http://127.0.0.1:11434/v1/").as_deref(),
+            Some("http://127.0.0.1:11434/api/show")
+        );
+        assert_eq!(ollama_show_endpoint("https://example.test/v1"), None);
+    }
+
+    #[test]
+    fn ollama_show_metadata_enriches_context_vision_and_thinking() {
+        let server = MockServer::json(
+            r#"{"capabilities":["completion","vision","thinking"],"model_info":{"gptoss.context_length":131072}}"#,
+            Duration::ZERO,
+        );
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut models = vec![Model {
+            id: "gpt-oss:120b".to_string(),
+            ..Model::default()
+        }];
+
+        enrich_models_with_ollama_show(
+            &client,
+            &format!("{}/api/show", server.base_url()),
+            "ollama-secret",
+            &mut models,
+        );
+
+        assert_eq!(models[0].context_window, Some(131_072));
+        assert_eq!(
+            models[0].input_modalities.as_deref(),
+            Some(["text".to_string(), "image".to_string()].as_slice())
+        );
+        assert_eq!(
+            models[0].supported_reasoning_levels.as_deref(),
+            Some(["low".to_string(), "medium".to_string(), "high".to_string()].as_slice())
+        );
+        assert_eq!(models[0].default_reasoning_level.as_deref(), Some("medium"));
+        let request = server.request();
+        assert!(request.starts_with("POST /api/show "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer ollama-secret"));
+        assert!(request.contains(r#""model":"gpt-oss:120b""#));
+        server.join();
+    }
+
+    #[test]
     fn refresh_official_models_requires_openai_api_key_without_leaking_values() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("OPENAI_API_KEY");
@@ -1095,6 +1440,79 @@ mod tests {
         assert_eq!(
             model_ids(&models.expect("list models")),
             ["codex-home-list-model"]
+        );
+    }
+
+    #[test]
+    fn list_models_falls_back_to_legacy_generated_catalog_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-models-legacy-catalog");
+        let codex_home = root.join("codex-home");
+        let catalog_path = codex_home
+            .join("model-catalogs")
+            .join(super::LEGACY_GENERATED_CATALOG_FILE);
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"models":[{"slug":"legacy-list-model","display_name":"Legacy List Model"}]}"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let models = list_models();
+
+        restore_env("CODEX_HOME", previous);
+        assert_eq!(
+            model_ids(&models.expect("list models")),
+            ["legacy-list-model"]
+        );
+    }
+
+    #[test]
+    fn list_model_metadata_merges_builtin_pricing_into_stale_cache() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("metadata-stale-cache");
+        let codex_home = root.join("codex-home");
+        let paths = ModelPaths::new(&codex_home, root.join("repo-root"));
+        fs::create_dir_all(paths.metadata_cache_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.metadata_cache_path(),
+            r#"[{"id":"openai/gpt-5.5","display_name":"Cached GPT-5.5","context_window":120000}]"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let models = list_model_metadata().expect("metadata");
+
+        restore_env("CODEX_HOME", previous);
+        let gpt55 = models
+            .iter()
+            .find(|model| model.id == "openai/gpt-5.5")
+            .expect("gpt-5.5 metadata");
+        assert_eq!(gpt55.display_name.as_deref(), Some("Cached GPT-5.5"));
+        assert_eq!(gpt55.context_window, Some(120_000));
+        assert_eq!(
+            gpt55
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.input_per_million),
+            Some(5.0)
+        );
+        assert_eq!(
+            gpt55
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.cached_input_per_million),
+            Some(0.5)
+        );
+        assert_eq!(
+            gpt55
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.output_per_million),
+            Some(22.5)
         );
     }
 

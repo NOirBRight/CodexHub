@@ -33,8 +33,13 @@ RUNTIME_MODEL_CATALOG_DIR = RUNTIME_CODEX_DIR / "model-catalogs"
 
 POLICY_PATH = REPO_ROOT / "config" / "catalog_policy.toml"
 OFFICIAL_SEED_PATH = BUNDLED_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
+RUNTIME_OFFICIAL_SEED_PATH = RUNTIME_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
 OLLAMA_FALLBACK_PATH = BUNDLED_MODEL_CATALOG_DIR / "ollama-cloud.json"
-GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-official-ollama.json"
+RUNTIME_OLLAMA_FALLBACK_PATH = RUNTIME_MODEL_CATALOG_DIR / "ollama-cloud.json"
+GENERATED_CATALOG_FILENAME = "codexhub-model-catalog.json"
+LEGACY_GENERATED_CATALOG_FILENAME = "codex-proxy-official-ollama.json"
+GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / GENERATED_CATALOG_FILENAME
+LEGACY_GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / LEGACY_GENERATED_CATALOG_FILENAME
 GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
 SETTINGS_PATH = RUNTIME_CODEX_DIR / "proxy" / "settings.json"
 
@@ -56,6 +61,11 @@ OLLAMA_MODEL_LIMIT_OVERRIDES: dict[str, dict[str, Any]] = {
         "context_window": 1000000,
         "max_output_tokens": 131072,
         "max_output_source": "https://docs.z.ai",
+    },
+    "kimi-k2.6": {
+        "context_window": 262144,
+        "max_output_tokens": 32768,
+        "max_output_source": "https://ollama.com/library/kimi-k2.6",
     },
     "kimi-k2.7-code": {
         "context_window": 262144,
@@ -84,6 +94,47 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
     "description": "Official OpenAI model.",
     "visibility": "list",
     "supported_in_api": True,
+}
+
+OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
+    {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
+]
+
+OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
+    "gpt-5.5": {
+        "context_window": 272000,
+        "max_context_window": 272000,
+        "additional_speed_tiers": ["fast"],
+        "service_tiers": OFFICIAL_FAST_SERVICE_TIERS,
+        "default_reasoning_level": "medium",
+    },
+    "gpt-5.5-fast": {
+        "context_window": 272000,
+        "max_context_window": 272000,
+        "default_reasoning_level": "medium",
+    },
+    "gpt-5.4": {
+        "context_window": 272000,
+        "max_context_window": 272000,
+        "additional_speed_tiers": ["fast"],
+        "service_tiers": OFFICIAL_FAST_SERVICE_TIERS,
+        "default_reasoning_level": "medium",
+    },
+    "gpt-5.4-fast": {
+        "context_window": 272000,
+        "max_context_window": 272000,
+        "default_reasoning_level": "medium",
+    },
+    "gpt-5.4-mini": {
+        "context_window": 272000,
+        "max_context_window": 272000,
+        "default_reasoning_level": "medium",
+    },
+    "gpt-5.3-codex-spark": {
+        "context_window": 128000,
+        "max_context_window": 128000,
+        "default_reasoning_level": "high",
+    },
 }
 
 DEFAULT_OLLAMA_MODEL: dict[str, Any] = {
@@ -122,6 +173,13 @@ DEFAULT_OLLAMA_MODEL: dict[str, Any] = {
     "instructions_variables": {},
 }
 
+REASONING_LEVEL_DESCRIPTIONS = {
+    "low": "Fast responses with lighter reasoning",
+    "medium": "Balances speed and reasoning depth for everyday tasks",
+    "high": "Greater reasoning depth for complex problems",
+    "xhigh": "Extra high reasoning depth for complex problems",
+    "max": "Maximum upstream reasoning depth",
+}
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -131,7 +189,9 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
     return (
         POLICY_PATH,
         OFFICIAL_SEED_PATH,
+        RUNTIME_OFFICIAL_SEED_PATH,
         OLLAMA_FALLBACK_PATH,
+        SETTINGS_PATH,
         DEFAULT_PROVIDERS_PATH,
         runtime_providers_path(),
         Path(__file__).resolve(),
@@ -151,14 +211,26 @@ def catalog_cache_is_fresh(max_age_seconds: int, catalog_path: Path = GENERATED_
     return age_seconds < max_age_seconds
 
 
+def existing_generated_catalog_path(path: Path = GENERATED_CATALOG_PATH) -> Path:
+    if path.exists():
+        return path
+    if path == GENERATED_CATALOG_PATH and LEGACY_GENERATED_CATALOG_PATH.exists():
+        return LEGACY_GENERATED_CATALOG_PATH
+    return path
+
+
 def load_json_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def read_client_version(seed_path: Path = OFFICIAL_SEED_PATH, fallback_path: Path = OLLAMA_FALLBACK_PATH) -> str:
-    for path in (seed_path, fallback_path):
+def read_client_version(
+    seed_path: Path = OFFICIAL_SEED_PATH,
+    fallback_path: Path = OLLAMA_FALLBACK_PATH,
+    runtime_seed_path: Path = RUNTIME_OFFICIAL_SEED_PATH,
+) -> str:
+    for path in (seed_path, runtime_seed_path, fallback_path):
         data = load_json_file(path)
         version = data.get("client_version")
         if isinstance(version, str) and version:
@@ -166,15 +238,48 @@ def read_client_version(seed_path: Path = OFFICIAL_SEED_PATH, fallback_path: Pat
     return DEFAULT_CLIENT_VERSION
 
 
-def load_official_seed_models(path: Path = OFFICIAL_SEED_PATH) -> list[dict[str, Any]]:
-    models = [deepcopy(model) for model in load_catalog_models(path) if str(model.get("slug", "")).startswith("gpt-")]
-    if models:
-        return models
+def official_seed_catalog_paths(
+    path: Path = OFFICIAL_SEED_PATH,
+    runtime_path: Path = RUNTIME_OFFICIAL_SEED_PATH,
+) -> list[Path]:
+    paths = [path]
+    if runtime_path not in paths:
+        paths.append(runtime_path)
+    return paths
+
+
+def load_official_seed_models(
+    path: Path = OFFICIAL_SEED_PATH,
+    runtime_path: Path = RUNTIME_OFFICIAL_SEED_PATH,
+) -> list[dict[str, Any]]:
+    for candidate in official_seed_catalog_paths(path, runtime_path):
+        models = [
+            deepcopy(model)
+            for model in load_catalog_models(candidate)
+            if str(model.get("slug", "")).startswith("gpt-")
+        ]
+        if models:
+            return models
+    return []
+
+
+def fallback_catalog_paths(path: Path = OLLAMA_FALLBACK_PATH) -> list[Path]:
+    paths = [path]
+    if path == OLLAMA_FALLBACK_PATH and RUNTIME_OLLAMA_FALLBACK_PATH not in paths:
+        paths.append(RUNTIME_OLLAMA_FALLBACK_PATH)
+    return paths
+
+
+def load_fallback_catalog_models(path: Path = OLLAMA_FALLBACK_PATH) -> list[dict[str, Any]]:
+    for candidate in fallback_catalog_paths(path):
+        models = load_catalog_models(candidate)
+        if models:
+            return models
     return []
 
 
 def model_ids_from_catalog(path: Path = OLLAMA_FALLBACK_PATH) -> list[str]:
-    return [str(model["slug"]) for model in load_catalog_models(path) if model.get("slug")]
+    return [str(model["slug"]) for model in load_fallback_catalog_models(path) if model.get("slug")]
 
 
 def extract_model_ids(payload: Any) -> list[str]:
@@ -344,8 +449,43 @@ def build_minimal_official_model(slug: str, policy: CatalogPolicy) -> dict[str, 
     return model
 
 
+def apply_official_model_defaults(model: dict[str, Any], slug: str) -> None:
+    defaults = OFFICIAL_MODEL_DEFAULTS.get(slug)
+    if not defaults:
+        return
+    for key, value in defaults.items():
+        model.setdefault(key, deepcopy(value))
+
+
 def official_proxy_alias(slug: str) -> str:
     return f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/{slug}"
+
+
+def official_sort_keys(model_id: str) -> tuple[str, str]:
+    key = canonical_model_id(model_id)
+    prefix = f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/"
+    if key.startswith(prefix):
+        return key, key[len(prefix):]
+    return official_proxy_alias(key), key
+
+
+def sort_official_slugs(slugs: Iterable[str], sort_order: Iterable[str]) -> list[str]:
+    ordered_slugs = list(slugs)
+    order_index: dict[str, int] = {}
+    for index, model_id in enumerate(sort_order):
+        for key in official_sort_keys(str(model_id)):
+            if key:
+                order_index.setdefault(key, index)
+
+    if not order_index:
+        return ordered_slugs
+
+    def sort_key(item: tuple[int, str]) -> tuple[int, int]:
+        original_index, slug = item
+        alias, upstream = official_sort_keys(slug)
+        return order_index.get(alias, order_index.get(upstream, len(order_index) + original_index)), original_index
+
+    return [slug for _, slug in sorted(enumerate(ordered_slugs), key=sort_key)]
 
 
 def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
@@ -356,6 +496,9 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
     model.setdefault("description", MINIMAL_OFFICIAL_MODEL["description"])
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
+    apply_official_model_defaults(model, slug)
+    for key, value in DEFAULT_OLLAMA_MODEL.items():
+        model.setdefault(key, deepcopy(value))
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     proxy_metadata.update(
         {
@@ -459,6 +602,20 @@ def build_external_provider_model(
     model.setdefault("supported_in_api", True)
     model["input_modalities"] = list(external_model.get("input_modalities") or ("text",))
 
+    reasoning_levels = external_model.get("supported_reasoning_levels")
+    if isinstance(reasoning_levels, (list, tuple)) and reasoning_levels:
+        model["supported_reasoning_levels"] = [
+            {
+                "effort": str(level),
+                "description": REASONING_LEVEL_DESCRIPTIONS.get(str(level), f"{level} reasoning effort"),
+            }
+            for level in reasoning_levels
+            if str(level).strip()
+        ]
+    default_reasoning_level = external_model.get("default_reasoning_level")
+    if isinstance(default_reasoning_level, str) and default_reasoning_level.strip():
+        model["default_reasoning_level"] = default_reasoning_level.strip()
+
     context_window = external_model.get("context_window")
     if isinstance(context_window, int) and context_window > 0:
         model["context_window"] = context_window
@@ -473,6 +630,7 @@ def build_external_provider_model(
             "provider": external_model["provider_alias"],
             "upstream_name": external_model["upstream_name"],
             "upstream_model": external_model["upstream_model"],
+            "upstream_format": external_model.get("upstream_format", "auto"),
         }
     )
     context_source = external_model.get("context_source")
@@ -494,12 +652,22 @@ def build_codex_catalog(
     fallback_models: Iterable[dict[str, Any]] | None = None,
     ollama_model_metadata: dict[str, dict[str, Any]] | None = None,
     external_models: Iterable[dict[str, Any]] | None = None,
+    official_model_sort_order: Iterable[str] | None = None,
+    disabled_official_model_ids: Iterable[str] | None = None,
     fetched_at: str | None = None,
 ) -> dict[str, Any]:
     models: list[dict[str, Any]] = []
     seen_slugs: set[str] = set()
     official_by_slug = official_model_index(official_models)
-    official_slugs = list(policy.official_models) or list(official_by_slug.keys())
+    disabled_official_slugs = {official_model_disable_key(str(model_id)) for model_id in disabled_official_model_ids or []}
+    official_slugs = sort_official_slugs(
+        [
+            slug
+            for slug in (list(policy.official_models) or list(official_by_slug.keys()))
+            if official_model_disable_key(str(slug)) not in disabled_official_slugs
+        ],
+        official_model_sort_order or [],
+    )
 
     for slug in official_slugs:
         alias = official_proxy_alias(slug)
@@ -582,20 +750,47 @@ def load_cached_state(path: Path = GENERATED_STATE_PATH) -> dict[str, Any]:
     }
 
 
+def load_settings() -> dict[str, Any]:
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def load_include_official_models() -> bool:
     """Read include_official_models from settings.json (written by Rust backend).
 
     Defaults to True when settings file is missing or the key is absent,
     matching the Rust Settings::default().
     """
-    if not SETTINGS_PATH.exists():
-        return True
-    try:
-        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    data = load_settings()
+    if not data:
         return True
     value = data.get("include_official_models")
     return value if isinstance(value, bool) else True
+
+
+def load_official_model_sort_order() -> list[str]:
+    data = load_settings()
+    value = data.get("official_model_sort_order")
+    if not isinstance(value, list):
+        return []
+    return [model_id for model_id in value if isinstance(model_id, str) and model_id.strip()]
+
+
+def load_official_disabled_models() -> list[str]:
+    data = load_settings()
+    value = data.get("official_disabled_models")
+    if not isinstance(value, list):
+        return []
+    return [official_model_disable_key(model_id) for model_id in value if isinstance(model_id, str) and model_id.strip()]
+
+
+def official_model_disable_key(model_id: str) -> str:
+    value = canonical_model_id(model_id)
+    return value.removeprefix("openai/")
 
 
 def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
@@ -606,12 +801,14 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
 
     policy = load_policy(POLICY_PATH)
     include_official = load_include_official_models()
+    official_model_sort_order = load_official_model_sort_order()
+    disabled_official_models = load_official_disabled_models()
     official_models = load_official_seed_models(OFFICIAL_SEED_PATH) if include_official else []
-    fallback_models = load_catalog_models(OLLAMA_FALLBACK_PATH)
+    fallback_models = load_fallback_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
     discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
     providers = load_providers()
-    external_models = list(build_external_model_index(providers).values())
+    external_models = list(build_external_model_index(providers, require_api_key=False).values())
     discovered_slugs = dedupe_canonical_model_ids(discovered_ids)
     visible_ollama_slugs = [
         canonical_model_id(str(slug))
@@ -628,6 +825,8 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         fallback_models=fallback_models,
         ollama_model_metadata=ollama_model_metadata,
         external_models=external_models,
+        official_model_sort_order=official_model_sort_order,
+        disabled_official_model_ids=disabled_official_models,
     )
     visible_slugs = [str(model["slug"]) for model in catalog["models"] if model.get("slug")]
     previous_visible_slugs = load_previous_visible_models(GENERATED_STATE_PATH)

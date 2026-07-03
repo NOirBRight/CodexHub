@@ -112,6 +112,53 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["deepseek-v4-flash"]["context_window"], 1048576)
         self.assertEqual(by_slug["deepseek-v4-flash"]["max_output_tokens"], 393216)
 
+    def test_build_catalog_applies_official_model_sort_order(self):
+        official = [
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list"},
+            {"slug": "gpt-5.4", "display_name": "GPT-5.4", "visibility": "list"},
+        ]
+
+        catalog = build_codex_catalog(
+            official,
+            [],
+            self.policy,
+            "0.142.0",
+            official_model_sort_order=["openai/gpt-5.4-mini", "openai/gpt-5.5"],
+        )
+
+        self.assertEqual(
+            [model["slug"] for model in catalog["models"]],
+            [
+                "openai/gpt-5.4-mini",
+                "openai/gpt-5.5",
+                "openai/gpt-5.4",
+                "openai/gpt-5.3-codex-spark",
+            ],
+        )
+
+    def test_build_catalog_filters_disabled_official_models(self):
+        official = [
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list"},
+            {"slug": "gpt-5.4", "display_name": "GPT-5.4", "visibility": "list"},
+        ]
+
+        catalog = build_codex_catalog(
+            official,
+            [],
+            self.policy,
+            "0.142.0",
+            disabled_official_model_ids=["openai/gpt-5.4"],
+        )
+
+        self.assertEqual(
+            [model["slug"] for model in catalog["models"]],
+            [
+                "openai/gpt-5.5",
+                "openai/gpt-5.4-mini",
+                "openai/gpt-5.3-codex-spark",
+            ],
+        )
+
     def test_official_fast_metadata_is_preserved(self):
         official = [
             {
@@ -137,7 +184,80 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["openai/gpt-5.5"]["additional_speed_tiers"], ["fast"])
         self.assertEqual(by_slug["openai/gpt-5.5"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
         self.assertEqual(by_slug["openai/gpt-5.4"]["service_tiers"][0]["id"], "priority")
-        self.assertNotIn("additional_speed_tiers", by_slug["openai/gpt-5.4-mini"])
+        self.assertIn("base_instructions", by_slug["openai/gpt-5.4-mini"])
+        self.assertIn("context_window", by_slug["openai/gpt-5.4-mini"])
+        self.assertIn("shell_type", by_slug["openai/gpt-5.4-mini"])
+        self.assertIn("supported_reasoning_levels", by_slug["openai/gpt-5.4-mini"])
+        self.assertEqual(by_slug["openai/gpt-5.4-mini"]["additional_speed_tiers"], [])
+
+    def test_load_official_seed_models_falls_back_to_runtime_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled_seed = root / "missing" / "openai-plus-ollama-cloud.json"
+            runtime_seed = root / "runtime" / "openai-plus-ollama-cloud.json"
+            runtime_seed.parent.mkdir(parents=True)
+            runtime_seed.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.5",
+                                "display_name": "GPT-5.5",
+                                "context_window": 272000,
+                                "max_context_window": 272000,
+                                "additional_speed_tiers": ["fast"],
+                                "service_tiers": [{"id": "priority", "name": "Fast"}],
+                            },
+                            {"slug": "not-gpt", "display_name": "Not GPT"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            models = catalog_sync.load_official_seed_models(bundled_seed, runtime_path=runtime_seed)
+
+        self.assertEqual([model["slug"] for model in models], ["gpt-5.5"])
+        self.assertEqual(models[0]["context_window"], 272000)
+        self.assertEqual(models[0]["additional_speed_tiers"], ["fast"])
+
+    def test_minimal_official_models_use_codex_defaults(self):
+        policy = CatalogPolicy(
+            denied_models=set(),
+            denied_substrings=set(),
+            display_names={
+                "gpt-5.5": "GPT-5.5",
+                "gpt-5.5-fast": "GPT-5.5 Fast",
+                "gpt-5.4": "GPT-5.4",
+                "gpt-5.4-fast": "GPT-5.4 Fast",
+                "gpt-5.4-mini": "GPT-5.4-Mini",
+                "gpt-5.3-codex-spark": "GPT-5.3-Codex-Spark",
+            },
+            official_models=(
+                "gpt-5.5",
+                "gpt-5.5-fast",
+                "gpt-5.4",
+                "gpt-5.4-fast",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
+            ),
+        )
+
+        catalog = build_codex_catalog([], [], policy, "0.142.0")
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+
+        self.assertEqual(by_slug["openai/gpt-5.5"]["context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.5"]["max_context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.5"]["additional_speed_tiers"], ["fast"])
+        self.assertEqual(by_slug["openai/gpt-5.5"]["service_tiers"][0]["id"], "priority")
+        self.assertEqual(by_slug["openai/gpt-5.5"]["default_reasoning_level"], "medium")
+        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.4"]["context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.4"]["additional_speed_tiers"], ["fast"])
+        self.assertEqual(by_slug["openai/gpt-5.4-fast"]["context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.4-mini"]["context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.4-mini"]["additional_speed_tiers"], [])
+        self.assertEqual(by_slug["openai/gpt-5.3-codex-spark"]["context_window"], 128000)
 
     def test_build_catalog_preserves_fallback_metadata_for_ollama_models(self):
         fallback_models = [
@@ -170,10 +290,13 @@ class CatalogSyncTests(unittest.TestCase):
                 "base_url": "https://ark.example.test/v1",
                 "api_key": "secret-test-key",
                 "upstream_model": "glm-5.2",
+                "upstream_format": "chat_completions",
                 "priority_base": 200,
                 "context_window": 1024000,
                 "max_output_tokens": 4096,
-                "input_modalities": ("text",),
+                "input_modalities": ("text", "image"),
+                "supported_reasoning_levels": ("low", "high", "xhigh"),
+                "default_reasoning_level": "high",
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
             },
@@ -203,10 +326,20 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1024000)
         self.assertEqual(by_slug["volc/glm-5.2"]["max_output_tokens"], 4096)
         self.assertEqual(by_slug["volc/glm-5.2"]["priority"], 200)
+        self.assertEqual(by_slug["volc/glm-5.2"]["input_modalities"], ["text", "image"])
+        self.assertEqual(by_slug["volc/glm-5.2"]["default_reasoning_level"], "high")
+        self.assertEqual(
+            [item["effort"] for item in by_slug["volc/glm-5.2"]["supported_reasoning_levels"]],
+            ["low", "high", "xhigh"],
+        )
         self.assertEqual(by_slug["volc/minimax-m3"]["priority"], 201)
         self.assertEqual(by_slug["volc/minimax-m3"]["input_modalities"], ["text", "image"])
         self.assertEqual(by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["provider"], "volc")
         self.assertEqual(by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["upstream_model"], "glm-5.2")
+        self.assertEqual(
+            by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["upstream_format"],
+            "chat_completions",
+        )
         self.assertEqual(
             by_slug["volc/glm-5.2"]["description"],
             "External Volc model via providers.toml.",
@@ -274,6 +407,10 @@ class CatalogSyncTests(unittest.TestCase):
 
                     self.assertEqual(
                         catalog_sync.GENERATED_CATALOG_PATH,
+                        codex_home / "model-catalogs" / "codexhub-model-catalog.json",
+                    )
+                    self.assertEqual(
+                        catalog_sync.LEGACY_GENERATED_CATALOG_PATH,
                         codex_home / "model-catalogs" / "codex-proxy-official-ollama.json",
                     )
                     self.assertEqual(
@@ -284,6 +421,28 @@ class CatalogSyncTests(unittest.TestCase):
                     self.assertEqual(
                         catalog_sync.OLLAMA_FALLBACK_PATH,
                         repo_root / "model-catalogs" / "ollama-cloud.json",
+                    )
+            finally:
+                importlib.reload(catalog_sync)
+
+    def test_existing_generated_catalog_path_falls_back_to_legacy_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            try:
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                    importlib.reload(catalog_sync)
+                    catalog_sync.LEGACY_GENERATED_CATALOG_PATH.parent.mkdir(parents=True)
+                    catalog_sync.LEGACY_GENERATED_CATALOG_PATH.write_text('{"models":[]}', encoding="utf-8")
+
+                    self.assertEqual(
+                        catalog_sync.existing_generated_catalog_path(),
+                        catalog_sync.LEGACY_GENERATED_CATALOG_PATH,
+                    )
+
+                    catalog_sync.GENERATED_CATALOG_PATH.write_text('{"models":[]}', encoding="utf-8")
+                    self.assertEqual(
+                        catalog_sync.existing_generated_catalog_path(),
+                        catalog_sync.GENERATED_CATALOG_PATH,
                     )
             finally:
                 importlib.reload(catalog_sync)
@@ -328,6 +487,22 @@ class CatalogSyncTests(unittest.TestCase):
         discover_http.assert_not_called()
         cache_models.assert_called_once_with(catalog_sync.OLLAMA_FALLBACK_PATH)
         self.assertFalse(hasattr(catalog_sync, "discover_ollama_cli"))
+
+    def test_model_ids_from_catalog_uses_runtime_fallback_when_bundled_catalog_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundled_path = Path(tmpdir) / "missing.json"
+            runtime_path = Path(tmpdir) / "runtime-ollama-cloud.json"
+            runtime_path.write_text(
+                json.dumps({"models": [{"slug": "glm-5.2"}, {"slug": "kimi-k2.7-code"}]}),
+                encoding="utf-8",
+            )
+            with patch("catalog_sync.OLLAMA_FALLBACK_PATH", bundled_path), patch(
+                "catalog_sync.RUNTIME_OLLAMA_FALLBACK_PATH",
+                runtime_path,
+            ):
+                ids = catalog_sync.model_ids_from_catalog(bundled_path)
+
+        self.assertEqual(ids, ["glm-5.2", "kimi-k2.7-code"])
 
     def test_discover_ollama_ids_reports_cloud_unavailable_without_key_or_cache(self):
         with (
@@ -452,6 +627,35 @@ class CatalogSyncTests(unittest.TestCase):
                 import catalog_sync
                 importlib.reload(catalog_sync)
                 self.assertFalse(catalog_sync.load_include_official_models())
+                importlib.reload(catalog_sync)
+
+    def test_load_official_model_sort_order_reads_string_list(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir)
+            settings_path = codex_home / "proxy" / "settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "official_model_sort_order": [
+                            "openai/gpt-5.4",
+                            "gpt-5.5",
+                            "",
+                            123,
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                import importlib
+                import catalog_sync
+                importlib.reload(catalog_sync)
+                self.assertEqual(
+                    catalog_sync.load_official_model_sort_order(),
+                    ["openai/gpt-5.4", "gpt-5.5"],
+                )
                 importlib.reload(catalog_sync)
 
 

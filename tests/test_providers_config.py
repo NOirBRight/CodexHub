@@ -332,32 +332,44 @@ enabled = true
 
         self.assertEqual(sorted(index), ["enabled-provider/enabled-model"])
 
-    def test_build_external_model_index_skips_hidden_and_not_exported_models(self):
-        providers = [
-            ProviderConfig(
-                id="visible-provider",
-                name="Visible Provider",
-                base_url="https://visible.example/v1",
-                api_key="secret",
-                models=[
-                    ModelConfig(id="exported", gateway_exported=True, hidden=False),
-                    ModelConfig(id="not-exported", gateway_exported=False, hidden=False),
-                    ModelConfig(id="hidden", gateway_exported=True, hidden=True),
-                ],
-            ),
-            ProviderConfig(
-                id="hidden-provider",
-                name="Hidden Provider",
-                base_url="https://hidden.example/v1",
-                api_key="secret",
-                hidden=True,
-                models=[ModelConfig(id="exported")],
-            ),
-        ]
+    def test_build_external_model_index_ignores_legacy_hidden_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "legacy-hidden-provider"
+name = "Legacy Hidden Provider"
+base_url = "https://legacy.example/v1"
+api_key = "secret"
+enabled = true
+hidden = true
+
+  [[providers.models]]
+  id = "exported"
+  enabled = true
+  hidden = true
+  gateway_exported = true
+
+  [[providers.models]]
+  id = "not-exported"
+  enabled = true
+  hidden = true
+  gateway_exported = false
+
+  [[providers.models]]
+  id = "disabled"
+  enabled = false
+  hidden = true
+  gateway_exported = true
+""".strip(),
+                encoding="utf-8",
+            )
+            providers = load_providers(path)
 
         index = build_external_model_index(providers)
 
-        self.assertEqual(sorted(index), ["visible-provider/exported"])
+        self.assertEqual(sorted(index), ["legacy-hidden-provider/exported"])
 
     def test_build_external_model_index_skips_missing_env_keys_and_resolves_present_env_keys(self):
         providers = [
@@ -521,7 +533,7 @@ enabled = true
     def test_default_config_uses_provider_ids_that_match_model_slug_prefixes(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
 
-        self.assertEqual([provider.id for provider in providers], ["ollama-cloud", "volc", "minimax-cn"])
+        self.assertEqual([provider.id for provider in providers], ["ollama-cloud", "volc", "minimax-cn", "xunfei"])
 
     def test_default_config_external_aliases_exclude_volc_minimax_m3_by_default(self):
         with patch.dict(
@@ -784,6 +796,9 @@ enabled = "0"
         self.assertFalse(loaded[0].models[1].enabled)
         self.assertIn('api_key = "{env:ROUNDTRIP_PROVIDER_KEY}"', raw_toml)
         self.assertNotIn("must-not-be-written", raw_toml)
+        self.assertNotIn("hidden", raw_toml)
+        self.assertIn("enabled = true", raw_toml)
+        self.assertIn("gateway_exported = true", raw_toml)
 
     def test_runtime_providers_path_preferred_over_bundled(self):
         """Regression: runtime CODEX_HOME/providers.toml must be read by load_providers

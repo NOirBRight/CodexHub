@@ -58,7 +58,6 @@ class ModelConfig:
     default_reasoning_level: str | None = None
     sort_order: int = 0
     enabled: bool = True
-    hidden: bool = False
     codex_enabled: bool = True
     gateway_exported: bool = True
 
@@ -73,7 +72,6 @@ class ProviderConfig:
     display_prefix: str | None = None
     sort_order: int = 0
     enabled: bool = True
-    hidden: bool = False
     models: list[ModelConfig] = field(default_factory=list)
 
     def resolved_api_key(self) -> str | None:
@@ -168,7 +166,6 @@ def build_external_model_index(
         provider_id = canonical_model_id(provider.id).lower()
         if (
             not provider.enabled
-            or provider.hidden
             or not provider_id
             or provider_id in EXTERNAL_PROVIDER_EXCLUDED_IDS
         ):
@@ -183,7 +180,7 @@ def build_external_model_index(
             continue
 
         for model in provider.models:
-            if not model.enabled or model.hidden or not model.gateway_exported:
+            if not model.enabled or not model.gateway_exported:
                 continue
 
             model_id = canonical_model_id(model.id).lower()
@@ -256,7 +253,6 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
                 default_reasoning_level=_optional_string_field(raw_model.get("default_reasoning_level")),
                 sort_order=_int_field(raw_model.get("sort_order"), 0),
                 enabled=_bool_field(raw_model.get("enabled"), True),
-                hidden=_bool_field(raw_model.get("hidden"), False),
                 codex_enabled=_bool_field(raw_model.get("codex_enabled"), True),
                 gateway_exported=_bool_field(raw_model.get("gateway_exported"), True),
             )
@@ -271,7 +267,6 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
-            hidden=_bool_field(raw_provider.get("hidden"), False),
             models=_sort_by_order(indexed_models),
         )
         indexed_providers.append((provider_index, provider))
@@ -304,7 +299,6 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             [
                 _toml_int_line("sort_order", provider.sort_order),
                 _toml_bool_line("enabled", provider.enabled),
-                _toml_bool_line("hidden", provider.hidden),
             ]
         )
 
@@ -335,7 +329,6 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                 [
                     _toml_int_line("sort_order", model.sort_order, indent="  "),
                     _toml_bool_line("enabled", model.enabled, indent="  "),
-                    _toml_bool_line("hidden", model.hidden, indent="  "),
                     _toml_bool_line("codex_enabled", model.codex_enabled, indent="  "),
                     _toml_bool_line("gateway_exported", model.gateway_exported, indent="  "),
                 ]
