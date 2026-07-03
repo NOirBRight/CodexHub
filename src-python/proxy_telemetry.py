@@ -125,6 +125,25 @@ def prepare_event_payload(event: str, fields: Mapping[str, Any], codex_home: Pat
     return payload
 
 
+def _canonical_usage_model(upstream: str | None, model: str | None) -> str | None:
+    if not model:
+        return None
+    value = model.strip()
+    if not value:
+        return None
+    if value.endswith(":cloud"):
+        value = value[:-6]
+    if upstream == "official" and "/" not in value and _looks_like_official_model(value):
+        return f"openai/{value}"
+    return value
+
+
+def _looks_like_official_model(model: str) -> bool:
+    if model.startswith(("gpt-", "codex-", "chatgpt-")):
+        return True
+    return len(model) > 1 and model[0] == "o" and model[1].isdigit()
+
+
 def enrich_request_observability(
     *,
     body: bytes,
@@ -409,12 +428,18 @@ def _request_values(payload: Mapping[str, Any], payload_json: str) -> dict[str, 
 
     upstream = _string(payload.get("upstream"))
     model = _string(payload.get("model"))
+    requested_model = _string(payload.get("model_requested")) or model
+    canonical_model = _canonical_usage_model(
+        upstream,
+        _string(payload.get("model_canonical")) or model,
+    )
     if "provider_id" not in values and upstream:
         values["provider_id"] = upstream
-    if "model_canonical" not in values and model:
-        values["model_canonical"] = model
-    if "model_requested" not in values and model:
-        values["model_requested"] = model
+    if canonical_model:
+        values["model_canonical"] = canonical_model
+        values["model"] = canonical_model
+    if "model_requested" not in values and requested_model:
+        values["model_requested"] = requested_model
     if "route_mode" not in values:
         values["route_mode"] = _route_mode(upstream)
     if event == "request_start" and "client_id" not in values:
@@ -429,10 +454,18 @@ def _request_values(payload: Mapping[str, Any], payload_json: str) -> dict[str, 
 def _apply_field_defaults(payload: dict[str, Any], codex_home: Path) -> None:
     upstream = _string(payload.get("upstream"))
     model = _string(payload.get("model"))
+    canonical_model = _canonical_usage_model(
+        upstream,
+        _string(payload.get("model_canonical")) or model,
+    )
     payload.setdefault("provider_id", upstream)
     payload.setdefault("route_mode", _route_mode(upstream))
     payload.setdefault("model_requested", model)
-    payload.setdefault("model_canonical", model)
+    if canonical_model:
+        payload["model"] = canonical_model
+        payload["model_canonical"] = canonical_model
+    else:
+        payload.setdefault("model_canonical", model)
     payload.setdefault("client_id", "unknown")
     payload.setdefault("client_inference_source", "unknown")
     user_agent = _string(payload.pop("user_agent", None))

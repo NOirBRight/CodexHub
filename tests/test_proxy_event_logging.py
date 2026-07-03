@@ -108,6 +108,51 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 importlib.reload(codex_proxy)
 
+    def test_official_bare_model_names_are_normalized_before_sqlite_write(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import proxy_telemetry
+
+            codex_home = Path(tmpdir) / "codex-home"
+            payload = proxy_telemetry.prepare_event_payload(
+                "request_start",
+                {
+                    "request_id": "req-official-model",
+                    "upstream": "official",
+                    "model": "gpt-5.5",
+                },
+                codex_home,
+            )
+
+            self.assertEqual(payload["model"], "openai/gpt-5.5")
+            self.assertEqual(payload["model_canonical"], "openai/gpt-5.5")
+            self.assertEqual(payload["model_requested"], "gpt-5.5")
+
+            db_path = Path(tmpdir) / "codex-proxy-telemetry.sqlite"
+            proxy_telemetry.write_event_to_sqlite(
+                db_path,
+                {
+                    "ts": "2026-07-03T01:00:00Z",
+                    "event": "request_complete",
+                    "request_id": "req-official-model",
+                    "upstream": "official",
+                    "model": "gpt-5.5",
+                    "model_canonical": "gpt-5.5",
+                    "status": 200,
+                },
+            )
+
+            connection = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT model, model_requested, model_canonical FROM gateway_requests WHERE request_id = ?",
+                        ("req-official-model",),
+                    ).fetchone(),
+                    ("openai/gpt-5.5", "gpt-5.5", "openai/gpt-5.5"),
+                )
+            finally:
+                connection.close()
+
     def test_request_context_ignores_client_route_mode_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"

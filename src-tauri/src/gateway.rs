@@ -1860,6 +1860,7 @@ fn upsert_gateway_request_from_event(
     Ok(())
 }
 
+#[cfg(test)]
 fn read_usage_summary_from_sqlite_path_with_pricing(
     path: &Path,
     pricing: &HashMap<String, UsagePricing>,
@@ -1882,6 +1883,7 @@ fn read_usage_summary_from_sqlite_path_with_pricing_and_window(
     ))
 }
 
+#[cfg(test)]
 fn read_usage_events_from_sqlite_path(
     path: &Path,
     limit: usize,
@@ -1955,7 +1957,7 @@ fn read_usage_events_from_sqlite_path_with_window(
                 Ok(GatewayUsageEvent {
                     ts: row.get(0)?,
                     request_id: row.get(1)?,
-                    model: row.get(2)?,
+                    model: normalize_usage_model(row.get(3)?, row.get(2)?),
                     upstream: row.get(3)?,
                     status: row.get(4)?,
                     duration_ms: row.get(5)?,
@@ -2084,6 +2086,29 @@ fn read_usage_summary_from_events_with_pricing(
 
 fn optional_i64_to_u64(value: Option<i64>) -> Option<u64> {
     value.and_then(|item| u64::try_from(item).ok())
+}
+
+fn normalize_usage_model(upstream: Option<String>, model: Option<String>) -> Option<String> {
+    let model = model?;
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let upstream = upstream.as_deref().unwrap_or_default();
+    if upstream == "official" && !trimmed.contains('/') && is_official_usage_model(trimmed) {
+        return Some(format!("openai/{trimmed}"));
+    }
+    Some(trimmed.to_string())
+}
+
+fn is_official_usage_model(model: &str) -> bool {
+    model.starts_with("gpt-")
+        || model.starts_with("codex-")
+        || model.starts_with("chatgpt-")
+        || model
+            .strip_prefix('o')
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|char| char.is_ascii_digit())
 }
 
 fn bool_or_i64_field(value: &Value, key: &str) -> Option<i64> {
@@ -4369,6 +4394,37 @@ mod tests {
         assert_eq!(windowed_summary.total_tokens, Some(11));
         assert_eq!(windowed_summary.cache_hit_rate, Some(50.0));
         assert_eq!(windowed_summary.missing_usage_requests, 1);
+    }
+
+    #[test]
+    fn usage_events_normalize_official_bare_model_names() {
+        let root = unique_temp_dir("codexhub-usage-official-models");
+        fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        super::initialize_telemetry_db(&connection).unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO gateway_requests (
+                    request_id, completed_ts, method, path, route_reason, model_canonical,
+                    upstream, provider_id, status, usage_source, usage_input_tokens, created_at, updated_at
+                ) VALUES
+                    ('req-bare', '2026-07-03T01:00:00Z', 'POST', '/v1/responses', 'model', 'gpt-5.5',
+                     'official', 'official', 200, 'upstream', 10, 'test', 'test'),
+                    ('req-prefixed', '2026-07-03T01:00:01Z', 'POST', '/v1/responses', 'model', 'openai/gpt-5.5',
+                     'official', 'official', 200, 'upstream', 10, 'test', 'test')
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let events = read_usage_events_from_sqlite_path(&db_path, usize::MAX).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.model.as_deref() == Some("openai/gpt-5.5")));
     }
 
     #[test]
