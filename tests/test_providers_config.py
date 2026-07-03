@@ -593,15 +593,28 @@ enabled = true
         self.assertEqual(index["volc/kimi-k2.6"]["upstream_model"], "kimi-k2.6")
         self.assertIsNone(volc_minimax)
 
-    def test_default_policy_lists_provider_qualified_ollama_cloud_models(self):
+    def test_default_policy_preserves_provider_qualified_catalog_models(self):
         from catalog import load_policy
 
         policy = load_policy(Path("config/catalog_policy.toml"))
 
-        self.assertIn("ollama-cloud/glm-5.2", policy.allowed_provider_models)
-        self.assertIn("ollama-cloud/minimax-m3", policy.allowed_provider_models)
-        self.assertIn("volc/glm-5.2", policy.allowed_provider_models)
-        self.assertIn("minimax-cn/MiniMax-M3", policy.allowed_provider_models)
+        self.assertTrue(
+            {
+                "ollama-cloud/glm-5.2",
+                "ollama-cloud/minimax-m3",
+                "ollama-cloud/kimi-k2.6",
+                "volc/ark-code-latest",
+                "volc/doubao-seed-2.0-code",
+                "volc/doubao-seed-2.0-pro",
+                "volc/doubao-seed-2.0-lite",
+                "volc/glm-5.2",
+                "volc/deepseek-v4-pro",
+                "volc/deepseek-v4-flash",
+                "volc/kimi-k2.6",
+                "minimax-cn/MiniMax-M3",
+            }.issubset(policy.allowed_provider_models)
+        )
+        self.assertNotIn("minimax-cn/minimax-m3", policy.allowed_provider_models)
         self.assertIn("glm-5.2", policy.allowed_ollama_cloud_models)
 
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):

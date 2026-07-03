@@ -26,10 +26,15 @@ allowed_provider_models = [
   "ollama-cloud/minimax-m3",
   "ollama-cloud/glm-5.2",
   "ollama-cloud/kimi-k2.6",
+  "volc/ark-code-latest",
+  "volc/doubao-seed-2.0-code",
+  "volc/doubao-seed-2.0-pro",
+  "volc/doubao-seed-2.0-lite",
   "volc/glm-5.2",
+  "volc/deepseek-v4-pro",
+  "volc/deepseek-v4-flash",
   "volc/kimi-k2.6",
   "minimax-cn/MiniMax-M3",
-  "minimax-cn/minimax-m3",
   "xunfei/xsparkx2",
   "xunfei/xopglm5",
   "xunfei/xopglm52",
@@ -82,7 +87,6 @@ denied_substrings = ["embedding"]
 "volc/minimax-m3" = "Volc MiniMax-M3"
 "volc/kimi-k2.6" = "Volc Kimi K2.6"
 "minimax-cn/MiniMax-M3" = "MiniMax.cn MiniMax-M3"
-"minimax-cn/minimax-m3" = "MiniMax.cn MiniMax-M3"
 "xunfei/xsparkx2" = "Xunfei Spark X2"
 "xunfei/xopglm5" = "Xunfei GLM-5"
 "xunfei/xopglm52" = "Xunfei GLM-5.2"
