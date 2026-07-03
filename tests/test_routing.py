@@ -251,6 +251,54 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["name"], "minimax_cn")
         self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
 
+    def test_denied_provider_qualified_ollama_alias_is_rejected(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"ollama-cloud/glm-5.2"},
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
+    def test_denied_bare_ollama_target_rejects_provider_qualified_alias(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"glm-5.2"},
+            allowed_ollama_cloud_models=policy.allowed_ollama_cloud_models + ("ollama-cloud/glm-5.2",),
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
+    def test_denied_external_compatibility_alias_is_rejected(self):
+        self.minimax_external_model["matched_alias"] = "minimax-cn/minimax-m3"
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"minimax-cn/minimax-m3"},
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("minimax-cn/minimax-m3")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
+    def test_provider_qualified_ollama_alias_requires_generated_catalog_entry(self):
+        with patch("codex_proxy.generated_catalog_slugs", return_value=set()):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("generated cloud catalog", str(context.exception))
+
     def test_external_provider_unknown_case_is_rejected(self):
         with self.assertRaises(ValueError):
             choose_upstream("minimax-cn/MINIMAX-M3")

@@ -22,7 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from catalog import canonical_model_id, load_catalog_models, load_policy, should_include_model
+from catalog import canonical_model_id, deny_match_model_id, load_catalog_models, load_policy, should_include_model
 from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias
@@ -463,6 +463,20 @@ def catalog_max_output_tokens(model_id: str) -> int | None:
     return catalog_value
 
 
+def policy_denies_model(model_id: Any, policy: Any) -> bool:
+    slug = canonical_model_id(str(model_id))
+    if not slug:
+        return False
+    if slug in policy.denied_models or deny_match_model_id(slug) in policy.denied_models:
+        return True
+    lowered = slug.lower()
+    return any(part in lowered for part in policy.denied_substrings)
+
+
+def policy_denies_any_model(model_ids: tuple[Any, ...], policy: Any) -> bool:
+    return any(model_id is not None and policy_denies_model(model_id, policy) for model_id in model_ids)
+
+
 def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
     if not slug.startswith(OFFICIAL_ALIAS_PREFIX):
         return None
@@ -481,9 +495,13 @@ def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> str | None:
     upstream_model = slug[len(OLLAMA_CLOUD_ALIAS_PREFIX) :]
     if not upstream_model:
         return None
-    if should_include_model(slug, policy) or should_include_model(upstream_model, policy):
-        return upstream_model
-    return None
+    if policy_denies_any_model((slug, upstream_model), policy):
+        raise ValueError(f"model is not allowed: {slug}")
+    if not (should_include_model(slug, policy) or should_include_model(upstream_model, policy)):
+        raise ValueError(f"model is not allowed: {slug}")
+    if upstream_model not in generated_catalog_slugs():
+        raise ValueError(f"model is not in the generated cloud catalog: {upstream_model}")
+    return upstream_model
 
 
 def choose_upstream(model_id: str) -> dict[str, Any]:
@@ -522,6 +540,8 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
     external_model = resolve_external_model_alias(slug)
     if external_model is not None:
         policy_alias = external_model.get("alias", slug)
+        if policy_denies_any_model((slug, policy_alias, external_model.get("matched_alias")), policy):
+            raise ValueError(f"model is not allowed: {slug}")
         if not should_include_model(policy_alias, policy):
             raise ValueError(f"model is not allowed: {slug}")
         return {
