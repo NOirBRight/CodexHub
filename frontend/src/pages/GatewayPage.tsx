@@ -225,12 +225,13 @@ export function GatewayPage({
   async function refreshGatewayClients() {
     setClientRefreshBusy(true);
     try {
-      await onRefreshClients({ includeClientVersions: true });
+      await onRefreshClients();
       setMessage("Gateway clients refreshed");
       setError(null);
     } catch (err) {
       setError(messageFromError(err));
     } finally {
+      setClientBusy(null);
       setClientRefreshBusy(false);
     }
   }
@@ -453,7 +454,7 @@ export function GatewayPage({
               className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-panel text-slate-600 hover:bg-slate-100 disabled:text-slate-300"
               disabled={clientRefreshBusy}
               aria-label="Refresh gateway clients"
-              title="Refresh installed clients and version checks"
+              title="Refresh installed clients"
               onClick={() => void refreshGatewayClients()}
             >
               <RefreshCcw size={14} className={clientRefreshBusy ? "animate-spin" : undefined} />
