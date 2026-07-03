@@ -719,10 +719,12 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
     let original_enabled = base.enabled;
     let original_codex_enabled = base.codex_enabled;
     let original_gateway_exported = base.gateway_exported;
+    let aliases = merge_model_aliases(base.aliases.clone(), override_model.aliases);
     *base = Model {
         id: override_model.id,
         display_name: override_model.display_name.or(base.display_name.take()),
         upstream_model: override_model.upstream_model.or(base.upstream_model.take()),
+        aliases,
         source_kind: override_model.source_kind.or(base.source_kind.take()),
         locked: base.locked || override_model.locked,
         codex_enabled: override_model.codex_enabled && original_codex_enabled,
@@ -743,6 +745,16 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         sort_order: override_model.sort_order.or(base.sort_order),
         enabled: override_model.enabled && original_enabled,
     };
+}
+
+fn merge_model_aliases(mut base: Vec<String>, overrides: Vec<String>) -> Vec<String> {
+    for alias in overrides {
+        let alias = alias.trim().to_string();
+        if !alias.is_empty() && !base.iter().any(|existing| existing == &alias) {
+            base.push(alias);
+        }
+    }
+    base
 }
 
 fn builtin_model_metadata() -> Vec<Model> {
@@ -936,6 +948,10 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
                     .and_then(Value::as_str)
                     .and_then(nonblank)
             }),
+        aliases: object
+            .get("aliases")
+            .and_then(string_array)
+            .unwrap_or_default(),
         context_window: numeric_limit(
             item,
             &["context_window", "max_context_window", "context_length"],

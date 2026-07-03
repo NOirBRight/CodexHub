@@ -267,6 +267,7 @@ enabled = true
                     ModelConfig(
                         id="alias-model",
                         upstream_model="Live-Case-Model",
+                        aliases=("legacy-case-model",),
                         input_modalities=("text", "image"),
                         supported_reasoning_levels=("low", "high", "xhigh"),
                         default_reasoning_level="high",
@@ -293,6 +294,7 @@ enabled = true
         self.assertEqual(loaded[0].upstream_format, "chat_completions")
         self.assertIsNone(loaded[0].models[1].upstream_model)
         self.assertIn('upstream_model = "Live-Case-Model"', raw_toml)
+        self.assertIn('aliases = ["legacy-case-model"]', raw_toml)
         self.assertIn('input_modalities = ["text", "image"]', raw_toml)
         self.assertIn('supported_reasoning_levels = ["low", "high", "xhigh"]', raw_toml)
         self.assertIn('default_reasoning_level = "high"', raw_toml)
@@ -304,7 +306,35 @@ enabled = true
         self.assertEqual(index["case-provider/alias-model"]["input_modalities"], ("text", "image"))
         self.assertEqual(index["case-provider/alias-model"]["supported_reasoning_levels"], ("low", "high", "xhigh"))
         self.assertEqual(index["case-provider/alias-model"]["default_reasoning_level"], "high")
-        self.assertEqual(index["case-provider/fallback-model"]["upstream_model"], "Fallback-Model")
+        self.assertEqual(index["case-provider/Fallback-Model"]["upstream_model"], "Fallback-Model")
+
+    def test_external_model_index_preserves_exact_case_and_explicit_aliases(self):
+        providers = [
+            ProviderConfig(
+                id="minimax-cn",
+                name="MiniMax.cn",
+                base_url="https://api.minimaxi.com/v1",
+                api_key="minimax-secret",
+                models=[
+                    ModelConfig(
+                        id="MiniMax-M3",
+                        aliases=("minimax-m3",),
+                        display_name="MiniMax-M3",
+                        context_window=1000000,
+                        max_output_tokens=524288,
+                    )
+                ],
+            )
+        ]
+
+        index = build_external_model_index(providers)
+
+        self.assertIn("minimax-cn/MiniMax-M3", index)
+        self.assertIn("minimax-cn/minimax-m3", index)
+        self.assertNotIn("minimax-cn/minimax-m3".upper(), index)
+        self.assertEqual(index["minimax-cn/MiniMax-M3"]["alias"], "minimax-cn/MiniMax-M3")
+        self.assertEqual(index["minimax-cn/minimax-m3"]["alias"], "minimax-cn/MiniMax-M3")
+        self.assertEqual(index["minimax-cn/MiniMax-M3"]["upstream_model"], "MiniMax-M3")
 
     def test_build_external_model_index_skips_disabled_providers_and_models(self):
         providers = [

@@ -547,6 +547,7 @@ mod tests {
                     id: "glm-5.2".to_string(),
                     display_name: Some("Volc GLM-5.2".to_string()),
                     upstream_model: Some("ep-20260629".to_string()),
+                    aliases: vec!["GLM-5.2".to_string(), "legacy-glm52".to_string()],
                     context_window: Some(1_024_000),
                     max_output_tokens: Some(8_192),
                     input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
@@ -587,6 +588,12 @@ mod tests {
         assert!(written.contains("[[providers.models]]"));
         assert!(written.contains("upstream_format = \"chat_completions\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
+        assert!(written.contains("aliases"));
+        assert!(written.contains("\"GLM-5.2\""));
+        assert_eq!(
+            loaded[0].models[0].aliases,
+            vec!["GLM-5.2".to_string(), "legacy-glm52".to_string()]
+        );
         assert!(written.contains("input_modalities"));
         assert!(written.contains("\"image\""));
         assert!(written.contains("supported_reasoning_levels"));

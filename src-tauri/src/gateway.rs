@@ -4087,6 +4087,79 @@ mod tests {
     }
 
     #[test]
+    fn gateway_models_preserve_provider_prefix_and_exact_model_case() {
+        let settings = Settings {
+            include_official_models: false,
+            ..Settings::default()
+        };
+        let providers = vec![
+            Provider {
+                id: "ollama-cloud".to_string(),
+                name: "Ollama Cloud".to_string(),
+                base_url: "https://ollama.com/v1".to_string(),
+                api_key: None,
+                upstream_format: None,
+                display_prefix: Some("Ollama".to_string()),
+                sort_order: Some(1),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Ollama GLM-5.2".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            },
+            Provider {
+                id: "volc".to_string(),
+                name: "Volcengine".to_string(),
+                base_url: "https://ark.example.test/v1".to_string(),
+                api_key: None,
+                upstream_format: None,
+                display_prefix: Some("Volc".to_string()),
+                sort_order: Some(2),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Volc GLM-5.2".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            },
+            Provider {
+                id: "minimax-cn".to_string(),
+                name: "MiniMax.cn".to_string(),
+                base_url: "https://api.minimaxi.com/v1".to_string(),
+                api_key: None,
+                upstream_format: None,
+                display_prefix: Some("MiniMax.cn".to_string()),
+                sort_order: Some(3),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "MiniMax-M3".to_string(),
+                    aliases: vec!["minimax-m3".to_string()],
+                    display_name: Some("MiniMax-M3".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            },
+        ];
+
+        let ids = gateway_models_from_config(&settings, &providers)
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"ollama-cloud/glm-5.2".to_string()));
+        assert!(ids.contains(&"volc/glm-5.2".to_string()));
+        assert!(ids.contains(&"minimax-cn/MiniMax-M3".to_string()));
+        assert!(!ids.contains(&"glm-5.2".to_string()));
+        assert!(!ids.contains(&"minimax-cn/minimax-m3".to_string()));
+    }
+
+    #[test]
     fn gateway_models_skip_disabled_official_models_and_fast_variants() {
         let settings = Settings {
             official_disabled_models: vec!["openai/gpt-5.4".to_string()],

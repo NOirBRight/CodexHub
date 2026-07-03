@@ -50,6 +50,7 @@ UPSTREAM_FORMATS = {"auto", "responses", "chat_completions"}
 class ModelConfig:
     id: str
     upstream_model: str | None = None
+    aliases: tuple[str, ...] = ()
     display_name: str | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
@@ -163,7 +164,7 @@ def build_external_model_index(
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for provider in providers:
-        provider_id = canonical_model_id(provider.id).lower()
+        provider_id = canonical_model_id(provider.id)
         if (
             not provider.enabled
             or not provider_id
@@ -183,12 +184,12 @@ def build_external_model_index(
             if not model.enabled or not model.gateway_exported:
                 continue
 
-            model_id = canonical_model_id(model.id).lower()
+            model_id = canonical_model_id(model.id)
             if not model_id:
                 continue
 
-            alias = canonical_model_id(f"{provider_id}/{model_id}").lower()
-            result[alias] = {
+            alias = canonical_model_id(f"{provider_id}/{model_id}")
+            entry = {
                 "alias": alias,
                 "provider_alias": provider_id,
                 "upstream_name": EXTERNAL_PROVIDER_UPSTREAM_NAMES.get(provider_id, provider_id),
@@ -206,6 +207,16 @@ def build_external_model_index(
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
             }
+            result[alias] = entry
+            for model_alias in model.aliases:
+                alias_id = canonical_model_id(model_alias)
+                if not alias_id:
+                    continue
+                qualified_alias = alias_id if "/" in alias_id else canonical_model_id(f"{provider_id}/{alias_id}")
+                if qualified_alias and qualified_alias not in result:
+                    alias_entry = dict(entry)
+                    alias_entry["matched_alias"] = qualified_alias
+                    result[qualified_alias] = alias_entry
     return result
 
 
@@ -215,7 +226,7 @@ def resolve_external_model_alias(
 ) -> dict[str, Any] | None:
     if providers_path is None:
         providers_path = runtime_providers_path()
-    return build_external_model_index(load_providers(providers_path)).get(canonical_model_id(model_id).lower())
+    return build_external_model_index(load_providers(providers_path)).get(canonical_model_id(model_id))
 
 
 def load_providers(path: Path | None = None) -> list[ProviderConfig]:
@@ -245,6 +256,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             model = ModelConfig(
                 id=_string_field(raw_model.get("id")),
                 upstream_model=_optional_string_field(raw_model.get("upstream_model")),
+                aliases=_string_tuple_field(raw_model.get("aliases"), ()),
                 display_name=_optional_string_field(raw_model.get("display_name")),
                 context_window=_optional_int_field(raw_model.get("context_window")),
                 max_output_tokens=_optional_int_field(raw_model.get("max_output_tokens")),
@@ -313,6 +325,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             )
             if model.upstream_model is not None:
                 chunks.append(_toml_string_line("upstream_model", model.upstream_model, indent="  "))
+            if model.aliases:
+                chunks.append(_toml_string_list_line("aliases", model.aliases, indent="  "))
             if model.display_name is not None:
                 chunks.append(_toml_string_line("display_name", model.display_name, indent="  "))
             if model.context_window is not None:

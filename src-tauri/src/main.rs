@@ -32,6 +32,8 @@ pub struct Model {
     pub id: String,
     pub display_name: Option<String>,
     pub upstream_model: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     pub source_kind: Option<String>,
     #[serde(default)]
     pub locked: bool,
@@ -57,6 +59,7 @@ impl Default for Model {
             id: String::new(),
             display_name: None,
             upstream_model: None,
+            aliases: Vec::new(),
             source_kind: None,
             locked: false,
             codex_enabled: true,
