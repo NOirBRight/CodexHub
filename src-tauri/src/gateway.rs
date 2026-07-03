@@ -132,6 +132,25 @@ pub struct GatewayUsageEvent {
     pub reasoning_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct UsageTimeWindow {
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+}
+
+impl UsageTimeWindow {
+    fn new(start_ts: Option<String>, end_ts: Option<String>) -> Self {
+        Self {
+            start_ts: non_empty_owned(start_ts),
+            end_ts: non_empty_owned(end_ts),
+        }
+    }
+
+    fn is_bounded(&self) -> bool {
+        self.start_ts.is_some() || self.end_ts.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct UsagePricing {
     input_per_million: f64,
@@ -398,18 +417,31 @@ pub fn gateway_recent_events(limit: Option<usize>) -> Result<Vec<GatewayEvent>, 
     Ok(read_recent_events(limit, None))
 }
 
-pub fn gateway_usage_summary() -> Result<GatewayUsageSummary, String> {
+pub fn gateway_usage_summary(
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<GatewayUsageSummary, String> {
     let db_path = telemetry_db_path();
     ensure_telemetry_sqlite_ready(&db_path)?;
     let pricing = usage_pricing_by_model();
-    read_usage_summary_from_sqlite_path_with_pricing(&db_path, &pricing)
+    let window = UsageTimeWindow::new(start_ts, end_ts);
+    read_usage_summary_from_sqlite_path_with_pricing_and_window(&db_path, &pricing, &window)
 }
 
-pub fn gateway_usage_events(limit: Option<usize>) -> Result<Vec<GatewayUsageEvent>, String> {
-    let limit = limit.unwrap_or(100).clamp(1, 500);
+pub fn gateway_usage_events(
+    limit: Option<usize>,
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<Vec<GatewayUsageEvent>, String> {
+    let window = UsageTimeWindow::new(start_ts, end_ts);
+    let limit = match limit {
+        Some(value) => value.clamp(1, 500),
+        None if window.is_bounded() => usize::MAX,
+        None => 100,
+    };
     let db_path = telemetry_db_path();
     ensure_telemetry_sqlite_ready(&db_path)?;
-    read_usage_events_from_sqlite_path(&db_path, limit)
+    read_usage_events_from_sqlite_path_with_window(&db_path, limit, &window)
 }
 
 pub fn gateway_copy_client_config(
@@ -1832,7 +1864,19 @@ fn read_usage_summary_from_sqlite_path_with_pricing(
     path: &Path,
     pricing: &HashMap<String, UsagePricing>,
 ) -> Result<GatewayUsageSummary, String> {
-    let events = read_usage_events_from_sqlite_path(path, usize::MAX)?;
+    read_usage_summary_from_sqlite_path_with_pricing_and_window(
+        path,
+        pricing,
+        &UsageTimeWindow::default(),
+    )
+}
+
+fn read_usage_summary_from_sqlite_path_with_pricing_and_window(
+    path: &Path,
+    pricing: &HashMap<String, UsagePricing>,
+    window: &UsageTimeWindow,
+) -> Result<GatewayUsageSummary, String> {
+    let events = read_usage_events_from_sqlite_path_with_window(path, usize::MAX, window)?;
     Ok(read_usage_summary_from_events_with_pricing(
         &events, pricing,
     ))
@@ -1841,6 +1885,14 @@ fn read_usage_summary_from_sqlite_path_with_pricing(
 fn read_usage_events_from_sqlite_path(
     path: &Path,
     limit: usize,
+) -> Result<Vec<GatewayUsageEvent>, String> {
+    read_usage_events_from_sqlite_path_with_window(path, limit, &UsageTimeWindow::default())
+}
+
+fn read_usage_events_from_sqlite_path_with_window(
+    path: &Path,
+    limit: usize,
+    window: &UsageTimeWindow,
 ) -> Result<Vec<GatewayUsageEvent>, String> {
     let connection = open_telemetry_connection(path)?;
     initialize_telemetry_db(&connection)?;
@@ -1868,6 +1920,8 @@ fn read_usage_events_from_sqlite_path(
                 usage_reasoning_tokens
             FROM gateway_requests
             WHERE completed_ts IS NOT NULL
+              AND (?1 IS NULL OR completed_ts >= ?1)
+              AND (?2 IS NULL OR completed_ts <= ?2)
               AND COALESCE(provider_id, upstream, '') != 'local'
               AND COALESCE(route_reason, '') NOT IN (
                   'official_control',
@@ -1890,30 +1944,33 @@ fn read_usage_events_from_sqlite_path(
                   OR usage_total_tokens IS NOT NULL
               )
             ORDER BY completed_ts DESC
-            LIMIT ?
+            LIMIT ?3
             "#,
         )
         .map_err(|error| format!("failed to prepare telemetry usage query: {error}"))?;
     let rows = statement
-        .query_map(params![limit], |row| {
-            Ok(GatewayUsageEvent {
-                ts: row.get(0)?,
-                request_id: row.get(1)?,
-                model: row.get(2)?,
-                upstream: row.get(3)?,
-                status: row.get(4)?,
-                duration_ms: row.get(5)?,
-                usage_source: row
-                    .get::<_, Option<String>>(6)?
-                    .unwrap_or_else(|| "missing".to_string()),
-                usage_missing_reason: row.get(7)?,
-                input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(8)?),
-                output_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(9)?),
-                total_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(10)?),
-                cached_input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(11)?),
-                reasoning_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(12)?),
-            })
-        })
+        .query_map(
+            params![window.start_ts.as_deref(), window.end_ts.as_deref(), limit],
+            |row| {
+                Ok(GatewayUsageEvent {
+                    ts: row.get(0)?,
+                    request_id: row.get(1)?,
+                    model: row.get(2)?,
+                    upstream: row.get(3)?,
+                    status: row.get(4)?,
+                    duration_ms: row.get(5)?,
+                    usage_source: row
+                        .get::<_, Option<String>>(6)?
+                        .unwrap_or_else(|| "missing".to_string()),
+                    usage_missing_reason: row.get(7)?,
+                    input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(8)?),
+                    output_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(9)?),
+                    total_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(10)?),
+                    cached_input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(11)?),
+                    reasoning_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(12)?),
+                })
+            },
+        )
         .map_err(|error| format!("failed to read telemetry usage rows: {error}"))?;
     let mut events = Vec::new();
     for row in rows {
@@ -2256,6 +2313,10 @@ fn non_empty_str(value: &str) -> Option<&str> {
     } else {
         Some(trimmed)
     }
+}
+
+fn non_empty_owned(value: Option<String>) -> Option<String> {
+    value.and_then(|item| non_empty_str(&item).map(ToOwned::to_owned))
 }
 
 #[cfg(test)]
@@ -4285,6 +4346,29 @@ mod tests {
         assert_eq!(summary.cache_hit_rate, Some(40.0));
         assert_eq!(summary.missing_usage_requests, 1);
         assert!(summary.estimated_cost_usd.is_some());
+
+        let window = super::UsageTimeWindow::new(
+            Some("2026-07-03T01:00:01Z".to_string()),
+            Some("2026-07-03T01:00:02Z".to_string()),
+        );
+        let windowed_events =
+            super::read_usage_events_from_sqlite_path_with_window(&db_path, usize::MAX, &window)
+                .unwrap();
+        let windowed_summary = super::read_usage_summary_from_sqlite_path_with_pricing_and_window(
+            &db_path, &pricing, &window,
+        )
+        .unwrap();
+
+        assert_eq!(windowed_events.len(), 2);
+        assert_eq!(windowed_events[0].request_id.as_deref(), Some("req-b"));
+        assert_eq!(
+            windowed_events[1].request_id.as_deref(),
+            Some("req-missing")
+        );
+        assert_eq!(windowed_summary.requests, windowed_events.len() as u64);
+        assert_eq!(windowed_summary.total_tokens, Some(11));
+        assert_eq!(windowed_summary.cache_hit_rate, Some(50.0));
+        assert_eq!(windowed_summary.missing_usage_requests, 1);
     }
 
     #[test]

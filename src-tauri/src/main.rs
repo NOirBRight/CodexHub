@@ -268,13 +268,20 @@ fn gateway_recent_events(limit: Option<usize>) -> Result<Vec<gateway::GatewayEve
 }
 
 #[tauri::command]
-fn gateway_usage_summary() -> Result<gateway::GatewayUsageSummary, String> {
-    gateway::gateway_usage_summary()
+fn gateway_usage_summary(
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<gateway::GatewayUsageSummary, String> {
+    gateway::gateway_usage_summary(start_ts, end_ts)
 }
 
 #[tauri::command]
-fn gateway_usage_events(limit: Option<usize>) -> Result<Vec<gateway::GatewayUsageEvent>, String> {
-    gateway::gateway_usage_events(limit)
+fn gateway_usage_events(
+    limit: Option<usize>,
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<Vec<gateway::GatewayUsageEvent>, String> {
+    gateway::gateway_usage_events(limit, start_ts, end_ts)
 }
 
 #[tauri::command]

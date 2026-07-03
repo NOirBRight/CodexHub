@@ -14,6 +14,7 @@ import type {
   Provider,
   Settings,
   TabId,
+  UsageQueryWindow,
 } from "./lib/types";
 import { GatewayPage } from "./pages/GatewayPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
@@ -31,6 +32,26 @@ type RuntimeSnapshot = {
 type LoadRuntimeOptions = {
   includeClientVersions?: boolean;
 };
+
+function defaultUsageWindow(): UsageQueryWindow {
+  const end = startOfDay(new Date());
+  return {
+    startTs: addDays(end, -6).toISOString(),
+    endTs: endOfDay(end).toISOString(),
+  };
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function endOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+function addDays(date: Date, days: number) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
 
 function mergeGatewayClients(
   previous: GatewayClientInfo[],
@@ -64,6 +85,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() => defaultUsageWindow());
 
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
     try {
@@ -93,8 +115,8 @@ export default function App() {
           api.getSettings(),
           api.getProviders(),
           api.gatewayStatus(),
-          api.gatewayUsageSummary(),
-          api.gatewayUsageEvents(100),
+          api.gatewayUsageSummary(usageWindow),
+          api.gatewayUsageEvents(usageWindow),
         ]);
 
       setRuntime((current) => ({
@@ -129,6 +151,15 @@ export default function App() {
     } finally {
       setBusy((current) => (current === "load" ? null : current));
     }
+  }, [usageWindow]);
+
+  const updateUsageWindow = useCallback((nextWindow: UsageQueryWindow) => {
+    setUsageWindow((current) => {
+      if (current.startTs === nextWindow.startTs && current.endTs === nextWindow.endTs) {
+        return current;
+      }
+      return nextWindow;
+    });
   }, []);
 
   useEffect(() => {
@@ -268,6 +299,7 @@ export default function App() {
             onRestartProxy={() => runRuntimeAction("restart", api.restartProxy)}
             onStartProxy={() => runRuntimeAction("start", api.startProxy)}
             onStopProxy={() => runRuntimeAction("stop", api.stopProxy)}
+            onUsageWindowChange={updateUsageWindow}
           />
         )}
       </div>

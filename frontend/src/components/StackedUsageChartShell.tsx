@@ -1,10 +1,11 @@
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { PendingPanel } from "./PendingPanel";
-import type { GatewayUsageEvent, GatewayUsageSummary, Provider } from "../lib/types";
+import type { GatewayUsageEvent, GatewayUsageSummary, Provider, UsageQueryWindow } from "../lib/types";
 
 interface StackedUsageChartShellProps {
   events: GatewayUsageEvent[];
+  onWindowChange?: (window: UsageQueryWindow) => void;
   pendingMessage: string;
   providers: Provider[];
   summary: GatewayUsageSummary | null;
@@ -73,6 +74,7 @@ const OTHER_SERIES_KEY = "__other__";
 
 export function StackedUsageChartShell({
   events,
+  onWindowChange,
   pendingMessage,
   providers,
   summary,
@@ -89,19 +91,20 @@ export function StackedUsageChartShell({
   const [customRange, setCustomRange] = useState<DateSpan>(initialCustomRange);
   const [calendarMonth, setCalendarMonth] = useState(() => startOfMonth(initialCustomRange.start));
 
-  const filteredEvents = useMemo(
-    () => filterEventsByRange(events, range, customRange),
-    [customRange, events, range],
-  );
+  const queryWindow = useMemo(() => usageQueryWindow(range, customRange), [customRange, range]);
   const providerLabels = useMemo(() => providerLabelMap(providers), [providers]);
   const stacked = useMemo(
-    () => buildStackedBuckets(filteredEvents, range, groupBy, customRange, metric, breakdown, providerLabels),
-    [breakdown, customRange, filteredEvents, groupBy, metric, providerLabels, range],
+    () => buildStackedBuckets(events, range, groupBy, customRange, metric, breakdown, providerLabels),
+    [breakdown, customRange, events, groupBy, metric, providerLabels, range],
   );
   const axis = useMemo(
     () => stacked.buckets.map((bucket) => bucket.label),
     [stacked.buckets],
   );
+
+  useEffect(() => {
+    onWindowChange?.(queryWindow);
+  }, [onWindowChange, queryWindow.endTs, queryWindow.startTs]);
 
   function selectRange(nextRange: UsageRange) {
     setRange(nextRange);
@@ -734,18 +737,12 @@ function NoTokenChart({
   );
 }
 
-function filterEventsByRange(events: GatewayUsageEvent[], range: UsageRange, customRange: DateSpan) {
+function usageQueryWindow(range: UsageRange, customRange: DateSpan): UsageQueryWindow {
   const span = rangeToSpan(range, customRange);
-  return events.filter((event) => {
-    if (!event.ts) {
-      return true;
-    }
-    const ts = Date.parse(event.ts);
-    if (Number.isNaN(ts)) {
-      return true;
-    }
-    return ts >= span.start.getTime() && ts <= endOfDay(span.end).getTime();
-  });
+  return {
+    startTs: span.start.toISOString(),
+    endTs: endOfDay(span.end).toISOString(),
+  };
 }
 
 function buildStackedBuckets(

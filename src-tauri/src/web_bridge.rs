@@ -266,14 +266,20 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
                 .and_then(|value| usize::try_from(value).ok());
             to_value(gateway::gateway_recent_events(limit))
         }
-        "gateway_usage_summary" => to_value(gateway::gateway_usage_summary()),
+        "gateway_usage_summary" => {
+            let start_ts = optional_string_arg(&request.args, &["startTs", "start_ts"]);
+            let end_ts = optional_string_arg(&request.args, &["endTs", "end_ts"]);
+            to_value(gateway::gateway_usage_summary(start_ts, end_ts))
+        }
         "gateway_usage_events" => {
             let limit = request
                 .args
                 .get("limit")
                 .and_then(Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
-            to_value(gateway::gateway_usage_events(limit))
+            let start_ts = optional_string_arg(&request.args, &["startTs", "start_ts"]);
+            let end_ts = optional_string_arg(&request.args, &["endTs", "end_ts"]);
+            to_value(gateway::gateway_usage_events(limit, start_ts, end_ts))
         }
         "gateway_copy_client_config" => {
             let client_kind = request
@@ -388,6 +394,16 @@ fn bool_arg(args: &Value, name: &str) -> Result<bool, String> {
     args.get(name)
         .and_then(Value::as_bool)
         .ok_or_else(|| format!("{name} argument is required"))
+}
+
+fn optional_string_arg(args: &Value, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        args.get(*name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 #[derive(Debug)]

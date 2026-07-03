@@ -17,6 +17,7 @@ import type {
   Settings,
   SubagentMatrixStatus,
   UpstreamFormatProbeResult,
+  UsageQueryWindow,
 } from "./types";
 
 declare global {
@@ -61,6 +62,13 @@ function bridgeUrl() {
   return import.meta.env.VITE_CODEXHUB_BRIDGE_URL || "http://127.0.0.1:1421/api/invoke";
 }
 
+function usageWindowArgs(window?: UsageQueryWindow | null) {
+  return {
+    startTs: window?.startTs ?? null,
+    endTs: window?.endTs ?? null,
+  };
+}
+
 export const api = {
   getStatus: () => call<AppStatus>("get_status"),
   switchMode: (mode: string, autoSync: boolean) =>
@@ -90,8 +98,19 @@ export const api = {
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>
     call<GatewayTestResult>("gateway_test_request", { kind, model: model ?? null }),
   gatewayRecentEvents: (limit = 20) => call<GatewayEvent[]>("gateway_recent_events", { limit }),
-  gatewayUsageSummary: () => call<GatewayUsageSummary>("gateway_usage_summary"),
-  gatewayUsageEvents: (limit = 100) => call<GatewayUsageEvent[]>("gateway_usage_events", { limit }),
+  gatewayUsageSummary: (window?: UsageQueryWindow | null) =>
+    call<GatewayUsageSummary>("gateway_usage_summary", usageWindowArgs(window)),
+  gatewayUsageEvents: (
+    limitOrWindow: number | UsageQueryWindow | null = 100,
+    window?: UsageQueryWindow | null,
+  ) => {
+    const limit = typeof limitOrWindow === "number" ? limitOrWindow : null;
+    const activeWindow = typeof limitOrWindow === "number" ? window : limitOrWindow;
+    return call<GatewayUsageEvent[]>("gateway_usage_events", {
+      limit,
+      ...usageWindowArgs(activeWindow),
+    });
+  },
   gatewayCopyClientConfig: (model?: string | null, clientKind = "zcode") =>
     call<GatewayClientConfig>("gateway_copy_client_config", {
       clientKind,

@@ -9,6 +9,7 @@ const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx",
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
+const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
 
 async function readContract() {
   return JSON.parse(await readFile(contractPath, "utf8"));
@@ -52,6 +53,26 @@ test("gateway page is wired to real usage and client backend APIs", async () => 
   assert.match(appSource, /api\.listGatewayClients\(/);
   assert.match(gatewaySource, /usageSummary/);
   assert.match(gatewaySource, /clientInfos/);
+});
+
+test("usage summary and chart use the same global time window", async () => {
+  const [appSource, gatewaySource, usageSource, tauriSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+    readFile(stackedUsagePath, "utf8"),
+    readFile(new URL("../src/lib/tauri.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(appSource, /const \[usageWindow, setUsageWindow\]/);
+  assert.match(appSource, /api\.gatewayUsageSummary\(usageWindow\)/);
+  assert.match(appSource, /api\.gatewayUsageEvents\(usageWindow\)/);
+  assert.doesNotMatch(appSource, /api\.gatewayUsageEvents\(100\)/);
+  assert.match(gatewaySource, /onUsageWindowChange/);
+  assert.match(usageSource, /onWindowChange\?\.\(queryWindow\)/);
+  assert.match(usageSource, /function usageQueryWindow/);
+  assert.doesNotMatch(usageSource, /function filterEventsByRange/);
+  assert.match(tauriSource, /startTs/);
+  assert.match(tauriSource, /endTs/);
 });
 
 test("gateway endpoint and copy panels use balanced 5:5 columns", async () => {

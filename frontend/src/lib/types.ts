@@ -142,6 +142,11 @@ export interface GatewayUsageEvent {
   reasoning_tokens?: number | null;
 }
 
+export interface UsageQueryWindow {
+  startTs?: string | null;
+  endTs?: string | null;
+}
+
 export interface GatewayDiagnostic {
   level: "ok" | "warning" | "error" | string;
   category: string;

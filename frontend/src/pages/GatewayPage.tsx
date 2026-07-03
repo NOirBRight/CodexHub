@@ -15,6 +15,7 @@ import type {
   GatewayUsageSummary,
   Provider,
   Settings,
+  UsageQueryWindow,
 } from "../lib/types";
 
 interface GatewayPageProps {
@@ -37,6 +38,7 @@ interface GatewayPageProps {
   onRestartProxy: () => Promise<void>;
   onStartProxy: () => Promise<void>;
   onStopProxy: () => Promise<void>;
+  onUsageWindowChange: (window: UsageQueryWindow) => void;
 }
 
 export function GatewayPage({
@@ -47,6 +49,7 @@ export function GatewayPage({
   onRestartProxy,
   onStartProxy,
   onStopProxy,
+  onUsageWindowChange,
   pending,
   providers,
   settings,
@@ -397,6 +400,7 @@ export function GatewayPage({
 
         <StackedUsageChartShell
           events={usageEvents}
+          onWindowChange={onUsageWindowChange}
           pendingMessage={pending.usage}
           providers={providers}
           summary={usageSummary}
