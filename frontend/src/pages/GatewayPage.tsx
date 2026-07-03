@@ -1,5 +1,5 @@
-import { Copy, Eye, EyeOff, Play, RefreshCcw, Save, Square } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Check, Copy, Eye, EyeOff, Play, RefreshCcw, Save, Square } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
 import { PendingPanel } from "../components/PendingPanel";
@@ -63,12 +63,23 @@ export function GatewayPage({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showDraftKey, setShowDraftKey] = useState(false);
+  const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
+  const copyResetTimer = useRef<number | null>(null);
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
     setDraftKey(settings?.gateway_client_key ?? "");
     setDraftTimeout(settings?.gateway_request_timeout_seconds ?? 120);
   }, [settings, status?.port]);
+
+  useEffect(
+    () => () => {
+      if (copyResetTimer.current !== null) {
+        window.clearTimeout(copyResetTimer.current);
+      }
+    },
+    [],
+  );
 
   const endpoints = useMemo(
     () =>
@@ -87,10 +98,22 @@ export function GatewayPage({
     [clientInfos],
   );
 
-  async function copyText(label: string, value: string) {
+  function markCopied(target: string) {
+    setCopiedTarget(target);
+    if (copyResetTimer.current !== null) {
+      window.clearTimeout(copyResetTimer.current);
+    }
+    copyResetTimer.current = window.setTimeout(() => {
+      setCopiedTarget((current) => (current === target ? null : current));
+      copyResetTimer.current = null;
+    }, 1200);
+  }
+
+  async function copyText(target: string, value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      setMessage(`${label} copied`);
+      markCopied(target);
+      setMessage(null);
       setError(null);
     } catch (err) {
       setError(`Copy failed: ${messageFromError(err)}`);
@@ -147,11 +170,14 @@ export function GatewayPage({
 
   async function switchClientMode(clientId: string, mode: "official" | "hub") {
     setClientBusy(`${clientId}:switch`);
+    const clientName =
+      clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
+    const routeName = mode === "hub" ? "CodexHub" : "Official";
     try {
       await api.switchGatewayClientRoute(clientId, mode, defaultModel);
-      setMessage(null);
-      setError(null);
       await onRefreshClients();
+      setMessage(`${clientName} switched to ${routeName}`);
+      setError(null);
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -177,6 +203,7 @@ export function GatewayPage({
   const bindAddress = `${status?.host ?? settings?.gateway_bind_address ?? "127.0.0.1"}:${status?.port ?? settings?.proxy_port ?? 9099}`;
   const actionableDiagnostics = status?.diagnostics.filter((item) => item.level !== "ok") ?? [];
   const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
+  const apiKeyCopied = copiedTarget === "gateway-api-key";
 
   async function toggleRuntime() {
     if (running) {
@@ -241,10 +268,10 @@ export function GatewayPage({
                       type="button"
                       className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100"
                       disabled={!draftKey}
-                      onClick={() => void copyText("API key", draftKey)}
+                      onClick={() => void copyText("gateway-api-key", draftKey)}
                     >
-                      <Copy size={14} />
-                      Copy
+                      {apiKeyCopied ? <Check size={14} /> : <Copy size={14} />}
+                      {apiKeyCopied ? "Copied" : "Copy"}
                     </button>
                     <button
                       type="button"
@@ -321,16 +348,20 @@ export function GatewayPage({
                 </div>
                 {endpoints.length > 0 ? (
                   <div className="grid h-full grid-rows-3 gap-2">
-                    {endpoints.map((endpoint) => (
-                      <EndpointRow
-                        key={endpoint.label}
-                        compact
-                        label={endpoint.label}
-                        meta={endpoint.meta}
-                        value={endpoint.value}
-                        onCopy={() => void copyText(endpoint.label, endpoint.value)}
-                      />
-                    ))}
+                    {endpoints.map((endpoint) => {
+                      const copyTarget = `endpoint:${endpoint.label}`;
+                      return (
+                        <EndpointRow
+                          key={endpoint.label}
+                          compact
+                          copied={copiedTarget === copyTarget}
+                          label={endpoint.label}
+                          meta={endpoint.meta}
+                          value={endpoint.value}
+                          onCopy={() => void copyText(copyTarget, endpoint.value)}
+                        />
+                      );
+                    })}
                   </div>
                 ) : (
                   <PendingPanel

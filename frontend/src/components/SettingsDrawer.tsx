@@ -11,7 +11,7 @@ interface SettingsDrawerProps {
   settings: Settings | null;
   onClose: () => void;
   onSave: (settings: Settings) => Promise<void>;
-  onSyncHistory: () => Promise<void>;
+  onSyncHistory: () => Promise<string>;
 }
 
 export function SettingsDrawer({
@@ -39,8 +39,7 @@ export function SettingsDrawer({
   }
 
   async function syncHistory() {
-    await onSyncHistory();
-    setMessage("History sync requested");
+    setMessage(await onSyncHistory());
   }
 
   return (

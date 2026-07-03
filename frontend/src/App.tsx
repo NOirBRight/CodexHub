@@ -191,7 +191,9 @@ export default function App() {
   async function syncHistory() {
     setBusy("sync");
     try {
-      setBanner(await api.syncHistory());
+      const message = await api.syncHistory();
+      setBanner(message);
+      return message;
     } catch (err) {
       setBanner(messageFromError(err));
       throw err;

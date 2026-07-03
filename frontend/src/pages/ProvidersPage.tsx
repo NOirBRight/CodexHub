@@ -1,5 +1,6 @@
 import {
   Brain,
+  Check,
   Copy,
   Eye,
   EyeOff,
@@ -202,7 +203,7 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     }
   }
 
-  async function saveProviders(next: Provider[], regenerateCatalog = true) {
+  async function saveProviders(next: Provider[], regenerateCatalog = true, successMessage?: string) {
     setBusy("save");
     try {
       const saved = await api.saveProviders(next);
@@ -210,7 +211,7 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
       if (regenerateCatalog) {
         await api.generateCatalog();
       }
-      setMessage(null);
+      setMessage(successMessage ?? null);
       setError(null);
       return saved;
     } catch (err) {
@@ -221,7 +222,7 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     }
   }
 
-  async function saveSettings(next: Settings, regenerateCatalog = false) {
+  async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string) {
     setBusy("settings");
     try {
       const saved = await api.saveSettings(next);
@@ -230,7 +231,7 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
       if (regenerateCatalog) {
         await api.generateCatalog();
       }
-      setMessage(null);
+      setMessage(successMessage ?? null);
       setError(null);
     } catch (err) {
       setError(messageFromError(err));
@@ -269,8 +270,12 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     }
   }
 
-  async function updateProvider(next: Provider) {
-    await saveProviders(providers.map((provider) => (provider.id === next.id ? next : provider)));
+  async function updateProvider(next: Provider, successMessage?: string) {
+    await saveProviders(
+      providers.map((provider) => (provider.id === next.id ? next : provider)),
+      true,
+      successMessage,
+    );
   }
 
   function toggleProviderEnabled(providerId: string, enabled: boolean) {
@@ -413,7 +418,7 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     setSelectedId(next[0]?.id ?? OFFICIAL_ID);
     setProviders(next);
     try {
-      const saved = await saveProviders(next);
+      const saved = await saveProviders(next, true, `${target.name} deleted`);
       if (saved.some((provider) => provider.id === providerId)) {
         setProviders(saved);
         setSelectedId(providerId);
@@ -427,7 +432,6 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
     }
     setProbeResult(null);
     setModelDiscoveryError(null);
-    setMessage(null);
     setError(null);
   }
 
@@ -495,20 +499,25 @@ export function ProvidersPage({ gatewayStatus: gatewayStatusSnapshot }: { gatewa
         0,
         ...providers.map((provider) => provider.sort_order ?? 0),
       ) + 1;
-    await saveProviders([
-      ...providers,
-      {
-        id,
-        name: form.name.trim(),
-        base_url: form.base_url.trim(),
-        api_key: form.api_key.trim() || null,
-        upstream_format: form.upstream_format,
-        display_prefix: form.display_prefix.trim() || null,
-        sort_order: nextSortOrder,
-        enabled: true,
-        models,
-      },
-    ]);
+    const providerName = form.name.trim();
+    await saveProviders(
+      [
+        ...providers,
+        {
+          id,
+          name: providerName,
+          base_url: form.base_url.trim(),
+          api_key: form.api_key.trim() || null,
+          upstream_format: form.upstream_format,
+          display_prefix: form.display_prefix.trim() || null,
+          sort_order: nextSortOrder,
+          enabled: true,
+          models,
+        },
+      ],
+      true,
+      `${providerName} added`,
+    );
     setSelectedId(id);
     setForm(emptyProvider);
   }
@@ -1071,7 +1080,7 @@ function ProviderDetail({
 }: {
   busy: string | null;
   discoverError?: string | null;
-  onChange: (provider: Provider) => void;
+  onChange: (provider: Provider, successMessage?: string) => void;
   onDelete: () => void;
   onProbe: (provider: Provider) => Promise<UpstreamFormatProbeResult | null>;
   onRefresh: (provider: Provider) => void;
@@ -1109,7 +1118,7 @@ function ProviderDetail({
       models: renumberModels(draft.models.filter((model) => model.id !== modelId)),
     };
     setDraft(next);
-    onChange(next);
+    onChange(next, "Model removed");
   }
 
   async function runProbe() {
@@ -1203,7 +1212,7 @@ function ProviderDetail({
           type="button"
           className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
           disabled={!dirty || busy === "save"}
-          onClick={() => onChange(draft)}
+          onClick={() => onChange(draft, `${draft.name} saved`)}
         >
           <Save size={16} />
           Save
@@ -1420,14 +1429,14 @@ function ModelIdentity({ model, providerId }: { model: Model; providerId?: strin
         <span className="min-w-0 truncate font-mono">{model.id}</span>
         <button
           type="button"
-          className="focus-ring grid h-5 w-5 shrink-0 place-items-center rounded border border-transparent text-slate-400 hover:border-line hover:bg-panel hover:text-ink"
+          className="focus-ring inline-flex h-6 min-w-[66px] shrink-0 items-center justify-center gap-1 rounded border border-transparent px-1.5 text-[11px] font-semibold text-slate-500 hover:border-line hover:bg-panel hover:text-ink"
           onClick={copyModelId}
           title={`Copy model ID: ${copyValue}`}
           aria-label={`Copy model ID ${copyValue}`}
         >
-          <Copy size={12} />
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? "Copied" : "Copy"}
         </button>
-        {copied && <span className="shrink-0 text-[11px] font-semibold text-action">Copied</span>}
       </span>
     </div>
   );

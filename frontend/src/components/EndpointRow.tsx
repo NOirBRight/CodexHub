@@ -1,15 +1,16 @@
-import { Copy } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { cx } from "../lib/format";
 
 interface EndpointRowProps {
   compact?: boolean;
+  copied?: boolean;
   label: string;
   meta: string;
   value: string;
   onCopy: () => void;
 }
 
-export function EndpointRow({ compact, label, meta, onCopy, value }: EndpointRowProps) {
+export function EndpointRow({ compact, copied, label, meta, onCopy, value }: EndpointRowProps) {
   return (
     <div
       className={cx(
@@ -29,13 +30,14 @@ export function EndpointRow({ compact, label, meta, onCopy, value }: EndpointRow
       <button
         type="button"
         className={cx(
-          "focus-ring inline-flex items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100",
+          "focus-ring inline-flex min-w-[70px] items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100",
           compact ? "h-7" : "h-8",
         )}
+        title={copied ? "Copied" : "Copy"}
         onClick={onCopy}
       >
-        <Copy size={13} />
-        Copy
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+        {copied ? "Copied" : "Copy"}
       </button>
     </div>
   );

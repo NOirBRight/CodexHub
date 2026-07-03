@@ -4,8 +4,10 @@ import { test } from "node:test";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
+const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
+const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
 
 async function readContract() {
   return JSON.parse(await readFile(contractPath, "utf8"));
@@ -57,11 +59,30 @@ test("gateway endpoint and copy panels use balanced 5:5 columns", async () => {
   assert.doesNotMatch(gatewaySource, /0\.86fr|1\.14fr/);
 });
 
+test("gateway copy actions use inline copied state instead of success toasts", async () => {
+  const [gatewaySource, endpointSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(endpointRowPath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /const \[copiedTarget, setCopiedTarget\]/);
+  assert.match(gatewaySource, /markCopied\(target\)/);
+  assert.match(endpointSource, /copied \? "Copied" : "Copy"/);
+  assert.doesNotMatch(gatewaySource, /setMessage\(`\$\{label\} copied`\)/);
+});
+
+test("gateway client route switching reports completion", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+
+  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
+  assert.ok(gatewaySource.includes("setMessage(`${clientName} switched to ${routeName}`)"));
+});
+
 test("provider model removal persists through provider save path", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
 
   assert.match(providersSource, /function removeModel\(modelId: string\)/);
-  assert.match(providersSource, /onChange\(next\)/);
+  assert.match(providersSource, /onChange\(next, "Model removed"\)/);
   assert.match(providersSource, /onRemove=\{removeModel\}/);
 });
 
@@ -142,7 +163,31 @@ test("model copy uses provider-qualified identifiers", async () => {
 
   assert.match(providersSource, /function providerQualifiedModelId\(providerId: string, modelId: string\)/);
   assert.match(providersSource, /navigator\.clipboard\.writeText\(copyValue\)/);
+  assert.match(providersSource, /\{copied \? "Copied" : "Copy"\}/);
   assert.match(providersSource, /<ModelIdentity model=\{model\} providerId=\{providerId\} \/>/);
+});
+
+test("provider write actions keep explicit success feedback", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+
+  assert.match(providersSource, /successMessage\?: string/);
+  assert.match(providersSource, /`\$\{providerName\} added`/);
+  assert.match(providersSource, /`\$\{target\.name\} deleted`/);
+  assert.match(providersSource, /onChange\(draft, `\$\{draft\.name\} saved`\)/);
+  assert.match(providersSource, /onChange\(next, "Model removed"\)/);
+});
+
+test("settings drawer reports the backend sync result", async () => {
+  const [appSource, drawerSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(settingsDrawerPath, "utf8"),
+  ]);
+
+  assert.match(appSource, /const message = await api\.syncHistory\(\)/);
+  assert.match(appSource, /return message/);
+  assert.match(drawerSource, /onSyncHistory: \(\) => Promise<string>/);
+  assert.match(drawerSource, /setMessage\(await onSyncHistory\(\)\)/);
+  assert.doesNotMatch(drawerSource, /History sync requested/);
 });
 
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {
