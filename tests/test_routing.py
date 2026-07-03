@@ -864,10 +864,14 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b'"model":"volc/glm-5.2"', transformed)
 
     def test_default_minimax_provider_rewrites_to_live_upstream_model_case(self):
+        from providers_config import DEFAULT_PROVIDERS_PATH
         from providers_config import resolve_external_model_alias as real_resolve_external_model_alias
 
+        def bundled_resolve_external_model_alias(model_id):
+            return real_resolve_external_model_alias(model_id, providers_path=DEFAULT_PROVIDERS_PATH)
+
         with (
-            patch("codex_proxy.resolve_external_model_alias", side_effect=real_resolve_external_model_alias),
+            patch("codex_proxy.resolve_external_model_alias", side_effect=bundled_resolve_external_model_alias),
             patch.dict(os.environ, {"MINIMAX_API_KEY": "minimax-live-case-token"}, clear=False),
         ):
             upstream = choose_upstream("minimax-cn/minimax-m3")
