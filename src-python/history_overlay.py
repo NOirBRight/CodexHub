@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,10 @@ STATE_DB_FILENAME = "state_5.sqlite"
 SESSION_DIR_NAMES = ("sessions", "archived_sessions")
 SQLITE_ID_CHUNK = 500
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
+OFFICIAL_ALIAS_PREFIX = "openai/"
+OFFICIAL_MODEL_PREFIXES = ("gpt-", "codex-", "chatgpt-", "computer-use-")
+OFFICIAL_HISTORY_FALLBACK_MODEL = "gpt-5.5"
+HISTORY_MODEL_MAP_FILENAME = "history-model-map.json"
 
 
 def utc_now_iso() -> str:
@@ -88,16 +93,128 @@ def backup_sqlite(db_path: Path, backup_path: Path) -> None:
         source.close()
 
 
+def sqlite_backup_path(db_path: Path, codex_dir: Path, backup_root: Path) -> Path:
+    try:
+        relative = db_path.resolve().relative_to(codex_dir.resolve())
+        return backup_root / "state" / relative
+    except (OSError, ValueError):
+        try:
+            key = str(db_path.resolve())
+        except OSError:
+            key = str(db_path)
+        digest = hashlib.sha256(key.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+        return backup_root / "state-external" / digest / db_path.name
+
+
 def chunks(values: list[str], size: int = SQLITE_ID_CHUNK) -> Iterable[list[str]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
+
+
+def table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def is_probably_official_model(model: str) -> bool:
+    value = model.strip()
+    if value.startswith(OFFICIAL_ALIAS_PREFIX):
+        value = value[len(OFFICIAL_ALIAS_PREFIX) :]
+    return value.startswith(OFFICIAL_MODEL_PREFIXES) or bool(re.match(r"^o\d", value))
+
+
+def history_model_map_path(codex_dir: Path) -> Path:
+    return codex_dir / "proxy" / HISTORY_MODEL_MAP_FILENAME
+
+
+def load_history_model_map(codex_dir: Path) -> dict[str, Any]:
+    path = history_model_map_path(codex_dir)
+    if not path.exists():
+        return {"version": 1, "threads": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "threads": {}}
+    threads = data.get("threads")
+    if not isinstance(threads, dict):
+        threads = {}
+    return {"version": 1, "threads": threads}
+
+
+def write_history_model_map(codex_dir: Path, model_map: dict[str, Any]) -> None:
+    path = history_model_map_path(codex_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(model_map, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def backup_history_model_map(codex_dir: Path, backup_root: Path) -> bool:
+    path = history_model_map_path(codex_dir)
+    existed = path.exists()
+    if existed:
+        backup_file(path, codex_dir, backup_root, "state")
+    return existed
+
+
+def restore_history_model_map(codex_dir: Path, backup_root: Path, existed: bool) -> bool:
+    path = history_model_map_path(codex_dir)
+    backup = backup_root / "state" / "proxy" / HISTORY_MODEL_MAP_FILENAME
+    if existed and backup.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, path)
+        return True
+    if not existed:
+        path.unlink(missing_ok=True)
+        return True
+    return False
+
+
+def model_for_target_provider(
+    thread_id: Any,
+    model: Any,
+    target_provider: str,
+    model_map: dict[str, Any],
+) -> str | None:
+    if not isinstance(model, str):
+        return None
+    value = model.strip()
+    if not value:
+        return None
+    thread_key = str(thread_id) if thread_id is not None else ""
+    mapped_threads = model_map.setdefault("threads", {})
+    if target_provider == SOURCE_PROVIDER:
+        if value.startswith(OFFICIAL_ALIAS_PREFIX):
+            if is_probably_official_model(value):
+                return value[len(OFFICIAL_ALIAS_PREFIX) :]
+            if thread_key:
+                mapped_threads[thread_key] = {
+                    "model": value,
+                    "stored_at": utc_now_iso(),
+                }
+            return OFFICIAL_HISTORY_FALLBACK_MODEL
+        if not is_probably_official_model(value):
+            if thread_key:
+                mapped_threads[thread_key] = {
+                    "model": value,
+                    "stored_at": utc_now_iso(),
+                }
+            return OFFICIAL_HISTORY_FALLBACK_MODEL
+        return value
+    if target_provider == TARGET_PROVIDER:
+        mapped = mapped_threads.pop(thread_key, None) if thread_key else None
+        if isinstance(mapped, dict) and isinstance(mapped.get("model"), str) and mapped["model"].strip():
+            return str(mapped["model"]).strip()
+        if value.startswith(OFFICIAL_ALIAS_PREFIX):
+            return value
+        if is_probably_official_model(value):
+            return f"{OFFICIAL_ALIAS_PREFIX}{value}"
+        return value
+    raise ValueError(f"unsupported target provider: {target_provider}")
 
 
 def migrate_state_db(db_path: Path, codex_dir: Path, backup_root: Path) -> dict[str, Any]:
     if not db_path.exists():
         return {"path": str(db_path), "thread_ids": [], "target_thread_ids": [], "skipped": "missing"}
 
-    backup_sqlite(db_path, backup_root / "state" / db_path.name)
+    backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir, backup_root))
     connection = sqlite3.connect(db_path)
     try:
         target_rows = connection.execute(
@@ -226,9 +343,33 @@ def collect_state_session_files(codex_dir: Path) -> list[Path]:
 
 def collect_normalization_session_files(codex_dir: Path) -> tuple[list[Path], str]:
     state_files = collect_state_session_files(codex_dir)
+    filesystem_files = collect_jsonl_files(codex_dir)
+
+    files_by_key: dict[str, Path] = {}
+    state_keys: set[str] = set()
+    for path in state_files:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        state_keys.add(key)
+        files_by_key.setdefault(key, path)
+
+    filesystem_added = False
+    for path in filesystem_files:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key not in state_keys:
+            filesystem_added = True
+        files_by_key.setdefault(key, path)
+
+    if state_files and filesystem_added:
+        return list(files_by_key.values()), "state_rollout_path+filesystem_scan"
     if state_files:
-        return state_files, "state_rollout_path"
-    return collect_jsonl_files(codex_dir), "filesystem_scan"
+        return list(files_by_key.values()), "state_rollout_path"
+    return list(files_by_key.values()), "filesystem_scan"
 
 
 def parse_session_meta(line: str) -> tuple[str | None, str | None, dict[str, Any] | None]:
@@ -513,11 +654,17 @@ def restore_history_overlay(ledger_path: Path) -> dict[str, int]:
     }
 
 
-def convert_state_provider(db_path: Path, backup_root: Path, source_provider: str, target_provider: str) -> int:
+def convert_state_provider(
+    db_path: Path,
+    backup_root: Path,
+    source_provider: str,
+    target_provider: str,
+    codex_dir: Path | None = None,
+) -> int:
     if not db_path.exists():
         return 0
 
-    backup_sqlite(db_path, backup_root / "state" / db_path.name)
+    backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir or db_path.parent, backup_root))
     connection = sqlite3.connect(db_path)
     try:
         cursor = connection.execute(
@@ -530,22 +677,46 @@ def convert_state_provider(db_path: Path, backup_root: Path, source_provider: st
         connection.close()
 
 
-def normalize_state_provider_fast(db_path: Path, backup_root: Path, target_provider: str) -> int:
+def normalize_state_provider_fast(db_path: Path, codex_dir: Path, backup_root: Path, target_provider: str) -> dict[str, int]:
     if not db_path.exists():
-        return 0
+        return {"provider_rows": 0, "model_rows": 0}
     if target_provider not in (SOURCE_PROVIDER, TARGET_PROVIDER):
         raise ValueError(f"unsupported target provider: {target_provider}")
 
     source_provider = TARGET_PROVIDER if target_provider == SOURCE_PROVIDER else SOURCE_PROVIDER
-    backup_sqlite(db_path, backup_root / "state" / db_path.name)
+    backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir, backup_root))
+    model_map = load_history_model_map(codex_dir)
     connection = sqlite3.connect(db_path)
     try:
+        columns = table_columns(connection, "threads")
+        if "model_provider" not in columns:
+            return {"provider_rows": 0, "model_rows": 0}
         cursor = connection.execute(
             "UPDATE threads SET model_provider = ? WHERE model_provider = ?",
             (target_provider, source_provider),
         )
+        model_rows = 0
+        if "model" in columns:
+            rows = connection.execute(
+                """
+                SELECT id, rowid, model FROM threads
+                WHERE model_provider IN (?, ?)
+                  AND model IS NOT NULL
+                  AND model != ''
+                """,
+                (SOURCE_PROVIDER, TARGET_PROVIDER),
+            ).fetchall()
+            for thread_id, rowid, model in rows:
+                normalized_model = model_for_target_provider(thread_id, model, target_provider, model_map)
+                if normalized_model is not None and normalized_model != model:
+                    connection.execute("UPDATE threads SET model = ? WHERE rowid = ?", (normalized_model, rowid))
+                    model_rows += 1
         connection.commit()
-        return cursor.rowcount if cursor.rowcount is not None else 0
+        write_history_model_map(codex_dir, model_map)
+        return {
+            "provider_rows": cursor.rowcount if cursor.rowcount is not None else 0,
+            "model_rows": model_rows,
+        }
     finally:
         connection.close()
 
@@ -585,7 +756,7 @@ def rollback_session_file_provider_fast(entry: dict[str, str], codex_dir: Path) 
 def restore_fast_state_backups(codex_dir: Path, backup_root: Path) -> int:
     restored = 0
     for path in sqlite_db_paths(codex_dir):
-        backup = backup_root / "state" / path.name
+        backup = sqlite_backup_path(path, codex_dir, backup_root)
         if backup.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup, path)
@@ -600,6 +771,7 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
     backup_root.mkdir(parents=True, exist_ok=True)
     ledger_path = backup_root / "ledger.json"
     started_at = time.perf_counter()
+    model_map_existed = backup_history_model_map(codex_dir, backup_root)
     session_files, plan_source = collect_normalization_session_files(codex_dir)
     jsonl_entries = [
         entry
@@ -614,9 +786,11 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
         "codex_dir": str(codex_dir),
         "target_provider": target_provider,
         "state_rows": None,
+        "state_model_rows": None,
         "jsonl": jsonl_entries,
         "plan_source": plan_source,
         "planned_session_files": len(session_files),
+        "model_map_existed": model_map_existed,
         "timings": {
             "plan_seconds": round(time.perf_counter() - started_at, 3),
         },
@@ -626,10 +800,12 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
     written_entries: list[dict[str, str]] = []
     try:
         state_start_at = time.perf_counter()
-        state_rows = sum(
-            normalize_state_provider_fast(path, backup_root, target_provider)
+        state_results = [
+            normalize_state_provider_fast(path, codex_dir, backup_root, target_provider)
             for path in sqlite_db_paths(codex_dir)
-        )
+        ]
+        state_rows = sum(result["provider_rows"] for result in state_results)
+        state_model_rows = sum(result["model_rows"] for result in state_results)
         state_done_at = time.perf_counter()
         for entry in jsonl_entries:
             apply_session_file_provider_fast(entry, codex_dir)
@@ -642,9 +818,11 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
             except Exception:
                 pass
         restored_states = restore_fast_state_backups(codex_dir, backup_root)
+        restored_model_map = restore_history_model_map(codex_dir, backup_root, model_map_existed)
         ledger["status"] = "rolled-back-after-error"
         ledger["rolled_back_jsonl"] = len(written_entries)
         ledger["restored_state_backups"] = restored_states
+        ledger["restored_model_map"] = restored_model_map
         ledger["failed_at"] = utc_now_iso()
         ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
         raise
@@ -652,6 +830,7 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
     ledger["status"] = "completed"
     ledger["completed_at"] = utc_now_iso()
     ledger["state_rows"] = state_rows
+    ledger["state_model_rows"] = state_model_rows
     ledger["timings"] = {
         **ledger["timings"],
         "state_seconds": round(state_done_at - state_start_at, 3),
@@ -665,25 +844,34 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
 def promote_custom_history_to_openai(codex_dir: Path, backup_root: Path) -> dict[str, Any]:
     backup_root.mkdir(parents=True, exist_ok=True)
     started_at = time.perf_counter()
-    state_rows = sum(
-        convert_state_provider(path, backup_root, TARGET_PROVIDER, SOURCE_PROVIDER)
-        for path in sqlite_db_paths(codex_dir)
-    )
-    state_done_at = time.perf_counter()
-    jsonl_files = 0
-    for path in collect_jsonl_files(codex_dir):
-        if rewrite_session_file(
-            path,
-            codex_dir,
-            backup_root,
-            TARGET_PROVIDER,
-            SOURCE_PROVIDER,
-            sanitize_for_official=True,
-        ):
-            jsonl_files += 1
-    jsonl_done_at = time.perf_counter()
+    model_map_existed = backup_history_model_map(codex_dir, backup_root)
+    try:
+        state_results = [
+            normalize_state_provider_fast(path, codex_dir, backup_root, SOURCE_PROVIDER)
+            for path in sqlite_db_paths(codex_dir)
+        ]
+        state_rows = sum(result["provider_rows"] for result in state_results)
+        state_model_rows = sum(result["model_rows"] for result in state_results)
+        state_done_at = time.perf_counter()
+        jsonl_files = 0
+        for path in collect_jsonl_files(codex_dir):
+            if rewrite_session_file(
+                path,
+                codex_dir,
+                backup_root,
+                TARGET_PROVIDER,
+                SOURCE_PROVIDER,
+                sanitize_for_official=True,
+            ):
+                jsonl_files += 1
+        jsonl_done_at = time.perf_counter()
+    except Exception:
+        restore_fast_state_backups(codex_dir, backup_root)
+        restore_history_model_map(codex_dir, backup_root, model_map_existed)
+        raise
     return {
         "state_rows": state_rows,
+        "state_model_rows": state_model_rows,
         "jsonl_files": jsonl_files,
         "timings": {
             "state_seconds": round(state_done_at - started_at, 3),
@@ -733,12 +921,14 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "promote-custom-to-openai":
         result = promote_custom_history_to_openai(args.codex_dir, args.backup_root)
         print(f"state_rows={result['state_rows']}")
+        print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_files={result['jsonl_files']}")
         for key, value in result.get("timings", {}).items():
             print(f"{key}={value}")
     elif args.command == "normalize-fast":
         result = normalize_history_provider_fast(args.codex_dir, args.backup_root, args.target)
         print(f"state_rows={result['state_rows']}")
+        print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_files={len(result.get('jsonl', []))}")
         for key, value in result.get("timings", {}).items():
             print(f"{key}={value}")

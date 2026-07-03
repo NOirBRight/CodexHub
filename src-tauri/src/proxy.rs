@@ -105,6 +105,9 @@ struct SettingsDocument {
     gateway_enable_models: Option<bool>,
     gateway_enable_responses: Option<bool>,
     gateway_enable_chat_completions: Option<bool>,
+    gateway_request_timeout_seconds: Option<u32>,
+    gateway_fast_model_variants: Option<Vec<String>>,
+    official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
     official_provider_sort_order: Option<i32>,
     proxy_port: Option<u16>,
@@ -141,6 +144,16 @@ impl SettingsDocument {
             gateway_enable_chat_completions: self
                 .gateway_enable_chat_completions
                 .unwrap_or(defaults.gateway_enable_chat_completions),
+            gateway_request_timeout_seconds: self
+                .gateway_request_timeout_seconds
+                .map(|value| value.clamp(5, 600))
+                .unwrap_or(defaults.gateway_request_timeout_seconds),
+            gateway_fast_model_variants: self
+                .gateway_fast_model_variants
+                .unwrap_or(defaults.gateway_fast_model_variants),
+            official_disabled_models: self
+                .official_disabled_models
+                .unwrap_or(defaults.official_disabled_models),
             official_model_sort_order: self
                 .official_model_sort_order
                 .unwrap_or(defaults.official_model_sort_order),
@@ -284,7 +297,7 @@ fn start_with_paths_and_timeout(
 
     remove_pid(paths)?;
     let python = find_python(paths);
-    let mut command = build_start_command(&python, &script, paths, settings.proxy_port);
+    let mut command = build_start_command(&python, &script, paths, &settings);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -476,16 +489,29 @@ fn stop_when_health_unavailable(
     })
 }
 
-fn build_start_command(python: &Path, script: &Path, paths: &ProxyPaths, port: u16) -> Command {
+fn build_start_command(
+    python: &Path,
+    script: &Path,
+    paths: &ProxyPaths,
+    settings: &Settings,
+) -> Command {
     let mut command = Command::new(python);
     command
         .arg(script)
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg(port.to_string())
+        .arg(settings.proxy_port.to_string())
         .current_dir(paths.proxy_script_dir())
-        .env("PYTHONPATH", paths.proxy_script_dir());
+        .env("PYTHONPATH", paths.proxy_script_dir())
+        .env("CODEX_HOME", paths.codex_dir.clone())
+        .env(
+            "CODEX_PROXY_UPSTREAM_TIMEOUT_SECONDS",
+            settings
+                .gateway_request_timeout_seconds
+                .clamp(5, 600)
+                .to_string(),
+        );
     configure_start_stdio(&mut command);
     configure_detached(&mut command);
     command
@@ -899,7 +925,7 @@ fn toml_config_uses_proxy(text: &str) -> Option<bool> {
     if document
         .get("model_catalog_json")
         .and_then(toml::Value::as_str)
-        .map(|value| value.contains("codex-proxy-official-ollama.json"))
+        .map(config_value_uses_managed_catalog)
         .unwrap_or(false)
     {
         return Some(true);
@@ -931,10 +957,16 @@ fn fallback_config_uses_proxy(text: &str) -> bool {
     [
         "model_provider=\"custom\"",
         "model_provider=\"codex_proxy\"",
+        "codexhub-model-catalog.json",
         "codex-proxy-official-ollama.json",
     ]
     .iter()
     .any(|marker| compact.contains(marker))
+}
+
+fn config_value_uses_managed_catalog(value: &str) -> bool {
+    value.contains("codexhub-model-catalog.json")
+        || value.contains("codex-proxy-official-ollama.json")
 }
 
 fn health(port: u16) -> Result<Option<HealthResponse>, String> {
@@ -1260,10 +1292,11 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 #[cfg(test)]
 mod tests {
     use super::{
-        comparable_path, configure_start_stdio, detect_mode, find_python, read_pid,
-        read_pid_record, start_with_paths, start_with_paths_and_timeout, status_with_paths,
-        stop_with_paths, stop_with_paths_and_controls, write_pid, InspectedProcess, ProcessInfo,
-        ProcessInspector, ProcessKiller, ProxyPaths, ProxyPidMetadata, ProxyPidRecord,
+        build_start_command, comparable_path, configure_start_stdio, detect_mode, find_python,
+        read_pid, read_pid_record, start_with_paths, start_with_paths_and_timeout,
+        status_with_paths, stop_with_paths, stop_with_paths_and_controls, write_pid,
+        InspectedProcess, ProcessInfo, ProcessInspector, ProcessKiller, ProxyPaths,
+        ProxyPidMetadata, ProxyPidRecord,
     };
     use crate::Settings;
     use std::cell::RefCell;
@@ -1308,6 +1341,15 @@ model_provider = "custom"
 model_provider = "custom"
 [model_providers.custom]
 base_url = "http://127.0.0.1:4555/v1"
+"#
+            ),
+            "custom"
+        );
+        assert_eq!(
+            detect_mode(
+                r#"
+model_catalog_json = "model-catalogs/codexhub-model-catalog.json"
+[model_providers.codex_proxy]
 "#
             ),
             "custom"
@@ -1466,6 +1508,38 @@ time.sleep(10)
         assert!(child.stderr.take().is_some());
         let status = child.wait().expect("stdio probe exits");
         assert!(status.success());
+    }
+
+    #[test]
+    fn start_command_sets_codex_home_for_runtime_logs() {
+        let root = temp_root("start-command-codex-home");
+        let paths = test_paths(&root);
+        let settings = Settings {
+            proxy_port: 4555,
+            ..Settings::default()
+        };
+
+        let command = build_start_command(
+            Path::new("python-test"),
+            &paths.proxy_script_path(),
+            &paths,
+            &settings,
+        );
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|item| item.to_os_string()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let codex_home = envs
+            .get("CODEX_HOME")
+            .and_then(|value| value.as_ref())
+            .map(PathBuf::from);
+        assert_eq!(codex_home, Some(paths.codex_dir.clone()));
     }
 
     #[test]

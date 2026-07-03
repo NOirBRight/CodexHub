@@ -154,7 +154,8 @@ Usage:
   codexhub list-providers
   codexhub list-models
   codexhub set-autostart [true|false]
-  codexhub remove-autostart"
+  codexhub remove-autostart
+  codexhub web-bridge [--port 1421]"
     );
 }
 

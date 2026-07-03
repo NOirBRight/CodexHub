@@ -270,7 +270,7 @@ function Set-ConfigForMode {
         return
     }
 
-    $catalogValue = Convert-ToTomlLiteral -Value 'model-catalogs/codex-proxy-official-ollama.json'
+    $catalogValue = Convert-ToTomlLiteral -Value 'model-catalogs/codexhub-model-catalog.json'
     $baseUrlValue = Convert-ToTomlLiteral -Value 'http://127.0.0.1:9099/v1'
     $prefix = @(
         '# BEGIN CODEX PROXY CONFIG',
@@ -325,12 +325,34 @@ function Assert-CodexClosed {
 }
 
 function Get-ProxyProcesses {
+    $self = $PID
     $pythonPattern = [Regex]::Escape((Join-Path $ProxyDir 'codex_proxy.py'))
     $runnerPattern = [Regex]::Escape((Join-Path $ScriptDir 'run-codex-proxy.ps1'))
+    $portPattern = [Regex]::Escape('9099')
+    $runnerInvokePattern = "(?i)(?:^|\s)(?:-|/)File\s+`"?$runnerPattern`"?(?:\s|$)"
     @(Get-CimInstance Win32_Process | Where-Object {
-        $commandLine = [string]$_.CommandLine
-        ($_.Name -ieq 'python.exe' -and $commandLine -match $pythonPattern) -or
-        ($_.Name -ieq 'powershell.exe' -and $commandLine -match $runnerPattern)
+        if ($_.ProcessId -eq $self) {
+            $false
+        }
+        else {
+            $name = [string]$_.Name
+            $commandLine = [string]$_.CommandLine
+            $isProxyPythonFile = (
+                $name -match '(?i)^python(?:w)?\.exe$' -and
+                $commandLine -match $pythonPattern -and
+                $commandLine -match "(?i)(?:^|\s)--port\s+$portPattern(?:\s|$)"
+            )
+            $isProxyPythonInline = (
+                $name -match '(?i)^python(?:w)?\.exe$' -and
+                $commandLine -match '(?i)\bcodex_proxy\.run_server\(' -and
+                $commandLine -match "(?i)(?:^|[,\s])$portPattern(?:[,\s\)]|$)"
+            )
+            $isProxyRunner = (
+                $name -ieq 'powershell.exe' -and
+                $commandLine -match $runnerInvokePattern
+            )
+            $isProxyPythonFile -or $isProxyPythonInline -or $isProxyRunner
+        }
     })
 }
 
@@ -494,7 +516,7 @@ function Detect-ActiveMode {
     $text = Read-TextIfExists -Path (Join-Path $CodexDir 'config.toml')
     if (
         $text -match '(?i)model_provider\s*=\s*[''"]custom[''"]' -or
-        $text -match '(?i)model_catalog_json\s*=.*codex-proxy-official-ollama\.json' -or
+        $text -match '(?i)model_catalog_json\s*=.*(codexhub-model-catalog|codex-proxy-official-ollama)\.json' -or
         $text -match '# BEGIN CODEX PROXY CONFIG'
     ) {
         return 'proxy'
@@ -728,7 +750,7 @@ $ProxyDir = Join-Path $RepoRoot 'src-python'
 $ConfigDir = Join-Path $RepoRoot 'config'
 $CodexDir = Join-Path $env:USERPROFILE '.codex'
 $ModeStateRoot = Join-Path $ScriptDir 'mode-state'
-$CatalogPath = Join-Path $CodexDir 'model-catalogs\codex-proxy-official-ollama.json'
+$CatalogPath = Join-Path $CodexDir 'model-catalogs\codexhub-model-catalog.json'
 $HealthUrl = 'http://127.0.0.1:9099/health'
 
 switch ($Mode) {

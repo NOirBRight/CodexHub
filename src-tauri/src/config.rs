@@ -90,7 +90,7 @@ impl ConfigPaths {
     fn generated_catalog_path(&self) -> PathBuf {
         self.codex_dir
             .join("model-catalogs")
-            .join("codex-proxy-official-ollama.json")
+            .join("codexhub-model-catalog.json")
     }
 
     fn config_overlay_script(&self) -> PathBuf {
@@ -163,6 +163,9 @@ struct SettingsDocument {
     gateway_enable_models: Option<bool>,
     gateway_enable_responses: Option<bool>,
     gateway_enable_chat_completions: Option<bool>,
+    gateway_request_timeout_seconds: Option<u32>,
+    gateway_fast_model_variants: Option<Vec<String>>,
+    official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
     official_provider_sort_order: Option<i32>,
     proxy_port: Option<u16>,
@@ -199,6 +202,18 @@ impl SettingsDocument {
             gateway_enable_chat_completions: self
                 .gateway_enable_chat_completions
                 .unwrap_or(defaults.gateway_enable_chat_completions),
+            gateway_request_timeout_seconds: self
+                .gateway_request_timeout_seconds
+                .map(|value| value.clamp(5, 600))
+                .unwrap_or(defaults.gateway_request_timeout_seconds),
+            gateway_fast_model_variants: self
+                .gateway_fast_model_variants
+                .map(sanitize_fast_model_variants)
+                .unwrap_or(defaults.gateway_fast_model_variants),
+            official_disabled_models: self
+                .official_disabled_models
+                .map(sanitize_model_ids)
+                .unwrap_or(defaults.official_disabled_models),
             official_model_sort_order: self
                 .official_model_sort_order
                 .unwrap_or(defaults.official_model_sort_order),
@@ -208,6 +223,28 @@ impl SettingsDocument {
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }
+}
+
+fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
+    const ALLOWED: &[&str] = &["openai/gpt-5.5", "openai/gpt-5.4"];
+    let mut output = Vec::new();
+    for value in values {
+        if ALLOWED.contains(&value.as_str()) && !output.contains(&value) {
+            output.push(value);
+        }
+    }
+    output
+}
+
+fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for value in values {
+        let value = value.trim().to_string();
+        if !value.is_empty() && !output.contains(&value) {
+            output.push(value);
+        }
+    }
+    output
 }
 
 fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
@@ -499,7 +536,6 @@ mod tests {
             display_prefix: Some("Volc".to_string()),
             sort_order: Some(2),
             enabled: true,
-            hidden: false,
             locked: false,
             models: vec![
                 Model {
@@ -603,6 +639,9 @@ sort_order = 7
             gateway_enable_models: false,
             gateway_enable_responses: true,
             gateway_enable_chat_completions: false,
+            gateway_request_timeout_seconds: 90,
+            gateway_fast_model_variants: vec!["openai/gpt-5.5".to_string()],
+            official_disabled_models: vec!["openai/gpt-5.4-mini".to_string()],
             official_model_sort_order: vec![
                 "openai/gpt-5.4".to_string(),
                 "openai/gpt-5.5".to_string(),
@@ -617,6 +656,9 @@ sort_order = 7
         assert_settings_eq(&loaded, &custom);
         let written = fs::read_to_string(paths.settings_path()).expect("settings text");
         assert!(written.contains("\"proxy_port\": 4555"));
+        assert!(written.contains("\"gateway_request_timeout_seconds\": 90"));
+        assert!(written.contains("\"gateway_fast_model_variants\""));
+        assert!(written.contains("\"official_disabled_models\""));
         assert!(written.contains("\"official_model_sort_order\""));
         assert!(written.contains("\"official_provider_sort_order\": 3"));
     }
@@ -858,10 +900,25 @@ sort_order = 7
         assert_eq!(left.gateway_bind_address, right.gateway_bind_address);
         assert_eq!(left.gateway_client_key, right.gateway_client_key);
         assert_eq!(left.gateway_enable_models, right.gateway_enable_models);
-        assert_eq!(left.gateway_enable_responses, right.gateway_enable_responses);
+        assert_eq!(
+            left.gateway_enable_responses,
+            right.gateway_enable_responses
+        );
         assert_eq!(
             left.gateway_enable_chat_completions,
             right.gateway_enable_chat_completions
+        );
+        assert_eq!(
+            left.gateway_request_timeout_seconds,
+            right.gateway_request_timeout_seconds
+        );
+        assert_eq!(
+            left.gateway_fast_model_variants,
+            right.gateway_fast_model_variants
+        );
+        assert_eq!(
+            left.official_disabled_models,
+            right.official_disabled_models
         );
         assert_eq!(
             left.official_model_sort_order,
