@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from catalog import CatalogPolicy
 import catalog_sync
 from catalog_sync import build_codex_catalog, diff_model_state, discover_ollama_ids
+from providers_config import ModelConfig, ProviderConfig
 
 
 class CatalogSyncTests(unittest.TestCase):
@@ -372,6 +373,56 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(metadata["provider"], "volc")
         self.assertNotIn("context_source", metadata)
         self.assertNotIn("max_output_source", metadata)
+
+    def test_sync_catalog_ignores_provider_alias_entries_for_external_catalog_state(self):
+        providers = [
+            ProviderConfig(
+                id="volc",
+                name="Volcengine",
+                base_url="https://ark.example.test/v1",
+                api_key="",
+                display_prefix="Volc",
+                sort_order=2,
+                models=[
+                    ModelConfig(id="glm-5.2", aliases=("GLM-5.2",), context_window=1024000),
+                    ModelConfig(id="minimax-m3", context_window=512000),
+                ],
+            )
+        ]
+        policy = CatalogPolicy(
+            denied_models=set(),
+            denied_substrings=set(),
+            display_names={},
+            allowed_provider_models=("volc/glm-5.2", "volc/minimax-m3"),
+        )
+        written: dict[str, dict] = {}
+
+        def capture_write(path: Path, data: dict) -> None:
+            written[path.name] = data
+
+        with (
+            patch("catalog_sync.catalog_cache_is_fresh", return_value=False),
+            patch("catalog_sync.load_policy", return_value=policy),
+            patch("catalog_sync.load_include_official_models", return_value=False),
+            patch("catalog_sync.load_official_model_sort_order", return_value=[]),
+            patch("catalog_sync.load_official_disabled_models", return_value=[]),
+            patch("catalog_sync.load_fallback_catalog_models", return_value=[]),
+            patch("catalog_sync.read_client_version", return_value="0.142.0"),
+            patch("catalog_sync.discover_ollama_ids", return_value=([], "test", "ok", "")),
+            patch("catalog_sync.load_providers", return_value=providers),
+            patch("catalog_sync.discover_ollama_model_metadata", return_value=({}, "")),
+            patch("catalog_sync.load_previous_visible_models", return_value=set()),
+            patch("catalog_sync.write_json", side_effect=capture_write),
+        ):
+            state = catalog_sync.sync_catalog()
+
+        self.assertEqual(state["external_provider_models"], ["volc/glm-5.2", "volc/minimax-m3"])
+        self.assertEqual(state["visible_models"], ["volc/glm-5.2", "volc/minimax-m3"])
+        self.assertEqual(state["diff"], {"added": ["volc/glm-5.2", "volc/minimax-m3"], "removed": []})
+
+        catalog = written[catalog_sync.GENERATED_CATALOG_FILENAME]
+        priorities_by_slug = {model["slug"]: model["priority"] for model in catalog["models"]}
+        self.assertEqual(priorities_by_slug, {"volc/glm-5.2": 200, "volc/minimax-m3": 201})
 
     def test_dynamic_ollama_metadata_overrides_static_context_and_modalities(self):
         metadata = {

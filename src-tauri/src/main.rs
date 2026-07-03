@@ -32,7 +32,7 @@ pub struct Model {
     pub id: String,
     pub display_name: Option<String>,
     pub upstream_model: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     pub source_kind: Option<String>,
     #[serde(default)]

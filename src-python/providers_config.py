@@ -220,6 +220,18 @@ def build_external_model_index(
     return result
 
 
+def catalog_visible_external_models(
+    providers: Iterable[ProviderConfig],
+    *,
+    require_api_key: bool = True,
+) -> list[dict[str, Any]]:
+    return [
+        entry
+        for entry in build_external_model_index(providers, require_api_key=require_api_key).values()
+        if "matched_alias" not in entry
+    ]
+
+
 def resolve_external_model_alias(
     model_id: str,
     providers_path: Path | None = None,

@@ -589,6 +589,7 @@ mod tests {
         assert!(written.contains("upstream_format = \"chat_completions\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
         assert!(written.contains("aliases"));
+        assert!(!written.contains("aliases = []"));
         assert!(written.contains("\"GLM-5.2\""));
         assert_eq!(
             loaded[0].models[0].aliases,

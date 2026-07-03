@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from catalog import CatalogPolicy, canonical_model_id, display_name_for, load_catalog_models, load_policy, should_include_model
-from providers_config import DEFAULT_PROVIDERS_PATH, build_external_model_index, load_providers, runtime_providers_path
+from providers_config import DEFAULT_PROVIDERS_PATH, catalog_visible_external_models, load_providers, runtime_providers_path
 
 
 PROXY_DIR = Path(__file__).resolve().parent
@@ -808,7 +808,7 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
     discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
     providers = load_providers()
-    external_models = list(build_external_model_index(providers, require_api_key=False).values())
+    external_models = catalog_visible_external_models(providers, require_api_key=False)
     discovered_slugs = dedupe_canonical_model_ids(discovered_ids)
     visible_ollama_slugs = [
         canonical_model_id(str(slug))
