@@ -2806,6 +2806,7 @@ fn detect_zcode_config_targets() -> ZcodeConfigTargets {
                 .as_ref()
                 .and_then(|path| zcode_v2_root_from_catalog_path(path))
         })
+        .or_else(|| zcode_v2_root_from_settings_path(&default_zcode_settings_path()))
         .unwrap_or_else(default_zcode_v2_root);
     ZcodeConfigTargets {
         catalog_path,
@@ -2821,8 +2822,43 @@ fn default_zcode_v2_root() -> PathBuf {
         .join("v2")
 }
 
+fn default_zcode_settings_path() -> PathBuf {
+    default_zcode_v2_root().join("setting.json")
+}
+
 fn zcode_v2_root_from_catalog_path(catalog_path: &Path) -> Option<PathBuf> {
     catalog_path.parent()?.parent().map(|root| root.join("v2"))
+}
+
+fn zcode_v2_root_from_settings_path(settings_path: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(settings_path).ok()?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    let data_base_dir = value
+        .get("dataBaseDir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(zcode_v2_root_from_data_base_dir(&PathBuf::from(
+        data_base_dir,
+    )))
+}
+
+fn zcode_v2_root_from_data_base_dir(data_base_dir: &Path) -> PathBuf {
+    if data_base_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("v2"))
+    {
+        return data_base_dir.to_path_buf();
+    }
+    if data_base_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(".zcode"))
+    {
+        return data_base_dir.join("v2");
+    }
+    data_base_dir.join(".zcode").join("v2")
 }
 
 fn detect_zcode_store_path() -> PathBuf {
@@ -5726,6 +5762,24 @@ mod tests {
         assert_eq!(
             super::zcode_v2_root_from_catalog_path(&catalog_path),
             Some(root.join("v2"))
+        );
+    }
+
+    #[test]
+    fn zcode_data_base_dir_derives_active_v2_root() {
+        let root = unique_temp_dir("codexhub-zcode-data-root");
+        let settings_path = root.join(".zcode").join("v2").join("setting.json");
+        let data_base_dir = root.join("external-data");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            json!({ "dataBaseDir": data_base_dir.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::zcode_v2_root_from_settings_path(&settings_path),
+            Some(data_base_dir.join(".zcode").join("v2"))
         );
     }
 
