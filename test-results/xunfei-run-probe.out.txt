@@ -1,0 +1,7 @@
+Reading additional input from stdin...
+{"type":"thread.started","thread_id":"019f2d09-874f-79a0-bd9a-72b11b03bab2"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Under-development features enabled: default_mode_request_user_input. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in C:\\Users\\noirb\\.codex\\config.toml."}}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)"}
+{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: stream closed before response.completed)"}
+{"type":"error","message":"Reconnecting... 3/5 (stream disconnected before completion: stream closed before response.completed)"}

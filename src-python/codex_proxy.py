@@ -38,7 +38,7 @@ DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is 
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
-PROXY_BUILD = "2026-06-30-subagent-single-loop-completion-gate"
+PROXY_BUILD = "2026-07-04-browser-tool-exposure"
 PROXY_FEATURES = [
     "compressed-request-routing",
     "provider-alias-routing",
@@ -56,7 +56,7 @@ PROXY_FEATURES = [
     "third-party-multi-agent-discovery-fallback",
     "third-party-native-tools-stay-visible",
     "third-party-multi-agent-discovery-guidance",
-    "third-party-tool-search-hidden-after-discovery",
+    "third-party-tool-search-disabled",
     "third-party-spawn-hidden-while-agent-open",
     "third-party-multi-agent-status-guidance",
     "third-party-unsupported-reasoning-strip",
@@ -69,6 +69,7 @@ PROXY_FEATURES = [
     "third-party-single-loop-completion-gate",
     "ollama-output-token-cap",
     "official-upstream-open-retry",
+    "browser-context-skill-guidance",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
@@ -92,6 +93,7 @@ MULTI_AGENT_NAMESPACE_ALIASES = {
     "multi_agent_v1",
     "mcp__multi_agent_v1",
 }
+NODE_REPL_NAMESPACE = "mcp__node_repl"
 THIRD_PARTY_TOOL_NAME_ALIASES = {
     f"multi_agent_v1__{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES
 }
@@ -193,6 +195,24 @@ TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
         "additionalProperties": False,
     },
 }
+BROWSER_CONTEXT_MARKERS = (
+    "# in app browser",
+    "# browser comments",
+    "browser visual feedback",
+)
+BROWSER_CURRENT_URL_RE = re.compile(
+    r"(?im)^\s*(?:current\s+url|current\s+browser\s+url|browser\s+url|url)\s*:\s*https?://\S+"
+)
+BROWSER_CONTEXT_GUIDANCE_SENTINEL = "Codex browser context detected."
+BROWSER_CONTEXT_GUIDANCE = (
+    BROWSER_CONTEXT_GUIDANCE_SENTINEL
+    + "\nRequired browser-control workflow:\n"
+    "- Load and follow the browser:control-in-app-browser skill before saying browser control is unavailable.\n"
+    '- For OpenAI/Codex native discovery, use tool_search with query "node_repl js" if mcp__node_repl.js is not already visible.\n'
+    "- Browser control is unavailable only when that search does not return mcp__node_repl.js, or when mcp__node_repl.js reports no in-app browser session.\n"
+    "- If executable alias mcp__node_repl__js is visible, use it directly to bootstrap browser-client.mjs and select the iab browser.\n"
+    '- In a CLI/no-browser environment, report "browser session unavailable"; do not report "browser tool not exposed".'
+)
 INTERNAL_INPUT_ITEM_TYPES = {
     "compaction",
     "reasoning",
@@ -249,6 +269,52 @@ PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
+RETRY_REQUEST_MAIN_GENERATION = "main_generation"
+RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
+RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
+TRANSIENT_HTTP_RETRY_STATUSES = {408, 409, 421, 425, 429, 500, 502, 503, 504}
+PERMANENT_HTTP_ERROR_STATUSES = {
+    400,
+    401,
+    403,
+    404,
+    405,
+    406,
+    407,
+    410,
+    411,
+    412,
+    413,
+    414,
+    415,
+    416,
+    417,
+    418,
+    422,
+    426,
+    428,
+    431,
+    451,
+    501,
+    505,
+}
+PERMANENT_UPSTREAM_ERROR_VALUES = {
+    "authentication_error",
+    "billing_hard_limit_reached",
+    "billing_not_active",
+    "context_length_exceeded",
+    "insufficient_quota",
+    "invalid_api_key",
+    "invalid_image",
+    "invalid_request_error",
+    "model_not_found",
+    "not_found_error",
+    "permission_denied",
+    "permission_error",
+    "unsupported_image",
+    "unsupported_parameter",
+    "unsupported_value",
+}
 IMAGE_PROXY_PROMPT_VERSION = "v2"
 IMAGE_PROXY_PROMPT = (
     "Describe the image in detail for a downstream text-only model. "
@@ -469,6 +535,15 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     payload = dict(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
+
+
+def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
+    payload = dict(context)
+    existing = payload.get("request_kind")
+    if isinstance(existing, str) and existing and existing != request_kind:
+        payload.setdefault("client_request_kind", existing)
+    payload["request_kind"] = request_kind
+    return payload
 
 
 def load_routing_config(path: Path = POLICY_PATH) -> dict[str, Any]:
@@ -838,6 +913,52 @@ def _collect_text_fragments(value: Any) -> list[str]:
         return fragments
 
     return []
+
+
+def _has_browser_context_signal(value: Any) -> bool:
+    for fragment in _collect_text_fragments(value):
+        lowered = fragment.lower()
+        if any(marker in lowered for marker in BROWSER_CONTEXT_MARKERS):
+            return True
+        if BROWSER_CURRENT_URL_RE.search(fragment):
+            return True
+    return False
+
+
+def _has_browser_context_guidance(value: Any) -> bool:
+    return any(BROWSER_CONTEXT_GUIDANCE_SENTINEL in fragment for fragment in _collect_text_fragments(value))
+
+
+def _user_text_message(content: str) -> dict[str, str]:
+    return {"type": "message", "role": "user", "content": content}
+
+
+def _inject_browser_context_guidance(
+    payload: dict[str, Any],
+    *,
+    upstream_name: Any,
+    event_context: Mapping[str, Any] | None = None,
+) -> bool:
+    input_items = payload.get("input")
+    if not _has_browser_context_signal(input_items) or _has_browser_context_guidance(input_items):
+        return False
+
+    guidance_message = _developer_text_message(BROWSER_CONTEXT_GUIDANCE)
+
+    if isinstance(input_items, list):
+        input_items.append(guidance_message)
+    elif isinstance(input_items, str):
+        payload["input"] = [_user_text_message(input_items), guidance_message]
+    else:
+        return False
+
+    _write_adapter_event(
+        event_context,
+        "browser_context_guidance_injected",
+        upstream=upstream_name if isinstance(upstream_name, str) else None,
+        model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+    )
+    return True
 
 
 def _hide_reasoning_text(value: Any) -> bool:
@@ -1882,15 +2003,7 @@ def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | 
     if not fragments:
         return None
 
-    return {
-        "type": "message",
-        "role": "system",
-        "content": "[Compacted conversation context]\n" + "\n\n".join(fragments),
-    }
-
-
-def _system_text_message(content: str) -> dict[str, str]:
-    return {"type": "message", "role": "system", "content": content}
+    return _developer_text_message("[Compacted conversation context]\n" + "\n\n".join(fragments))
 
 
 def _developer_text_message(content: str) -> dict[str, str]:
@@ -1953,10 +2066,6 @@ def _transcript_text(title: str, item: Mapping[str, Any]) -> str:
     _append_internal_field(lines, "execution", item.get("execution"))
     _append_internal_field(lines, "tools", item.get("tools"))
     return "\n".join(lines)
-
-
-def _system_transcript_message(title: str, item: Mapping[str, Any]) -> dict[str, str]:
-    return {"type": "message", "role": "system", "content": _transcript_text(title, item)}
 
 
 def _assistant_transcript_message(title: str, item: Mapping[str, Any]) -> dict[str, Any]:
@@ -2079,6 +2188,55 @@ def _supports_explicit_namespace_alias(namespace_name: str) -> bool:
     return namespace_name == "codex_app" or namespace_name.startswith("mcp__")
 
 
+def _is_multi_agent_namespace_name(name: str | None) -> bool:
+    return isinstance(name, str) and name in MULTI_AGENT_NAMESPACE_ALIASES
+
+
+def _is_multi_agent_explicit_tool_name(name: str) -> bool:
+    return name in THIRD_PARTY_TOOL_NAME_ALIASES
+
+
+def _is_multi_agent_tool_schema(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    item_type = value.get("type")
+    name = _tool_schema_name(value)
+    if item_type == "namespace":
+        return _is_multi_agent_namespace_name(name)
+    if item_type == "function":
+        if value.get("namespace") == "multi_agent_v1":
+            return True
+        return isinstance(name, str) and _is_multi_agent_explicit_tool_name(name)
+    return False
+
+
+def _is_node_repl_explicit_tool_name(name: str) -> bool:
+    return name.startswith(f"{NODE_REPL_NAMESPACE}__") or name.startswith(f"{NODE_REPL_NAMESPACE}.")
+
+
+def _is_node_repl_tool_schema(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    item_type = value.get("type")
+    name = _tool_schema_name(value)
+    if item_type == "namespace":
+        return name == NODE_REPL_NAMESPACE
+    if item_type == "function":
+        if value.get("namespace") == NODE_REPL_NAMESPACE:
+            return True
+        return isinstance(name, str) and _is_node_repl_explicit_tool_name(name)
+    return False
+
+
+def _is_flattened_namespace_schema(value: Any) -> bool:
+    if not isinstance(value, Mapping) or value.get("type") != "namespace":
+        return False
+    name = _tool_schema_name(value)
+    return _is_multi_agent_namespace_name(name) or (
+        isinstance(name, str) and _supports_explicit_namespace_alias(name)
+    )
+
+
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for namespace in tools:
@@ -2120,6 +2278,19 @@ def _multi_agent_function_call_name(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _node_repl_function_call_name(item: Mapping[str, Any]) -> str | None:
+    if item.get("type") != "function_call":
+        return None
+
+    namespace = item.get("namespace")
+    name = item.get("name")
+    if namespace == NODE_REPL_NAMESPACE and name == "js":
+        return "js"
+    if name in {f"{NODE_REPL_NAMESPACE}__js", f"{NODE_REPL_NAMESPACE}.js"}:
+        return "js"
+    return None
+
+
 def _inject_explicit_codex_tools(
     payload: dict[str, Any],
     include_tool_search: bool = True,
@@ -2127,6 +2298,8 @@ def _inject_explicit_codex_tools(
     include_spawn_agent: bool = True,
     include_wait_agent: bool = True,
     include_close_agent: bool = True,
+    include_node_repl_tools: bool = True,
+    strip_namespace_tools: bool = True,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
@@ -2139,6 +2312,25 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
+    flattened_namespace_tools = _flatten_namespace_function_tools(tools)
+    if strip_namespace_tools:
+        filtered_tools = [tool for tool in tools if not _is_flattened_namespace_schema(tool)]
+        if len(filtered_tools) != len(tools):
+            tools[:] = filtered_tools
+            changed = True
+
+    if not include_multi_agent_tools:
+        filtered_tools = [tool for tool in tools if not _is_multi_agent_tool_schema(tool)]
+        if len(filtered_tools) != len(tools):
+            tools[:] = filtered_tools
+            changed = True
+
+    if not include_node_repl_tools:
+        filtered_tools = [tool for tool in tools if not _is_node_repl_tool_schema(tool)]
+        if len(filtered_tools) != len(tools):
+            tools[:] = filtered_tools
+            changed = True
+
     excluded_tool_names = set()
     if not include_tool_search:
         excluded_tool_names.add(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"])
@@ -2180,7 +2372,11 @@ def _inject_explicit_codex_tools(
                 close_agent_ids=close_agent_ids,
             )
         )
-    additions.extend(_flatten_namespace_function_tools(tools))
+    additions.extend(flattened_namespace_tools)
+    if not include_multi_agent_tools:
+        additions = [tool for tool in additions if not _is_multi_agent_tool_schema(tool)]
+    if not include_node_repl_tools:
+        additions = [tool for tool in additions if not _is_node_repl_tool_schema(tool)]
 
     for tool in additions:
         name = _tool_schema_name(tool)
@@ -2444,7 +2640,7 @@ def _compatible_multi_agent_call_message(item: Mapping[str, Any], tool_name: str
     if value:
         lines.append(f"call_id: {value}")
     _append_internal_field(lines, "arguments", item.get("arguments"))
-    return _system_text_message("\n".join(lines))
+    return _developer_text_message("\n".join(lines))
 
 
 def _status_completed_agent_ids(status: Any) -> list[str]:
@@ -2599,9 +2795,54 @@ def _has_single_loop_multi_agent_request(value: Any) -> bool:
             "only once",
             "single spawn",
             "single loop",
+            "single lifecycle",
+            "exactly one",
+            "one lifecycle",
             "do not spawn again",
             "don't spawn again",
             "do not repeat",
+        )
+    )
+
+
+def _has_single_step_node_repl_request(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    text = _joined_text(value).lower()
+    if not any(token in text for token in ("mcp__node_repl", "node_repl")):
+        return False
+    return any(
+        token in text
+        for token in (
+            "exactly once",
+            "one tool result",
+            "stop tool use",
+            "single-step",
+            "single step",
+            "只调用一次",
+            "只执行一次",
+            "不要重复",
+        )
+    )
+
+
+def _has_completed_single_step_node_repl_context(value: Any) -> bool:
+    if _has_browser_context_signal(value) or not _has_single_step_node_repl_request(value):
+        return False
+    text = _joined_text(value).lower()
+    return "codex native mcp__node_repl.js result" in text and "status: completed" in text
+
+
+def _node_repl_single_step_complete_message() -> dict[str, str]:
+    return _developer_text_message(
+        "\n".join(
+            [
+                "Codex native mcp__node_repl.js current state",
+                "status: single_step_complete",
+                "completed_tool_alias: mcp__node_repl__js",
+                "completed_native_tool: mcp__node_repl.js",
+                "required_next_action: write the final answer now. The node_repl tool call already completed successfully; do not infer hidden tools were unavailable, and do not call mcp__node_repl__js, mcp__node_repl.js, or tool_search again for this single-step request.",
+            ]
         )
     )
 
@@ -2634,8 +2875,9 @@ def _multi_agent_lifecycle_complete_message(closed_agent_ids: list[str]) -> dict
     lines.append("status: lifecycle_complete")
     if closed_agent_ids:
         lines.append(f"closed_agent_ids: {', '.join(closed_agent_ids)}")
+    lines.append("completed_tool_aliases: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent")
     lines.append(
-        "required_next_action: write the final concise report now. Do not call tool_search or any multi_agent_v1 tool again for this single-loop request."
+        "required_next_action: write the final concise report now. The lifecycle already completed via real Codex tool calls; do not infer hidden tools were unavailable, and do not call tool_search or any multi_agent_v1 tool again for this single-loop request."
     )
     return _developer_text_message("\n".join(lines))
 
@@ -2727,7 +2969,32 @@ def _compatible_multi_agent_output_message(
             lines.append("next_action: do not retry close for this same target; if it was already closed, continue.")
 
     _append_internal_field(lines, "raw_output", output)
-    return _system_text_message("\n".join(lines))
+    return _developer_text_message("\n".join(lines))
+
+
+def _compatible_node_repl_call_message(item: Mapping[str, Any]) -> dict[str, str]:
+    lines = ["Previous real Codex native mcp__node_repl.js call transcript"]
+    value = _stringify_internal_field(item.get("call_id"))
+    if value:
+        lines.append(f"call_id: {value}")
+    _append_internal_field(lines, "arguments", item.get("arguments"))
+    return _developer_text_message("\n".join(lines))
+
+
+def _compatible_node_repl_output_message(item: Mapping[str, Any], *, enforce_final: bool) -> dict[str, str]:
+    lines = ["Codex native mcp__node_repl.js result"]
+    value = _stringify_internal_field(item.get("call_id"))
+    if value:
+        lines.append(f"call_id: {value}")
+    lines.append("status: completed")
+    if enforce_final:
+        lines.append("completed_tool_alias: mcp__node_repl__js")
+        lines.append("completed_native_tool: mcp__node_repl.js")
+        lines.append(
+            "required_next_action: write the final answer now. The node_repl tool call already completed successfully; do not infer hidden tools were unavailable, and do not call mcp__node_repl__js or tool_search again for this single-step request."
+        )
+    _append_internal_field(lines, "raw_output", item.get("output"))
+    return _developer_text_message("\n".join(lines))
 
 
 def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
@@ -2747,7 +3014,7 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
         _append_internal_field(lines, "output", item.get("output"))
     elif item_type == "function_call":
         lines = ["Read-only Codex function call transcript"]
-        for label, key in (("function", "name"), ("call_id", "call_id"), ("status", "status")):
+        for label, key in (("namespace", "namespace"), ("function", "name"), ("call_id", "call_id"), ("status", "status")):
             value = _stringify_internal_field(item.get(key))
             if value:
                 lines.append(f"{label}: {value}")
@@ -2793,7 +3060,7 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
 
     if len(lines) == 1:
         return None
-    return {"type": "message", "role": "system", "content": "\n".join(lines)}
+    return _developer_text_message("\n".join(lines))
 
 
 def _compatible_internal_message(item: Mapping[str, Any]) -> dict[str, str] | None:
@@ -2823,13 +3090,20 @@ def _rewrite_internal_input_items(
 
     changed = False
     rewritten_items: list[Any] = []
+    single_step_node_repl_request = _has_single_step_node_repl_request(input_items)
     multi_agent_search_call_ids: set[str] = set()
     multi_agent_calls_by_call_id: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    node_repl_call_ids: set[str] = set()
     for item in input_items:
         item_type = item.get("type") if isinstance(item, dict) else None
         if isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
             call_id = item.get("call_id")
             if item_type == "function_call" and isinstance(call_id, str):
+                if _node_repl_function_call_name(item) is not None:
+                    node_repl_call_ids.add(call_id)
+                    rewritten_items.append(_compatible_node_repl_call_message(item))
+                    changed = True
+                    continue
                 tool_name = _multi_agent_function_call_name(item)
                 if tool_name is not None:
                     arguments = _json_object_from_arguments(item.get("arguments"))
@@ -2844,6 +3118,12 @@ def _rewrite_internal_input_items(
             ):
                 tool_name, arguments = multi_agent_calls_by_call_id[call_id]
                 rewritten_items.append(_compatible_multi_agent_output_message(item, tool_name, arguments))
+                changed = True
+                continue
+            if item_type == "function_call_output" and isinstance(call_id, str) and call_id in node_repl_call_ids:
+                rewritten_items.append(
+                    _compatible_node_repl_output_message(item, enforce_final=single_step_node_repl_request)
+                )
                 changed = True
                 continue
             if (
@@ -2872,6 +3152,27 @@ def _rewrite_internal_input_items(
             changed = True
             continue
         rewritten_items.append(item)
+
+    if changed:
+        payload["input"] = rewritten_items
+    return changed
+
+
+def _sanitize_official_system_messages(payload: dict[str, Any]) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    changed = False
+    rewritten_items: list[Any] = []
+    for item in input_items:
+        if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "system":
+            rewritten = dict(item)
+            rewritten["role"] = "developer"
+            rewritten_items.append(rewritten)
+            changed = True
+        else:
+            rewritten_items.append(item)
 
     if changed:
         payload["input"] = rewritten_items
@@ -2994,7 +3295,11 @@ def compatible_request_body(
     requested_model = payload.get("model")
     if upstream_name == "official":
         changed = _sanitize_official_reasoning_items(payload)
+        if _sanitize_official_system_messages(payload):
+            changed = True
         if _sanitize_official_invalid_tool_calls(payload):
+            changed = True
+        if _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
             changed = True
         if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
             payload["model"] = upstream_model
@@ -3012,13 +3317,18 @@ def compatible_request_body(
         if "max_output_tokens" in payload:
             del payload["max_output_tokens"]
             changed = True
+        if _sanitize_official_system_messages(payload):
+            changed = True
         if not changed:
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
     changed = _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name)
     input_items = payload.get("input")
-    include_tool_search = not _has_multi_agent_discovery_context(input_items)
+    if _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
+        changed = True
+        input_items = payload.get("input")
+    include_tool_search = False
     open_agent_ids = _open_multi_agent_ids(input_items)
     completed_wait_agent_ids = set(_completed_multi_agent_wait_ids(input_items))
     closed_agent_ids = _closed_multi_agent_ids(input_items)
@@ -3026,8 +3336,7 @@ def compatible_request_body(
     close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
     has_open_agent = _has_open_multi_agent_context(input_items)
     lifecycle_complete = _has_completed_single_loop_multi_agent_context(input_items)
-    if lifecycle_complete:
-        include_tool_search = False
+    node_repl_single_step_complete = _has_completed_single_step_node_repl_context(input_items)
     include_spawn_agent = not has_open_agent
     include_wait_agent = (not has_open_agent) or not open_agent_ids or bool(wait_agent_ids)
     include_close_agent = (not has_open_agent) or not open_agent_ids or bool(close_agent_ids)
@@ -3051,6 +3360,15 @@ def compatible_request_body(
             lifecycle_complete=lifecycle_complete,
         )
         changed = True
+    if node_repl_single_step_complete and isinstance(input_items, list):
+        input_items.append(_node_repl_single_step_complete_message())
+        _write_adapter_event(
+            event_context,
+            "node_repl_single_step_complete_guidance_injected",
+            upstream=upstream_name,
+            model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+        )
+        changed = True
     if inject_codex_tools:
         tool_names_before = _function_tool_names(payload.get("tools"))
         if _inject_explicit_codex_tools(
@@ -3060,6 +3378,7 @@ def compatible_request_body(
             include_spawn_agent=include_spawn_agent,
             include_wait_agent=include_wait_agent,
             include_close_agent=include_close_agent,
+            include_node_repl_tools=not node_repl_single_step_complete,
             open_agent_ids=open_agent_ids,
             wait_agent_ids=wait_agent_ids,
             close_agent_ids=close_agent_ids,
@@ -3702,6 +4021,7 @@ def _call_vision_model_for_image_description(
             upstream_format=upstream_format,
             timeout=upstream_timeout_seconds(),
             event_context=vision_context,
+            request_kind=RETRY_REQUEST_IMAGE_PROXY_VISION,
             max_attempts=1,
         ) as response:
             response_status = getattr(response, "status", None)
@@ -3892,10 +4212,98 @@ def _upstream_retry_attempts() -> int:
     return gateway_auto_retry_max_attempts() if gateway_auto_retry_enabled() else 1
 
 
-def _upstream_error_retryable(exc: BaseException) -> bool:
+def _http_retry_header_override(exc: HTTPError) -> bool | None:
+    value = _get_header(getattr(exc, "headers", {}), "x-should-retry")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return None
+
+
+def _http_error_body_bytes(exc: HTTPError) -> bytes:
+    cached = getattr(exc, "_codexhub_error_body", None)
+    if isinstance(cached, bytes):
+        return cached
+    fp = getattr(exc, "fp", None)
+    if fp is None:
+        return b""
+    try:
+        body = fp.read()
+    except OSError:
+        return b""
+    replacement = io.BytesIO(body)
+    exc.fp = replacement
+    exc.file = replacement
+    setattr(exc, "_codexhub_error_body", body)
+    return body
+
+
+def _http_error_payload(exc: HTTPError) -> Mapping[str, Any] | None:
+    body = _http_error_body_bytes(exc)
+    if not body:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _http_error_values(exc: HTTPError) -> set[str]:
+    payload = _http_error_payload(exc)
+    if not isinstance(payload, Mapping):
+        return set()
+    error = payload.get("error")
+    values: set[str] = set()
+    if isinstance(error, Mapping):
+        for key in ("type", "code", "param", "message"):
+            value = error.get(key)
+            if isinstance(value, str) and value:
+                values.add(value.strip().lower())
+    elif isinstance(error, str) and error:
+        values.add(error.strip().lower())
+    for key in ("type", "code", "detail", "message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            values.add(value.strip().lower())
+    return values
+
+
+def _has_permanent_upstream_error_value(exc: HTTPError) -> bool:
+    values = _http_error_values(exc)
+    if not values:
+        return False
+    for value in values:
+        if value in PERMANENT_UPSTREAM_ERROR_VALUES:
+            return True
+    return False
+
+
+def _upstream_error_retryable(
+    exc: BaseException,
+    *,
+    request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
+) -> bool:
     if isinstance(exc, HTTPError):
+        override = _http_retry_header_override(exc)
+        if override is not None:
+            return override
         status = _upstream_retry_status(exc)
-        return status in {408, 409, 429} or (status is not None and 500 <= status <= 599)
+        if status in PERMANENT_HTTP_ERROR_STATUSES:
+            return False
+        if status == 429 and _has_permanent_upstream_error_value(exc):
+            return False
+        if _has_permanent_upstream_error_value(exc):
+            return False
+        if status in TRANSIENT_HTTP_RETRY_STATUSES:
+            return True
+        if status is not None and 520 <= status <= 599:
+            return True
+        return False
     return isinstance(exc, (IncompleteRead, OSError, URLError))
 
 
@@ -3904,6 +4312,7 @@ def _emit_upstream_retry_event(
     *,
     upstream_name: str,
     upstream_format: str,
+    request_kind: str,
     attempt: int,
     max_attempts: int,
     exc: BaseException,
@@ -3915,6 +4324,8 @@ def _emit_upstream_retry_event(
         upstream=upstream_name,
         provider_id=upstream_name,
         upstream_format=upstream_format,
+        request_kind=request_kind,
+        retryable=True,
         status=_upstream_retry_status(exc),
         attempt=attempt,
         max_attempts=max_attempts,
@@ -3928,6 +4339,7 @@ def _downstream_retry_payload(
     *,
     upstream_name: str,
     upstream_format: str,
+    request_kind: str,
     attempt: int,
     max_attempts: int,
     exc: BaseException,
@@ -3937,6 +4349,7 @@ def _downstream_retry_payload(
         "type": "codexhub.retry",
         "upstream": upstream_name,
         "upstream_format": upstream_format,
+        "request_kind": request_kind,
         "status": _upstream_retry_status(exc),
         "attempt": attempt,
         "max_attempts": max_attempts,
@@ -3973,6 +4386,7 @@ def _open_upstream_response(
     timeout: int,
     event_context: Mapping[str, Any] | None = None,
     downstream_retry_callback: Any = None,
+    request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
     max_attempts: int | None = None,
 ) -> Any:
     retry_attempts = _upstream_retry_attempts() if max_attempts is None else max(1, max_attempts)
@@ -3980,13 +4394,14 @@ def _open_upstream_response(
         try:
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
-            if attempt >= retry_attempts or not _upstream_error_retryable(exc):
+            if attempt >= retry_attempts or not _upstream_error_retryable(exc, request_kind=request_kind):
                 raise
             delay_seconds = gateway_retry_delay_seconds(attempt)
             _emit_upstream_retry_event(
                 event_context,
                 upstream_name=upstream_name,
                 upstream_format=upstream_format,
+                request_kind=request_kind,
                 attempt=attempt,
                 max_attempts=retry_attempts,
                 exc=exc,
@@ -3997,6 +4412,7 @@ def _open_upstream_response(
                     _downstream_retry_payload(
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
+                        request_kind=request_kind,
                         attempt=attempt,
                         max_attempts=retry_attempts,
                         exc=exc,
@@ -4073,6 +4489,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
+        proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_MAIN_GENERATION)
         model = None
         model_requested = None
         upstream_name = None
@@ -4133,12 +4550,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 content_decoded=content_decoded,
                 decode_error=decode_error[:160] if decode_error else None,
                 **request_observability,
-                **request_context,
+                **proxy_request_context,
             )
             adapter_event_context = {
                 "request_id": request_id,
                 "model": model_canonical,
-                **request_context,
+                **proxy_request_context,
             }
 
             def emit_downstream_status(status_payload: Mapping[str, Any]) -> None:
@@ -4182,6 +4599,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     self._send_sse_headers(200, upstream_name)
                     downstream_sse_started = True
                 self._write_sse_event("codexhub.retry", payload)
+                notice_fields = dict(proxy_request_context)
+                notice_fields.update(
+                    {
+                        "request_id": request_id,
+                        "model": model_canonical,
+                        "model_requested": model_requested,
+                        "model_canonical": model_canonical,
+                        "upstream": upstream_name,
+                        "provider_id": upstream_name,
+                        "upstream_format": upstream_format,
+                        "route_reason": route_reason,
+                        "route_mode": "official" if upstream_name == "official" else "codexhub",
+                        "inbound_format": inbound_format,
+                        "is_stream": caller_stream,
+                    }
+                )
+                retry_payload = dict(payload)
+                retry_payload.pop("type", None)
+                notice_fields.update(retry_payload)
+                write_proxy_event("sse_retry_notice", **notice_fields)
 
             relay_attempts = _upstream_retry_attempts()
             for relay_attempt in range(1, relay_attempts + 1):
@@ -4193,6 +4630,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         timeout=upstream_timeout_seconds(),
                         event_context=adapter_event_context,
                         downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
+                        request_kind=RETRY_REQUEST_MAIN_GENERATION,
                     ) as response:
                         status = self._relay_upstream_response(
                             response,
@@ -4215,6 +4653,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         adapter_event_context,
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
+                        request_kind=RETRY_REQUEST_MAIN_GENERATION,
                         attempt=relay_attempt,
                         max_attempts=relay_attempts,
                         exc=exc,
@@ -4225,6 +4664,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             _downstream_retry_payload(
                                 upstream_name=upstream_name,
                                 upstream_format=upstream_format,
+                                request_kind=RETRY_REQUEST_MAIN_GENERATION,
                                 attempt=relay_attempt,
                                 max_attempts=relay_attempts,
                                 exc=exc,
@@ -4253,7 +4693,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_observability,
                 **usage_capture,
-                **request_context,
+                **proxy_request_context,
             )
         except ImageProxyError as exc:
             write_proxy_event(
@@ -4269,7 +4709,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=str(exc)[:300],
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             self._safe_send_json(502, {"error": "image_proxy_error", "detail": str(exc)}, request_id)
         except ValueError as exc:
@@ -4286,7 +4726,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=str(exc)[:300],
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             self._safe_send_json(400, {"error": str(exc)}, request_id)
         except HTTPError as exc:
@@ -4302,14 +4742,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error="HTTPError",
                     detail=safe_upstream_error_detail(exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
-                    **request_context,
+                    **proxy_request_context,
                 )
                 return
             try:
                 adapter_event_context = {
                     "request_id": request_id,
                     "model": canonical_model_id(model) if model else None,
-                    **request_context,
+                    **proxy_request_context,
                 }
                 status = self._relay_upstream_response(
                     exc,
@@ -4332,7 +4772,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error=type(relay_exc).__name__,
                     detail=safe_upstream_error_detail(relay_exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
-                    **request_context,
+                    **proxy_request_context,
                 )
                 return
             write_proxy_event(
@@ -4345,7 +4785,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error="HTTPError",
                 detail=safe_upstream_error_detail(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
         except IncompleteRead as exc:
             detail = safe_upstream_error_detail(exc)
@@ -4359,7 +4799,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             if downstream_sse_started:
                 self._write_sse_error_event(upstream_name or "upstream_error", exc)
@@ -4377,7 +4817,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             if downstream_sse_started:
                 self._write_sse_error_event(upstream_name or "upstream_error", exc)
@@ -4395,7 +4835,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             if downstream_sse_started:
                 self._write_sse_error_event(upstream_name or "upstream_error", exc)
@@ -4478,6 +4918,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
+        proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_OFFICIAL_CONTROL)
         upstream = official_upstream()
         upstream_name = upstream["name"]
 
@@ -4490,15 +4931,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 content_length=0,
-                **request_context,
+                **proxy_request_context,
             )
             request = Request(_responses_url(upstream, self.path), headers=headers, method=method)
             adapter_event_context = {
                 "request_id": request_id,
                 "model": None,
-                **request_context,
+                **proxy_request_context,
             }
             with _open_upstream_response(
                 request,
@@ -4506,6 +4947,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format="responses",
                 timeout=upstream_timeout_seconds(),
                 event_context=adapter_event_context,
+                request_kind=RETRY_REQUEST_OFFICIAL_CONTROL,
             ) as response:
                 status = self._relay_upstream_response(response, upstream_name, request_id=request_id, model=None)
             write_proxy_event(
@@ -4514,10 +4956,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 status=status,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
         except HTTPError as exc:
             try:
@@ -4530,12 +4972,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     method=method,
                     model=None,
                     upstream=upstream_name,
-                    route_reason="official_control",
+                    route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                     status=getattr(exc, "code", 502),
                     error=type(relay_exc).__name__,
                     detail=safe_upstream_error_detail(relay_exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
-                    **request_context,
+                    **proxy_request_context,
                 )
                 return
             write_proxy_event(
@@ -4544,12 +4986,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 status=status,
                 error="HTTPError",
                 detail=safe_upstream_error_detail(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
         except (OSError, URLError) as exc:
             detail = safe_upstream_error_detail(exc)
@@ -4559,12 +5001,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 status=502,
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
 

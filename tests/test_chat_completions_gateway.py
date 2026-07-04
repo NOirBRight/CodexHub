@@ -436,7 +436,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.catalog_by_slug_patch.start()
         self.addCleanup(self.catalog_by_slug_patch.stop)
         self.event_patch = patch("codex_proxy.write_proxy_event")
-        self.event_patch.start()
+        self.write_proxy_event = self.event_patch.start()
         self.addCleanup(self.event_patch.stop)
         self.auth_patch = patch("codex_proxy.codex_access_token", return_value="fake-sub-token")
         self.auth_patch.start()
@@ -504,6 +504,40 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi there!")
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(handler._fake.status, 200)
+
+    def test_post_chat_completions_events_use_proxy_request_kind(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        handler.headers["x-codex-client-metadata"] = json.dumps({
+            "request_kind": "turn",
+            "turn_id": "turn-meta",
+        })
+        upstream_body = json.dumps({
+            "id": "resp_test",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+            }],
+        }).encode("utf-8")
+
+        with patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
+        request_start = next(fields for event, fields in events if event == "request_start")
+        request_complete = next(fields for event, fields in events if event == "request_complete")
+        for fields in (request_start, request_complete):
+            self.assertEqual(fields["request_kind"], "main_generation")
+            self.assertEqual(fields["client_request_kind"], "turn")
+            self.assertEqual(fields["turn_id"], "turn-meta")
 
     def test_post_chat_completions_retries_official_connect_error_before_relaying(self):
         body = json.dumps({
