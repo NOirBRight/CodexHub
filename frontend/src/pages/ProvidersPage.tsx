@@ -1072,18 +1072,21 @@ function CodexHubProviderCard({
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold">Codex Hub</h2>
           <p className="mt-1 truncate text-xs text-slate-500">External provider catalog</p>
+          <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
+            Apps may sort alphabetically.
+          </p>
         </div>
         <SourceStatusChip {...gatewayStatusChip(gatewayStatus)} />
       </div>
 
       <div className="grid gap-2">
-        <div className="grid grid-cols-2 gap-2 text-xs">
+        <div className="grid grid-cols-2 gap-2 px-px text-xs">
           <SourceMetric label="Models" value={String(modelCount)} />
           <SourceMetric label="Enabled" value={String(enabledModelCount)} />
         </div>
       </div>
 
-      <div className="min-h-0 overflow-auto pr-1">
+      <div className="min-h-0 overflow-auto">
         {items.length ? (
           <SortableList
             className="space-y-2"
@@ -1098,6 +1101,7 @@ function CodexHubProviderCard({
                 meta={`${item.provider.models.filter((model) => model.enabled).length}/${item.provider.models.length} models`}
                 onClick={() => onSelect(item.provider.id)}
                 onToggle={(enabled) => onToggleProvider(item.provider.id, enabled)}
+                highlightShape="right"
               />
             )}
           />
@@ -1169,6 +1173,7 @@ function SourceMetric({ label, value }: { label: string; value: string }) {
 function ProviderNavButton({
   active,
   enabled,
+  highlightShape = "full",
   label,
   meta,
   onClick,
@@ -1177,6 +1182,7 @@ function ProviderNavButton({
 }: {
   active: boolean;
   enabled: boolean;
+  highlightShape?: "full" | "right";
   label: string;
   meta: string;
   onClick: () => void;
@@ -1186,7 +1192,8 @@ function ProviderNavButton({
   return (
     <div
       className={cx(
-        "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-inner px-3 py-2 text-sm transition-[box-shadow,background-color] duration-150 ease-out",
+        "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 text-sm transition-[box-shadow,background-color] duration-150 ease-out",
+        highlightShape === "right" ? "rounded-r-inner" : "rounded-inner",
         active ? "bg-blue-50 text-action shadow-raised" : "hover:bg-panel hover:shadow-control",
       )}
     >
@@ -1534,11 +1541,14 @@ function ModelSection({
   return (
     <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 p-5">
       <div className="flex items-center justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <h3 className="text-sm font-semibold">Models</h3>
           <p className="mt-1 text-xs text-slate-500">{models.length} configured</p>
+          <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
+            Apps may sort models alphabetically.
+          </p>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+        <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
           {discoverError && (
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
               {discoverError}
@@ -1547,7 +1557,7 @@ function ModelSection({
           {onRefresh && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
               disabled={refreshBusy}
               onClick={onRefresh}
             >
@@ -1558,7 +1568,7 @@ function ModelSection({
           {onDiscover && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
               disabled={discoverBusy || discoverDisabled}
               onClick={onDiscover}
             >
@@ -1569,7 +1579,7 @@ function ModelSection({
           {!disabled && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
               onClick={addAndEdit}
             >
               <Plus size={16} />
@@ -2242,7 +2252,7 @@ function ProviderCapabilitiesPanel({
   ];
 
   return (
-    <div className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-line bg-panel px-3 py-2">
+    <div className="flex min-w-0 items-center gap-2 rounded-md border border-line bg-panel px-3 py-2">
       <div className="flex min-w-0 items-center gap-2">
         <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-slate-500">
           Provider capabilities
@@ -2253,9 +2263,6 @@ function ProviderCapabilitiesPanel({
           ))}
         </div>
       </div>
-      <span className="shrink-0 rounded-full border border-line bg-white px-2 py-0.5 text-xs font-semibold text-slate-500">
-        Adapter {shortUpstreamFormatLabel(result?.recommended_format ?? configuredFormat)}
-      </span>
     </div>
   );
 }
@@ -2363,16 +2370,6 @@ function upstreamFormatLabel(value?: UpstreamFormat | null) {
     return "Chat Completions translate";
   }
   return "Auto detect";
-}
-
-function shortUpstreamFormatLabel(value?: UpstreamFormat | null) {
-  if (value === "responses") {
-    return "Responses";
-  }
-  if (value === "chat_completions") {
-    return "Chat Completions";
-  }
-  return "Auto";
 }
 
 function shortProviderDiscoveryError(err: unknown) {

@@ -421,7 +421,7 @@ export function GatewayPage({
                     </button>
                   </div>
                 </label>
-                <div className="grid min-w-0 grid-cols-1 items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
                   <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
                     <span>Listen Port</span>
                     <input
@@ -446,7 +446,7 @@ export function GatewayPage({
                   </label>
                   <button
                     type="button"
-                    className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300 sm:col-span-2 xl:col-span-1"
+                    className="focus-ring inline-flex h-8 items-center justify-center gap-2 whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
                     disabled={Boolean(busy) || !settings}
                     onClick={() => void applyGatewaySettings()}
                   >

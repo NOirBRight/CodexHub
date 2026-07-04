@@ -1,4 +1,4 @@
-import { Eye, EyeOff, History, Save, X } from "lucide-react";
+import { History, Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
@@ -27,12 +27,10 @@ export function SettingsDrawer({
   const { showToast, updateToast } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [historyBusy, setHistoryBusy] = useState(false);
-  const [showClientKey, setShowClientKey] = useState(false);
 
   useEffect(() => {
     setDraft(settings);
     setHistoryBusy(false);
-    setShowClientKey(false);
   }, [settings, open]);
 
   async function saveDraft() {
@@ -155,6 +153,15 @@ export function SettingsDrawer({
                   label="Unified Codex history"
                   onChange={(value) => void toggleUnifiedHistory(value)}
                 />
+                <button
+                  type="button"
+                  className="focus-ring inline-flex h-9 items-center justify-start gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                  disabled={Boolean(busy) || historyBusy}
+                  onClick={() => void repairHistory()}
+                >
+                  <History size={15} />
+                  Repair history bucket
+                </button>
                 <Toggle
                   checked={draft.auto_sync_clients}
                   label="Auto-sync bound clients"
@@ -164,130 +171,59 @@ export function SettingsDrawer({
             </section>
 
             <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">Maintenance</h3>
-              <div className="grid gap-2 rounded-panel bg-panel p-3 shadow-card">
-                <button
-                  type="button"
-                  className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-                  disabled={Boolean(busy) || historyBusy}
-                  onClick={() => void repairHistory()}
-                >
-                  <History size={15} />
-                  Repair history bucket
-                </button>
+              <SectionHeaderToggle
+                checked={draft.gateway_auto_retry_enabled}
+                disabled={Boolean(busy)}
+                title="Auto retry"
+                onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
+              />
+              <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                  <span>Max attempts</span>
+                  <input
+                    className="field h-9"
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={draft.gateway_auto_retry_max_attempts}
+                    disabled={!draft.gateway_auto_retry_enabled}
+                    onChange={(event) =>
+                      setDraft({
+                        ...draft,
+                        gateway_auto_retry_max_attempts: clampRetryAttempts(event.target.value),
+                      })
+                    }
+                  />
+                </label>
               </div>
             </section>
 
             <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">Gateway</h3>
+              <SectionHeaderToggle
+                checked={draft.gateway_image_proxy_enabled}
+                disabled={Boolean(busy)}
+                title="Image proxy"
+                onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
+              />
               <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Bind address
-                  <input
+                <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                  <span>Vision model</span>
+                  <select
                     className="field h-9"
-                    value={draft.gateway_bind_address}
-                    disabled
-                    onChange={() => undefined}
-                  />
-                  <span className="text-xs font-normal text-slate-500">
-                    Local-only binding is enforced for this release.
-                  </span>
-                </label>
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  Port
-                  <input
-                    className="field h-9"
-                    type="number"
-                    min={1024}
-                    max={65535}
-                    value={draft.proxy_port}
-                    onChange={(event) => setDraft({ ...draft, proxy_port: Number(event.target.value) })}
-                  />
-                </label>
-                <div className="grid gap-1 text-sm font-medium text-slate-700">
-                  <label htmlFor="settings-local-client-key">Local client key</label>
-                  <div className="relative min-w-0">
-                    <input
-                      id="settings-local-client-key"
-                      className="field h-9 w-full pr-9"
-                      type={showClientKey ? "text" : "password"}
-                      autoComplete="off"
-                      value={draft.gateway_client_key}
-                      onChange={(event) => setDraft({ ...draft, gateway_client_key: event.target.value })}
-                    />
-                    <button
-                      type="button"
-                      className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
-                      aria-label={showClientKey ? "Hide local client key" : "Show local client key"}
-                      title={showClientKey ? "Hide local client key" : "Show local client key"}
-                      onClick={() => setShowClientKey((value) => !value)}
-                    >
-                      {showClientKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                  </div>
-                  <span className="text-xs font-normal text-slate-500">
-                    Local compatibility key only; not an upstream provider or OpenAI key.
-                  </span>
-                </div>
-                <Toggle
-                  checked={draft.auto_start_proxy}
-                  label="Auto-start runtime"
-                  onChange={(value) => setDraft({ ...draft, auto_start_proxy: value })}
-                />
-                <div className="grid gap-3 border-t border-line pt-3">
-                  <Toggle
-                    checked={draft.gateway_auto_retry_enabled}
-                    label="Auto retry"
-                    onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
-                  />
-                  <label className="grid gap-1 text-sm font-medium text-slate-700">
-                    Max attempts
-                    <input
-                      className="field h-9"
-                      type="number"
-                      min={1}
-                      max={30}
-                      value={draft.gateway_auto_retry_max_attempts}
-                      disabled={!draft.gateway_auto_retry_enabled}
-                      onChange={(event) =>
-                        setDraft({
-                          ...draft,
-                          gateway_auto_retry_max_attempts: clampRetryAttempts(event.target.value),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-                <div className="grid gap-3 border-t border-line pt-3">
-                  <Toggle
-                    checked={draft.gateway_image_proxy_enabled}
-                    label="Image proxy"
-                    onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
-                  />
-                  <label className="grid gap-1 text-sm font-medium text-slate-700">
-                    Vision model
-                    <select
-                      className="field h-9"
-                      value={draft.gateway_image_proxy_model}
-                      disabled={!draft.gateway_image_proxy_enabled || visionModels.length === 0}
-                      onChange={(event) => setDraft({ ...draft, gateway_image_proxy_model: event.target.value })}
-                    >
-                      <option value="">
-                        {visionModels.length === 0 ? "No vision-capable models" : "Select a vision model"}
+                    value={draft.gateway_image_proxy_model}
+                    disabled={!draft.gateway_image_proxy_enabled || visionModels.length === 0}
+                    onChange={(event) => setDraft({ ...draft, gateway_image_proxy_model: event.target.value })}
+                  >
+                    <option value="">
+                      {visionModels.length === 0 ? "No vision-capable models" : "Select a vision model"}
+                    </option>
+                    {visionModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {visionModelLabel(model)}
                       </option>
-                      {visionModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {visionModelLabel(model)}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-xs font-normal text-slate-500">
-                      {visionModels.length === 0
-                        ? "Enable at least one image-capable catalog model first."
-                        : "Used only when a text-only target model receives image input."}
-                    </span>
-                  </label>
-                </div>
+                    ))}
+                  </select>
+                </label>
               </div>
             </section>
           </div>
@@ -338,17 +274,53 @@ function Toggle({
   return (
     <label className="flex min-h-9 items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
       <span className="min-w-0 truncate">{label}</span>
-      <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
-        <input
-          type="checkbox"
-          className="peer sr-only"
-          checked={checked}
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.checked)}
-        />
-        <span className="absolute inset-0 rounded-full bg-slate-200 shadow-control transition-colors peer-checked:bg-action" />
-        <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
-      </span>
+      <SwitchControl checked={checked} disabled={disabled} onChange={onChange} />
     </label>
+  );
+}
+
+function SectionHeaderToggle({
+  checked,
+  disabled,
+  onChange,
+  title,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (value: boolean) => void;
+  title: string;
+}) {
+  return (
+    <label className="flex min-h-9 items-center justify-between gap-3">
+      <h3 className="min-w-0 truncate text-sm font-semibold text-ink">{title}</h3>
+      <SwitchControl checked={checked} disabled={disabled} onChange={onChange} ariaLabel={title} />
+    </label>
+  );
+}
+
+function SwitchControl({
+  ariaLabel,
+  checked,
+  disabled,
+  onChange,
+}: {
+  ariaLabel?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
+      <input
+        type="checkbox"
+        className="peer sr-only"
+        aria-label={ariaLabel}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span className="absolute inset-0 rounded-full bg-slate-200 shadow-control transition-colors peer-checked:bg-action peer-disabled:opacity-60" />
+      <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
+    </span>
   );
 }

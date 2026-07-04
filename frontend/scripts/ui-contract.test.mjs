@@ -293,7 +293,8 @@ test("gateway layout reserves space for the client rail", async () => {
   assert.match(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
   assert.doesNotMatch(gatewaySource, /Clients discover models from/);
   assert.match(gatewaySource, /grid-cols-1 items-stretch gap-3 lg:grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
-  assert.match(gatewaySource, /sm:grid-cols-2 xl:grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)_auto\]/);
+  assert.match(gatewaySource, /grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)_auto\] items-end gap-2/);
+  assert.match(gatewaySource, /whitespace-nowrap rounded-control bg-ink/);
   assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
   assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
   assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-2">/);
@@ -406,12 +407,14 @@ test("settings normalization restores default-on fields when persisted settings 
   assert.match(tauriSource, /settings: normalizeSettings\(settings\)/);
 });
 
-test("settings drawer hides the local client key without adapter explainer copy", async () => {
+test("settings drawer omits duplicated local endpoint controls", async () => {
   const drawerSource = await readFile(settingsDrawerPath, "utf8");
 
-  assert.match(drawerSource, /type=\{showClientKey \? "text" : "password"\}/);
-  assert.match(drawerSource, /Show local client key/);
-  assert.match(drawerSource, /Hide local client key/);
+  assert.doesNotMatch(drawerSource, /showClientKey/);
+  assert.doesNotMatch(drawerSource, /Bind address/);
+  assert.doesNotMatch(drawerSource, />Port</);
+  assert.doesNotMatch(drawerSource, /Local client key/);
+  assert.doesNotMatch(drawerSource, /Auto-start runtime/);
   assert.doesNotMatch(drawerSource, /Client adapters/);
   assert.doesNotMatch(drawerSource, /partial support/);
 });
@@ -442,11 +445,12 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(typesSource, /gateway_auto_retry_max_attempts: number;/);
   assert.match(typesSource, /gateway_image_proxy_enabled: boolean;/);
   assert.match(typesSource, /gateway_image_proxy_model: string;/);
-  assert.match(drawerSource, /Auto retry/);
+  assert.match(drawerSource, /title="Auto retry"/);
+  assert.match(drawerSource, /gateway_auto_retry_enabled/);
   assert.match(drawerSource, /Max attempts/);
   assert.match(drawerSource, /min=\{1\}/);
   assert.match(drawerSource, /max=\{30\}/);
-  assert.match(drawerSource, /Image proxy/);
+  assert.match(drawerSource, /title="Image proxy"/);
   assert.match(drawerSource, /Vision model/);
   assert.match(drawerSource, /visionModels/);
   assert.match(drawerSource, /gateway_image_proxy_enabled/);
@@ -513,9 +517,10 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.match(providerDetail, /className="lg:col-span-2"/);
   assert.match(providerDetail, /<div className="lg:col-span-2">\s*<ProviderCapabilitiesPanel/);
   assert.doesNotMatch(providerDetail, /className="grid gap-4 border-b border-line p-5"/);
-  assert.match(providerCapabilitiesPanel, /className="flex min-w-0 items-center justify-between gap-2/);
   assert.match(providerCapabilitiesPanel, /className="flex min-w-0 items-center gap-2/);
   assert.match(providerCapabilitiesPanel, /className="flex shrink-0 gap-2/);
+  assert.doesNotMatch(providerCapabilitiesPanel, /Adapter \{/);
+  assert.doesNotMatch(providerCapabilitiesPanel, /justify-between/);
   assert.doesNotMatch(providerCapabilitiesPanel, /flex-wrap/);
 
   assert.match(modelSection, /className="min-h-0 overflow-auto -mr-3 pr-3"/);

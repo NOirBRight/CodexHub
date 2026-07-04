@@ -412,30 +412,30 @@ fn stop_with_paths_and_controls(
     }
 
     let Some(pid_record) = pid_record else {
-        let mut status = status_with_paths(paths)?;
-        status.message =
-            "Proxy is running, but no PID file was found; stop did not shut down or force-kill it"
-                .to_string();
-        return Ok(status);
+        return stop_running_proxy_without_pid(paths, mode, settings.proxy_port);
     };
 
     match verify_proxy_process(&pid_record, paths, settings.proxy_port, inspector)? {
         VerifiedProxyProcess::Verified { pid } => pid,
         VerifiedProxyProcess::Missing { pid } => {
             remove_pid(paths)?;
-            let mut status = status_with_paths(paths)?;
-            status.message = format!(
-                "Proxy health responds on port {}, but PID {pid} no longer exists; no kill was attempted",
-                settings.proxy_port
+            return stop_running_proxy_with_stale_pid(
+                paths,
+                mode,
+                settings.proxy_port,
+                pid,
+                "PID no longer exists".to_string(),
             );
-            return Ok(status);
         }
         VerifiedProxyProcess::Mismatch { pid, reason } => {
             remove_pid(paths)?;
-            return Err(format!(
-                "Proxy health responds on port {}, but PID {pid} was not killed because ownership could not be verified: {reason}; removed PID file",
-                settings.proxy_port
-            ));
+            return stop_running_proxy_with_stale_pid(
+                paths,
+                mode,
+                settings.proxy_port,
+                pid,
+                format!("ownership could not be verified: {reason}"),
+            );
         }
     };
 
@@ -457,19 +457,23 @@ fn stop_with_paths_and_controls(
         VerifiedProxyProcess::Verified { pid } => pid,
         VerifiedProxyProcess::Missing { pid } => {
             remove_pid(paths)?;
-            let mut status = status_with_paths(paths)?;
-            status.message = format!(
-                "Proxy health still responds on port {}, but PID {pid} disappeared before force kill; no kill was attempted",
-                settings.proxy_port
+            return stop_running_proxy_with_stale_pid(
+                paths,
+                mode,
+                settings.proxy_port,
+                pid,
+                "PID disappeared before force kill".to_string(),
             );
-            return Ok(status);
         }
         VerifiedProxyProcess::Mismatch { pid, reason } => {
             remove_pid(paths)?;
-            return Err(format!(
-                "Proxy health still responds on port {}, but PID {pid} was not killed because ownership could not be verified: {reason}; removed PID file",
-                settings.proxy_port
-            ));
+            return stop_running_proxy_with_stale_pid(
+                paths,
+                mode,
+                settings.proxy_port,
+                pid,
+                format!("ownership could not be verified before force kill: {reason}"),
+            );
         }
     };
 
@@ -491,6 +495,60 @@ fn stop_with_paths_and_controls(
         history_sync_status: None,
         history_sync_message: None,
     })
+}
+
+fn stop_running_proxy_with_stale_pid(
+    paths: &ProxyPaths,
+    mode: String,
+    port: u16,
+    pid: u32,
+    reason: String,
+) -> Result<AppStatus, String> {
+    let _ = request_shutdown(port);
+    if wait_for_stopped(port, GRACEFUL_STOP_TIMEOUT)? {
+        return Ok(AppStatus {
+            mode,
+            proxy_running: false,
+            proxy_port: port,
+            proxy_build: None,
+            message: format!(
+                "Proxy stopped gracefully after removing stale proxy PID {pid}: {reason}"
+            ),
+            history_sync_status: None,
+            history_sync_message: None,
+        });
+    }
+
+    let mut status = status_with_paths(paths)?;
+    status.message = format!(
+        "Proxy health responds on port {port}, but stale PID {pid} was removed because {reason}; shutdown endpoint did not stop it and no force kill was attempted"
+    );
+    Ok(status)
+}
+
+fn stop_running_proxy_without_pid(
+    paths: &ProxyPaths,
+    mode: String,
+    port: u16,
+) -> Result<AppStatus, String> {
+    let _ = request_shutdown(port);
+    if wait_for_stopped(port, GRACEFUL_STOP_TIMEOUT)? {
+        return Ok(AppStatus {
+            mode,
+            proxy_running: false,
+            proxy_port: port,
+            proxy_build: None,
+            message: "Proxy stopped gracefully without a proxy PID file".to_string(),
+            history_sync_status: None,
+            history_sync_message: None,
+        });
+    }
+
+    let mut status = status_with_paths(paths)?;
+    status.message = format!(
+        "Proxy health responds on port {port}, but no proxy PID file was found; shutdown endpoint did not stop it and no force kill was attempted"
+    );
+    Ok(status)
 }
 
 fn stop_when_health_unavailable(
@@ -1372,6 +1430,7 @@ mod tests {
     use crate::Settings;
     use std::cell::RefCell;
     use std::fs;
+    use std::io::Write;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1516,6 +1575,59 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         assert!(status.message.contains("was not killed"));
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
         assert!(killer.killed.borrow().is_empty());
+    }
+
+    #[test]
+    fn stop_treats_mismatched_pid_as_stale_when_health_responds() {
+        let root = temp_root("pid-mismatch-health-running");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_pid(&paths, 12_345u32, port, &paths.proxy_script_path()).expect("write pid");
+        let health_server = spawn_single_health_response(port);
+        let killer = RecordingKiller::default();
+        let inspector =
+            RecordingInspector::new(InspectedProcess::Running(ProcessInfo::from_args(vec![
+                "python".to_string(),
+                "other_script.py".to_string(),
+                "--port".to_string(),
+                port.to_string(),
+            ])));
+
+        let status = stop_with_paths_and_controls(&paths, &killer, &inspector)
+            .expect("stop should not error on stale mismatched pid");
+
+        assert!(!status.proxy_running);
+        assert!(status.message.contains("Proxy stopped gracefully"));
+        assert!(status.message.contains("stale proxy PID 12345"));
+        assert_eq!(read_pid(&paths).expect("pid removed"), None);
+        assert!(killer.killed.borrow().is_empty());
+        health_server.join().expect("health server joins");
+    }
+
+    #[test]
+    fn stop_treats_missing_pid_file_as_external_running_proxy() {
+        let root = temp_root("pid-missing-health-running");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        let health_server = spawn_health_then_shutdown_server(port);
+        let killer = RecordingKiller::default();
+        let inspector = RecordingInspector::new(InspectedProcess::Missing);
+
+        let status = stop_with_paths_and_controls(&paths, &killer, &inspector)
+            .expect("stop should not error when running proxy has no pid file");
+
+        assert!(!status.proxy_running);
+        assert!(
+            status
+                .message
+                .contains("Proxy stopped gracefully without a proxy PID file")
+        );
+        assert_eq!(read_pid(&paths).expect("pid remains missing"), None);
+        assert!(killer.killed.borrow().is_empty());
+        assert!(inspector.inspected.borrow().is_empty());
+        health_server.join().expect("health server joins");
     }
 
     #[test]
@@ -1703,6 +1815,51 @@ time.sleep(10)
     fn free_port() -> u16 {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free port");
         listener.local_addr().unwrap().port()
+    }
+
+    fn spawn_single_health_response(port: u16) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind health port");
+            let (mut stream, _) = listener.accept().expect("accept health request");
+            let mut buffer = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buffer);
+            let body = r#"{"ok":true,"build":"test","features":[]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write health response");
+        })
+    }
+
+    fn spawn_health_then_shutdown_server(port: u16) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind health port");
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut buffer = [0u8; 1024];
+                let count = std::io::Read::read(&mut stream, &mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                if request.starts_with("POST /shutdown ") {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("write shutdown response");
+                    break;
+                }
+                let body = r#"{"ok":true,"build":"test","features":[]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write health response");
+            }
+        })
     }
 
     fn write_settings(paths: &ProxyPaths, port: u16) {

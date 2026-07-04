@@ -174,10 +174,17 @@ fn handle_request(request: BridgeRequest) -> Result<BridgeResponse, String> {
 }
 
 fn origin_allowed(origin: Option<&str>) -> bool {
-    matches!(
-        origin,
-        None | Some("http://127.0.0.1:1420") | Some("http://localhost:1420")
-    )
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some(port) = origin
+        .strip_prefix("http://127.0.0.1:")
+        .or_else(|| origin.strip_prefix("http://localhost:"))
+        .and_then(|port| port.parse::<u16>().ok())
+    else {
+        return false;
+    };
+    port >= 1024
 }
 
 fn dispatch(request: InvokeRequest) -> Result<Value, String> {
@@ -467,7 +474,7 @@ impl BridgeResponse {
             _ => "Internal Server Error",
         };
         let header = format!(
-            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\naccess-control-allow-origin: http://127.0.0.1:1420\r\naccess-control-allow-methods: POST, OPTIONS\r\naccess-control-allow-headers: content-type\r\nconnection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\naccess-control-allow-origin: *\r\naccess-control-allow-methods: POST, OPTIONS\r\naccess-control-allow-headers: content-type\r\nconnection: close\r\n\r\n",
             self.status,
             reason,
             self.body.len()

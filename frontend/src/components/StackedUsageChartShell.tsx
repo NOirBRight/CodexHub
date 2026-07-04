@@ -1,6 +1,7 @@
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { PendingPanel } from "./PendingPanel";
+import { cx } from "../lib/format";
 import type { GatewayUsageEvent, GatewayUsageSummary, Provider, TelemetryStatus, UsageQueryWindow } from "../lib/types";
 
 interface StackedUsageChartShellProps {
@@ -463,17 +464,28 @@ function StackedUsageChart({
   summary: GatewayUsageSummary | null;
 }) {
   const [hover, setHover] = useState<ChartHover | null>(null);
+  const [hiddenSeriesKeys, setHiddenSeriesKeys] = useState<Set<string>>(() => new Set());
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const [tooltipHeight, setTooltipHeight] = useState(0);
-  const maxTotal = niceMax(Math.max(1, ...buckets.map((bucket) => bucket.total)));
-  const hasData = buckets.some((bucket) => bucket.total > 0);
+  const visibleSeries = series.filter((item) => !hiddenSeriesKeys.has(item.key));
+  const visibleBuckets = buckets.map((bucket) => {
+    const visibleSegments = bucket.segments.filter((segment) => !hiddenSeriesKeys.has(segment.key));
+    return {
+      ...bucket,
+      segments: visibleSegments,
+      total: visibleSegments.reduce((sum, segment) => sum + segment.value, 0),
+    };
+  });
+  const maxTotal = niceMax(Math.max(1, ...visibleBuckets.map((bucket) => bucket.total)));
+  const hasData = visibleBuckets.some((bucket) => bucket.total > 0);
+  const allSeriesHidden = series.length > 0 && visibleSeries.length === 0;
   const columns = chartColumns(buckets.length);
   const valueLabel = metric === "request" ? "requests" : "tokens";
-  const layers = buildChartLayers(buckets, series, maxTotal);
+  const layers = buildChartLayers(visibleBuckets, visibleSeries, maxTotal);
   const isModelBreakdown = breakdown === "model";
   const tooltipWidth = isModelBreakdown ? 320 : TOOLTIP_WIDTH;
-  const activeIndex = hover?.index ?? Math.max(0, buckets.findIndex((bucket) => bucket.total > 0));
-  const activeBucket = buckets[activeIndex];
+  const activeIndex = hover?.index ?? Math.max(0, visibleBuckets.findIndex((bucket) => bucket.total > 0));
+  const activeBucket = visibleBuckets[activeIndex];
   const activeSegments = activeBucket?.segments.filter((segment) => segment.value > 0) ?? [];
   const activeSegmentSignature = activeSegments
     .map((segment) => `${segment.key}:${segment.label}:${segment.value}`)
@@ -512,6 +524,14 @@ function StackedUsageChart({
     setTooltipHeight(0);
   }, [breakdown, buckets, metric, series]);
 
+  useEffect(() => {
+    setHiddenSeriesKeys((current) => {
+      const validKeys = new Set(series.map((item) => item.key));
+      const next = new Set(Array.from(current).filter((key) => validKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [series]);
+
   useLayoutEffect(() => {
     if (!hover || !tooltipRef.current) {
       return;
@@ -540,6 +560,19 @@ function StackedUsageChart({
       x: plotRect.left - hostRect.left + (point.x / 100) * plotRect.width,
       y: plotRect.top - hostRect.top + (point.y / 100) * plotRect.height,
     });
+  }
+
+  function toggleSeries(key: string) {
+    setHiddenSeriesKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+    setHover(null);
   }
 
   return (
@@ -619,24 +652,38 @@ function StackedUsageChart({
               className="pointer-events-none absolute inset-x-0 bottom-0 grid h-2 items-end gap-1 opacity-0"
               style={{ gridTemplateColumns: columns }}
             >
-              {buckets.map((bucket) => (
+              {buckets.map((bucket, index) => (
                 <span
                   key={`${bucket.label}-${bucket.start.toISOString()}`}
-                  title={`${bucket.label} - ${formatNumber(bucket.total)} ${valueLabel}`}
+                  title={`${bucket.label} - ${formatNumber(visibleBuckets[index]?.total ?? 0)} ${valueLabel}`}
                 />
               ))}
             </div>
           ) : (
-            <div className="relative z-10 grid h-full min-h-[226px] place-items-center p-5">
-            <PendingPanel
-              compact
-              className="w-full max-w-[480px] py-3"
-              label={summary && summary.requests > 0 ? "event window empty" : "pending data"}
-              title={metric === "request" ? "Request usage" : "Token usage"}
-              message={
-                  summary && summary.requests > 0
-                    ? `No ${valueLabel} in the selected range for this ${breakdown} breakdown.`
-                    : pendingMessage
+            <div className="pointer-events-none relative z-10 grid h-full min-h-[226px] place-items-center p-5">
+              <PendingPanel
+                compact
+                className="w-full max-w-[480px] py-3"
+                label={
+                  allSeriesHidden
+                    ? "series hidden"
+                    : summary && summary.requests > 0
+                      ? "event window empty"
+                      : "pending data"
+                }
+                title={
+                  allSeriesHidden
+                    ? "Usage series hidden"
+                    : metric === "request"
+                      ? "Request usage"
+                      : "Token usage"
+                }
+                message={
+                  allSeriesHidden
+                    ? "Use the legend to restore a series."
+                    : summary && summary.requests > 0
+                      ? `No ${valueLabel} in the selected range for this ${breakdown} breakdown.`
+                      : pendingMessage
                 }
               />
             </div>
@@ -654,29 +701,42 @@ function StackedUsageChart({
           ))}
         </div>
         {series.length > 0 && (
-          <div className="absolute inset-x-10 bottom-2 flex min-h-4 flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] font-semibold text-slate-500">
-            {series.map((item) => (
-              <span
-                key={item.key}
-                className={
-                  isModelBreakdown
-                    ? "inline-flex max-w-[360px] items-start gap-1.5 leading-4"
-                    : "inline-flex min-w-0 items-center gap-1.5"
-                }
-              >
-                <i className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
-                <span
-                  className={
+          <div className="absolute inset-x-10 bottom-2 z-20 flex min-h-4 flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] font-semibold text-slate-500">
+            {series.map((item) => {
+              const hidden = hiddenSeriesKeys.has(item.key);
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={cx(
+                    "focus-ring inline-flex min-h-5 rounded-full px-1 transition-[opacity,background-color] duration-150 ease-out hover:bg-panel",
+                    hidden && "opacity-45",
                     isModelBreakdown
-                      ? "min-w-0 whitespace-normal break-words text-left"
-                      : "max-w-32 truncate"
-                  }
-                  title={item.label}
+                      ? "max-w-[360px] items-start gap-1.5 leading-4"
+                      : "min-w-0 items-center gap-1.5",
+                  )}
+                  aria-pressed={!hidden}
+                  title={`${hidden ? "Show" : "Hide"} ${item.label}`}
+                  onClick={() => toggleSeries(item.key)}
                 >
-                  {item.label}
-                </span>
-              </span>
-            ))}
+                  <i
+                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: item.color }}
+                  />
+                  <span
+                    className={cx(
+                      isModelBreakdown
+                        ? "min-w-0 whitespace-normal break-words text-left"
+                        : "max-w-32 truncate",
+                      hidden && "line-through",
+                    )}
+                    title={item.label}
+                  >
+                    {item.label}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
         {hasData && hover && activeBucket && (
