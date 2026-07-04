@@ -20,6 +20,7 @@ import type {
   UpstreamFormatProbeResult,
   UsageQueryWindow,
 } from "./types";
+import { normalizeSettings } from "./settings";
 
 declare global {
   interface Window {
@@ -103,8 +104,13 @@ export const api = {
   restartProxy: () => call<AppStatus>("restart_proxy"),
   getProviders: () => call<Provider[]>("get_providers"),
   saveProviders: (providers: Provider[]) => call<Provider[]>("save_providers", { providers }),
-  getSettings: () => call<Settings>("get_settings"),
-  saveSettings: (settings: Settings) => call<Settings>("save_settings", { settings }),
+  getSettings: async () => normalizeSettings(await call<Partial<Settings>>("get_settings")),
+  saveSettings: async (settings: Settings) =>
+    normalizeSettings(
+      await call<Partial<Settings>>("save_settings", {
+        settings: normalizeSettings(settings),
+      }),
+    ),
   refreshOfficialModels: () => call<Model[]>("refresh_official_models"),
   discoverProviderModels: (baseUrl: string, apiKey: string) =>
     call<Model[]>("discover_provider_models", { baseUrl, apiKey }),

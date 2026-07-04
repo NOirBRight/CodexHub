@@ -318,7 +318,7 @@ test("gateway client route switching reports completion", async () => {
   assert.match(gatewaySource, /Switching \$\{clientName\} to \$\{routeName\}/);
   assert.match(gatewaySource, /showToast\(`Switching \$\{clientName\} to \$\{routeName\}\.\.\.`, "loading"\)/);
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
-  assert.ok(gatewaySource.includes("setMessage(`${clientName} switched to ${routeName}`)"));
+  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: `\$\{clientName\} switched to \$\{routeName\}`,[\s\S]*tone: "message"/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -334,17 +334,21 @@ test("gateway client route switching refreshes without version probes", async ()
 });
 
 test("gateway toast uses the shared dismissible page toast", async () => {
-  const [gatewaySource, pageToastSource] = await Promise.all([
+  const [gatewaySource, pageToastSource, mainSource] = await Promise.all([
     readFile(gatewayPagePath, "utf8"),
     readFile(pageToastPath, "utf8"),
+    readFile(new URL("../src/main.tsx", import.meta.url), "utf8"),
   ]);
 
-  assert.match(gatewaySource, /<PageToast toast=\{toast\} onDismiss=\{dismissToast\} \/>/);
-  assert.match(gatewaySource, /toast\.tone === "loading"/);
-  assert.match(gatewaySource, /window\.setTimeout\(\(\) => dismissToast\(\), 3000\)/);
+  assert.match(gatewaySource, /const \{ showToast, updateToast \} = useToasts\(\)/);
+  assert.match(gatewaySource, /showToast\([^)]*"loading"/);
+  assert.doesNotMatch(gatewaySource, /const \[toast, setToastState\]/);
+  assert.doesNotMatch(gatewaySource, /window\.setTimeout\(\(\) => dismissToast\(\), 3000\)/);
   assert.match(gatewaySource, /<main className="relative grid/);
   assert.doesNotMatch(gatewaySource, /"fixed bottom-4 left-4/);
-  assert.match(pageToastSource, /"absolute bottom-3 left-3 z-50/);
+  assert.match(mainSource, /<ToastProvider>/);
+  assert.match(pageToastSource, /function ToastViewport/);
+  assert.match(pageToastSource, /"fixed bottom-4 left-4 z-\[70\]/);
   assert.match(pageToastSource, /aria-label="Dismiss notification"/);
 });
 
@@ -353,7 +357,7 @@ test("gateway client version refresh uses a persistent loading toast", async () 
 
   assert.match(gatewaySource, /showToast\("Refreshing gateway clients and checking versions\.\.\.", "loading"\)/);
   assert.match(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)/);
-  assert.match(gatewaySource, /setMessage\("Gateway clients refreshed"\)/);
+  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: "Gateway clients refreshed",[\s\S]*tone: "message"/);
 });
 
 test("settings drawer hides non-functional route and endpoint toggles", async () => {
@@ -678,7 +682,7 @@ test("Codex Hub connection failures no longer mention history sync", async () =>
   assert.doesNotMatch(providersSource, /Connection failed while syncing history/);
   assert.doesNotMatch(providersSource, /Turn off Auto-sync history/);
   assert.match(providersSource, /Codex Hub connection failed/);
-  assert.match(pageToastSource, /toast\.action \? "truncate" : toast\.tone === "error" \? "max-h-32 overflow-auto whitespace-pre-wrap break-words" : "truncate"/);
+  assert.match(pageToastSource, /toast\.action\s*\?\s*"truncate"\s*:\s*toast\.tone === "error"\s*\?\s*"max-h-32 overflow-auto whitespace-pre-wrap break-words"\s*:\s*"truncate"/);
 });
 
 test("Codex Hub connection ignores structured history sync fields from switch status", async () => {
@@ -738,7 +742,8 @@ test("providers toast is locally anchored, dismissible, and auto-dismisses", asy
   assert.match(providersSource, /toast\.tone !== "info"/);
   assert.match(providersSource, /window\.setTimeout\(\(\) => dismissToast\(\), 3000\)/);
   assert.match(providersSource, /<PageToast toast=\{toast\} onDismiss=\{dismissToast\} \/>/);
-  assert.match(pageToastSource, /"absolute bottom-3 left-3 z-50/);
+  assert.match(pageToastSource, /function ToastViewport/);
+  assert.match(pageToastSource, /"fixed bottom-4 left-4 z-\[70\]/);
   assert.match(pageToastSource, /aria-label="Dismiss notification"/);
   assert.match(pageToastSource, /animate-spin/);
   assert.doesNotMatch(providersSource, /"fixed bottom-4 left-4/);
@@ -788,7 +793,9 @@ test("settings drawer reports the backend sync result", async () => {
   assert.match(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
   assert.match(appSource, /return message/);
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
-  assert.match(drawerSource, /setMessage\(await onSyncHistory\(targetProvider\)\)/);
+  assert.match(drawerSource, /showToast\("Repairing history bucket\.\.\.", "loading"\)/);
+  assert.match(drawerSource, /const message = await onSyncHistory\(targetProvider\)/);
+  assert.match(drawerSource, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "message"/);
   assert.doesNotMatch(drawerSource, /onMigrateOfficialHistory/);
   assert.doesNotMatch(drawerSource, /onRestoreOfficialHistory/);
   assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);

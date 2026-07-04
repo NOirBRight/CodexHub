@@ -2,7 +2,7 @@ import { Check, Copy, Eye, EyeOff, Play, RefreshCcw, Save, Square } from "lucide
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
-import { PageToast } from "../components/PageToast";
+import { useToasts } from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { StatusCard } from "../components/StatusCard";
@@ -19,7 +19,6 @@ import type {
   TelemetryStatus,
   UsageQueryWindow,
 } from "../lib/types";
-import type { PageToastState, PageToastTone } from "../components/PageToast";
 
 interface GatewayPageProps {
   busy?: string | null;
@@ -65,12 +64,12 @@ export function GatewayPage({
   usageStatus,
   clientInfos,
 }: GatewayPageProps) {
+  const { showToast, updateToast } = useToasts();
   const [draftPort, setDraftPort] = useState(settings?.proxy_port ?? status?.port ?? 9099);
   const [draftKey, setDraftKey] = useState(settings?.gateway_client_key ?? "");
   const [draftTimeout, setDraftTimeout] = useState(settings?.gateway_request_timeout_seconds ?? 120);
   const [clientBusy, setClientBusy] = useState<string | null>(null);
   const [clientRefreshBusy, setClientRefreshBusy] = useState(false);
-  const [toast, setToastState] = useState<PageToastState | null>(null);
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const copyResetTimer = useRef<number | null>(null);
@@ -90,14 +89,6 @@ export function GatewayPage({
     },
     [],
   );
-
-  useEffect(() => {
-    if (!toast || toast.tone === "loading" || toast.action) {
-      return;
-    }
-    const timer = window.setTimeout(() => dismissToast(), 3000);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
 
   useEffect(() => {
     if (!usageError) {
@@ -146,20 +137,10 @@ export function GatewayPage({
     }, 1200);
   }
 
-  function showToast(text: string, tone: PageToastTone = "info", action?: PageToastState["action"]) {
-    setToastState({ action, text, tone });
-  }
-
-  function dismissToast() {
-    setToastState(null);
-  }
-
   function setMessage(value: string | null) {
     if (value) {
-      showToast(value, "info");
-      return;
+      showToast(value, "message");
     }
-    setToastState((current) => (current?.tone === "info" ? null : current));
   }
 
   function setError(value: string | null) {
@@ -169,27 +150,43 @@ export function GatewayPage({
         return;
       }
       showToast(value, "error");
-      return;
     }
-    setToastState((current) => (current?.tone === "error" ? null : current));
   }
 
   function showBackendDisconnectedToast() {
-    showToast("Backend is not connected", "error", {
-      label: "Start",
-      onClick: () => void startBackendFromToast(),
+    let toastId = "";
+    toastId = showToast({
+      text: "Backend is not connected",
+      tone: "error",
+      action: {
+        label: "Start",
+        onClick: () => void startBackendFromToast(toastId),
+      },
     });
   }
 
-  async function startBackendFromToast() {
+  async function startBackendFromToast(toastId?: string) {
     setClientRefreshBusy(true);
-    showToast("Starting backend...", "loading");
+    const activeToastId = toastId ?? showToast("Starting backend...", "loading");
+    updateToast(activeToastId, {
+      action: null,
+      text: "Starting backend...",
+      tone: "loading",
+    });
     try {
       await api.startProxy();
       await onRefreshClients();
-      setMessage("Backend started");
+      updateToast(activeToastId, {
+        action: null,
+        text: "Backend started",
+        tone: "message",
+      });
     } catch (err) {
-      setError(messageFromError(err));
+      updateToast(activeToastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
     } finally {
       setClientRefreshBusy(false);
     }
@@ -225,22 +222,33 @@ export function GatewayPage({
     const timeoutChanged = next.gateway_request_timeout_seconds !== settings.gateway_request_timeout_seconds;
     const keyChanged = next.gateway_client_key !== settings.gateway_client_key;
     const restartRequired = running && (portChanged || timeoutChanged);
+    const toastId = showToast(
+      restartRequired ? "Saving gateway settings and restarting runtime..." : "Saving gateway settings...",
+      "loading",
+    );
 
     try {
       await onApplySettings(next);
       if (restartRequired) {
         await onRestartProxy();
       }
-      setMessage(
-        restartRequired
-          ? "Gateway settings saved and runtime restarted"
-          : keyChanged && !portChanged && !timeoutChanged
-            ? "API key saved; Gateway restart not required"
-            : "Gateway settings saved",
-      );
+      const message = restartRequired
+        ? "Gateway settings saved and runtime restarted"
+        : keyChanged && !portChanged && !timeoutChanged
+          ? "API key saved; Gateway restart not required"
+          : "Gateway settings saved";
+      updateToast(toastId, {
+        action: null,
+        text: message,
+        tone: "message",
+      });
       setError(null);
     } catch (err) {
-      setError(messageFromError(err));
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
     }
   }
 
@@ -259,14 +267,22 @@ export function GatewayPage({
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const routeName = mode === "hub" ? "CodexHub" : "Official";
-    showToast(`Switching ${clientName} to ${routeName}...`, "loading");
+    const toastId = showToast(`Switching ${clientName} to ${routeName}...`, "loading");
     try {
       await api.switchGatewayClientRoute(clientId, mode, defaultModel);
       await onRefreshClients();
-      setMessage(`${clientName} switched to ${routeName}`);
+      updateToast(toastId, {
+        action: null,
+        text: `${clientName} switched to ${routeName}`,
+        tone: "message",
+      });
       setError(null);
     } catch (err) {
-      setError(messageFromError(err));
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
     } finally {
       setClientBusy(null);
     }
@@ -274,13 +290,21 @@ export function GatewayPage({
 
   async function refreshGatewayClients() {
     setClientRefreshBusy(true);
-    showToast("Refreshing gateway clients and checking versions...", "loading");
+    const toastId = showToast("Refreshing gateway clients and checking versions...", "loading");
     try {
       await onRefreshClients({ includeClientVersions: true });
-      setMessage("Gateway clients refreshed");
+      updateToast(toastId, {
+        action: null,
+        text: "Gateway clients refreshed",
+        tone: "message",
+      });
       setError(null);
     } catch (err) {
-      setError(messageFromError(err));
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
     } finally {
       setClientRefreshBusy(false);
     }
@@ -294,11 +318,41 @@ export function GatewayPage({
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 
   async function toggleRuntime() {
+    const toastId = showToast(
+      running ? "Stopping Gateway runtime..." : "Starting Gateway runtime...",
+      "loading",
+    );
     if (running) {
-      await onStopProxy();
+      try {
+        await onStopProxy();
+        updateToast(toastId, {
+          action: null,
+          text: "Gateway runtime stopped",
+          tone: "message",
+        });
+      } catch (err) {
+        updateToast(toastId, {
+          action: null,
+          text: messageFromError(err),
+          tone: "error",
+        });
+      }
       return;
     }
-    await onStartProxy();
+    try {
+      await onStartProxy();
+      updateToast(toastId, {
+        action: null,
+        text: "Gateway runtime started",
+        tone: "message",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    }
   }
 
   return (
@@ -537,7 +591,6 @@ export function GatewayPage({
           </div>
         </div>
       </aside>
-      {toast && <PageToast toast={toast} onDismiss={dismissToast} />}
     </main>
   );
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
+import { useToasts } from "./components/PageToast";
 import { cx } from "./lib/format";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
@@ -99,6 +100,7 @@ function visionModelOptions(models: Model[]) {
 }
 
 export default function App() {
+  const { showToast, updateToast } = useToasts();
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
     status: null,
@@ -224,15 +226,41 @@ export default function App() {
   const exportedCount = runtime.gatewayStatus?.official_models.length ?? 0;
   const visionModels = visionModelOptions(runtime.catalogModels);
 
-  async function runRuntimeAction(label: string, action: () => Promise<AppStatus>) {
+  async function runRuntimeAction(
+    label: string,
+    action: () => Promise<AppStatus>,
+    options?: { toast?: boolean },
+  ) {
     setBusy(label);
+    const toastId =
+      options?.toast === false
+        ? null
+        : showToast(runtimeActionLoadingMessage(label), "loading");
     try {
       const status = await action();
       setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
       setBanner(status.message);
+      if (toastId) {
+        updateToast(toastId, {
+          action: null,
+          text: runtimeActionSuccessMessage(label),
+          tone: "message",
+        });
+      }
       await loadRuntime();
     } catch (err) {
-      setBanner(messageFromError(err));
+      const message = messageFromError(err);
+      setBanner(message);
+      if (toastId) {
+        updateToast(toastId, {
+          action: null,
+          text: message,
+          tone: "error",
+        });
+      }
+      if (options?.toast === false) {
+        throw err;
+      }
     } finally {
       setBusy(null);
     }
@@ -347,7 +375,7 @@ export default function App() {
               await loadRuntime();
               await loadGatewayClients();
             }}
-            onStartProxy={() => runRuntimeAction("start", api.startProxy)}
+            onStartProxy={() => runRuntimeAction("start", api.startProxy, { toast: false })}
           />
         ) : (
           <GatewayPage
@@ -366,9 +394,9 @@ export default function App() {
               await saveSettings(settings);
             }}
             onRefreshClients={loadGatewayClients}
-            onRestartProxy={() => runRuntimeAction("restart", api.restartProxy)}
-            onStartProxy={() => runRuntimeAction("start", api.startProxy)}
-            onStopProxy={() => runRuntimeAction("stop", api.stopProxy)}
+            onRestartProxy={() => runRuntimeAction("restart", api.restartProxy, { toast: false })}
+            onStartProxy={() => runRuntimeAction("start", api.startProxy, { toast: false })}
+            onStopProxy={() => runRuntimeAction("stop", api.stopProxy, { toast: false })}
             onUsageWindowChange={updateUsageWindow}
           />
         )}
@@ -393,4 +421,30 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function runtimeActionLoadingMessage(label: string) {
+  if (label === "start") {
+    return "Starting Gateway runtime...";
+  }
+  if (label === "stop") {
+    return "Stopping Gateway runtime...";
+  }
+  if (label === "restart") {
+    return "Restarting Gateway runtime...";
+  }
+  return "Updating Gateway runtime...";
+}
+
+function runtimeActionSuccessMessage(label: string) {
+  if (label === "start") {
+    return "Gateway runtime started";
+  }
+  if (label === "stop") {
+    return "Gateway runtime stopped";
+  }
+  if (label === "restart") {
+    return "Gateway runtime restarted";
+  }
+  return "Gateway runtime updated";
 }

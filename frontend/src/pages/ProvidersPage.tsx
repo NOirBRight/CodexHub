@@ -159,7 +159,7 @@ export function ProvidersPage({
   }, [toast]);
 
   function showToast(text: string, tone: PageToastTone = "info", action?: PageToastState["action"]) {
-    setToastState({ action, text, tone });
+    setToastState({ action, id: "providers-page-toast", text, tone });
   }
 
   function dismissToast() {

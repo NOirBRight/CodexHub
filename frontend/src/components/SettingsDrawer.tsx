@@ -1,7 +1,9 @@
 import { Eye, EyeOff, History, Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
+import { messageFromError } from "../lib/tauri";
 import type { Model, Settings } from "../lib/types";
+import { useToasts } from "./PageToast";
 
 interface SettingsDrawerProps {
   busy?: string | null;
@@ -22,13 +24,14 @@ export function SettingsDrawer({
   settings,
   visionModels,
 }: SettingsDrawerProps) {
+  const { showToast, updateToast } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(settings);
-  const [message, setMessage] = useState<string | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const [showClientKey, setShowClientKey] = useState(false);
 
   useEffect(() => {
     setDraft(settings);
-    setMessage(null);
+    setHistoryBusy(false);
     setShowClientKey(false);
   }, [settings, open]);
 
@@ -36,16 +39,74 @@ export function SettingsDrawer({
     if (!draft) {
       return;
     }
-    const savedMessage = await onSave(draft);
-    setMessage(savedMessage ?? "Settings saved");
+    const toastId = showToast("Saving settings...", "loading");
+    try {
+      const savedMessage = await onSave(draft);
+      updateToast(toastId, {
+        action: null,
+        text: savedMessage ?? "Settings saved",
+        tone: "message",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    }
   }
 
   async function repairHistory() {
     if (!draft) {
       return;
     }
+    const toastId = showToast("Repairing history bucket...", "loading");
     const targetProvider = draft.unified_codex_history ? "custom" : "openai";
-    setMessage(await onSyncHistory(targetProvider));
+    try {
+      const message = await onSyncHistory(targetProvider);
+      updateToast(toastId, {
+        action: null,
+        text: message,
+        tone: "message",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    }
+  }
+
+  async function toggleUnifiedHistory(enabled: boolean) {
+    if (!draft || historyBusy) {
+      return;
+    }
+    const previous = draft;
+    const next = { ...draft, unified_codex_history: enabled };
+    const toastId = showToast(
+      enabled ? "Enabling unified Codex history..." : "Restoring official Codex history...",
+      "loading",
+    );
+    setDraft(next);
+    setHistoryBusy(true);
+    try {
+      const savedMessage = await onSave(next);
+      updateToast(toastId, {
+        action: null,
+        text: savedMessage ?? (enabled ? "Unified Codex history enabled" : "Official Codex history restored"),
+        tone: "message",
+      });
+    } catch (err) {
+      setDraft(previous);
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    } finally {
+      setHistoryBusy(false);
+    }
   }
 
   return (
@@ -90,8 +151,9 @@ export function SettingsDrawer({
                 />
                 <Toggle
                   checked={draft.unified_codex_history}
+                  disabled={historyBusy || Boolean(busy)}
                   label="Unified Codex history"
-                  onChange={(value) => setDraft({ ...draft, unified_codex_history: value })}
+                  onChange={(value) => void toggleUnifiedHistory(value)}
                 />
                 <Toggle
                   checked={draft.auto_sync_clients}
@@ -107,7 +169,7 @@ export function SettingsDrawer({
                 <button
                   type="button"
                   className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-                  disabled={Boolean(busy)}
+                  disabled={Boolean(busy) || historyBusy}
                   onClick={() => void repairHistory()}
                 >
                   <History size={15} />
@@ -233,12 +295,11 @@ export function SettingsDrawer({
       </div>
 
       <div className="px-5 py-4 shadow-[0_-1px_0_rgba(31,41,51,0.06)]">
-        {message && <div className="mb-3 text-sm text-slate-600">{message}</div>}
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
-            disabled={Boolean(busy) || !draft}
+            disabled={Boolean(busy) || historyBusy || !draft}
             onClick={() => void saveDraft()}
           >
             <Save size={15} />
@@ -265,21 +326,24 @@ function visionModelLabel(model: Model) {
 
 function Toggle({
   checked,
+  disabled,
   label,
   onChange,
 }: {
   checked: boolean;
+  disabled?: boolean;
   label: string;
   onChange: (value: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-9 cursor-pointer items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
+    <label className="flex min-h-9 items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
       <span className="min-w-0 truncate">{label}</span>
       <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
         <input
           type="checkbox"
           className="peer sr-only"
           checked={checked}
+          disabled={disabled}
           onChange={(event) => onChange(event.target.checked)}
         />
         <span className="absolute inset-0 rounded-full bg-slate-200 shadow-control transition-colors peer-checked:bg-action" />

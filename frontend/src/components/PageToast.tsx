@@ -1,15 +1,40 @@
-import { RefreshCcw, X } from "lucide-react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { CheckCircle2, Info, RefreshCcw, X } from "lucide-react";
 import { cx } from "../lib/format";
 
-export type PageToastTone = "info" | "success" | "error" | "loading";
+export type PageToastTone = "message" | "info" | "success" | "error" | "loading";
+
+export type PageToastAction = {
+  label: string;
+  onClick: () => void;
+};
 
 export type PageToastState = {
-  action?: {
-    label: string;
-    onClick: () => void;
-  };
+  action?: PageToastAction;
+  id: string;
+  timeoutMs?: number | null;
   tone: PageToastTone;
   text: string;
+};
+
+export type ToastPatch = Partial<Omit<PageToastState, "action" | "id">> & {
+  action?: PageToastAction | null;
+};
+
+type ToastInput = {
+  action?: PageToastAction;
+  text: string;
+  timeoutMs?: number | null;
+  tone?: PageToastTone;
+};
+
+type ToastContextValue = {
+  dismissToast: (id: string) => void;
+  showToast: {
+    (text: string, tone?: PageToastTone, action?: PageToastAction): string;
+    (toast: ToastInput): string;
+  };
+  updateToast: (id: string, patch: ToastPatch) => void;
 };
 
 interface PageToastProps {
@@ -17,11 +42,114 @@ interface PageToastProps {
   onDismiss: () => void;
 }
 
+const ToastContext = createContext<ToastContextValue | null>(null);
+
+let toastSequence = 0;
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<PageToastState[]>([]);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
+  const showToast = useCallback<ToastContextValue["showToast"]>(
+    (input: string | ToastInput, tone: PageToastTone = "message", action?: PageToastAction) => {
+      const toastInput = typeof input === "string" ? { action, text: input, tone } : input;
+      const id = `toast-${Date.now()}-${toastSequence++}`;
+      const toast: PageToastState = {
+        id,
+        action: toastInput.action,
+        text: toastInput.text,
+        timeoutMs: toastInput.timeoutMs,
+        tone: toastInput.tone ?? "message",
+      };
+      setToasts((current) => [...current, toast]);
+      return id;
+    },
+    [],
+  );
+
+  const updateToast = useCallback((id: string, patch: ToastPatch) => {
+    setToasts((current) =>
+      current.map((toast) => {
+        if (toast.id !== id) {
+          return toast;
+        }
+        const { action, ...rest } = patch;
+        const next: PageToastState = { ...toast, ...rest };
+        if ("action" in patch) {
+          next.action = action ?? undefined;
+        }
+        return next;
+      }),
+    );
+  }, []);
+
+  const value = useMemo(
+    () => ({ dismissToast, showToast, updateToast }),
+    [dismissToast, showToast, updateToast],
+  );
+
+  return (
+    <ToastContext.Provider value={value}>
+      {children}
+      <ToastViewport dismissToast={dismissToast} toasts={toasts} />
+    </ToastContext.Provider>
+  );
+}
+
+export function useToasts() {
+  const value = useContext(ToastContext);
+  if (!value) {
+    throw new Error("useToasts must be used within ToastProvider");
+  }
+  return value;
+}
+
+function ToastViewport({
+  dismissToast,
+  toasts,
+}: {
+  dismissToast: (id: string) => void;
+  toasts: PageToastState[];
+}) {
+  if (!toasts.length) {
+    return null;
+  }
+
+  return (
+    <div className="fixed bottom-4 left-4 z-[70] flex max-w-[min(calc(100vw-2rem),460px)] flex-col gap-2">
+      {toasts.map((toast) => (
+        <ToastItem
+          key={toast.id}
+          toast={toast}
+          onDismiss={() => dismissToast(toast.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ToastItem({ toast, onDismiss }: PageToastProps) {
+  useEffect(() => {
+    const timeoutMs = toastTimeoutMs(toast);
+    if (timeoutMs == null) {
+      return;
+    }
+    const timer = window.setTimeout(onDismiss, timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [onDismiss, toast]);
+
+  return <PageToast toast={toast} onDismiss={onDismiss} />;
+}
+
 export function PageToast({ toast, onDismiss }: PageToastProps) {
+  const dismissible = toast.tone !== "loading";
   return (
     <div
       className={cx(
-        "absolute bottom-3 left-3 z-50 grid max-w-[460px] grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-panel px-3 py-2 text-sm shadow-floating",
+        "grid min-h-10 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-panel px-3 py-2 text-sm shadow-floating transition-[opacity,transform] duration-150 ease-out",
         toast.tone === "error"
           ? "bg-red-50 text-danger"
           : toast.tone === "success"
@@ -32,13 +160,21 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
     >
       {toast.tone === "loading" ? (
         <RefreshCcw size={14} className="animate-spin text-action" />
+      ) : toast.tone === "success" ? (
+        <CheckCircle2 size={14} className="text-emerald-600" />
+      ) : toast.tone === "error" ? (
+        <span className="h-2 w-2 rounded-full bg-danger" />
       ) : (
-        <span className="h-2 w-2 rounded-full bg-action" />
+        <Info size={14} className="text-action" />
       )}
       <span
         className={cx(
           "min-w-0",
-          toast.action ? "truncate" : toast.tone === "error" ? "max-h-32 overflow-auto whitespace-pre-wrap break-words" : "truncate",
+          toast.action
+            ? "truncate"
+            : toast.tone === "error"
+              ? "max-h-32 overflow-auto whitespace-pre-wrap break-words"
+              : "truncate",
         )}
       >
         {toast.text}
@@ -52,14 +188,26 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
           {toast.action.label}
         </button>
       )}
-      <button
-        type="button"
-        className="focus-ring grid h-6 w-6 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
-        aria-label="Dismiss notification"
-        onClick={onDismiss}
-      >
-        <X size={14} />
-      </button>
+      {dismissible && (
+        <button
+          type="button"
+          className="focus-ring grid h-6 w-6 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
+          aria-label="Dismiss notification"
+          onClick={onDismiss}
+        >
+          <X size={14} />
+        </button>
+      )}
     </div>
   );
+}
+
+function toastTimeoutMs(toast: PageToastState) {
+  if (toast.timeoutMs !== undefined) {
+    return toast.timeoutMs;
+  }
+  if (toast.action || toast.tone === "loading" || toast.tone === "error") {
+    return null;
+  }
+  return 3000;
 }
