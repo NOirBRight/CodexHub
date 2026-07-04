@@ -3877,6 +3877,7 @@ def _call_vision_model_for_image_description(
     vision_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
 ) -> str:
+    upstream_format = str(vision_upstream.get("upstream_format") or "responses")
     payload = {
         "model": vision_model,
         "input": [
@@ -3889,7 +3890,7 @@ def _call_vision_model_for_image_description(
                 ],
             }
         ],
-        "stream": False,
+        "stream": upstream_format != "chat_completions",
     }
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     vision_context = dict(event_context or {})
@@ -3903,7 +3904,6 @@ def _call_vision_model_for_image_description(
             event_context=vision_context,
             inject_codex_tools=False,
         )
-        upstream_format = str(vision_upstream.get("upstream_format", "responses"))
         upstream_url = _responses_url(vision_upstream, "/v1/responses")
         if upstream_format == "chat_completions":
             body = _responses_request_to_chat_completion_body(body)
