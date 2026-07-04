@@ -17,6 +17,7 @@ struct InvokeRequest {
 
 pub fn run(args: &[String]) -> i32 {
     let addr = parse_addr(args).unwrap_or_else(|| DEFAULT_ADDR.to_string());
+    gateway::start_telemetry_ingester();
     match TcpListener::bind(&addr) {
         Ok(listener) => {
             println!("CodexHub web bridge listening on http://{addr}");
@@ -273,6 +274,16 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
             let end_ts = optional_string_arg(&request.args, &["endTs", "end_ts"]);
             to_value(gateway::gateway_usage_summary(start_ts, end_ts))
         }
+        "gateway_usage_snapshot" => {
+            let limit = request
+                .args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            let start_ts = optional_string_arg(&request.args, &["startTs", "start_ts"]);
+            let end_ts = optional_string_arg(&request.args, &["endTs", "end_ts"]);
+            to_value(gateway::gateway_usage_snapshot(limit, start_ts, end_ts))
+        }
         "gateway_usage_events" => {
             let limit = request
                 .args
@@ -368,6 +379,12 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(history::sync_history(target_provider.as_deref()))
+        }
+        "migrate_official_history_to_unified" => {
+            to_value(history::migrate_official_history_to_unified())
+        }
+        "restore_official_history_from_unified" => {
+            to_value(history::restore_official_history_from_unified())
         }
         "sync_catalog" => to_value(catalog::sync_catalog()),
         "set_autostart" => to_value(autostart::set_autostart(bool_arg(

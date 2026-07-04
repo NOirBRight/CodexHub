@@ -29,7 +29,14 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       ) : (
         <span className="h-2 w-2 rounded-full bg-action" />
       )}
-      <span className="min-w-0 truncate">{toast.text}</span>
+      <span
+        className={cx(
+          "min-w-0",
+          toast.tone === "error" ? "max-h-32 overflow-auto whitespace-pre-wrap break-words" : "truncate",
+        )}
+      >
+        {toast.text}
+      </span>
       <button
         type="button"
         className="focus-ring grid h-6 w-6 place-items-center rounded text-slate-500 hover:bg-slate-100 hover:text-ink"

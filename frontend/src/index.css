@@ -29,10 +29,40 @@ textarea {
   font: inherit;
 }
 
+button:not(:disabled),
+select:not(:disabled),
+input[type="checkbox"]:not(:disabled),
+input[type="radio"]:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:not(:disabled) *,
+[role="button"]:not([aria-disabled="true"]) * {
+  cursor: inherit;
+}
+
+label:has(input[type="checkbox"]:not(:disabled)),
+label:has(input[type="radio"]:not(:disabled)) {
+  cursor: pointer;
+}
+
+label:has(input[type="checkbox"]:not(:disabled)) *,
+label:has(input[type="radio"]:not(:disabled)) * {
+  cursor: inherit;
+}
+
 button:disabled,
-input:disabled {
+select:disabled,
+input:disabled,
+[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+label:has(input[type="checkbox"]:disabled),
+label:has(input[type="radio"]:disabled) {
+  cursor: not-allowed;
 }
 
 [data-sortable-handle="true"],

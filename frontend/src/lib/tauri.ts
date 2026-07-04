@@ -11,6 +11,7 @@ import type {
   GatewayTestKind,
   GatewayTestResult,
   GatewayUsageEvent,
+  GatewayUsageSnapshot,
   GatewayUsageSummary,
   Model,
   Provider,
@@ -34,7 +35,13 @@ interface BridgeResponse<T> {
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (window.__TAURI_INTERNALS__) {
-    return invoke<T>(command, args);
+    try {
+      return await invoke<T>(command, args);
+    } catch (error) {
+      if (!shouldFallbackToBridge(error)) {
+        throw error;
+      }
+    }
   }
   return bridgeInvoke<T>(command, args);
 }
@@ -49,7 +56,6 @@ async function desktopCall<T>(command: string, args?: Record<string, unknown>): 
 async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const response = await fetch(bridgeUrl(), {
     method: "POST",
-    headers: { "content-type": "application/json" },
     body: JSON.stringify({ command, args: args ?? {} }),
   }).catch((error: unknown) => {
     const detail = error instanceof Error ? error.message : String(error);
@@ -63,6 +69,20 @@ async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>):
     throw new Error(payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`);
   }
   return payload.value as T;
+}
+
+function shouldFallbackToBridge(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  const message = detail.toLowerCase();
+
+  return (
+    message.includes("__tauri_internals__") ||
+    message.includes("window.__tauri__") ||
+    message.includes("invoke is not a function") ||
+    message.includes("ipc") ||
+    message.includes("unknown command") ||
+    /command .*(not found|not allowed|not recognized)/.test(message)
+  );
 }
 
 function bridgeUrl() {
@@ -105,6 +125,8 @@ export const api = {
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>
     call<GatewayTestResult>("gateway_test_request", { kind, model: model ?? null }),
   gatewayRecentEvents: (limit = 20) => call<GatewayEvent[]>("gateway_recent_events", { limit }),
+  gatewayUsageSnapshot: (window?: UsageQueryWindow | null) =>
+    call<GatewayUsageSnapshot>("gateway_usage_snapshot", usageWindowArgs(window)),
   gatewayUsageSummary: (window?: UsageQueryWindow | null) =>
     call<GatewayUsageSummary>("gateway_usage_summary", usageWindowArgs(window)),
   gatewayUsageEvents: (
@@ -157,6 +179,10 @@ export const api = {
     call<Model>("save_model_metadata_override", { model }),
   syncHistory: (targetProvider?: string) =>
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
+  migrateOfficialHistoryToUnified: () =>
+    call<string>("migrate_official_history_to_unified"),
+  restoreOfficialHistoryFromUnified: () =>
+    call<string>("restore_official_history_from_unified"),
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),

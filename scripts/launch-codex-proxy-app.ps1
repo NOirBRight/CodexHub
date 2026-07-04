@@ -131,7 +131,8 @@ $GlobalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 $SessionId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
 $ConfigBackupPath = Join-Path $ScriptDir "config.toml.session-$SessionId.bak"
 $GlobalStateBackupPath = Join-Path $ScriptDir "global-state.session-$SessionId.bak"
-$HistoryRepairBackupRoot = Join-Path $ScriptDir "history-promote-custom-openai-$SessionId"
+$HistoryRepairBackupRoot = Join-Path $ScriptDir "history-bucket-repair-openai-$SessionId"
+$HistoryLedgerRoot = Join-Path $CodexDir 'proxy'
 $CodexAppStartTimeoutSeconds = 120
 
 function Get-CodexAppProcesses {
@@ -353,15 +354,19 @@ function Test-OldCustomProxyOverlay {
 }
 
 function Repair-CustomHistory {
-    Write-Host 'Repairing old custom-bucket proxy history into the openai bucket...'
+    Write-Host 'Repairing ledger-confirmed custom-bucket history into the openai bucket...'
     Invoke-Timed -Label 'Custom history repair' -ScriptBlock {
         Invoke-Checked -FilePath 'python' -Arguments @(
             $HistoryOverlay,
-            'promote-custom-to-openai',
+            'repair-history',
             '--codex-dir',
             $CodexDir,
             '--backup-root',
-            $HistoryRepairBackupRoot
+            $HistoryRepairBackupRoot,
+            '--target',
+            'openai',
+            '--ledger-root',
+            $HistoryLedgerRoot
         )
     }
 }

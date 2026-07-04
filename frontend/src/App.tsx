@@ -14,6 +14,7 @@ import type {
   Provider,
   Settings,
   TabId,
+  TelemetryStatus,
   UsageQueryWindow,
 } from "./lib/types";
 import { GatewayPage } from "./pages/GatewayPage";
@@ -26,6 +27,8 @@ type RuntimeSnapshot = {
   gatewayStatus: GatewayStatus | null;
   gatewayUsageSummary: GatewayUsageSummary | null;
   gatewayUsageEvents: GatewayUsageEvent[];
+  gatewayUsageStatus: TelemetryStatus | null;
+  usageError: string | null;
   gatewayClients: GatewayClientInfo[];
 };
 
@@ -80,6 +83,8 @@ export default function App() {
     gatewayStatus: null,
     gatewayUsageSummary: null,
     gatewayUsageEvents: [],
+    gatewayUsageStatus: null,
+    usageError: null,
     gatewayClients: [],
   });
   const [busy, setBusy] = useState<string | null>("load");
@@ -117,16 +122,14 @@ export default function App() {
         settingsResult,
         providersResult,
         gatewayResult,
-        usageSummaryResult,
-        usageEventsResult,
+        usageSnapshotResult,
       ] =
         await Promise.allSettled([
           api.getStatus(),
           api.getSettings(),
           api.getProviders(),
           api.gatewayStatus(),
-          api.gatewayUsageSummary(usageWindow),
-          api.gatewayUsageEvents(usageWindow),
+          api.gatewayUsageSnapshot(usageWindow),
         ]);
 
       setRuntime((current) => ({
@@ -136,13 +139,21 @@ export default function App() {
         providers: providersResult.status === "fulfilled" ? providersResult.value : current.providers,
         gatewayStatus: gatewayResult.status === "fulfilled" ? gatewayResult.value : current.gatewayStatus,
         gatewayUsageSummary:
-          usageSummaryResult.status === "fulfilled"
-            ? usageSummaryResult.value
+          usageSnapshotResult.status === "fulfilled"
+            ? usageSnapshotResult.value.summary
             : current.gatewayUsageSummary,
         gatewayUsageEvents:
-          usageEventsResult.status === "fulfilled"
-            ? usageEventsResult.value
+          usageSnapshotResult.status === "fulfilled"
+            ? usageSnapshotResult.value.events
             : current.gatewayUsageEvents,
+        gatewayUsageStatus:
+          usageSnapshotResult.status === "fulfilled"
+            ? usageSnapshotResult.value.telemetry_status
+            : current.gatewayUsageStatus,
+        usageError:
+          usageSnapshotResult.status === "fulfilled"
+            ? null
+            : messageFromError(usageSnapshotResult.reason),
       }));
 
       const rejected = [
@@ -150,8 +161,6 @@ export default function App() {
         settingsResult,
         providersResult,
         gatewayResult,
-        usageSummaryResult,
-        usageEventsResult,
       ].find((result) => result.status === "rejected");
       if (rejected?.status === "rejected") {
         setBanner(messageFromError(rejected.reason));
@@ -202,6 +211,9 @@ export default function App() {
   async function saveSettings(next: Settings) {
     setBusy("settings");
     try {
+      const previousUnified = runtime.settings?.unified_codex_history ?? true;
+      const nextUnified = next.unified_codex_history ?? true;
+      const currentMode = runtime.status?.mode;
       if (runtime.settings && next.auto_start_proxy !== runtime.settings.auto_start_proxy) {
         if (next.auto_start_proxy) {
           await api.setAutostart(true);
@@ -211,22 +223,20 @@ export default function App() {
       }
       const settings = await api.saveSettings(next);
       setRuntime((currentRuntime) => ({ ...currentRuntime, settings }));
-      setBanner("Settings saved");
+      let historyMessage: string | null = null;
+      if (previousUnified !== nextUnified) {
+        if (currentMode === "official") {
+          const status = await api.switchMode("official", false);
+          setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
+        }
+        if (nextUnified) {
+          historyMessage = await api.migrateOfficialHistoryToUnified();
+        } else if (currentMode === "official") {
+          historyMessage = await api.restoreOfficialHistoryFromUnified();
+        }
+      }
+      setBanner(historyMessage ?? "Settings saved");
       await loadRuntime();
-    } catch (err) {
-      setBanner(messageFromError(err));
-      throw err;
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function syncHistory() {
-    setBusy("sync");
-    try {
-      const message = await api.syncHistory();
-      setBanner(message);
-      return message;
     } catch (err) {
       setBanner(messageFromError(err));
       throw err;
@@ -290,6 +300,8 @@ export default function App() {
             status={runtime.gatewayStatus}
             usageSummary={runtime.gatewayUsageSummary}
             usageEvents={runtime.gatewayUsageEvents}
+            usageStatus={runtime.gatewayUsageStatus}
+            usageError={runtime.usageError}
             clientInfos={runtime.gatewayClients}
             busy={busy}
             pending={contract.pendingBackend}
@@ -310,7 +322,16 @@ export default function App() {
         settings={runtime.settings}
         onClose={() => setSettingsOpen(false)}
         onSave={saveSettings}
-        onSyncHistory={syncHistory}
+        onSyncHistory={async (targetProvider) => {
+          setBusy("history");
+          try {
+            const message = await api.syncHistory(targetProvider);
+            setBanner(message);
+            return message;
+          } finally {
+            setBusy(null);
+          }
+        }}
       />
       {settingsOpen && (
         <button

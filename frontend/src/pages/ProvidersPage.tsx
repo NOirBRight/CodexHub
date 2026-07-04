@@ -10,7 +10,6 @@ import {
   Plus,
   RefreshCcw,
   Save,
-  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
@@ -120,6 +119,10 @@ export function ProvidersPage({
       ),
     [providers],
   );
+  const officialDisabledModels = settings?.official_disabled_models ?? [];
+  const officialEnabledCount = officialModels.filter(
+    (model) => !isOfficialModelDisabled(officialDisabledModels, model.id),
+  ).length;
   const providerNavItems = useMemo<ProviderNavItem[]>(() => {
     return providers
       .map((provider) => ({
@@ -143,10 +146,10 @@ export function ProvidersPage({
   const message = toast && toast.tone !== "error" ? toast.text : null;
 
   useEffect(() => {
-    if (!toast || toast.tone === "loading") {
+    if (!toast || toast.tone !== "info") {
       return;
     }
-    const timer = window.setTimeout(() => dismissToast(), 8000);
+    const timer = window.setTimeout(() => dismissToast(), 3000);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -317,18 +320,6 @@ export function ProvidersPage({
     }
   }
 
-  async function syncNow() {
-    setBusy("sync");
-    try {
-      setMessage(await api.syncHistory());
-      setError(null);
-    } catch (err) {
-      setError(messageFromError(err));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function updateProvider(next: Provider, successMessage?: string) {
     await saveProviders(
       providers.map((provider) => (provider.id === next.id ? next : provider)),
@@ -389,16 +380,32 @@ export function ProvidersPage({
       return;
     }
     const nextMode = codexStatus?.mode === "custom" ? "official" : "custom";
+    const actionLabel = nextMode === "custom" ? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";
     setBusy("route");
+    showToast(`${actionLabel}...`, "loading");
     try {
-      const status = await api.switchMode(nextMode, settingsDraft.auto_sync_history);
+      const status = await api.switchMode(nextMode, false);
       setCodexStatus(status);
-      setMessage(status.message);
+      setMessage(codexHubConnectionSuccessMessage(nextMode));
       setError(null);
+      const targetProvider =
+        nextMode === "custom" || settingsDraft.unified_codex_history ? "custom" : "openai";
+      void repairUnifiedHistoryInBackground(targetProvider);
     } catch (err) {
-      setError(messageFromError(err));
+      setError(codexHubConnectionErrorMessage(err));
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function repairUnifiedHistoryInBackground(targetProvider: "custom" | "openai") {
+    try {
+      const message = await api.syncHistory(targetProvider);
+      if (!historyRepairAlreadyUnified(message)) {
+        showToast(historyRepairSuccessMessage(message), "info");
+      }
+    } catch (err) {
+      showToast(`History repair failed: ${messageFromError(err)}`, "error");
     }
   }
 
@@ -595,12 +602,15 @@ export function ProvidersPage({
           gatewayStatus={gatewayStatus}
           busy={busy}
           enabledProviderModels={enabledProviderModels}
+          officialEnabledCount={officialEnabledCount}
+          officialIncluded={settings?.include_official_models ?? false}
           officialCount={officialModels.length}
           providerModelCount={providerModelCount}
           onAdd={() => setSelectedId(ADD_ID)}
           items={providerNavItems}
           onReorder={(items) => void reorderHubProviders(items)}
           onSelect={setSelectedId}
+          onToggleOfficialInclude={toggleOfficialInclude}
           onToggleProvider={toggleProviderEnabled}
           onToggleConnection={() => void toggleCodexHubConnection()}
           selectedId={selectedId}
@@ -635,13 +645,11 @@ export function ProvidersPage({
               <OfficialDetail
                 authState={codexAuthState}
                 busy={busy}
-                included={settings?.include_official_models ?? false}
                 gatewayContextById={gatewayContextById}
                 models={officialModels}
-                officialDisabledModels={settings?.official_disabled_models ?? []}
+                officialDisabledModels={officialDisabledModels}
                 onRefresh={() => void refreshOfficialModels()}
                 onReorder={(models) => void reorderOfficialModels(models)}
-                onToggleInclude={toggleOfficialInclude}
                 onToggleModel={toggleOfficialModel}
               />
             ) : selectedProvider ? (
@@ -676,11 +684,14 @@ function ProviderSourceSidebar({
   enabledProviderModels,
   gatewayStatus,
   items,
+  officialEnabledCount,
+  officialIncluded,
   officialCount,
   providerModelCount,
   onAdd,
   onReorder,
   onSelect,
+  onToggleOfficialInclude,
   onToggleProvider,
   onToggleConnection,
   selectedId,
@@ -691,11 +702,14 @@ function ProviderSourceSidebar({
   enabledProviderModels: number;
   gatewayStatus: GatewayStatus | null;
   items: ProviderNavItem[];
+  officialEnabledCount: number;
+  officialIncluded: boolean;
   officialCount: number;
   providerModelCount: number;
   onAdd: () => void;
   onReorder: (items: ProviderNavItem[]) => void;
   onSelect: (id: string) => void;
+  onToggleOfficialInclude: (included: boolean) => void;
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   onToggleConnection: () => void;
   selectedId: string;
@@ -705,11 +719,15 @@ function ProviderSourceSidebar({
       <OfficialOpenAICard
         authState={codexAuthState}
         active={selectedId === OFFICIAL_ID}
+        enabledModelCount={officialEnabledCount}
+        included={officialIncluded}
         modelCount={officialCount}
         onSelect={() => onSelect(OFFICIAL_ID)}
+        onToggleInclude={onToggleOfficialInclude}
       />
       <HubConnectionBridge
         connected={codexConnected}
+        connecting={busy === "route"}
         disabled={busy === "route"}
         onToggle={onToggleConnection}
       />
@@ -733,38 +751,44 @@ function ProviderSourceSidebar({
 function OfficialOpenAICard({
   active,
   authState,
+  enabledModelCount,
+  included,
   modelCount,
   onSelect,
+  onToggleInclude,
 }: {
   active: boolean;
   authState: CodexAuthState;
+  enabledModelCount: number;
+  included: boolean;
   modelCount: number;
   onSelect: () => void;
+  onToggleInclude: (included: boolean) => void;
 }) {
-  const authLabel =
-    authState === "authorized" ? "Authorized" : authState === "missing" ? "Auth missing" : "Auth unknown";
-  const authTone = authState === "authorized" ? "ok" : authState === "missing" ? "pending" : "muted";
+  const authChip = codexAuthChip(authState);
 
   return (
-    <section
-      className={cx(
-        "grid gap-3 rounded-md border p-3",
-        active ? "border-action bg-blue-50/70" : "border-line bg-panel",
-      )}
-    >
+    <section className="grid gap-3 rounded-md border border-line bg-panel p-3">
       <button type="button" className="focus-ring rounded text-left" onClick={onSelect}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold">Codex Desktop</h2>
             <p className="mt-1 text-xs text-slate-500">Codex app auth and official models</p>
           </div>
-          <SourceStatusChip label={authLabel} tone={authTone} />
+          <SourceStatusChip {...authChip} />
         </div>
       </button>
 
-      <div className="flex items-center justify-between rounded-md border border-line bg-white px-2.5 py-2 text-xs">
-        <span className="font-semibold text-slate-500">Official models</span>
-        <span className="font-semibold text-ink">{modelCount}</span>
+      <div className="rounded-md border border-line bg-white">
+        <ProviderNavButton
+          active={active}
+          enabled={included}
+          label="OpenAI"
+          meta={`${enabledModelCount}/${modelCount} models`}
+          onClick={onSelect}
+          onToggle={onToggleInclude}
+          toggleLabel={included ? "OpenAI source included" : "OpenAI source excluded"}
+        />
       </div>
     </section>
   );
@@ -772,29 +796,38 @@ function OfficialOpenAICard({
 
 function HubConnectionBridge({
   connected,
+  connecting,
   disabled,
   onToggle,
 }: {
   connected: boolean;
+  connecting: boolean;
   disabled: boolean;
   onToggle: () => void;
 }) {
+  const label = connecting
+    ? "Connecting"
+    : connected
+      ? "Connected Codex Hub"
+      : "Connect to Codex Hub";
+
   return (
-    <div className="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-2 px-2 py-1.5">
-      <span className="relative grid h-12 w-7 place-items-center">
+    <div className="grid grid-cols-[34px_minmax(0,1fr)] items-center gap-3 rounded-md border border-action/20 bg-blue-50/60 px-2.5 py-2">
+      <span className="relative grid h-14 w-8 place-items-center">
         <span
           className={cx(
             "absolute -inset-y-2 left-1/2 border-l border-dashed",
-            connected ? "border-emerald-300" : "border-slate-300",
+            connected ? "border-emerald-300" : "border-action/35",
           )}
           aria-hidden="true"
         />
         <span
           className={cx(
-            "relative z-10 grid h-7 w-7 place-items-center rounded-full border shadow-sm",
+            "relative z-10 grid h-8 w-8 place-items-center rounded-full border shadow-sm",
+            connecting && "animate-pulse",
             connected
               ? "border-emerald-300 bg-emerald-50 text-emerald-700"
-              : "border-slate-300 bg-white text-slate-500",
+              : "border-action/30 bg-white text-action",
           )}
           title={connected ? "Codex App connected to Hub" : "Codex App disconnected from Hub"}
           aria-label={connected ? "Codex App connected to Hub" : "Codex App disconnected from Hub"}
@@ -805,16 +838,17 @@ function HubConnectionBridge({
       <button
         type="button"
         className={cx(
-          "focus-ring flex h-8 min-w-0 items-center justify-center rounded-full border px-3 text-sm font-semibold transition-colors",
+          "focus-ring flex h-11 min-w-0 items-center justify-center rounded-full border px-4 text-sm font-semibold shadow-sm transition-colors disabled:opacity-80",
+          connecting && "bg-action text-white",
           connected
-            ? "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
-            : "border-action/30 bg-white text-action hover:bg-blue-50",
+            ? "border-emerald-700 bg-emerald-600 text-white hover:bg-emerald-700"
+            : "border-action bg-action text-white hover:bg-blue-700",
         )}
         disabled={disabled}
         onClick={onToggle}
         title={connected ? "Disconnect Codex App from Hub" : "Connect Codex App to Hub"}
       >
-        {connected ? "Disconnect" : "Connect"}
+        {label}
       </button>
     </div>
   );
@@ -957,6 +991,7 @@ function ProviderNavButton({
   meta,
   onClick,
   onToggle,
+  toggleLabel,
 }: {
   active: boolean;
   enabled: boolean;
@@ -964,6 +999,7 @@ function ProviderNavButton({
   meta: string;
   onClick: () => void;
   onToggle: (enabled: boolean) => void;
+  toggleLabel?: string;
 }) {
   return (
     <div
@@ -978,80 +1014,10 @@ function ProviderNavButton({
       </button>
       <SwitchControl
         checked={enabled}
-        label={enabled ? "Provider enabled" : "Provider disabled"}
+        label={toggleLabel ?? (enabled ? "Provider enabled" : "Provider disabled")}
         showLabel={false}
         onChange={onToggle}
       />
-    </div>
-  );
-}
-
-function RuntimePanel({
-  busy,
-  onDraftChange,
-  onSave,
-  onSyncNow,
-  onToggleAutostart,
-  settings,
-}: {
-  busy: string | null;
-  onDraftChange: (settings: Settings) => void;
-  onSave: () => void;
-  onSyncNow: () => void;
-  onToggleAutostart: (enabled: boolean) => void;
-  settings: Settings;
-}) {
-  return (
-    <div className="border-t border-line p-3">
-      <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
-        <SlidersHorizontal size={15} />
-        Runtime
-      </div>
-      <div className="grid gap-2">
-        <label className="grid gap-1 text-xs font-medium text-slate-600">
-          Proxy port
-          <input
-            className="field h-9"
-            type="number"
-            min={1024}
-            max={65535}
-            value={settings.proxy_port}
-            onChange={(event) =>
-              onDraftChange({ ...settings, proxy_port: Number(event.target.value) })
-            }
-          />
-        </label>
-        <Toggle
-          label="Auto-start proxy"
-          checked={settings.auto_start_proxy}
-          onChange={onToggleAutostart}
-        />
-        <Toggle
-          label="Auto-sync history"
-          checked={settings.auto_sync_history}
-          onChange={(value) => onDraftChange({ ...settings, auto_sync_history: value })}
-        />
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white"
-            disabled={busy === "settings"}
-            onClick={onSave}
-          >
-            <Save size={15} />
-            Save
-          </button>
-          <button
-            type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold"
-            disabled={busy === "sync"}
-            onClick={onSyncNow}
-          >
-            <RefreshCcw size={15} />
-            Sync
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1060,23 +1026,19 @@ function OfficialDetail({
   authState,
   busy,
   gatewayContextById,
-  included,
   models,
   officialDisabledModels,
   onRefresh,
   onReorder,
-  onToggleInclude,
   onToggleModel,
 }: {
   authState: CodexAuthState;
   busy: string | null;
   gatewayContextById: Map<string, number>;
-  included: boolean;
   models: Model[];
   officialDisabledModels: string[];
   onRefresh: () => void;
   onReorder: (models: Model[]) => void;
-  onToggleInclude: (value: boolean) => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
 }) {
   return (
@@ -1088,10 +1050,6 @@ function OfficialDetail({
           actions={
             <>
               <SourceStatusChip {...codexAuthChip(authState)} />
-              <Toggle label="Include in Codex Hub" checked={included} onChange={onToggleInclude} />
-              <IconButton title="Refresh official models" disabled={busy === "official-refresh"} onClick={onRefresh}>
-                <RefreshCcw size={16} />
-              </IconButton>
             </>
           }
         />
@@ -1101,7 +1059,10 @@ function OfficialDetail({
         disabled
         models={models}
         officialDisabledModels={officialDisabledModels}
+        onRefresh={onRefresh}
         onReorder={onReorder}
+        reorderable={false}
+        refreshBusy={busy === "official-refresh"}
         onToggleOfficialModel={onToggleModel}
       />
     </div>
@@ -1271,10 +1232,13 @@ function ModelSection({
   models,
   onAdd,
   onDiscover,
+  onRefresh,
   onRemove,
   onReorder,
   officialDisabledModels,
   providerId,
+  reorderable = true,
+  refreshBusy,
   onToggleOfficialModel,
   onToggle,
   onUpdate,
@@ -1287,10 +1251,13 @@ function ModelSection({
   models: Model[];
   onAdd?: () => string | undefined;
   onDiscover?: () => void;
+  onRefresh?: () => void;
   onRemove?: (modelId: string) => void;
   onReorder: (models: Model[]) => void;
   officialDisabledModels?: string[];
   providerId?: string;
+  reorderable?: boolean;
+  refreshBusy?: boolean;
   onToggleOfficialModel?: (modelId: string, enabled: boolean) => void;
   onToggle?: (modelId: string, enabled: boolean) => void;
   onUpdate?: (modelId: string, patch: Partial<Model>) => void;
@@ -1310,6 +1277,78 @@ function ModelSection({
     setEditingModelId(null);
   }
 
+  function renderModelRow(model: Model) {
+    const contextWindow = contextById?.get(model.id) ?? model.context_window;
+    const modelEnabled = disabled
+      ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
+      : model.enabled;
+    const rowInteractable = !disabled || Boolean(onToggleOfficialModel);
+    function activateModelRow() {
+      if (disabled && onToggleOfficialModel) {
+        onToggleOfficialModel(model.id, !modelEnabled);
+        return;
+      }
+      setEditingModelId(model.id);
+    }
+    const actions = (
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 lg:justify-end">
+        {modelCapabilityTags(model).map((tag) => (
+          <ModelCapabilityChip key={tag} tag={tag} />
+        ))}
+        <CapabilityChip label={formatContextWindow(contextWindow)} />
+        {disabled && onToggleOfficialModel && (
+          <SwitchControl
+            checked={modelEnabled}
+            label={modelEnabled ? "Model enabled" : "Model disabled"}
+            showLabel={false}
+            onChange={(checked) => onToggleOfficialModel(model.id, checked)}
+          />
+        )}
+        {!disabled && onToggle && (
+          <SwitchControl
+            checked={modelEnabled}
+            label={modelEnabled ? "Model enabled" : "Model disabled"}
+            showLabel={false}
+            onChange={(checked) => onToggle(model.id, checked)}
+          />
+        )}
+      </div>
+    );
+    return (
+      <div
+        className={cx(
+          "grid min-h-[52px] gap-3 px-3 py-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center",
+          rowInteractable && "cursor-pointer",
+          !modelEnabled && "opacity-70",
+        )}
+        role={rowInteractable ? "button" : undefined}
+        tabIndex={rowInteractable ? 0 : undefined}
+        onClick={rowInteractable ? activateModelRow : undefined}
+        onKeyDown={
+          rowInteractable
+            ? (event) => {
+                if (event.target !== event.currentTarget) {
+                  return;
+                }
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  activateModelRow();
+                }
+              }
+            : undefined
+        }
+      >
+        <ModelIdentity model={model} providerId={providerId} />
+        <div
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          {actions}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 p-5">
       <div className="flex items-center justify-between gap-3">
@@ -1322,6 +1361,17 @@ function ModelSection({
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
               {discoverError}
             </span>
+          )}
+          {onRefresh && (
+            <button
+              type="button"
+              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              disabled={refreshBusy}
+              onClick={onRefresh}
+            >
+              <RefreshCcw size={16} />
+              Refresh
+            </button>
           )}
           {onDiscover && (
             <button
@@ -1351,76 +1401,22 @@ function ModelSection({
           <div className="rounded-md border border-line bg-panel p-4 text-sm text-slate-500">
             No models
           </div>
-        ) : (
+        ) : reorderable ? (
           <SortableList
             className="space-y-2"
             items={models}
             getId={(model) => model.id}
             onReorder={onReorder}
-            renderItem={(model) => {
-            const contextWindow = contextById?.get(model.id) ?? model.context_window;
-            const modelEnabled = disabled
-              ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
-              : model.enabled;
-            const actions = (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 lg:justify-end">
-                {modelCapabilityTags(model).map((tag) => (
-                  <ModelCapabilityChip key={tag} tag={tag} />
-                ))}
-                <CapabilityChip label={formatContextWindow(contextWindow)} />
-                {disabled && onToggleOfficialModel && (
-                  <SwitchControl
-                    checked={modelEnabled}
-                    label={modelEnabled ? "Model enabled" : "Model disabled"}
-                    showLabel={false}
-                    onChange={(checked) => onToggleOfficialModel(model.id, checked)}
-                  />
-                )}
-                {!disabled && onToggle && (
-                  <SwitchControl
-                    checked={modelEnabled}
-                    label={modelEnabled ? "Model enabled" : "Model disabled"}
-                    showLabel={false}
-                    onChange={(checked) => onToggle(model.id, checked)}
-                  />
-                )}
-              </div>
-            );
-            return (
-              <div
-                className={cx(
-                  "grid min-h-[52px] gap-3 px-3 py-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center",
-                  !disabled && "cursor-pointer",
-                  !modelEnabled && "opacity-70",
-                )}
-                role={!disabled ? "button" : undefined}
-                tabIndex={!disabled ? 0 : undefined}
-                onClick={!disabled ? () => setEditingModelId(model.id) : undefined}
-                onKeyDown={
-                  !disabled
-                    ? (event) => {
-                        if (event.target !== event.currentTarget) {
-                          return;
-                        }
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setEditingModelId(model.id);
-                        }
-                      }
-                    : undefined
-                }
-              >
-                <ModelIdentity model={model} providerId={providerId} />
-                <div
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => event.stopPropagation()}
-                >
-                  {actions}
-                </div>
-              </div>
-            );
-            }}
+            renderItem={renderModelRow}
           />
+        ) : (
+          <div className="space-y-2">
+            {models.map((model) => (
+              <div key={model.id} className="rounded-md border border-line bg-white shadow-subtle">
+                {renderModelRow(model)}
+              </div>
+            ))}
+          </div>
         )}
       </div>
       {!disabled && editingModel && (
@@ -1469,7 +1465,7 @@ function ModelIdentity({ model, providerId }: { model: Model; providerId?: strin
         <span className="min-w-0 truncate font-mono">{model.id}</span>
         <button
           type="button"
-          className="focus-ring inline-flex h-6 min-w-[66px] shrink-0 items-center justify-center gap-1 rounded border border-transparent px-1.5 text-[11px] font-semibold text-slate-500 hover:border-line hover:bg-panel hover:text-ink"
+          className="focus-ring inline-flex h-6 w-[72px] shrink-0 items-center justify-center gap-1 rounded border border-transparent px-1.5 text-[11px] font-semibold text-slate-500 hover:border-line hover:bg-panel hover:text-ink"
           onClick={copyModelId}
           title={`Copy model ID: ${copyValue}`}
           aria-label={`Copy model ID ${copyValue}`}
@@ -1773,6 +1769,8 @@ function modelIdMatches(left: string, right: string) {
 function withDefaultFastVariants(settings: Settings): Settings {
   const base = {
     ...settings,
+    auto_sync_history: settings.auto_sync_history ?? false,
+    unified_codex_history: settings.unified_codex_history ?? true,
     auto_sync_clients: settings.auto_sync_clients ?? settings.auto_sync_catalog ?? true,
     official_disabled_models: settings.official_disabled_models ?? [],
   };
@@ -2214,6 +2212,30 @@ function shortProviderDiscoveryError(err: unknown) {
     return "Discovery failed: invalid request";
   }
   return "Discovery failed";
+}
+
+function codexHubConnectionErrorMessage(err: unknown) {
+  const message = messageFromError(err);
+
+  return `Codex Hub connection failed.\n\n${message}`;
+}
+
+function codexHubConnectionSuccessMessage(mode: string) {
+  return mode === "custom" ? "Connected Codex App to Codex Hub" : "Disconnected Codex App from Codex Hub";
+}
+
+function historyRepairAlreadyUnified(message: string) {
+  return /status=already-(unified|openai)/.test(message) || /dirty_state_rows=0/.test(message);
+}
+
+function historyRepairSuccessMessage(message: string) {
+  const stateRows = message.match(/state_rows=(\d+)/)?.[1] ?? "0";
+  const jsonlApplied = message.match(/jsonl_applied=(\d+)/)?.[1] ?? "0";
+  const jsonlSkipped = message.match(/jsonl_skipped=(\d+)/)?.[1] ?? "0";
+  if (jsonlSkipped !== "0") {
+    return `History bucket repaired (${stateRows} rows, ${jsonlApplied} files, ${jsonlSkipped} skipped)`;
+  }
+  return `History bucket repaired (${stateRows} rows, ${jsonlApplied} files)`;
 }
 
 function codexAuthStateFromGatewayStatus(status: GatewayStatus | null): CodexAuthState {

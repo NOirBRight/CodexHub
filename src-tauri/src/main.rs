@@ -127,6 +127,10 @@ pub struct AppStatus {
     pub proxy_port: u16,
     pub proxy_build: Option<String>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_sync_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_sync_message: Option<String>,
 }
 
 impl AppStatus {
@@ -137,6 +141,8 @@ impl AppStatus {
             proxy_port: 9099,
             proxy_build: None,
             message: message.into(),
+            history_sync_status: None,
+            history_sync_message: None,
         }
     }
 }
@@ -144,6 +150,8 @@ impl AppStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub auto_sync_history: bool,
+    #[serde(default)]
+    pub unified_codex_history: bool,
     pub auto_start_proxy: bool,
     pub include_official_models: bool,
     pub auto_sync_catalog: bool,
@@ -172,7 +180,8 @@ fn default_fast_model_variants() -> Vec<String> {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            auto_sync_history: true,
+            auto_sync_history: false,
+            unified_codex_history: true,
             auto_start_proxy: true,
             include_official_models: true,
             auto_sync_catalog: true,
@@ -296,6 +305,15 @@ fn gateway_usage_summary(
 }
 
 #[tauri::command]
+fn gateway_usage_snapshot(
+    limit: Option<usize>,
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<gateway::GatewayUsageSnapshot, String> {
+    gateway::gateway_usage_snapshot(limit, start_ts, end_ts)
+}
+
+#[tauri::command]
 fn gateway_usage_events(
     limit: Option<usize>,
     start_ts: Option<String>,
@@ -394,6 +412,16 @@ fn sync_history(target_provider: Option<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn migrate_official_history_to_unified() -> Result<String, String> {
+    history::migrate_official_history_to_unified()
+}
+
+#[tauri::command]
+fn restore_official_history_from_unified() -> Result<String, String> {
+    history::restore_official_history_from_unified()
+}
+
+#[tauri::command]
 fn sync_catalog() -> Result<String, String> {
     catalog::sync_catalog()
 }
@@ -446,20 +474,14 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-fn codex_auto_sync_history() -> bool {
-    config::get_settings()
-        .map(|settings| settings.auto_sync_history)
-        .unwrap_or(true)
-}
-
 fn run_tray_action(app: &AppHandle, id: &str) {
     match id {
         TRAY_SHOW => show_main_window(app),
         TRAY_CONNECT_OFFICIAL => {
-            let _ = config::switch_mode("official", codex_auto_sync_history());
+            let _ = config::switch_mode("official", false);
         }
         TRAY_CONNECT_HUB => {
-            let _ = config::switch_mode("custom", codex_auto_sync_history());
+            let _ = config::switch_mode("custom", false);
         }
         TRAY_START_GATEWAY => {
             let _ = proxy::start();
@@ -585,6 +607,7 @@ fn run_gui() {
         .setup(|app| {
             #[cfg(desktop)]
             setup_tray(app)?;
+            gateway::start_telemetry_ingester();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -611,6 +634,7 @@ fn run_gui() {
             gateway_test_request,
             gateway_recent_events,
             gateway_usage_summary,
+            gateway_usage_snapshot,
             gateway_usage_events,
             gateway_copy_client_config,
             list_gateway_clients,
@@ -626,6 +650,8 @@ fn run_gui() {
             list_model_metadata,
             save_model_metadata_override,
             sync_history,
+            migrate_official_history_to_unified,
+            restore_official_history_from_unified,
             sync_catalog,
             set_autostart,
             remove_autostart,

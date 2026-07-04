@@ -1,4 +1,4 @@
-import { Eye, EyeOff, RefreshCcw, Save, X } from "lucide-react";
+import { Eye, EyeOff, RefreshCw, Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
 import type { Settings } from "../lib/types";
@@ -9,7 +9,7 @@ interface SettingsDrawerProps {
   settings: Settings | null;
   onClose: () => void;
   onSave: (settings: Settings) => Promise<void>;
-  onSyncHistory: () => Promise<string>;
+  onSyncHistory: (targetProvider: string) => Promise<string>;
 }
 
 export function SettingsDrawer({
@@ -38,8 +38,13 @@ export function SettingsDrawer({
     setMessage("Settings saved");
   }
 
-  async function syncHistory() {
-    setMessage(await onSyncHistory());
+  async function repairHistory() {
+    if (!draft) {
+      return;
+    }
+    const targetProvider = draft.unified_codex_history ? "custom" : "openai";
+    const result = await onSyncHistory(targetProvider);
+    setMessage(result);
   }
 
   return (
@@ -83,9 +88,9 @@ export function SettingsDrawer({
                   onChange={(value) => setDraft({ ...draft, include_official_models: value })}
                 />
                 <Toggle
-                  checked={draft.auto_sync_history}
-                  label="Auto-sync history"
-                  onChange={(value) => setDraft({ ...draft, auto_sync_history: value })}
+                  checked={draft.unified_codex_history}
+                  label="Unified Codex history"
+                  onChange={(value) => setDraft({ ...draft, unified_codex_history: value })}
                 />
                 <Toggle
                   checked={draft.auto_sync_clients}
@@ -96,10 +101,10 @@ export function SettingsDrawer({
                   type="button"
                   className="focus-ring flex min-h-9 items-center justify-between gap-4 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
                   disabled={Boolean(busy)}
-                  onClick={() => void syncHistory()}
+                  onClick={() => void repairHistory()}
                 >
-                  <span className="min-w-0 truncate">Repair Conversation History</span>
-                  <RefreshCcw size={15} />
+                  <span className="min-w-0 truncate">Repair history bucket</span>
+                  <RefreshCw size={15} />
                 </button>
               </div>
             </section>

@@ -99,6 +99,7 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
 OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
     {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
 ]
+OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = {"gpt-5.5-fast", "gpt-5.4-fast"}
 
 OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.5": {
@@ -461,6 +462,10 @@ def official_proxy_alias(slug: str) -> str:
     return f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/{slug}"
 
 
+def is_official_gateway_fast_variant_slug(slug: str) -> bool:
+    return canonical_model_id(slug) in OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS
+
+
 def official_sort_keys(model_id: str) -> tuple[str, str]:
     key = canonical_model_id(model_id)
     prefix = f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/"
@@ -665,6 +670,7 @@ def build_codex_catalog(
             slug
             for slug in (list(policy.official_models) or list(official_by_slug.keys()))
             if official_model_disable_key(str(slug)) not in disabled_official_slugs
+            and not is_official_gateway_fast_variant_slug(str(slug))
         ],
         official_model_sort_order or [],
     )

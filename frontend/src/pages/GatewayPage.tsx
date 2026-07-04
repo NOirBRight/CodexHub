@@ -16,6 +16,7 @@ import type {
   GatewayUsageSummary,
   Provider,
   Settings,
+  TelemetryStatus,
   UsageQueryWindow,
 } from "../lib/types";
 import type { PageToastState, PageToastTone } from "../components/PageToast";
@@ -33,7 +34,9 @@ interface GatewayPageProps {
   settings: Settings | null;
   status: GatewayStatus | null;
   usageEvents: GatewayUsageEvent[];
+  usageError: string | null;
   usageSummary: GatewayUsageSummary | null;
+  usageStatus: TelemetryStatus | null;
   clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<void>;
   onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
@@ -57,7 +60,9 @@ export function GatewayPage({
   settings,
   status,
   usageEvents,
+  usageError,
   usageSummary,
+  usageStatus,
   clientInfos,
 }: GatewayPageProps) {
   const [draftPort, setDraftPort] = useState(settings?.proxy_port ?? status?.port ?? 9099);
@@ -89,7 +94,7 @@ export function GatewayPage({
     if (!toast || toast.tone === "loading") {
       return;
     }
-    const timer = window.setTimeout(() => dismissToast(), 8000);
+    const timer = window.setTimeout(() => dismissToast(), 3000);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -209,7 +214,7 @@ export function GatewayPage({
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const routeName = mode === "hub" ? "CodexHub" : "Official";
-    setMessage(`Switching ${clientName} to ${routeName}...`);
+    showToast(`Switching ${clientName} to ${routeName}...`, "loading");
     try {
       await api.switchGatewayClientRoute(clientId, mode, defaultModel);
       await onRefreshClients();
@@ -224,6 +229,7 @@ export function GatewayPage({
 
   async function refreshGatewayClients() {
     setClientRefreshBusy(true);
+    showToast("Refreshing gateway clients and checking versions...", "loading");
     try {
       await onRefreshClients({ includeClientVersions: true });
       setMessage("Gateway clients refreshed");
@@ -231,7 +237,6 @@ export function GatewayPage({
     } catch (err) {
       setError(messageFromError(err));
     } finally {
-      setClientBusy(null);
       setClientRefreshBusy(false);
     }
   }
@@ -304,7 +309,7 @@ export function GatewayPage({
                     </div>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                      className="focus-ring inline-flex h-8 w-[76px] items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
                       disabled={!draftKey}
                       onClick={() => void copyText("gateway-api-key", draftKey)}
                     >
@@ -374,7 +379,7 @@ export function GatewayPage({
                 <StatusCard
                   compact
                   label="OpenAI Auth"
-                  value={authPresent ? "Present" : "Missing"}
+                  value={authPresent ? "Signed in" : "Not signed in"}
                   tone={authPresent ? "ok" : "warn"}
                 />
               </div>
@@ -439,6 +444,8 @@ export function GatewayPage({
           pendingMessage={pending.usage}
           providers={providers}
           summary={usageSummary}
+          telemetryStatus={usageStatus}
+          usageError={usageError}
         />
 
       </section>

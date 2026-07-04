@@ -96,6 +96,7 @@ impl ProxyPaths {
 #[derive(Debug, Deserialize)]
 struct SettingsDocument {
     auto_sync_history: Option<bool>,
+    unified_codex_history: Option<bool>,
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
     auto_sync_catalog: Option<bool>,
@@ -119,6 +120,9 @@ impl SettingsDocument {
         let defaults = Settings::default();
         Settings {
             auto_sync_history: self.auto_sync_history.unwrap_or(defaults.auto_sync_history),
+            unified_codex_history: self
+                .unified_codex_history
+                .unwrap_or(defaults.unified_codex_history),
             auto_start_proxy: self.auto_start_proxy.unwrap_or(defaults.auto_start_proxy),
             include_official_models: self
                 .include_official_models
@@ -263,6 +267,8 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
         } else {
             "Proxy is not running".to_string()
         },
+        history_sync_status: None,
+        history_sync_message: None,
     })
 }
 
@@ -284,6 +290,8 @@ fn start_with_paths_and_timeout(
                 proxy_port: settings.proxy_port,
                 proxy_build: response.build,
                 message: "Proxy is already running".to_string(),
+                history_sync_status: None,
+                history_sync_message: None,
             });
         }
     }
@@ -325,6 +333,8 @@ fn start_with_paths_and_timeout(
             proxy_port: settings.proxy_port,
             proxy_build: response.build,
             message: format!("Proxy started with PID {pid}"),
+            history_sync_status: None,
+            history_sync_message: None,
         }),
         StartupOutcome::Exited(status) => {
             let _ = remove_pid(paths);
@@ -415,6 +425,8 @@ fn stop_with_paths_and_controls(
             proxy_port: settings.proxy_port,
             proxy_build: None,
             message: "Proxy stopped gracefully".to_string(),
+            history_sync_status: None,
+            history_sync_message: None,
         });
     }
 
@@ -453,6 +465,8 @@ fn stop_with_paths_and_controls(
         proxy_port: settings.proxy_port,
         proxy_build: None,
         message: format!("Proxy PID {pid} stopped"),
+        history_sync_status: None,
+        history_sync_message: None,
     })
 }
 
@@ -491,6 +505,8 @@ fn stop_when_health_unavailable(
         proxy_port: port,
         proxy_build: None,
         message,
+        history_sync_status: None,
+        history_sync_message: None,
     })
 }
 

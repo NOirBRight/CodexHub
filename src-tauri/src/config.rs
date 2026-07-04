@@ -4,7 +4,6 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     get_providers_with_paths(&ConfigPaths::runtime()?)
@@ -100,21 +99,6 @@ impl ConfigPaths {
     pub(crate) fn history_overlay_script(&self) -> PathBuf {
         self.repo_root.join("src-python").join("history_overlay.py")
     }
-
-    fn history_backup_root(&self, mode: &str) -> PathBuf {
-        let direction = match mode {
-            "custom" => "openai-to-custom",
-            "official" => "custom-to-openai",
-            _ => "unknown",
-        };
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or_default();
-
-        self.proxy_dir()
-            .join(format!("history-{direction}-{stamp}"))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +138,7 @@ struct ProvidersDocument {
 #[derive(Debug, Deserialize)]
 struct SettingsDocument {
     auto_sync_history: Option<bool>,
+    unified_codex_history: Option<bool>,
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
     auto_sync_catalog: Option<bool>,
@@ -177,6 +162,9 @@ impl SettingsDocument {
         let defaults = Settings::default();
         Settings {
             auto_sync_history: self.auto_sync_history.unwrap_or(defaults.auto_sync_history),
+            unified_codex_history: self
+                .unified_codex_history
+                .unwrap_or(defaults.unified_codex_history),
             auto_start_proxy: self.auto_start_proxy.unwrap_or(defaults.auto_start_proxy),
             include_official_models: self
                 .include_official_models
@@ -327,7 +315,7 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
 
 pub(crate) fn switch_mode_with_paths(
     mode: &str,
-    auto_sync: bool,
+    _auto_sync: bool,
     paths: &ConfigPaths,
     python: &Path,
     runner: &dyn CommandRunner,
@@ -338,51 +326,32 @@ pub(crate) fn switch_mode_with_paths(
         ));
     }
 
-    let settings = if mode == "custom" {
-        get_settings_with_paths(paths)?
-    } else {
-        Settings::default()
+    let settings = match get_settings_with_paths(paths) {
+        Ok(settings) => settings,
+        Err(error) if mode == "official" => {
+            log::warn!("failed to read settings while switching official; using defaults: {error}");
+            Settings::default()
+        }
+        Err(error) => return Err(error),
     };
     ensure_mode_switch_directories(paths)?;
 
-    let mut history_backup_root = None;
-    if auto_sync {
-        let target = if mode == "official" {
-            "openai"
-        } else {
-            "custom"
-        };
-        let backup_root = paths.history_backup_root(mode);
-        run_python_script(
-            "history overlay normalize",
-            python,
-            paths.history_overlay_script(),
-            vec![
-                "normalize-fast".to_string(),
-                "--codex-dir".to_string(),
-                paths.codex_dir().to_string_lossy().into_owned(),
-                "--backup-root".to_string(),
-                backup_root.to_string_lossy().into_owned(),
-                "--target".to_string(),
-                target.to_string(),
-            ],
-            runner,
-        )?;
-        history_backup_root = Some(backup_root);
-    }
-
     let overlay_result = if mode == "official" {
+        let mut args = vec![
+            "restore".to_string(),
+            "--config".to_string(),
+            paths.codex_config_path().to_string_lossy().into_owned(),
+            "--backup".to_string(),
+            paths.config_backup_path().to_string_lossy().into_owned(),
+        ];
+        if settings.unified_codex_history {
+            args.push("--unified-history".to_string());
+        }
         run_python_script(
             "config overlay restore",
             python,
             paths.config_overlay_script(),
-            vec![
-                "restore".to_string(),
-                "--config".to_string(),
-                paths.codex_config_path().to_string_lossy().into_owned(),
-                "--backup".to_string(),
-                paths.config_backup_path().to_string_lossy().into_owned(),
-            ],
+            args,
             runner,
         )
     } else {
@@ -407,8 +376,7 @@ pub(crate) fn switch_mode_with_paths(
             runner,
         )
     };
-    overlay_result
-        .map_err(|error| add_history_backup_context(error, history_backup_root.as_deref()))?;
+    overlay_result?;
 
     Ok(AppStatus {
         mode: mode.to_string(),
@@ -416,14 +384,9 @@ pub(crate) fn switch_mode_with_paths(
         proxy_port: settings.proxy_port,
         proxy_build: None,
         message: format!("Switched to {mode} mode; proxy lifecycle is handled separately"),
+        history_sync_status: None,
+        history_sync_message: None,
     })
-}
-
-fn add_history_backup_context(error: String, history_backup_root: Option<&Path>) -> String {
-    match history_backup_root {
-        Some(path) => format!("{error}\nhistory backup root: {}", path.display()),
-        None => error,
-    }
 }
 
 fn ensure_mode_switch_directories(paths: &ConfigPaths) -> Result<(), String> {
@@ -643,6 +606,7 @@ sort_order = 7
 
         let custom = Settings {
             auto_sync_history: false,
+            unified_codex_history: false,
             auto_start_proxy: false,
             include_official_models: false,
             auto_sync_catalog: false,
@@ -676,6 +640,7 @@ sort_order = 7
         assert!(written.contains("\"official_model_sort_order\""));
         assert!(written.contains("\"official_provider_sort_order\": 3"));
         assert!(written.contains("\"auto_sync_clients\": false"));
+        assert!(written.contains("\"unified_codex_history\": false"));
     }
 
     #[test]
@@ -700,7 +665,27 @@ sort_order = 7
     }
 
     #[test]
-    fn switch_mode_custom_normalizes_history_then_applies_config_overlay() {
+    fn unified_history_setting_false_is_preserved() {
+        let root = temp_root("unified-history-disabled");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "unified_codex_history": false,
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("legacy settings load");
+
+        assert!(!loaded.unified_codex_history);
+        assert_eq!(loaded.proxy_port, 4555);
+    }
+
+    #[test]
+    fn switch_mode_custom_applies_config_overlay_without_history_sync() {
         let root = temp_root("switch-custom");
         let paths = test_paths(&root);
         save_settings_with_paths(
@@ -723,34 +708,27 @@ sort_order = 7
         assert!(status.message.contains("custom"));
 
         let commands = runner.commands.borrow();
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0].program, PathBuf::from("python-test"));
+        assert_eq!(commands.len(), 1);
         assert_eq!(
             commands[0].args[0],
-            paths.history_overlay_script().to_string_lossy()
-        );
-        assert_contains_sequence(&commands[0].args, &["normalize-fast"]);
-        assert_arg_value(&commands[0].args, "--codex-dir", paths.codex_dir());
-        assert_arg_value_prefix(&commands[0].args, "--backup-root", &paths.proxy_dir());
-        assert_arg_literal(&commands[0].args, "--target", "custom");
-
-        assert_eq!(
-            commands[1].args[0],
             paths.config_overlay_script().to_string_lossy()
         );
-        assert_contains_sequence(&commands[1].args, &["apply"]);
-        assert_arg_value(&commands[1].args, "--config", &paths.codex_config_path());
-        assert_arg_value(&commands[1].args, "--backup", &paths.config_backup_path());
+        assert_contains_sequence(&commands[0].args, &["apply"]);
+        assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
+        assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
         assert_arg_value(
-            &commands[1].args,
+            &commands[0].args,
             "--catalog",
             &paths.generated_catalog_path(),
         );
-        assert_arg_literal(&commands[1].args, "--base-url", "http://127.0.0.1:4555");
+        assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:4555");
+        assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
+        assert_eq!(status.history_sync_status, None);
+        assert_eq!(status.history_sync_message, None);
     }
 
     #[test]
-    fn switch_mode_official_can_skip_history_and_restores_config_overlay() {
+    fn switch_mode_official_uses_unified_history_bucket_by_default() {
         let root = temp_root("switch-official");
         let paths = test_paths(&root);
         let runner = RecordingRunner::successful();
@@ -771,6 +749,41 @@ sort_order = 7
         assert_contains_sequence(&commands[0].args, &["restore"]);
         assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
+        assert!(commands[0]
+            .args
+            .iter()
+            .any(|arg| arg == "--unified-history"));
+    }
+
+    #[test]
+    fn switch_mode_official_skips_unified_history_when_setting_is_disabled() {
+        let root = temp_root("switch-official-unified-history");
+        let paths = test_paths(&root);
+        save_settings_with_paths(
+            Settings {
+                unified_codex_history: false,
+                proxy_port: 4555,
+                ..Settings::default()
+            },
+            &paths,
+        )
+        .expect("settings save");
+        let runner = RecordingRunner::successful();
+
+        let status =
+            switch_mode_with_paths("official", true, &paths, Path::new("python-test"), &runner)
+                .expect("switch official");
+
+        assert_eq!(status.mode, "official");
+        assert_eq!(status.proxy_port, 4555);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_contains_sequence(&commands[0].args, &["restore"]);
+        assert!(!commands[0]
+            .args
+            .iter()
+            .any(|arg| arg == "--unified-history"));
+        assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
     }
 
     #[test]
@@ -793,7 +806,7 @@ sort_order = 7
     }
 
     #[test]
-    fn switch_mode_reports_history_backup_when_overlay_fails_after_history() {
+    fn switch_mode_does_not_run_history_when_overlay_fails() {
         let root = temp_root("switch-overlay-fails-after-history");
         let paths = test_paths(&root);
         save_settings_with_paths(
@@ -804,30 +817,18 @@ sort_order = 7
             &paths,
         )
         .expect("settings save");
-        let runner = RecordingRunner::sequence(vec![
-            CommandOutcome {
-                code: Some(0),
-                stdout: "history ok".to_string(),
-                stderr: String::new(),
-            },
-            CommandOutcome {
-                code: Some(23),
-                stdout: "overlay stdout".to_string(),
-                stderr: "overlay stderr".to_string(),
-            },
-        ]);
+        let runner = RecordingRunner::failed(23, "overlay stdout", "overlay stderr");
 
         let error =
             switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
                 .expect_err("overlay should fail");
 
         let commands = runner.commands.borrow();
-        assert_eq!(commands.len(), 2);
-        let backup_root = arg_value(&commands[0].args, "--backup-root").to_string();
-        drop(commands);
+        assert_eq!(commands.len(), 1);
+        assert_contains_sequence(&commands[0].args, &["apply"]);
+        assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
         assert!(error.contains("config overlay apply failed"));
-        assert!(error.contains("history backup root"));
-        assert!(error.contains(&backup_root));
+        assert!(!error.contains("history backup root"));
         assert!(error.contains("overlay stderr"));
     }
 
@@ -849,7 +850,6 @@ sort_order = 7
 
     #[derive(Debug, Clone)]
     struct RecordedCommand {
-        program: PathBuf,
         args: Vec<String>,
     }
 
@@ -884,9 +884,8 @@ sort_order = 7
     }
 
     impl CommandRunner for RecordingRunner {
-        fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
+        fn run(&self, _program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
             self.commands.borrow_mut().push(RecordedCommand {
-                program: program.to_path_buf(),
                 args: args.to_vec(),
             });
             let mut outcomes = self.outcomes.borrow_mut();
@@ -929,6 +928,7 @@ sort_order = 7
 
     fn assert_settings_eq(left: &Settings, right: &Settings) {
         assert_eq!(left.auto_sync_history, right.auto_sync_history);
+        assert_eq!(left.unified_codex_history, right.unified_codex_history);
         assert_eq!(left.auto_start_proxy, right.auto_start_proxy);
         assert_eq!(left.include_official_models, right.include_official_models);
         assert_eq!(left.auto_sync_catalog, right.auto_sync_catalog);
@@ -981,14 +981,6 @@ sort_order = 7
 
     fn assert_arg_value(args: &[String], name: &str, expected: &Path) {
         assert_arg_literal(args, name, &expected.to_string_lossy());
-    }
-
-    fn assert_arg_value_prefix(args: &[String], name: &str, expected_prefix: &Path) {
-        let value = arg_value(args, name);
-        assert!(
-            Path::new(value).starts_with(expected_prefix),
-            "expected {name} value {value:?} to start with {expected_prefix:?}"
-        );
     }
 
     fn assert_arg_literal(args: &[String], name: &str, expected: &str) {

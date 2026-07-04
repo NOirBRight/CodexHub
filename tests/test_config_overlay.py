@@ -7,6 +7,7 @@ import unittest
 from config_overlay import (
     MARKER_BEGIN,
     apply_overlay,
+    inject_unified_history_config,
     restore_overlay,
     catalog_config_value,
     set_feature_flags,
@@ -134,6 +135,101 @@ class ConfigOverlayTests(unittest.TestCase):
 
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
             self.assertFalse(backup_path.exists())
+
+    def test_restore_overlay_can_inject_unified_official_history_bucket(self):
+        original = "\n".join(
+            [
+                'model = "gpt-5.5"',
+                'model_reasoning_effort = "high"',
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            backup_path.write_text(original, encoding="utf-8")
+
+            status = restore_overlay(config_path, backup_path, unified_history=True)
+            updated = config_path.read_text(encoding="utf-8")
+
+            self.assertEqual(status, "injected")
+            self.assertFalse(backup_path.exists())
+            self.assertIn('model_provider = "custom"', updated)
+            self.assertIn("[model_providers.custom]", updated)
+            self.assertIn('name = "OpenAI"', updated)
+            self.assertIn("requires_openai_auth = true", updated)
+            self.assertIn("supports_websockets = true", updated)
+            self.assertIn('wire_api = "responses"', updated)
+            self.assertIn('model_reasoning_effort = "high"', updated)
+            self.assertIn("[features]", updated)
+
+    def test_unified_history_injection_skips_explicit_model_provider(self):
+        original = "\n".join(
+            [
+                'model_provider = "openai"',
+                "",
+                "[model_providers.openai]",
+                'name = "OpenAI"',
+                "",
+            ]
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "explicit_model_provider")
+        self.assertEqual(updated, original)
+
+    def test_unified_history_injection_skips_conflicting_custom_provider(self):
+        original = "\n".join(
+            [
+                "[model_providers.custom]",
+                'name = "Third Party"',
+                'base_url = "https://example.test/v1"',
+                "",
+            ]
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "conflicting_custom_provider")
+        self.assertEqual(updated, original)
+
+    def test_restore_overlay_strips_exact_unified_history_bucket_when_disabled(self):
+        unified = "\n".join(
+            [
+                'model_provider = "custom"',
+                "",
+                "[model_providers.custom]",
+                'name = "OpenAI"',
+                "requires_openai_auth = true",
+                "supports_websockets = true",
+                'wire_api = "responses"',
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(unified, encoding="utf-8")
+
+            status = restore_overlay(config_path, backup_path, unified_history=False)
+            updated = config_path.read_text(encoding="utf-8")
+
+            self.assertEqual(status, "disabled")
+            self.assertNotIn('model_provider = "custom"', updated)
+            self.assertNotIn("[model_providers.custom]", updated)
+            self.assertIn("[features]", updated)
+            self.assertIn("hooks = true", updated)
 
 
 if __name__ == "__main__":

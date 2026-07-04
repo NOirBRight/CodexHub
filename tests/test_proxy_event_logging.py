@@ -31,7 +31,7 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 importlib.reload(codex_proxy)
 
-    def test_event_log_dual_writes_sqlite_request_without_sensitive_fields(self):
+    def test_event_log_writes_jsonl_without_sqlite_request_path_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
             try:
@@ -41,70 +41,44 @@ class ProxyEventLoggingTests(TestCase):
                     importlib.reload(proxy_telemetry)
                     importlib.reload(codex_proxy)
 
-                    codex_proxy.write_proxy_event(
-                        "request_start",
-                        request_id="req-sqlite",
-                        method="POST",
-                        path="/v1/responses",
-                        client_id="opencode",
-                        thread_id="thread-1",
-                        window_id="window-1",
-                        upstream="official",
-                        provider_id="official",
-                        model="openai/gpt-5.5",
-                        model_requested="openai/gpt-5.5",
-                        model_canonical="openai/gpt-5.5",
-                        request_body_hmac="body-hash",
-                        Authorization="Bearer should-not-persist",
-                    )
-                    codex_proxy.write_proxy_event(
-                        "request_complete",
-                        request_id="req-sqlite",
-                        method="POST",
-                        status=200,
-                        duration_ms=123,
-                        usage_source="upstream",
-                        usage_input_tokens=10,
-                        usage_cached_input_tokens=4,
-                        usage_output_tokens=2,
-                        upstream="official",
-                        model="openai/gpt-5.5",
-                    )
+                    with patch("proxy_telemetry.write_event_to_sqlite") as sqlite_write:
+                        codex_proxy.write_proxy_event(
+                            "request_start",
+                            request_id="req-jsonl",
+                            method="POST",
+                            path="/v1/responses",
+                            client_id="opencode",
+                            thread_id="thread-1",
+                            window_id="window-1",
+                            upstream="official",
+                            provider_id="official",
+                            model="openai/gpt-5.5",
+                            model_requested="openai/gpt-5.5",
+                            model_canonical="openai/gpt-5.5",
+                            request_body_hmac="body-hash",
+                            Authorization="Bearer should-not-persist",
+                        )
+                        codex_proxy.write_proxy_event(
+                            "request_complete",
+                            request_id="req-jsonl",
+                            method="POST",
+                            status=200,
+                            duration_ms=123,
+                            usage_source="upstream",
+                            usage_input_tokens=10,
+                            usage_cached_input_tokens=4,
+                            usage_output_tokens=2,
+                            upstream="official",
+                            model="openai/gpt-5.5",
+                        )
 
                     jsonl = codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
                     self.assertNotIn("should-not-persist", jsonl)
-
-                    connection = sqlite3.connect(proxy_telemetry.telemetry_db_path(codex_home))
-                    try:
-                        request = connection.execute(
-                            """
-                            SELECT client_id, thread_id, window_id, provider_id, model_canonical,
-                                   usage_input_tokens, usage_cached_input_tokens, status
-                            FROM gateway_requests
-                            WHERE request_id = ?
-                            """,
-                            ("req-sqlite",),
-                        ).fetchone()
-                        self.assertEqual(
-                            request,
-                            (
-                                "opencode",
-                                "thread-1",
-                                "window-1",
-                                "official",
-                                "openai/gpt-5.5",
-                                10,
-                                4,
-                                200,
-                            ),
-                        )
-                        payload_json = connection.execute(
-                            "SELECT payload_json FROM gateway_events WHERE request_id = ? ORDER BY event_id LIMIT 1",
-                            ("req-sqlite",),
-                        ).fetchone()[0]
-                        self.assertNotIn("should-not-persist", payload_json)
-                    finally:
-                        connection.close()
+                    sqlite_write.assert_not_called()
+                    self.assertFalse(proxy_telemetry.telemetry_db_path(codex_home).exists())
+                    payloads = [json.loads(line) for line in jsonl.splitlines() if line.strip()]
+                    self.assertEqual([payload["event"] for payload in payloads], ["request_start", "request_complete"])
+                    self.assertTrue(all(payload["request_id"] == "req-jsonl" for payload in payloads))
             finally:
                 importlib.reload(codex_proxy)
 
@@ -332,7 +306,7 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 connection.close()
 
-    def test_sqlite_write_failure_does_not_block_jsonl_event(self):
+    def test_proxy_event_logging_does_not_attempt_sqlite_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
             try:
@@ -341,12 +315,13 @@ class ProxyEventLoggingTests(TestCase):
 
                     importlib.reload(proxy_telemetry)
                     importlib.reload(codex_proxy)
-                    with patch("proxy_telemetry.write_event_to_sqlite", side_effect=sqlite3.DatabaseError("boom")):
+                    with patch("proxy_telemetry.write_event_to_sqlite", side_effect=sqlite3.DatabaseError("boom")) as sqlite_write:
                         codex_proxy.write_proxy_event(
                             "request_complete",
                             request_id="req-jsonl-survives",
                             status=200,
                         )
+                    sqlite_write.assert_not_called()
 
                     payloads = [
                         json.loads(line)
@@ -356,8 +331,6 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertTrue(
                         any(payload.get("request_id") == "req-jsonl-survives" for payload in payloads)
                     )
-                    self.assertTrue(
-                        any(payload.get("event") == "telemetry_sqlite_write_failed" for payload in payloads)
-                    )
+                    self.assertFalse(any(payload.get("event") == "telemetry_sqlite_write_failed" for payload in payloads))
             finally:
                 importlib.reload(codex_proxy)

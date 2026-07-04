@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import re
-import sqlite3
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -243,7 +242,6 @@ def _runtime_codex_dir() -> Path:
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
-PROXY_TELEMETRY_DB_PATH = proxy_telemetry.telemetry_db_path(RUNTIME_CODEX_DIR)
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
@@ -283,20 +281,6 @@ def write_proxy_event(event: str, **fields: Any) -> None:
             with PROXY_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
-                try:
-                    proxy_telemetry.write_event_to_sqlite(PROXY_TELEMETRY_DB_PATH, payload)
-                except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-                    failure_payload = proxy_telemetry.prepare_event_payload(
-                        "telemetry_sqlite_write_failed",
-                        {
-                            "request_id": fields.get("request_id"),
-                            "error": type(exc).__name__,
-                            "detail": str(exc)[:240],
-                        },
-                        RUNTIME_CODEX_DIR,
-                    )
-                    handle.write(json.dumps(failure_payload, ensure_ascii=True, separators=(",", ":")) + "\n")
-                    logger.warning("failed to write proxy telemetry sqlite: %s", type(exc).__name__)
     except OSError as exc:
         logger.warning("failed to write proxy event log: %s", type(exc).__name__)
 

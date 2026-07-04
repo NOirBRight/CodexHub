@@ -80,7 +80,7 @@ fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
 
 fn run_switch_command<GetSettings, SwitchMode>(
     values: &[String],
-    get_settings: GetSettings,
+    _get_settings: GetSettings,
     switch_mode: SwitchMode,
 ) -> i32
 where
@@ -95,16 +95,7 @@ where
         }
     };
 
-    let auto_sync = match request.auto_sync {
-        Some(auto_sync) => auto_sync,
-        None => match get_settings() {
-            Ok(settings) => settings.auto_sync_history,
-            Err(error) => {
-                eprintln!("{error}");
-                return 1;
-            }
-        },
-    };
+    let auto_sync = request.auto_sync.unwrap_or(false);
 
     print_result(switch_mode(request.mode, auto_sync))
 }
@@ -248,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_auto_sync_flag_runs_history_overlay() {
+    fn switch_auto_sync_flag_is_accepted_but_ignored() {
         let root = temp_root("cli-switch-auto-sync");
         let paths = test_paths(&root);
         let runner = RecordingRunner::successful();
@@ -270,13 +261,13 @@ mod tests {
 
         assert_eq!(exit, 0);
         let commands = runner.commands.borrow();
-        assert_eq!(commands.len(), 2);
-        assert!(commands[0].args.iter().any(|arg| arg == "normalize-fast"));
-        assert!(commands[1].args.iter().any(|arg| arg == "apply"));
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].args.iter().any(|arg| arg == "apply"));
+        assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
     }
 
     #[test]
-    fn switch_without_flag_uses_settings_default() {
+    fn switch_without_flag_does_not_read_settings() {
         let root = temp_root("cli-switch-settings-default");
         let paths = test_paths(&root);
         let runner = RecordingRunner::successful();
@@ -284,12 +275,7 @@ mod tests {
 
         let exit = run_switch_command(
             &args,
-            || {
-                Ok(crate::Settings {
-                    auto_sync_history: false,
-                    ..crate::Settings::default()
-                })
-            },
+            || panic!("switch default should not read settings"),
             |mode, auto_sync| {
                 config::switch_mode_with_paths(
                     mode,

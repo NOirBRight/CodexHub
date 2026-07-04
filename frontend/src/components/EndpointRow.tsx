@@ -30,7 +30,7 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
       <button
         type="button"
         className={cx(
-          "focus-ring inline-flex min-w-[70px] items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100",
+          "focus-ring inline-flex w-[76px] items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100",
           compact ? "h-7" : "h-8",
         )}
         title={copied ? "Copied" : "Copy"}

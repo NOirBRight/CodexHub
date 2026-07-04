@@ -6,14 +6,18 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(900);
 const EVENT_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+const TELEMETRY_INGEST_BATCH_LINES: usize = 1000;
+const TELEMETRY_INGEST_BATCH_BYTES: u64 = 1024 * 1024;
+const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_MODEL: &str = "openai/gpt-5.5";
 
 const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
@@ -48,6 +52,8 @@ const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
 ];
 
 static GATEWAY_CLIENT_CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static TELEMETRY_INGEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static TELEMETRY_INGESTER_STARTED: OnceLock<()> = OnceLock::new();
 
 #[allow(dead_code)]
 const SUBAGENT_FEATURES: &[&str] = &[
@@ -157,6 +163,23 @@ pub struct GatewayUsageEvent {
     pub total_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TelemetryStatus {
+    pub event_log_size: u64,
+    pub indexed_offset: u64,
+    pub lag_bytes: u64,
+    pub backfill_pending: bool,
+    pub last_indexed_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayUsageSnapshot {
+    pub summary: GatewayUsageSummary,
+    pub events: Vec<GatewayUsageEvent>,
+    pub telemetry_status: TelemetryStatus,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -460,6 +483,20 @@ pub fn gateway_usage_summary(
     let pricing = usage_pricing_by_model();
     let window = UsageTimeWindow::new(start_ts, end_ts);
     read_usage_summary_from_sqlite_path_with_pricing_and_window(&db_path, &pricing, &window)
+}
+
+pub fn gateway_usage_snapshot(
+    limit: Option<usize>,
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<GatewayUsageSnapshot, String> {
+    gateway_usage_snapshot_for_paths(
+        &event_log_path(),
+        &telemetry_db_path(),
+        limit,
+        start_ts,
+        end_ts,
+    )
 }
 
 pub fn gateway_usage_events(
@@ -1766,6 +1803,19 @@ fn telemetry_db_path() -> PathBuf {
         .join("codex-proxy-telemetry.sqlite")
 }
 
+pub fn start_telemetry_ingester() {
+    TELEMETRY_INGESTER_STARTED.get_or_init(|| {
+        let _ = thread::Builder::new()
+            .name("codexhub-telemetry-ingester".to_string())
+            .spawn(|| loop {
+                if let Err(error) = ingest_telemetry_once() {
+                    let _ = record_telemetry_ingest_error(&telemetry_db_path(), &error);
+                }
+                thread::sleep(TELEMETRY_INGEST_INTERVAL);
+            });
+    });
+}
+
 fn ensure_telemetry_sqlite_ready(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -1777,18 +1827,222 @@ fn ensure_telemetry_sqlite_ready(path: &Path) -> Result<(), String> {
     }
     let connection = open_telemetry_connection(path)?;
     initialize_telemetry_db(&connection)?;
-    let event_log_path = event_log_path();
-    let current_event_log_size = fs::metadata(&event_log_path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    let backfilled = telemetry_meta_value(&connection, "last_backfill_at")?.is_some();
-    let last_backfill_size = telemetry_meta_value(&connection, "last_backfill_size")?
-        .and_then(|value| value.parse::<u64>().ok());
-    drop(connection);
+    Ok(())
+}
 
-    if !backfilled || last_backfill_size != Some(current_event_log_size) {
-        backfill_event_log_to_sqlite_path(&event_log_path, path)?;
+fn telemetry_ingest_lock() -> &'static Mutex<()> {
+    TELEMETRY_INGEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn ingest_telemetry_once() -> Result<TelemetryStatus, String> {
+    ingest_telemetry_once_for_paths(&event_log_path(), &telemetry_db_path())
+}
+
+fn ingest_telemetry_once_for_paths(
+    event_path: &Path,
+    db_path: &Path,
+) -> Result<TelemetryStatus, String> {
+    let _guard = telemetry_ingest_lock()
+        .lock()
+        .map_err(|_| "telemetry ingest lock is poisoned".to_string())?;
+    ensure_telemetry_sqlite_ready(db_path)?;
+    let mut connection = open_telemetry_connection(db_path)?;
+    initialize_telemetry_db(&connection)?;
+    let event_log_size = event_log_size(event_path);
+    let meta_offset = telemetry_meta_u64(&connection, "last_ingested_offset")?;
+    let mut indexed_offset = meta_offset
+        .or_else(|| {
+            telemetry_meta_u64(&connection, "last_backfill_size")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or(0);
+    if indexed_offset > event_log_size {
+        indexed_offset = 0;
     }
+    let (events, next_offset) = read_telemetry_ingest_batch(
+        event_path,
+        indexed_offset,
+        TELEMETRY_INGEST_BATCH_LINES,
+        TELEMETRY_INGEST_BATCH_BYTES,
+    )?;
+    if next_offset != indexed_offset || meta_offset != Some(indexed_offset) {
+        write_telemetry_ingest_batch(&mut connection, &events, next_offset)?;
+    }
+    telemetry_status_for_paths(event_path, db_path)
+}
+
+fn read_telemetry_ingest_batch(
+    event_path: &Path,
+    start_offset: u64,
+    max_lines: usize,
+    max_bytes: u64,
+) -> Result<(Vec<Value>, u64), String> {
+    let file = match fs::File::open(event_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), 0));
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to open telemetry event log {}: {error}",
+                event_path.display()
+            ));
+        }
+    };
+    let mut reader = std::io::BufReader::new(file);
+    reader
+        .seek(std::io::SeekFrom::Start(start_offset))
+        .map_err(|error| {
+            format!(
+                "failed to seek telemetry event log {}: {error}",
+                event_path.display()
+            )
+        })?;
+
+    let mut events = Vec::new();
+    let mut next_offset = start_offset;
+    let mut read_bytes = 0_u64;
+    let mut read_lines = 0_usize;
+    loop {
+        if read_lines >= max_lines || read_bytes >= max_bytes {
+            break;
+        }
+        let mut line = Vec::new();
+        let count = reader.read_until(b'\n', &mut line).map_err(|error| {
+            format!(
+                "failed to read telemetry event log {}: {error}",
+                event_path.display()
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        next_offset = next_offset.saturating_add(count as u64);
+        read_bytes = read_bytes.saturating_add(count as u64);
+        read_lines += 1;
+        let text = String::from_utf8_lossy(&line);
+        let trimmed = text.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        let Ok(mut value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        sanitize_json_value(&mut value);
+        if let Value::Object(object) = &mut value {
+            object
+                .entry("schema_version".to_string())
+                .or_insert_with(|| Value::Number(2.into()));
+        }
+        events.push(value);
+    }
+    Ok((events, next_offset))
+}
+
+fn write_telemetry_ingest_batch(
+    connection: &mut Connection,
+    events: &[Value],
+    next_offset: u64,
+) -> Result<(), String> {
+    let now = telemetry_now_marker();
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| format!("failed to begin telemetry ingest transaction: {error}"))?;
+    let result = (|| {
+        for event in events {
+            write_json_event_to_sqlite(connection, event)?;
+        }
+        connection
+            .execute(
+                "INSERT INTO telemetry_meta (key, value) VALUES ('last_ingested_offset', ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![next_offset.to_string()],
+            )
+            .map_err(|error| format!("failed to update telemetry ingest offset: {error}"))?;
+        connection
+            .execute(
+                "INSERT INTO telemetry_meta (key, value) VALUES ('last_indexed_at', ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![now],
+            )
+            .map_err(|error| format!("failed to update telemetry indexed marker: {error}"))?;
+        connection
+            .execute(
+                "DELETE FROM telemetry_meta WHERE key = 'last_ingest_error'",
+                [],
+            )
+            .map_err(|error| format!("failed to clear telemetry ingest error: {error}"))?;
+        Ok::<(), String>(())
+    })();
+    match result {
+        Ok(()) => connection
+            .execute_batch("COMMIT")
+            .map_err(|error| format!("failed to commit telemetry ingest transaction: {error}")),
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn telemetry_status_for_paths(
+    event_path: &Path,
+    db_path: &Path,
+) -> Result<TelemetryStatus, String> {
+    ensure_telemetry_sqlite_ready(db_path)?;
+    let connection = open_telemetry_connection(db_path)?;
+    initialize_telemetry_db(&connection)?;
+    let event_log_size = event_log_size(event_path);
+    let mut indexed_offset = telemetry_meta_u64(&connection, "last_ingested_offset")?
+        .or_else(|| {
+            telemetry_meta_u64(&connection, "last_backfill_size")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or(0);
+    if indexed_offset > event_log_size {
+        indexed_offset = 0;
+    }
+    let lag_bytes = event_log_size.saturating_sub(indexed_offset);
+    Ok(TelemetryStatus {
+        event_log_size,
+        indexed_offset,
+        lag_bytes,
+        backfill_pending: lag_bytes > 0,
+        last_indexed_at: telemetry_meta_value(&connection, "last_indexed_at")?.or_else(|| {
+            telemetry_meta_value(&connection, "last_backfill_at")
+                .ok()
+                .flatten()
+        }),
+        last_error: telemetry_meta_value(&connection, "last_ingest_error")?,
+    })
+}
+
+fn telemetry_meta_u64(connection: &Connection, key: &str) -> Result<Option<u64>, String> {
+    Ok(telemetry_meta_value(connection, key)?.and_then(|value| value.parse::<u64>().ok()))
+}
+
+fn event_log_size(event_path: &Path) -> u64 {
+    fs::metadata(event_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn record_telemetry_ingest_error(db_path: &Path, error: &str) -> Result<(), String> {
+    ensure_telemetry_sqlite_ready(db_path)?;
+    let connection = open_telemetry_connection(db_path)?;
+    initialize_telemetry_db(&connection)?;
+    connection
+        .execute(
+            "INSERT INTO telemetry_meta (key, value) VALUES ('last_ingest_error', ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![error.chars().take(500).collect::<String>()],
+        )
+        .map_err(|error| format!("failed to record telemetry ingest error: {error}"))?;
     Ok(())
 }
 
@@ -1976,6 +2230,7 @@ fn telemetry_meta_value(connection: &Connection, key: &str) -> Result<Option<Str
         .map_err(|error| format!("failed to read telemetry meta {key}: {error}"))
 }
 
+#[cfg(test)]
 fn backfill_event_log_to_sqlite_path(event_path: &Path, db_path: &Path) -> Result<(), String> {
     let connection = open_telemetry_connection(db_path)?;
     initialize_telemetry_db(&connection)?;
@@ -2244,6 +2499,32 @@ fn read_usage_summary_from_sqlite_path_with_pricing_and_window(
     Ok(read_usage_summary_from_events_with_pricing(
         &events, pricing,
     ))
+}
+
+fn gateway_usage_snapshot_for_paths(
+    event_path: &Path,
+    db_path: &Path,
+    limit: Option<usize>,
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+) -> Result<GatewayUsageSnapshot, String> {
+    ensure_telemetry_sqlite_ready(db_path)?;
+    let window = UsageTimeWindow::new(start_ts, end_ts);
+    let pricing = usage_pricing_by_model();
+    let event_limit = match limit {
+        Some(value) => value.clamp(1, 500),
+        None if window.is_bounded() => usize::MAX,
+        None => 100,
+    };
+    let summary =
+        read_usage_summary_from_sqlite_path_with_pricing_and_window(db_path, &pricing, &window)?;
+    let events = read_usage_events_from_sqlite_path_with_window(db_path, event_limit, &window)?;
+    let telemetry_status = telemetry_status_for_paths(event_path, db_path)?;
+    Ok(GatewayUsageSnapshot {
+        summary,
+        events,
+        telemetry_status,
+    })
 }
 
 #[cfg(test)]
@@ -4635,6 +4916,7 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5573,6 +5855,110 @@ mod tests {
                 "upstream_timeout".to_string()
             )
         );
+    }
+
+    #[test]
+    fn telemetry_incremental_ingest_processes_only_complete_lines() {
+        let root = unique_temp_dir("codexhub-usage-incremental-partial");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        let first = r#"{"ts":"2026-07-03T01:00:00Z","event":"request_complete","request_id":"req-a","status":200,"duration_ms":10,"usage_source":"upstream","usage_input_tokens":1,"usage_output_tokens":2,"upstream":"official","model":"openai/gpt-5.5"}"#;
+        let partial =
+            r#"{"ts":"2026-07-03T01:00:01Z","event":"request_complete","request_id":"req-b""#;
+        fs::write(&log_path, format!("{first}\n{partial}")).unwrap();
+
+        let status = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+        let events = read_usage_events_from_sqlite_path(&db_path, usize::MAX).unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id.as_deref(), Some("req-a"));
+        assert_eq!(status.indexed_offset, first.len() as u64 + 1);
+        assert_eq!(status.lag_bytes, partial.len() as u64);
+        assert!(status.backfill_pending);
+
+        let mut file = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+        file.write_all(
+            br#","status":200,"duration_ms":11,"usage_source":"upstream","usage_input_tokens":3,"usage_output_tokens":4,"upstream":"official","model":"openai/gpt-5.5"}"#,
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+
+        let status = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+        let events = read_usage_events_from_sqlite_path(&db_path, usize::MAX).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].request_id.as_deref(), Some("req-b"));
+        assert_eq!(
+            status.indexed_offset,
+            fs::metadata(&log_path).unwrap().len()
+        );
+        assert_eq!(status.lag_bytes, 0);
+        assert!(!status.backfill_pending);
+    }
+
+    #[test]
+    fn telemetry_incremental_ingest_resets_after_log_truncation_and_dedupes() {
+        let root = unique_temp_dir("codexhub-usage-incremental-truncate");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        let first = r#"{"ts":"2026-07-03T01:00:00Z","event":"request_complete","request_id":"req-a","status":200,"duration_ms":10,"usage_source":"upstream","usage_input_tokens":1,"usage_output_tokens":2,"upstream":"official","model":"openai/gpt-5.5"}"#;
+        let new_second = r#"{"ts":"2026-07-03T01:00:02Z","event":"request_complete","request_id":"req-new","status":200,"duration_ms":12,"usage_source":"upstream","usage_input_tokens":5,"usage_output_tokens":6,"upstream":"official","model":"openai/gpt-5.5"}"#;
+        fs::write(&log_path, format!("{first}\n{}\n", "x".repeat(512))).unwrap();
+        super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+
+        fs::write(&log_path, format!("{first}\n{new_second}\n")).unwrap();
+        let status = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let event_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM gateway_events", [], |row| row.get(0))
+            .unwrap();
+        let new_request_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gateway_requests WHERE request_id = 'req-new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(event_count, 2);
+        assert_eq!(new_request_count, 1);
+        assert_eq!(
+            status.indexed_offset,
+            fs::metadata(&log_path).unwrap().len()
+        );
+        assert_eq!(status.lag_bytes, 0);
+    }
+
+    #[test]
+    fn usage_snapshot_reports_lag_without_inline_backfill() {
+        let root = unique_temp_dir("codexhub-usage-snapshot-lag");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        fs::write(
+            &log_path,
+            r#"{"ts":"2026-07-03T01:00:00Z","event":"request_complete","request_id":"req-lag","status":200,"duration_ms":10,"usage_source":"upstream","usage_input_tokens":1,"usage_output_tokens":2,"upstream":"official","model":"openai/gpt-5.5"}"#,
+        )
+        .unwrap();
+
+        let snapshot =
+            super::gateway_usage_snapshot_for_paths(&log_path, &db_path, None, None, None).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let event_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM gateway_events", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(snapshot.summary.requests, 0);
+        assert!(snapshot.events.is_empty());
+        assert_eq!(event_count, 0);
+        assert_eq!(snapshot.telemetry_status.indexed_offset, 0);
+        assert_eq!(
+            snapshot.telemetry_status.lag_bytes,
+            fs::metadata(&log_path).unwrap().len()
+        );
+        assert!(snapshot.telemetry_status.backfill_pending);
     }
 
     #[test]

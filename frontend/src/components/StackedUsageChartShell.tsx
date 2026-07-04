@@ -1,7 +1,7 @@
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { PendingPanel } from "./PendingPanel";
-import type { GatewayUsageEvent, GatewayUsageSummary, Provider, UsageQueryWindow } from "../lib/types";
+import type { GatewayUsageEvent, GatewayUsageSummary, Provider, TelemetryStatus, UsageQueryWindow } from "../lib/types";
 
 interface StackedUsageChartShellProps {
   events: GatewayUsageEvent[];
@@ -9,6 +9,8 @@ interface StackedUsageChartShellProps {
   pendingMessage: string;
   providers: Provider[];
   summary: GatewayUsageSummary | null;
+  telemetryStatus?: TelemetryStatus | null;
+  usageError?: string | null;
 }
 
 type UsageRange = "7d" | "1m" | "custom";
@@ -78,6 +80,8 @@ export function StackedUsageChartShell({
   pendingMessage,
   providers,
   summary,
+  telemetryStatus,
+  usageError,
 }: StackedUsageChartShellProps) {
   const initialCustomRange = useMemo(() => defaultCustomRange(), []);
   const [range, setRange] = useState<UsageRange>("7d");
@@ -90,6 +94,7 @@ export function StackedUsageChartShell({
   const [customOpen, setCustomOpen] = useState(false);
   const [customRange, setCustomRange] = useState<DateSpan>(initialCustomRange);
   const [calendarMonth, setCalendarMonth] = useState(() => startOfMonth(initialCustomRange.start));
+  const customRangeRef = useRef<HTMLDivElement | null>(null);
 
   const queryWindow = useMemo(() => usageQueryWindow(range, customRange), [customRange, range]);
   const providerLabels = useMemo(() => providerLabelMap(providers), [providers]);
@@ -101,10 +106,38 @@ export function StackedUsageChartShell({
     () => stacked.buckets.map((bucket) => bucket.label),
     [stacked.buckets],
   );
+  const telemetryMessage = usageTelemetryMessage(telemetryStatus, usageError);
 
   useEffect(() => {
     onWindowChange?.(queryWindow);
   }, [onWindowChange, queryWindow.endTs, queryWindow.startTs]);
+
+  useEffect(() => {
+    if (!customOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && customRangeRef.current?.contains(target)) {
+        return;
+      }
+      setCustomOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setCustomOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [customOpen]);
 
   function selectRange(nextRange: UsageRange) {
     setRange(nextRange);
@@ -130,46 +163,19 @@ export function StackedUsageChartShell({
 
   return (
     <section className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 rounded-md border border-line bg-white p-4 shadow-subtle">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-ink">Usage &amp; Cost</h2>
-          <p className="mt-1 text-xs text-slate-500">
-            Local Gateway usage events; missing token usage stays unknown.
-          </p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="shrink-0 text-sm font-semibold text-ink">Usage &amp; Cost</h2>
+          {telemetryMessage && (
+            <span
+              className="min-w-0 truncate rounded-full border border-line bg-panel px-2 py-1 text-[11px] font-semibold text-slate-500"
+              title={telemetryMessage}
+            >
+              {telemetryMessage}
+            </span>
+          )}
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative">
-            <div className="grid grid-cols-3 rounded-full border border-line bg-panel p-1 text-xs shadow-subtle">
-              {[
-                { value: "7d", label: "7D" },
-                { value: "1m", label: "1M" },
-                { value: "custom", label: "Custom" },
-              ].map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={
-                    range === option.value
-                      ? "h-7 rounded-full bg-white px-4 font-semibold text-ink shadow-subtle"
-                      : "h-7 rounded-full px-4 font-semibold text-slate-500 hover:text-ink"
-                  }
-                  aria-pressed={range === option.value}
-                  onClick={() => selectRange(option.value as UsageRange)}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            {customOpen && (
-              <CalendarRangePopover
-                month={calendarMonth}
-                range={customRange}
-                onMonthChange={setCalendarMonth}
-                onSelect={selectCustomDay}
-              />
-            )}
-          </div>
-
+        <div className="flex shrink-0 items-center gap-2">
           <UsageDropdown
             label="Metric"
             open={metricOpen}
@@ -232,6 +238,38 @@ export function StackedUsageChartShell({
               setGroupOpen(false);
             }}
           />
+
+          <div ref={customRangeRef} className="relative">
+            <div className="grid grid-cols-[54px_54px_74px] rounded-full border border-line bg-panel p-0.5 text-[11px] shadow-subtle">
+              {[
+                { value: "7d", label: "7D" },
+                { value: "1m", label: "1M" },
+                { value: "custom", label: "Custom" },
+              ].map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={
+                    range === option.value
+                      ? "h-7 rounded-full bg-white px-2 font-semibold text-ink shadow-subtle"
+                      : "h-7 rounded-full px-2 font-semibold text-slate-500 hover:text-ink"
+                  }
+                  aria-pressed={range === option.value}
+                  onClick={() => selectRange(option.value as UsageRange)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {customOpen && (
+              <CalendarRangePopover
+                month={calendarMonth}
+                range={customRange}
+                onMonthChange={setCalendarMonth}
+                onSelect={selectCustomDay}
+              />
+            )}
+          </div>
         </div>
       </div>
 
@@ -281,16 +319,16 @@ function UsageDropdown<T extends string>({
     <div className="relative">
       <button
         type="button"
-        className="focus-ring flex h-9 w-[132px] items-center justify-between gap-2 rounded-full border border-line bg-white px-4 text-xs font-semibold text-slate-600 shadow-subtle"
+        className="focus-ring flex h-8 w-[124px] items-center justify-between gap-1.5 rounded-full border border-line bg-white px-3 text-[11px] font-semibold text-slate-600 shadow-subtle"
         aria-expanded={open}
         onClick={onToggle}
       >
         <span>{label}</span>
         <span className="text-ink">{valueLabel}</span>
-        <ChevronDown size={15} className="text-ink" />
+        <ChevronDown size={13} className="text-ink" />
       </button>
       {open && (
-        <div className="absolute right-0 top-10 z-20 w-[132px] space-y-1 rounded-[16px] border border-line bg-white p-1 shadow-xl">
+        <div className="absolute right-0 top-9 z-20 w-[124px] space-y-1 rounded-[14px] border border-line bg-white p-1 shadow-xl">
           {options.map((option) => {
             const selected = value === option.value;
             return (
@@ -299,13 +337,13 @@ function UsageDropdown<T extends string>({
                 type="button"
                 className={
                   selected
-                    ? "flex h-8 w-full items-center justify-between rounded-[11px] bg-panel px-3 text-left text-xs font-semibold text-ink"
-                    : "flex h-8 w-full items-center justify-between rounded-[11px] px-3 text-left text-xs font-semibold text-ink hover:bg-panel"
+                    ? "flex h-7 w-full items-center justify-between rounded-[10px] bg-panel px-2.5 text-left text-[11px] font-semibold text-ink"
+                    : "flex h-7 w-full items-center justify-between rounded-[10px] px-2.5 text-left text-[11px] font-semibold text-ink hover:bg-panel"
                 }
                 onClick={() => onSelect(option.value)}
               >
                 {option.label}
-                {selected && <Check size={16} />}
+                {selected && <Check size={14} />}
               </button>
             );
           })}
@@ -471,6 +509,11 @@ function StackedUsageChart({
     : TOOLTIP_EDGE_MARGIN;
   const activeBucketDateLabel = activeBucket ? formatBucketTooltipDate(activeBucket) : "";
 
+  useEffect(() => {
+    setHover(null);
+    setTooltipHeight(0);
+  }, [breakdown, buckets, metric, series]);
+
   useLayoutEffect(() => {
     if (!hover || !tooltipRef.current) {
       return;
@@ -505,8 +548,10 @@ function StackedUsageChart({
     <div className="grid h-full min-h-[300px] p-4">
       <div className="relative h-full min-h-[250px] overflow-hidden rounded-md border border-dashed border-line bg-white/70">
         <div className="absolute bottom-14 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
-          <span>{formatNumber(maxTotal)}</span>
-          <span className="self-center">{formatNumber(Math.round(maxTotal / 2))}</span>
+          <span title={formatNumber(maxTotal)}>{formatAxisNumber(maxTotal)}</span>
+          <span className="self-center" title={formatNumber(Math.round(maxTotal / 2))}>
+            {formatAxisNumber(Math.round(maxTotal / 2))}
+          </span>
           <span>0</span>
         </div>
         <div
@@ -530,7 +575,7 @@ function StackedUsageChart({
             ))}
             {hasData && layers.map((layer) => (
               <path
-                key={`${layer.key}:area`}
+                key={`${metric}:${breakdown}:${layer.key}:area`}
                 d={areaPath(layer.topPoints, layer.basePoints)}
                 fill={layer.color}
                 fillOpacity="0.18"
@@ -538,7 +583,7 @@ function StackedUsageChart({
             ))}
             {hasData && layers.map((layer) => (
               <path
-                key={`${layer.key}:line`}
+                key={`${metric}:${breakdown}:${layer.key}:line`}
                 d={linePath(layer.topPoints)}
                 fill="none"
                 stroke={layer.color}
@@ -561,7 +606,7 @@ function StackedUsageChart({
           </svg>
           {hasData && hover && activeTopPoints.map(({ color, point }) => (
             <span
-              key={`${point.x}-${point.y}-${point.value}`}
+              key={`${metric}:${breakdown}:${color}:${point.x}-${point.y}-${point.value}`}
               className="pointer-events-none absolute h-2 w-2 rounded-full border-2 border-white shadow-sm"
               style={{
                 backgroundColor: color,
@@ -1093,6 +1138,44 @@ function tokenTotal(event: GatewayUsageEvent) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatAxisNumber(value: number) {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) {
+    return `${formatCompactAxisValue(value / 1_000_000)}M`;
+  }
+  if (abs >= 1_000) {
+    return `${formatCompactAxisValue(value / 1_000)}K`;
+  }
+  return formatNumber(value);
+}
+
+function formatCompactAxisValue(value: number) {
+  if (Math.abs(value) >= 10 || Number.isInteger(value)) {
+    return value.toFixed(0);
+  }
+  return value.toFixed(1).replace(/\.0$/, "");
+}
+
+function usageTelemetryMessage(status?: TelemetryStatus | null, error?: string | null) {
+  if (error) {
+    return `Usage telemetry delayed: ${error}`;
+  }
+  if (!status || (!status.backfill_pending && status.lag_bytes <= 0)) {
+    return null;
+  }
+  return `Indexing usage... ${formatByteCount(status.lag_bytes)} pending`;
+}
+
+function formatByteCount(value: number) {
+  if (value >= 1_048_576) {
+    return `${formatCompactAxisValue(value / 1_048_576)} MB`;
+  }
+  if (value >= 1024) {
+    return `${formatCompactAxisValue(value / 1024)} KB`;
+  }
+  return `${formatNumber(value)} B`;
 }
 
 function costLabel(summary: GatewayUsageSummary | null) {

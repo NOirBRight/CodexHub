@@ -9,10 +9,15 @@ from unittest.mock import patch
 
 from history_overlay import (
     apply_history_overlay,
-    history_model_map_path,
+    apply_session_file_provider_fast,
+    ensure_unified_history_bucket,
+    migrate_official_history_to_unified,
     normalize_history_provider_fast,
+    plan_session_file_provider_fast,
     promote_custom_history_to_openai,
+    repair_history_bucket,
     restore_history_overlay,
+    restore_official_history_from_unified,
 )
 
 
@@ -83,7 +88,7 @@ class HistoryOverlayTests(unittest.TestCase):
             first_line = session_file.read_text(encoding="utf-8").splitlines()[0]
             self.assertEqual(json.loads(first_line)["payload"]["model_provider"], "openai")
 
-    def test_restore_migrates_new_custom_sessions_and_sanitizes_bad_reasoning(self):
+    def test_restore_uses_ledger_only_and_does_not_rewrite_session_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             codex_dir = root / ".codex"
@@ -148,29 +153,29 @@ class HistoryOverlayTests(unittest.TestCase):
 
             restored = restore_history_overlay(ledger_path)
 
-            self.assertEqual(restored["new_state_rows"], 1)
-            self.assertEqual(restored["new_jsonl_files"], 1)
+            self.assertEqual(restored["new_state_rows"], 0)
+            self.assertEqual(restored["new_jsonl_files"], 0)
             connection = sqlite3.connect(db_path)
             try:
                 providers = dict(connection.execute("SELECT id, model_provider FROM threads"))
             finally:
                 connection.close()
             self.assertEqual(providers["thread-openai"], "openai")
-            self.assertEqual(providers["thread-new-custom"], "openai")
+            self.assertEqual(providers["thread-new-custom"], "custom")
             self.assertEqual(providers["thread-existing-custom"], "custom")
 
             openai_lines = [json.loads(line) for line in openai_session_file.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(openai_lines[0]["payload"]["model_provider"], "openai")
-            self.assertNotIn("encrypted_content", openai_lines[1]["payload"])
+            self.assertIn("encrypted_content", openai_lines[1]["payload"])
 
             new_custom_lines = [json.loads(line) for line in new_custom_file.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(new_custom_lines[0]["payload"]["model_provider"], "openai")
-            self.assertNotIn("encrypted_content", new_custom_lines[1]["payload"])
+            self.assertEqual(new_custom_lines[0]["payload"]["model_provider"], "custom")
+            self.assertIn("encrypted_content", new_custom_lines[1]["payload"])
 
             existing_custom_first_line = existing_custom_file.read_text(encoding="utf-8").splitlines()[0]
             self.assertEqual(json.loads(existing_custom_first_line)["payload"]["model_provider"], "custom")
 
-    def test_promote_custom_history_to_openai_converts_all_custom_rows(self):
+    def test_promote_custom_history_to_openai_without_ledger_is_safe_noop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
             sessions_dir = codex_dir / "sessions"
@@ -197,19 +202,20 @@ class HistoryOverlayTests(unittest.TestCase):
 
             result = promote_custom_history_to_openai(codex_dir, codex_dir / "backup")
 
-            self.assertEqual(result["state_rows"], 1)
-            self.assertEqual(result["jsonl_files"], 1)
+            self.assertEqual(result["status"], "no-ledger")
+            self.assertEqual(result["state_rows"], 0)
+            self.assertEqual(result["jsonl_restored"], 0)
             connection = sqlite3.connect(state_path)
             try:
                 providers = dict(connection.execute("SELECT id, model_provider FROM threads"))
             finally:
                 connection.close()
-            self.assertEqual(providers["thread-custom"], "openai")
+            self.assertEqual(providers["thread-custom"], "custom")
             lines = [json.loads(line) for line in custom_file.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(lines[0]["payload"]["model_provider"], "openai")
-            self.assertNotIn("encrypted_content", lines[1]["payload"])
+            self.assertEqual(lines[0]["payload"]["model_provider"], "custom")
+            self.assertIn("encrypted_content", lines[1]["payload"])
 
-    def test_promote_custom_history_to_openai_uses_official_fallback_for_third_party_models(self):
+    def test_promote_custom_history_to_openai_preserves_model_names(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
             state_path = codex_dir / "state_5.sqlite"
@@ -223,16 +229,15 @@ class HistoryOverlayTests(unittest.TestCase):
 
             result = promote_custom_history_to_openai(codex_dir, codex_dir / "backup")
 
-            self.assertEqual(result["state_rows"], 1)
-            self.assertEqual(result["state_model_rows"], 1)
+            self.assertEqual(result["status"], "no-ledger")
+            self.assertEqual(result["state_rows"], 0)
+            self.assertEqual(result["state_model_rows"], 0)
             connection = sqlite3.connect(state_path)
             try:
                 row = connection.execute("SELECT model_provider, model FROM threads WHERE id = 'thread-custom'").fetchone()
             finally:
                 connection.close()
-            self.assertEqual(row, ("openai", "gpt-5.5"))
-            model_map = json.loads(history_model_map_path(codex_dir).read_text(encoding="utf-8"))
-            self.assertEqual(model_map["threads"]["thread-custom"]["model"], "kimi-k2.7-code")
+            self.assertEqual(row, ("custom", "kimi-k2.7-code"))
 
     def test_normalize_history_provider_fast_only_rewrites_session_meta(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,6 +283,97 @@ class HistoryOverlayTests(unittest.TestCase):
             lines = [json.loads(line) for line in custom_file.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(lines[0]["payload"]["model_provider"], "openai")
             self.assertEqual(lines[1]["payload"]["encrypted_content"], "not-official")
+
+    def test_ensure_unified_history_bucket_repairs_dirty_rollout_paths_without_rewriting_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-openai.jsonl"
+            session_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-openai", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            orphan_file = sessions_dir / "rollout-orphan.jsonl"
+            orphan_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-orphan", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-openai', 'openai', 'gpt-5.5', ?)",
+                    (str(session_file),),
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-custom', 'custom', 'kimi-k2.7-code', '')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = ensure_unified_history_bucket(codex_dir, codex_dir / "backup")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["dirty_state_rows"], 1)
+            self.assertEqual(result["state_rows"], 1)
+            self.assertEqual(result["state_model_rows"], 0)
+            self.assertEqual(result["jsonl_planned"], 1)
+            self.assertEqual(result["jsonl_applied"], 1)
+            self.assertEqual(result["jsonl_skipped"], 0)
+            self.assertEqual(result["plan_source"], "dirty_rollout_path")
+            connection = sqlite3.connect(state_path)
+            try:
+                rows = {
+                    row[0]: (row[1], row[2])
+                    for row in connection.execute("SELECT id, model_provider, model FROM threads")
+                }
+            finally:
+                connection.close()
+            self.assertEqual(rows["thread-openai"], ("custom", "gpt-5.5"))
+            self.assertEqual(rows["thread-custom"], ("custom", "kimi-k2.7-code"))
+            indexed_first_line = json.loads(session_file.read_text(encoding="utf-8").splitlines()[0])
+            orphan_first_line = json.loads(orphan_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(indexed_first_line["payload"]["model_provider"], "custom")
+            self.assertEqual(orphan_first_line["payload"]["model_provider"], "openai")
+
+    def test_ensure_unified_history_bucket_returns_fast_when_no_openai_rows_exist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-custom.jsonl"
+            session_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-custom", "model_provider": "custom"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-custom', 'custom', 'gpt-5.5', ?)",
+                    (str(session_file),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = ensure_unified_history_bucket(codex_dir, codex_dir / "backup")
+
+            self.assertEqual(result["status"], "already-unified")
+            self.assertEqual(result["dirty_state_rows"], 0)
+            self.assertEqual(result["jsonl_planned"], 0)
+            self.assertFalse((codex_dir / "backup").exists())
 
     def test_normalize_history_provider_fast_scans_filesystem_beside_state_rollout_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -329,7 +425,7 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(json.loads(indexed_first_line)["payload"]["model_provider"], "custom")
             self.assertEqual(json.loads(orphan_first_line)["payload"]["model_provider"], "custom")
 
-    def test_normalize_history_provider_fast_preserves_third_party_models_across_roundtrip(self):
+    def test_normalize_history_provider_fast_preserves_model_names_across_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
             state_path = codex_dir / "state_5.sqlite"
@@ -357,7 +453,7 @@ class HistoryOverlayTests(unittest.TestCase):
             result = normalize_history_provider_fast(codex_dir, codex_dir / "backup-official", "openai")
 
             self.assertEqual(result["state_rows"], 3)
-            self.assertEqual(result["state_model_rows"], 4)
+            self.assertEqual(result["state_model_rows"], 0)
             connection = sqlite3.connect(state_path)
             try:
                 rows = {
@@ -366,18 +462,15 @@ class HistoryOverlayTests(unittest.TestCase):
                 }
             finally:
                 connection.close()
-            self.assertEqual(rows["thread-custom-openai"], ("openai", "gpt-5.5"))
-            self.assertEqual(rows["thread-openai-prefixed"], ("openai", "gpt-5.4"))
-            self.assertEqual(rows["thread-custom-kimi"], ("openai", "gpt-5.5"))
-            self.assertEqual(rows["thread-custom-volc"], ("openai", "gpt-5.5"))
-            model_map = json.loads(history_model_map_path(codex_dir).read_text(encoding="utf-8"))
-            self.assertEqual(model_map["threads"]["thread-custom-kimi"]["model"], "kimi-k2.7-code")
-            self.assertEqual(model_map["threads"]["thread-custom-volc"]["model"], "volc/glm-5.2")
+            self.assertEqual(rows["thread-custom-openai"], ("openai", "openai/gpt-5.5"))
+            self.assertEqual(rows["thread-openai-prefixed"], ("openai", "openai/gpt-5.4"))
+            self.assertEqual(rows["thread-custom-kimi"], ("openai", "kimi-k2.7-code"))
+            self.assertEqual(rows["thread-custom-volc"], ("openai", "volc/glm-5.2"))
 
             result = normalize_history_provider_fast(codex_dir, codex_dir / "backup-custom", "custom")
 
             self.assertEqual(result["state_rows"], 4)
-            self.assertEqual(result["state_model_rows"], 4)
+            self.assertEqual(result["state_model_rows"], 0)
             connection = sqlite3.connect(state_path)
             try:
                 rows = {
@@ -390,10 +483,8 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(rows["thread-openai-prefixed"], ("custom", "openai/gpt-5.4"))
             self.assertEqual(rows["thread-custom-kimi"], ("custom", "kimi-k2.7-code"))
             self.assertEqual(rows["thread-custom-volc"], ("custom", "volc/glm-5.2"))
-            model_map = json.loads(history_model_map_path(codex_dir).read_text(encoding="utf-8"))
-            self.assertEqual(model_map["threads"], {})
 
-    def test_normalize_history_provider_fast_rolls_back_model_map_when_jsonl_write_fails(self):
+    def test_normalize_history_provider_fast_rolls_back_state_when_jsonl_write_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
             sessions_dir = codex_dir / "sessions"
@@ -428,9 +519,102 @@ class HistoryOverlayTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(row, ("custom", "kimi-k2.7-code"))
-            map_path = history_model_map_path(codex_dir)
-            if map_path.exists():
-                self.assertEqual(json.loads(map_path.read_text(encoding="utf-8"))["threads"], {})
+
+    def test_normalize_history_provider_fast_replans_changed_session_meta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-openai.jsonl"
+            session_file.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "thread-openai",
+                            "model_provider": "openai",
+                            "timestamp": "old",
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            original_plan = plan_session_file_provider_fast
+            changed = False
+
+            def mutate_after_plan(path: Path, active_codex_dir: Path, target_provider: str):
+                nonlocal changed
+                entry = original_plan(path, active_codex_dir, target_provider)
+                if entry is not None and not changed:
+                    changed = True
+                    session_file.write_text(
+                        json.dumps(
+                            {
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "thread-openai",
+                                    "model_provider": "openai",
+                                    "timestamp": "new",
+                                },
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                return entry
+
+            with patch("history_overlay.plan_session_file_provider_fast", side_effect=mutate_after_plan):
+                result = normalize_history_provider_fast(codex_dir, codex_dir / "backup", "custom")
+
+            first_line = json.loads(session_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first_line["payload"]["model_provider"], "custom")
+            self.assertEqual(first_line["payload"]["timestamp"], "new")
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["jsonl_applied"], 1)
+            self.assertEqual(result["jsonl_skipped"], 0)
+            self.assertEqual(result["jsonl"][0]["status"], "applied")
+            self.assertEqual(json.loads(result["jsonl"][0]["old_first_line"])["payload"]["timestamp"], "new")
+
+    def test_normalize_history_provider_fast_skips_missing_or_already_target_session_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            missing_file = sessions_dir / "rollout-missing.jsonl"
+            target_file = sessions_dir / "rollout-target.jsonl"
+            for path, provider in ((missing_file, "openai"), (target_file, "openai")):
+                path.write_text(
+                    json.dumps({"type": "session_meta", "payload": {"id": path.stem, "model_provider": provider}})
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            original_apply = apply_session_file_provider_fast
+
+            def mutate_before_apply(entry: dict[str, str], active_codex_dir: Path):
+                path = active_codex_dir / entry["path"]
+                if path.name == "rollout-missing.jsonl":
+                    path.unlink()
+                if path.name == "rollout-target.jsonl":
+                    path.write_text(
+                        json.dumps({"type": "session_meta", "payload": {"id": path.stem, "model_provider": "custom"}})
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                return original_apply(entry, active_codex_dir)
+
+            with patch("history_overlay.apply_session_file_provider_fast", side_effect=mutate_before_apply):
+                result = normalize_history_provider_fast(codex_dir, codex_dir / "backup", "custom")
+
+            self.assertEqual(result["status"], "completed-with-skips")
+            self.assertEqual(result["jsonl_applied"], 0)
+            self.assertEqual(result["jsonl_skipped"], 2)
+            reasons = {entry["reason"] for entry in result["jsonl"]}
+            self.assertEqual(reasons, {"missing", "already_target"})
 
     def test_normalize_history_provider_fast_rolls_back_multiple_sqlite_homes_independently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -479,6 +663,201 @@ class HistoryOverlayTests(unittest.TestCase):
                 finally:
                     connection.close()
                 self.assertEqual(row, (thread_id, "custom", model))
+
+    def test_migrate_official_history_to_unified_requires_live_custom_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-openai.jsonl"
+            session_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-openai", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = migrate_official_history_to_unified(codex_dir, codex_dir / "backup")
+
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["reason"], "live_not_unified")
+            first_line = json.loads(session_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first_line["payload"]["model_provider"], "openai")
+
+    def test_migrate_and_restore_official_history_uses_ledger_without_touching_new_custom_sessions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            (codex_dir / "config.toml").write_text('model_provider = "custom"\n', encoding="utf-8")
+            official_file = sessions_dir / "rollout-official.jsonl"
+            official_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-official", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            existing_custom_file = sessions_dir / "rollout-existing-custom.jsonl"
+            existing_custom_file.write_text(
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": "thread-existing-custom", "model_provider": "custom"}}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+                connection.execute("INSERT INTO threads VALUES ('thread-official', 'openai')")
+                connection.execute("INSERT INTO threads VALUES ('thread-existing-custom', 'custom')")
+                connection.commit()
+            finally:
+                connection.close()
+
+            backup_root = codex_dir / "backup"
+            migrate_result = migrate_official_history_to_unified(codex_dir, backup_root)
+
+            self.assertEqual(migrate_result["status"], "completed")
+            self.assertEqual(migrate_result["state_rows"], 1)
+            self.assertEqual(migrate_result["jsonl_applied"], 1)
+            self.assertTrue((backup_root / "ledger.json").exists())
+            self.assertTrue((backup_root / "jsonl" / "sessions" / "rollout-official.jsonl").exists())
+            official_first = json.loads(official_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(official_first["payload"]["model_provider"], "custom")
+            connection = sqlite3.connect(state_path)
+            try:
+                providers = dict(connection.execute("SELECT id, model_provider FROM threads"))
+            finally:
+                connection.close()
+            self.assertEqual(providers["thread-official"], "custom")
+            self.assertEqual(providers["thread-existing-custom"], "custom")
+
+            new_custom_file = sessions_dir / "rollout-new-custom.jsonl"
+            new_custom_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-new-custom", "model_provider": "custom"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute("INSERT INTO threads VALUES ('thread-new-custom', 'custom')")
+                connection.commit()
+            finally:
+                connection.close()
+
+            restore_result = restore_official_history_from_unified(codex_dir, backup_root)
+
+            self.assertEqual(restore_result["status"], "completed")
+            self.assertEqual(restore_result["state_rows"], 1)
+            self.assertEqual(restore_result["jsonl_restored"], 1)
+            official_first = json.loads(official_file.read_text(encoding="utf-8").splitlines()[0])
+            existing_first = json.loads(existing_custom_file.read_text(encoding="utf-8").splitlines()[0])
+            new_first = json.loads(new_custom_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(official_first["payload"]["model_provider"], "openai")
+            self.assertEqual(existing_first["payload"]["model_provider"], "custom")
+            self.assertEqual(new_first["payload"]["model_provider"], "custom")
+            connection = sqlite3.connect(state_path)
+            try:
+                providers = dict(connection.execute("SELECT id, model_provider FROM threads"))
+            finally:
+                connection.close()
+            self.assertEqual(providers["thread-official"], "openai")
+            self.assertEqual(providers["thread-existing-custom"], "custom")
+            self.assertEqual(providers["thread-new-custom"], "custom")
+
+    def test_repair_history_bucket_can_restore_ledger_confirmed_custom_rows_to_openai(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            official_file = sessions_dir / "rollout-official.jsonl"
+            official_file.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "thread-official",
+                            "model_provider": "custom",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            third_party_file = sessions_dir / "rollout-third-party.jsonl"
+            third_party_file.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "thread-third-party",
+                            "model_provider": "custom",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-official', 'custom', 'gpt-5.5', ?)",
+                    (str(official_file),),
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-third-party', 'custom', 'kimi-k2.7-code', ?)",
+                    (str(third_party_file),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            ledger_root = codex_dir / "migration-ledger"
+            ledger_root.mkdir()
+            (ledger_root / "ledger.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "mode": "migrate-official-to-unified",
+                        "target_provider": "custom",
+                        "created_at": "2026-07-04T00:00:00Z",
+                        "codex_dir": str(codex_dir),
+                        "state": [{"thread_ids": ["thread-official"]}],
+                        "jsonl": [
+                            {
+                                "status": "applied",
+                                "path": "sessions/rollout-official.jsonl",
+                                "session_id": "thread-official",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = repair_history_bucket(codex_dir, codex_dir / "repair", "openai", ledger_root)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["state_rows"], 1)
+            self.assertEqual(result["state_model_rows"], 0)
+            self.assertEqual(result["jsonl_restored"], 1)
+            connection = sqlite3.connect(state_path)
+            try:
+                rows = {
+                    row[0]: (row[1], row[2])
+                    for row in connection.execute("SELECT id, model_provider, model FROM threads")
+                }
+            finally:
+                connection.close()
+            self.assertEqual(rows["thread-official"], ("openai", "gpt-5.5"))
+            self.assertEqual(rows["thread-third-party"], ("custom", "kimi-k2.7-code"))
+            official_first = json.loads(official_file.read_text(encoding="utf-8").splitlines()[0])
+            third_party_first = json.loads(third_party_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(official_first["payload"]["model_provider"], "openai")
+            self.assertEqual(third_party_first["payload"]["model_provider"], "custom")
 
 
 if __name__ == "__main__":

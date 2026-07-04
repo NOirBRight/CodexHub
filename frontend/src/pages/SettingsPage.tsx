@@ -1,4 +1,4 @@
-import { RefreshCcw, Save } from "lucide-react";
+import { RefreshCw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, messageFromError } from "../lib/tauri";
 import type { Settings } from "../lib/types";
@@ -39,6 +39,42 @@ export function SettingsPage() {
     }
   }
 
+  async function toggleUnifiedHistory(enabled: boolean) {
+    if (!settings) {
+      return;
+    }
+    setBusy("history");
+    try {
+      const saved = await api.saveSettings({ ...settings, unified_codex_history: enabled });
+      const historyMessage = enabled
+        ? await api.migrateOfficialHistoryToUnified()
+        : await api.restoreOfficialHistoryFromUnified();
+      setSettings(saved);
+      setMessage(historyMessage);
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function repairHistory() {
+    if (!settings) {
+      return;
+    }
+    setBusy("history");
+    try {
+      const targetProvider = settings.unified_codex_history ? "custom" : "openai";
+      setMessage(await api.syncHistory(targetProvider));
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function toggleAutostart(enabled: boolean) {
     if (!settings) {
       return;
@@ -57,18 +93,6 @@ export function SettingsPage() {
     }
   }
 
-  async function syncNow() {
-    setBusy("sync");
-    try {
-      setMessage(await api.syncHistory());
-      setError(null);
-    } catch (err) {
-      setError(messageFromError(err));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   if (!settings) {
     return (
       <main className="rounded-md border border-line bg-white p-6 text-sm text-slate-500">
@@ -82,11 +106,6 @@ export function SettingsPage() {
       <section className="rounded-md border border-line bg-white p-4 shadow-subtle">
         <div className="grid gap-4 md:grid-cols-2">
           <Toggle
-            label="Auto-sync history"
-            checked={settings.auto_sync_history}
-            onChange={(value) => void save({ ...settings, auto_sync_history: value })}
-          />
-          <Toggle
             label="Auto-start proxy"
             checked={settings.auto_start_proxy}
             onChange={(value) => void toggleAutostart(value)}
@@ -95,6 +114,11 @@ export function SettingsPage() {
             label="Include official models"
             checked={settings.include_official_models}
             onChange={(value) => void save({ ...settings, include_official_models: value })}
+          />
+          <Toggle
+            label="Unified Codex history"
+            checked={settings.unified_codex_history}
+            onChange={(value) => void toggleUnifiedHistory(value)}
           />
           <Toggle
             label="Auto-sync bound clients"
@@ -149,12 +173,12 @@ export function SettingsPage() {
           </button>
           <button
             type="button"
-            className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold"
-            disabled={busy === "sync"}
-            onClick={() => void syncNow()}
+            className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+            disabled={Boolean(busy)}
+            onClick={() => void repairHistory()}
           >
-            <RefreshCcw size={16} />
-            Sync now
+            <RefreshCw size={16} />
+            Repair history bucket
           </button>
         </div>
       </section>

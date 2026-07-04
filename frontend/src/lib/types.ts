@@ -69,6 +69,8 @@ export interface AppStatus {
   proxy_port: number;
   proxy_build?: string | null;
   message: string;
+  history_sync_status?: string | null;
+  history_sync_message?: string | null;
 }
 
 export interface GatewayStatus {
@@ -140,6 +142,21 @@ export interface GatewayUsageEvent {
   total_tokens?: number | null;
   cached_input_tokens?: number | null;
   reasoning_tokens?: number | null;
+}
+
+export interface TelemetryStatus {
+  event_log_size: number;
+  indexed_offset: number;
+  lag_bytes: number;
+  backfill_pending: boolean;
+  last_indexed_at?: string | null;
+  last_error?: string | null;
+}
+
+export interface GatewayUsageSnapshot {
+  summary: GatewayUsageSummary;
+  events: GatewayUsageEvent[];
+  telemetry_status: TelemetryStatus;
 }
 
 export interface UsageQueryWindow {
@@ -258,6 +275,7 @@ export interface SubagentMatrixRow {
 
 export interface Settings {
   auto_sync_history: boolean;
+  unified_codex_history: boolean;
   auto_start_proxy: boolean;
   include_official_models: boolean;
   auto_sync_catalog: boolean;
