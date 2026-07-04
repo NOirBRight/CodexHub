@@ -271,6 +271,7 @@ DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
 RETRY_REQUEST_MAIN_GENERATION = "main_generation"
 RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
+RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
 TRANSIENT_HTTP_RETRY_STATUSES = {408, 409, 421, 425, 429, 500, 502, 503, 504}
 PERMANENT_HTTP_ERROR_STATUSES = {
     400,
@@ -502,6 +503,15 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     payload = dict(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
+
+
+def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
+    payload = dict(context)
+    existing = payload.get("request_kind")
+    if isinstance(existing, str) and existing and existing != request_kind:
+        payload.setdefault("client_request_kind", existing)
+    payload["request_kind"] = request_kind
+    return payload
 
 
 def load_routing_config(path: Path = POLICY_PATH) -> dict[str, Any]:
@@ -3195,6 +3205,7 @@ def compatible_request_body(
     upstream: Mapping[str, Any],
     model_id: str | None = None,
     event_context: Mapping[str, Any] | None = None,
+    inject_codex_tools: bool = True,
 ) -> bytes:
     try:
         payload = json.loads(body.decode("utf-8-sig"))
@@ -3286,29 +3297,30 @@ def compatible_request_body(
             model=payload.get("model") if isinstance(payload.get("model"), str) else None,
         )
         changed = True
-    tool_names_before = _function_tool_names(payload.get("tools"))
-    if _inject_explicit_codex_tools(
-        payload,
-        include_tool_search=include_tool_search,
-        include_multi_agent_tools=not lifecycle_complete,
-        include_spawn_agent=include_spawn_agent,
-        include_wait_agent=include_wait_agent,
-        include_close_agent=include_close_agent,
-        include_node_repl_tools=not node_repl_single_step_complete,
-        open_agent_ids=open_agent_ids,
-        wait_agent_ids=wait_agent_ids,
-        close_agent_ids=close_agent_ids,
-    ):
-        added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
-        _write_adapter_event(
-            event_context,
-            "explicit_codex_tools_injected",
-            upstream=upstream_name,
-            model=payload.get("model") if isinstance(payload.get("model"), str) else None,
-            added_tool_count=len(added_tool_names),
-            added_tool_names=added_tool_names,
-        )
-        changed = True
+    if inject_codex_tools:
+        tool_names_before = _function_tool_names(payload.get("tools"))
+        if _inject_explicit_codex_tools(
+            payload,
+            include_tool_search=include_tool_search,
+            include_multi_agent_tools=not lifecycle_complete,
+            include_spawn_agent=include_spawn_agent,
+            include_wait_agent=include_wait_agent,
+            include_close_agent=include_close_agent,
+            include_node_repl_tools=not node_repl_single_step_complete,
+            open_agent_ids=open_agent_ids,
+            wait_agent_ids=wait_agent_ids,
+            close_agent_ids=close_agent_ids,
+        ):
+            added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
+            _write_adapter_event(
+                event_context,
+                "explicit_codex_tools_injected",
+                upstream=upstream_name,
+                model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                added_tool_count=len(added_tool_names),
+                added_tool_names=added_tool_names,
+            )
+            changed = True
     model_id = payload.get("model")
     max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
     if max_output_tokens is not None:
@@ -3884,7 +3896,13 @@ def _call_vision_model_for_image_description(
     vision_context["image_proxy"] = True
     vision_context["vision_model"] = canonical_model_id(vision_model)
     try:
-        body = compatible_request_body(body, vision_upstream, model_id=vision_model, event_context=vision_context)
+        body = compatible_request_body(
+            body,
+            vision_upstream,
+            model_id=vision_model,
+            event_context=vision_context,
+            inject_codex_tools=False,
+        )
         upstream_format = str(vision_upstream.get("upstream_format", "responses"))
         upstream_url = _responses_url(vision_upstream, "/v1/responses")
         if upstream_format == "chat_completions":
@@ -4295,6 +4313,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
+        proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_MAIN_GENERATION)
         model = None
         model_requested = None
         upstream_name = None
@@ -4355,12 +4374,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 content_decoded=content_decoded,
                 decode_error=decode_error[:160] if decode_error else None,
                 **request_observability,
-                **request_context,
+                **proxy_request_context,
             )
             adapter_event_context = {
                 "request_id": request_id,
                 "model": model_canonical,
-                **request_context,
+                **proxy_request_context,
             }
             usage_capture: dict[str, Any] = {}
             body = compatible_request_body(body, upstream, model_id=model, event_context=adapter_event_context)
@@ -4391,6 +4410,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     self._send_sse_headers(200, upstream_name)
                     downstream_sse_started = True
                 self._write_sse_event("codexhub.retry", payload)
+                notice_fields = dict(proxy_request_context)
+                notice_fields.update(
+                    {
+                        "request_id": request_id,
+                        "model": model_canonical,
+                        "model_requested": model_requested,
+                        "model_canonical": model_canonical,
+                        "upstream": upstream_name,
+                        "provider_id": upstream_name,
+                        "upstream_format": upstream_format,
+                        "route_reason": route_reason,
+                        "route_mode": "official" if upstream_name == "official" else "codexhub",
+                        "inbound_format": inbound_format,
+                        "is_stream": caller_stream,
+                    }
+                )
+                retry_payload = dict(payload)
+                retry_payload.pop("type", None)
+                notice_fields.update(retry_payload)
+                write_proxy_event("sse_retry_notice", **notice_fields)
 
             relay_attempts = _upstream_retry_attempts()
             for relay_attempt in range(1, relay_attempts + 1):
@@ -4464,7 +4503,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_observability,
                 **usage_capture,
-                **request_context,
+                **proxy_request_context,
             )
         except ImageProxyError as exc:
             write_proxy_event(
@@ -4480,7 +4519,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=str(exc)[:300],
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             self._safe_send_json(502, {"error": "image_proxy_error", "detail": str(exc)}, request_id)
         except ValueError as exc:
@@ -4497,7 +4536,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=str(exc)[:300],
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             self._safe_send_json(400, {"error": str(exc)}, request_id)
         except HTTPError as exc:
@@ -4513,14 +4552,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error="HTTPError",
                     detail=safe_upstream_error_detail(exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
-                    **request_context,
+                    **proxy_request_context,
                 )
                 return
             try:
                 adapter_event_context = {
                     "request_id": request_id,
                     "model": canonical_model_id(model) if model else None,
-                    **request_context,
+                    **proxy_request_context,
                 }
                 status = self._relay_upstream_response(
                     exc,
@@ -4543,7 +4582,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error=type(relay_exc).__name__,
                     detail=safe_upstream_error_detail(relay_exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
-                    **request_context,
+                    **proxy_request_context,
                 )
                 return
             write_proxy_event(
@@ -4556,7 +4595,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error="HTTPError",
                 detail=safe_upstream_error_detail(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
         except IncompleteRead as exc:
             detail = safe_upstream_error_detail(exc)
@@ -4570,7 +4609,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             if downstream_sse_started:
                 self._write_sse_error_event(upstream_name or "upstream_error", exc)
@@ -4588,7 +4627,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             if downstream_sse_started:
                 self._write_sse_error_event(upstream_name or "upstream_error", exc)
@@ -4606,7 +4645,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             if downstream_sse_started:
                 self._write_sse_error_event(upstream_name or "upstream_error", exc)
@@ -4689,6 +4728,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
+        proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_OFFICIAL_CONTROL)
         upstream = official_upstream()
         upstream_name = upstream["name"]
 
@@ -4701,15 +4741,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 content_length=0,
-                **request_context,
+                **proxy_request_context,
             )
             request = Request(_responses_url(upstream, self.path), headers=headers, method=method)
             adapter_event_context = {
                 "request_id": request_id,
                 "model": None,
-                **request_context,
+                **proxy_request_context,
             }
             with _open_upstream_response(
                 request,
@@ -4717,7 +4757,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format="responses",
                 timeout=upstream_timeout_seconds(),
                 event_context=adapter_event_context,
-                request_kind="official_control",
+                request_kind=RETRY_REQUEST_OFFICIAL_CONTROL,
             ) as response:
                 status = self._relay_upstream_response(response, upstream_name, request_id=request_id, model=None)
             write_proxy_event(
@@ -4726,10 +4766,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 status=status,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
         except HTTPError as exc:
             try:
@@ -4742,12 +4782,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     method=method,
                     model=None,
                     upstream=upstream_name,
-                    route_reason="official_control",
+                    route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                     status=getattr(exc, "code", 502),
                     error=type(relay_exc).__name__,
                     detail=safe_upstream_error_detail(relay_exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
-                    **request_context,
+                    **proxy_request_context,
                 )
                 return
             write_proxy_event(
@@ -4756,12 +4796,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 status=status,
                 error="HTTPError",
                 detail=safe_upstream_error_detail(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
         except (OSError, URLError) as exc:
             detail = safe_upstream_error_detail(exc)
@@ -4771,12 +4811,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 method=method,
                 model=None,
                 upstream=upstream_name,
-                route_reason="official_control",
+                route_reason=RETRY_REQUEST_OFFICIAL_CONTROL,
                 status=502,
                 error=type(exc).__name__,
                 detail=detail,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
-                **request_context,
+                **proxy_request_context,
             )
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
 

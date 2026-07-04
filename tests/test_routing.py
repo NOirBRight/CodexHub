@@ -73,6 +73,12 @@ class FakeSseResponse:
     def readline(self):
         return self.lines.pop(0)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return None
+
 
 class FakeResponse:
     status = 200
@@ -469,6 +475,204 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 1)
         mock_sleep.assert_not_called()
 
+    def test_post_responses_streaming_emits_downstream_retry_notice_before_success(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":{"type":"server_error","message":"try later"}}'),
+        )
+        success = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_retry","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+                b'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(2)
+        self.assertEqual(fake.status, 200)
+        written = b"".join(fake.wfile.writes)
+        retry_index = written.index(b"event: codexhub.retry\n")
+        model_index = written.index(b"response.output_text.delta")
+        self.assertLess(retry_index, model_index)
+        self.assertIn(b'"request_kind":"main_generation"', written)
+        notice_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "sse_retry_notice"
+        ]
+        self.assertEqual(len(notice_events), 1)
+        self.assertEqual(notice_events[0]["request_kind"], "main_generation")
+        self.assertEqual(notice_events[0]["status"], 503)
+        self.assertEqual(notice_events[0]["attempt"], 1)
+        self.assertEqual(notice_events[0]["max_attempts"], 2)
+
+    def test_post_responses_error_event_uses_proxy_request_kind(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "x-codex-client-metadata": json.dumps({
+                "request_kind": "turn",
+                "turn_id": "turn-error",
+            }),
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            400,
+            "Bad Request",
+            {"Content-Type": "application/json"},
+            io.BytesIO(b'{"error":{"type":"invalid_request_error","message":"bad request"}}'),
+        )
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1"}, clear=False),
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        error_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_error"
+        ]
+        self.assertEqual(len(error_events), 1)
+        self.assertEqual(error_events[0]["request_kind"], "main_generation")
+        self.assertEqual(error_events[0]["client_request_kind"], "turn")
+        self.assertEqual(error_events[0]["turn_id"], "turn-error")
+        self.assertEqual(error_events[0]["status"], 400)
+        retry_events = [
+            call for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(retry_events, [])
+
+    def test_official_control_events_use_official_request_kind(self):
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses/resp_control"
+        handler.headers = {
+            "x-codex-client-metadata": json.dumps({
+                "request_kind": "poll",
+                "thread_id": "thread-control",
+            }),
+        }
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(b'{"id":"resp_control"}')),
+        ):
+            CodexProxyHandler.do_GET(handler)
+
+        events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
+        request_start = next(fields for event, fields in events if event == "request_start")
+        request_complete = next(fields for event, fields in events if event == "request_complete")
+        for fields in (request_start, request_complete):
+            self.assertEqual(fields["request_kind"], "official_control")
+            self.assertEqual(fields["client_request_kind"], "poll")
+            self.assertEqual(fields["thread_id"], "thread-control")
+            self.assertEqual(fields["route_reason"], "official_control")
+
+    def test_official_control_error_event_uses_official_request_kind(self):
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses/resp_control"
+        handler.headers = {
+            "x-codex-client-metadata": json.dumps({
+                "request_kind": "poll",
+                "thread_id": "thread-control",
+            }),
+        }
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        error = HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses/resp_control",
+            502,
+            "Bad Gateway",
+            {"Content-Type": "application/json"},
+            io.BytesIO(b'{"error":{"type":"server_error","message":"bad gateway"}}'),
+        )
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.urlopen", side_effect=error),
+        ):
+            CodexProxyHandler.do_GET(handler)
+
+        error_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_error"
+        ]
+        self.assertEqual(len(error_events), 1)
+        self.assertEqual(error_events[0]["request_kind"], "official_control")
+        self.assertEqual(error_events[0]["client_request_kind"], "poll")
+        self.assertEqual(error_events[0]["thread_id"], "thread-control")
+        self.assertEqual(error_events[0]["route_reason"], "official_control")
+        self.assertEqual(error_events[0]["status"], 502)
+
     def test_image_proxy_replaces_images_for_text_only_target_model(self):
         payload = {
             "model": "volc/glm-5.2",
@@ -569,6 +773,36 @@ class RoutingTests(unittest.TestCase):
                 )
 
         self.assertIn("Vision model is not configured", str(context.exception))
+
+    def test_image_proxy_vision_request_does_not_inject_codex_tools(self):
+        response_body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "A small attachment thumbnail."}],
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+        ):
+            description = codex_proxy._call_vision_model_for_image_description(
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                "minimax-cn/MiniMax-M3",
+                upstream,
+                event_context={"request_id": "req_img", "image_proxy": True},
+            )
+
+        self.assertEqual(description, "A small attachment thumbnail.")
+        request = mock_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "MiniMax-M3")
+        self.assertNotIn("tools", payload)
 
     def test_image_proxy_cache_hit_avoids_repeated_vision_call_and_raw_image_storage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -894,6 +1128,22 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(context["turn_id"], "turn-meta")
         self.assertEqual(context["thread_id"], "thread-meta")
+        self.assertEqual(context["request_kind"], "turn")
+
+    def test_event_context_with_request_kind_preserves_client_request_kind(self):
+        context = {
+            "request_kind": "turn",
+            "turn_id": "turn-meta",
+        }
+
+        event_context = codex_proxy._event_context_with_request_kind(
+            context,
+            codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+        )
+
+        self.assertEqual(event_context["request_kind"], "main_generation")
+        self.assertEqual(event_context["client_request_kind"], "turn")
+        self.assertEqual(event_context["turn_id"], "turn-meta")
         self.assertEqual(context["request_kind"], "turn")
 
     def test_upstream_timeout_defaults_and_env_override(self):
