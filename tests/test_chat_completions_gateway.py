@@ -372,9 +372,8 @@ class _FakeHandler:
 
 
 class _FakeJsonResponse:
-    status = 200
-
-    def __init__(self, body):
+    def __init__(self, body, status=200):
+        self.status = status
         self.headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
         self._body = body
         self._read = False
@@ -404,7 +403,10 @@ class _FakeSseResponse:
         self._lines = list(lines)
 
     def readline(self):
-        return self._lines.pop(0)
+        line = self._lines.pop(0)
+        if isinstance(line, BaseException):
+            raise line
+        return line
 
     def __enter__(self):
         return self
@@ -702,6 +704,112 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(first_chunk["choices"][0]["delta"], {"role": "assistant"})
         # Last line should be [DONE]
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
+
+    def test_post_chat_completions_streaming_reports_upstream_retry_to_downstream(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        sse_lines = [
+            b'data: {"type":"response.created","response":{"id":"resp_s","model":"gpt-5.5"}}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.delta","delta":"Recovered"}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_s","model":"gpt-5.5","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=[URLError(TimeoutError("connect timed out")), _FakeSseResponse(sse_lines)],
+            ) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"event: codexhub.retry\n", written)
+        self.assertIn(b'"attempt":1', written)
+        self.assertIn(b'"max_attempts":2', written)
+        self.assertIn(b"Recovered", written)
+        self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
+
+    def test_post_chat_completions_streaming_keeps_retry_and_final_error_in_sse(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({"error": "upstream returned json"}).encode("utf-8")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body, status=502)],
+            ),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"event: codexhub.retry\n", written)
+        self.assertIn(b"event: error\n", written)
+        self.assertIn(b'"type":"upstream_stream_error"', written)
+        self.assertIn(b'"error":"UpstreamProtocolError"', written)
+        self.assertNotIn(upstream_body, written)
+        self.assertFalse(written.rstrip().endswith(b"data: [DONE]"))
+
+    def test_post_chat_completions_streaming_reports_read_errors_as_sse_error_not_empty_finish(self):
+        cases = [
+            TimeoutError("The read operation timed out"),
+            OSError("socket reset"),
+            URLError(TimeoutError("upstream timed out")),
+        ]
+        for exc in cases:
+            with self.subTest(error=type(exc).__name__):
+                body = json.dumps({
+                    "model": "gpt-5.5",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                }).encode("utf-8")
+                handler = self._make_handler(body)
+                sse_lines = [
+                    b'data: {"type":"response.created","response":{"id":"resp_s","model":"gpt-5.5"}}\n',
+                    b'\n',
+                    exc,
+                ]
+
+                with patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)):
+                    CodexProxyHandler.do_POST(handler)
+
+                written = b"".join(handler.wfile.writes)
+                self.assertIn(b"event: error\n", written)
+                self.assertIn(b'"type":"upstream_stream_error"', written)
+                self.assertIn(f'"error":"{type(exc).__name__}"'.encode("utf-8"), written)
+                self.assertNotIn(b"finish_reason", written)
+                self.assertFalse(written.rstrip().endswith(b"data: [DONE]"))
 
     def test_post_chat_completions_404_for_unknown_path(self):
         handler = self._make_handler(b'{}', path="/v1/unknown")

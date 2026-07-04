@@ -3715,6 +3715,47 @@ def _emit_upstream_retry_event(
     )
 
 
+def _downstream_retry_payload(
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    attempt: int,
+    max_attempts: int,
+    exc: BaseException,
+    delay_seconds: int,
+) -> dict[str, Any]:
+    return {
+        "type": "codexhub.retry",
+        "upstream": upstream_name,
+        "upstream_format": upstream_format,
+        "status": _upstream_retry_status(exc),
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "delay_ms": delay_seconds * 1000,
+        "error": type(exc).__name__,
+        "detail": safe_upstream_error_detail(exc),
+    }
+
+
+def _downstream_stream_error_payload(
+    *,
+    upstream_name: str,
+    status: int = 502,
+    exc: BaseException | None = None,
+    error: str | None = None,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    error_type = error or (type(exc).__name__ if exc is not None else "UpstreamStreamError")
+    error_detail = detail or (safe_upstream_error_detail(exc) if exc is not None else "")
+    return {
+        "type": "upstream_stream_error",
+        "status": status,
+        "upstream": upstream_name,
+        "error": error_type,
+        "detail": error_detail,
+    }
+
+
 def _open_upstream_response(
     request: Request,
     *,
@@ -3722,6 +3763,7 @@ def _open_upstream_response(
     upstream_format: str,
     timeout: int,
     event_context: Mapping[str, Any] | None = None,
+    downstream_retry_callback: Any = None,
 ) -> Any:
     max_attempts = _upstream_retry_attempts()
     for attempt in range(1, max_attempts + 1):
@@ -3740,6 +3782,17 @@ def _open_upstream_response(
                 exc=exc,
                 delay_seconds=delay_seconds,
             )
+            if downstream_retry_callback is not None:
+                downstream_retry_callback(
+                    _downstream_retry_payload(
+                        upstream_name=upstream_name,
+                        upstream_format=upstream_format,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        exc=exc,
+                        delay_seconds=delay_seconds,
+                    )
+                )
             time.sleep(delay_seconds)
     raise RuntimeError("unreachable upstream retry state")
 
@@ -3814,6 +3867,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         model_requested = None
         upstream_name = None
         upstream_format = "responses"
+        downstream_sse_started = False
 
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -3895,6 +3949,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_url = _chat_completions_url(upstream)
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
             request = Request(upstream_url, data=body, headers=headers, method="POST")
+
+            def emit_downstream_retry(payload: Mapping[str, Any]) -> None:
+                nonlocal downstream_sse_started
+                if not caller_stream:
+                    return
+                if not downstream_sse_started:
+                    self._send_sse_headers(200, upstream_name)
+                    downstream_sse_started = True
+                self._write_sse_event("codexhub.retry", payload)
+
             relay_attempts = _upstream_retry_attempts()
             for relay_attempt in range(1, relay_attempts + 1):
                 try:
@@ -3904,6 +3968,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         timeout=upstream_timeout_seconds(),
                         event_context=adapter_event_context,
+                        downstream_retry_callback=emit_downstream_retry if caller_stream else None,
                     ) as response:
                         status = self._relay_upstream_response(
                             response,
@@ -3915,6 +3980,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             caller_stream=caller_stream,
                             event_context=adapter_event_context,
                             usage_capture=usage_capture,
+                            headers_already_sent=downstream_sse_started,
                         )
                     break
                 except IncompleteRead as exc:
@@ -3929,6 +3995,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         max_attempts=relay_attempts,
                         exc=exc,
                         delay_seconds=delay_seconds,
+                    )
+                    emit_downstream_retry(
+                        _downstream_retry_payload(
+                            upstream_name=upstream_name,
+                            upstream_format=upstream_format,
+                            attempt=relay_attempt,
+                            max_attempts=relay_attempts,
+                            exc=exc,
+                            delay_seconds=delay_seconds,
+                        )
                     )
                     time.sleep(delay_seconds)
             else:
@@ -3989,6 +4065,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             self._safe_send_json(400, {"error": str(exc)}, request_id)
         except HTTPError as exc:
+            if downstream_sse_started:
+                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                write_proxy_event(
+                    "request_error",
+                    request_id=request_id,
+                    model=canonical_model_id(model) if model else None,
+                    upstream=upstream_name,
+                    upstream_format=upstream_format,
+                    status=getattr(exc, "code", 502),
+                    error="HTTPError",
+                    detail=safe_upstream_error_detail(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                    **request_context,
+                )
+                return
             try:
                 adapter_event_context = {
                     "request_id": request_id,
@@ -4044,6 +4135,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
+            if downstream_sse_started:
+                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                return
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
         except (OSError, URLError) as exc:
             detail = safe_upstream_error_detail(exc)
@@ -4059,6 +4153,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
+            if downstream_sse_started:
+                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                return
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
         except Exception as exc:
             detail = safe_upstream_error_detail(exc)
@@ -4074,6 +4171,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
+            if downstream_sse_started:
+                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                return
             self._safe_send_json(500, {"error": type(exc).__name__, "detail": detail}, request_id)
 
     def _send_local_responses_no_content(self) -> None:
@@ -4250,6 +4350,40 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse_headers(self, status: int, upstream_name: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _write_sse_event(self, event: str, payload: Mapping[str, Any]) -> None:
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        self.wfile.write(
+            b"data: "
+            + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            + b"\n\n"
+        )
+        self.wfile.flush()
+
+    def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:
+        self._write_sse_event(
+            "error",
+            _downstream_stream_error_payload(upstream_name=upstream_name, exc=exc),
+        )
+
+    def _write_sse_protocol_error_event(self, upstream_name: str, status: int, detail: str) -> None:
+        self._write_sse_event(
+            "error",
+            _downstream_stream_error_payload(
+                upstream_name=upstream_name,
+                status=status,
+                error="UpstreamProtocolError",
+                detail=detail,
+            ),
+        )
+
     def _safe_send_json(self, status: int, payload: dict[str, Any], request_id: str) -> None:
         try:
             self._send_json(status, payload)
@@ -4274,6 +4408,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         caller_stream: bool = True,
         event_context: Mapping[str, Any] | None = None,
         usage_capture: dict[str, Any] | None = None,
+        headers_already_sent: bool = False,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -4324,35 +4459,60 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             else:
                 body = compatible_response_body(body, upstream_name, event_context=event_context)
             _capture_usage(usage_capture, _usage_from_json_body(body))
+            if headers_already_sent:
+                self._write_sse_protocol_error_event(
+                    upstream_name,
+                    status,
+                    f"upstream returned non-SSE response after downstream SSE retry status: HTTP {status}",
+                )
+                self.close_connection = True
+                _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
+                return status
 
-        self.send_response(status)
-        content_length = None if is_event_stream else len(body)
-        for key, value in _filtered_response_headers(response.headers, is_event_stream, content_length):
-            self.send_header(key, value)
-        self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-        self.send_header("Connection", "close")
-        self.end_headers()
+        if not headers_already_sent:
+            self.send_response(status)
+            content_length = None if is_event_stream else len(body)
+            for key, value in _filtered_response_headers(response.headers, is_event_stream, content_length):
+                self.send_header(key, value)
+            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+            self.send_header("Connection", "close")
+            self.end_headers()
 
         if is_event_stream:
             if want_chat_output and upstream_format != "chat_completions":
                 # Upstream returns Responses SSE; convert to Chat Completions SSE.
                 line_ending = b"\n"
                 events: list[Mapping[str, Any]] = []
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
-                    line_ending = _sse_line_ending(line)
-                    payload_bytes = _sse_payload_bytes(line)
-                    if payload_bytes is None:
-                        continue
-                    try:
-                        event = json.loads(payload_bytes.decode("utf-8-sig"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(event, dict):
-                        events.append(event)
-                        _capture_usage(usage_capture, _usage_from_response_event(event))
+                try:
+                    while True:
+                        line = response.readline()
+                        if not line:
+                            break
+                        line_ending = _sse_line_ending(line)
+                        payload_bytes = _sse_payload_bytes(line)
+                        if payload_bytes is None:
+                            continue
+                        try:
+                            event = json.loads(payload_bytes.decode("utf-8-sig"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(event, dict):
+                            events.append(event)
+                            _capture_usage(usage_capture, _usage_from_response_event(event))
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_interrupted",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    self._write_sse_error_event(upstream_name, exc)
+                    _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                    return 502
                 for chunk in _response_events_to_chat_stream_chunks(events):
                     self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                     self.wfile.flush()
@@ -4365,21 +4525,36 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if upstream_format == "chat_completions":
                 line_ending = b"\n"
                 chunks: list[Mapping[str, Any]] = []
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
-                    line_ending = _sse_line_ending(line)
-                    payload_bytes = _sse_payload_bytes(line)
-                    if payload_bytes is None:
-                        continue
-                    try:
-                        payload = json.loads(payload_bytes.decode("utf-8-sig"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(payload, dict):
-                        chunks.append(payload)
-                        _capture_usage(usage_capture, _usage_from_payload(payload))
+                try:
+                    while True:
+                        line = response.readline()
+                        if not line:
+                            break
+                        line_ending = _sse_line_ending(line)
+                        payload_bytes = _sse_payload_bytes(line)
+                        if payload_bytes is None:
+                            continue
+                        try:
+                            payload = json.loads(payload_bytes.decode("utf-8-sig"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(payload, dict):
+                            chunks.append(payload)
+                            _capture_usage(usage_capture, _usage_from_payload(payload))
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_interrupted",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    self._write_sse_error_event(upstream_name, exc)
+                    _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                    return 502
                 if want_chat_output:
                     # Inbound and upstream are both Chat Completions; pass through.
                     for chunk in chunks:
@@ -4419,7 +4594,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
                     self.wfile.write(line)
                     self.wfile.flush()
-            except IncompleteRead as exc:
+            except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                 self.close_connection = True
                 write_proxy_event(
                     "upstream_stream_interrupted",
@@ -4430,6 +4605,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error=type(exc).__name__,
                     detail=safe_upstream_error_detail(exc),
                 )
+                self._write_sse_error_event(upstream_name, exc)
                 _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
             if upstream_name != "official" and reasoning_stats["seen"]:
