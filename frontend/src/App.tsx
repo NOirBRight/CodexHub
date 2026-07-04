@@ -244,7 +244,7 @@ export default function App() {
         updateToast(toastId, {
           action: null,
           text: runtimeActionSuccessMessage(label),
-          tone: "message",
+          tone: "success",
         });
       }
       await loadRuntime();

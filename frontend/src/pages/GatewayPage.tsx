@@ -165,6 +165,26 @@ export function GatewayPage({
     });
   }
 
+  function updateToastWithError(toastId: string, err: unknown) {
+    const text = messageFromError(err);
+    if (isBackendDisconnectedMessage(text)) {
+      updateToast(toastId, {
+        action: {
+          label: "Start",
+          onClick: () => void startBackendFromToast(toastId),
+        },
+        text: "Backend is not connected",
+        tone: "error",
+      });
+      return;
+    }
+    updateToast(toastId, {
+      action: null,
+      text,
+      tone: "error",
+    });
+  }
+
   async function startBackendFromToast(toastId?: string) {
     setClientRefreshBusy(true);
     const activeToastId = toastId ?? showToast("Starting backend...", "loading");
@@ -179,14 +199,10 @@ export function GatewayPage({
       updateToast(activeToastId, {
         action: null,
         text: "Backend started",
-        tone: "message",
+        tone: "success",
       });
     } catch (err) {
-      updateToast(activeToastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
+      updateToastWithError(activeToastId, err);
     } finally {
       setClientRefreshBusy(false);
     }
@@ -240,15 +256,11 @@ export function GatewayPage({
       updateToast(toastId, {
         action: null,
         text: message,
-        tone: "message",
+        tone: "success",
       });
       setError(null);
     } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
+      updateToastWithError(toastId, err);
     }
   }
 
@@ -274,15 +286,11 @@ export function GatewayPage({
       updateToast(toastId, {
         action: null,
         text: `${clientName} switched to ${routeName}`,
-        tone: "message",
+        tone: "success",
       });
       setError(null);
     } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
+      updateToastWithError(toastId, err);
     } finally {
       setClientBusy(null);
     }
@@ -296,15 +304,11 @@ export function GatewayPage({
       updateToast(toastId, {
         action: null,
         text: "Gateway clients refreshed",
-        tone: "message",
+        tone: "success",
       });
       setError(null);
     } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
+      updateToastWithError(toastId, err);
     } finally {
       setClientRefreshBusy(false);
     }
@@ -328,14 +332,10 @@ export function GatewayPage({
         updateToast(toastId, {
           action: null,
           text: "Gateway runtime stopped",
-          tone: "message",
+          tone: "success",
         });
       } catch (err) {
-        updateToast(toastId, {
-          action: null,
-          text: messageFromError(err),
-          tone: "error",
-        });
+        updateToastWithError(toastId, err);
       }
       return;
     }
@@ -344,14 +344,10 @@ export function GatewayPage({
       updateToast(toastId, {
         action: null,
         text: "Gateway runtime started",
-        tone: "message",
+        tone: "success",
       });
     } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
+      updateToastWithError(toastId, err);
     }
   }
 

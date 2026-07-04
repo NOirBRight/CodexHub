@@ -11,6 +11,7 @@ const indexCssPath = new URL("../src/index.css", import.meta.url);
 const pageToastPath = new URL("../src/components/PageToast.tsx", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
 const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
+const settingsLibPath = new URL("../src/lib/settings.ts", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
 const sortableListPath = new URL("../src/components/SortableList.tsx", import.meta.url);
 const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
@@ -318,7 +319,7 @@ test("gateway client route switching reports completion", async () => {
   assert.match(gatewaySource, /Switching \$\{clientName\} to \$\{routeName\}/);
   assert.match(gatewaySource, /showToast\(`Switching \$\{clientName\} to \$\{routeName\}\.\.\.`, "loading"\)/);
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
-  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: `\$\{clientName\} switched to \$\{routeName\}`,[\s\S]*tone: "message"/);
+  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: `\$\{clientName\} switched to \$\{routeName\}`,[\s\S]*tone: "success"/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -349,7 +350,18 @@ test("gateway toast uses the shared dismissible page toast", async () => {
   assert.match(mainSource, /<ToastProvider>/);
   assert.match(pageToastSource, /function ToastViewport/);
   assert.match(pageToastSource, /"fixed bottom-4 left-4 z-\[70\]/);
+  assert.match(pageToastSource, /flex-col gap-2/);
   assert.match(pageToastSource, /aria-label="Dismiss notification"/);
+  assert.match(pageToastSource, /toast\.tone === "success"[\s\S]*<CheckCircle2/);
+  assert.match(pageToastSource, /toast\.tone === "error"[\s\S]*<AlertCircle/);
+  assert.match(pageToastSource, /toast\.tone === "loading"[\s\S]*<RefreshCcw/);
+  assert.match(pageToastSource, /return 3000;/);
+  assert.match(pageToastSource, /toast\.action \|\| toast\.tone === "loading" \|\| toast\.tone === "error"/);
+  assert.match(pageToastSource, /function ToastItem\(\{ dismissToast, toast \}: ToastItemProps\)/);
+  assert.match(pageToastSource, /const dismissCurrentToast = useCallback\(\(\) => dismissToast\(toast\.id\), \[dismissToast, toast\.id\]\)/);
+  assert.match(pageToastSource, /\}, \[dismissToast, hasAction, toast\.id, toast\.timeoutMs, toast\.tone\]\);/);
+  assert.doesNotMatch(pageToastSource, /onDismiss=\{\(\) => dismissToast\(toast\.id\)\}/);
+  assert.doesNotMatch(pageToastSource, /\[onDismiss, toast\]/);
 });
 
 test("gateway client version refresh uses a persistent loading toast", async () => {
@@ -357,7 +369,7 @@ test("gateway client version refresh uses a persistent loading toast", async () 
 
   assert.match(gatewaySource, /showToast\("Refreshing gateway clients and checking versions\.\.\.", "loading"\)/);
   assert.match(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)/);
-  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: "Gateway clients refreshed",[\s\S]*tone: "message"/);
+  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: "Gateway clients refreshed",[\s\S]*tone: "success"/);
 });
 
 test("settings drawer hides non-functional route and endpoint toggles", async () => {
@@ -379,6 +391,19 @@ test("settings exposes bound client auto-sync instead of catalog auto-sync", asy
   assert.match(drawerSource, /auto_sync_clients/);
   assert.doesNotMatch(drawerSource, /Auto-sync catalog/);
   assert.match(settingsSource, /Auto-sync bound clients/);
+});
+
+test("settings normalization restores default-on fields when persisted settings omit them", async () => {
+  const [settingsSource, tauriSource] = await Promise.all([
+    readFile(settingsLibPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+  ]);
+
+  assert.match(settingsSource, /unified_codex_history:\s*true/);
+  assert.match(settingsSource, /unified_codex_history:\s*source\.unified_codex_history \?\? DEFAULT_SETTINGS\.unified_codex_history/);
+  assert.match(settingsSource, /source\.auto_sync_clients\s*\?\?\s*source\.auto_sync_catalog\s*\?\?\s*DEFAULT_SETTINGS\.auto_sync_clients/s);
+  assert.match(tauriSource, /getSettings: async \(\) => normalizeSettings\(await call<Partial<Settings>>\("get_settings"\)\)/);
+  assert.match(tauriSource, /settings: normalizeSettings\(settings\)/);
 });
 
 test("settings drawer hides the local client key without adapter explainer copy", async () => {
@@ -600,14 +625,15 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.match(link, /connected[\s\S]*\? "border-emerald-500 bg-emerald-500 shadow-\[0_0_0_4px_rgba\(16,185,129,0\.16\)\]"[\s\S]*: "border-slate-300 bg-surface"/);
   assert.doesNotMatch(link, /border-dashed/);
 
-  // Cards no longer reserve space for protruding wires.
+  // Cards no longer reserve space for protruding wires or toast layout.
   assert.match(providersSource, /rounded-panel p-3 shadow-card/);
   assert.doesNotMatch(providersSource, /rounded-panel p-3 pb-8 shadow-card/);
-  assert.match(providersSource, /toastVisible=\{Boolean\(toast\)\}/);
-  assert.match(providersSource, /toastVisible: boolean;/);
+  assert.doesNotMatch(providersSource, /toastVisible=\{Boolean\(toast\)\}/);
+  assert.doesNotMatch(providersSource, /toastVisible: boolean;/);
   assert.match(providersSource, /grid h-full min-h-0 grid-rows-\[auto_auto_minmax\(0,1fr\)_auto\] gap-3 overflow-hidden rounded-panel px-3 pt-3 shadow-card/);
   assert.doesNotMatch(providersSource, /px-3 pt-8 shadow-card/);
-  assert.match(providersSource, /toastVisible \? "pb-16" : "pb-3"/);
+  assert.doesNotMatch(providersSource, /toastVisible \? "pb-16" : "pb-3"/);
+  assert.doesNotMatch(providersSource, /pb-16/);
 
   // Softened upward flow animation.
   assert.match(providersSource, /codexhub-flow-beam/);
@@ -654,20 +680,23 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.ok(action.indexOf("showToast(`${actionLabel}...`, \"loading\");") < action.indexOf("api.switchMode("));
   assert.match(action, /api\.switchMode\(nextMode, false\)/);
   assert.match(action, /setConnectionPreview\(null\);/);
-  assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPreview\(nextMode === "custom"\);[\s\S]*setError\(message\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPreview\(nextMode === "custom"\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(providersSource, /function updateToastWithError\(toastId: string, err: unknown\)[\s\S]*label: "Start"[\s\S]*startBackendFromToast\(toastId\)/);
   assert.doesNotMatch(action, /historyHint/);
-  assert.match(action, /showToast\(codexHubConnectionSuccessMessage\(nextMode\), "success"\)/);
+  assert.match(action, /updateToast\(toastId,[\s\S]*text: codexHubConnectionSuccessMessage\(nextMode\),[\s\S]*tone: "success"/);
   assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
 
-test("background history repair is silent on success and only reports failures", async () => {
+test("background history repair reports progress and settles the same toast", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const repair = providersSource.match(/async function repairUnifiedHistoryInBackground[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
+  assert.match(repair, /const toastId = showToast\("Repairing history bucket\.\.\.", "loading"\)/);
   assert.match(repair, /await api\.syncHistory\(targetProvider\)/);
+  assert.match(repair, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "success"/);
   assert.match(repair, /History repair failed:/);
+  assert.match(repair, /updateToast\(toastId,[\s\S]*History repair failed: \$\{messageFromError\(err\)\}[\s\S]*tone: "error"/);
   assert.doesNotMatch(repair, /historyRepairSuccessMessage/);
-  assert.doesNotMatch(repair, /showToast\(historyRepairSuccessMessage/);
 });
 
 test("Codex Hub connection failures no longer mention history sync", async () => {
@@ -677,7 +706,9 @@ test("Codex Hub connection failures no longer mention history sync", async () =>
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(action, /setError\(codexHubConnectionErrorMessage\(err\)\)/);
+  assert.match(action, /const errorMessage = codexHubConnectionErrorMessage\(err\);/);
+  assert.match(action, /setError\(errorMessage\)/);
+  assert.match(action, /updateToast\(toastId,[\s\S]*text: errorMessage,[\s\S]*tone: "error"/);
   assert.match(providersSource, /function codexHubConnectionErrorMessage\(err: unknown\)/);
   assert.doesNotMatch(providersSource, /Connection failed while syncing history/);
   assert.doesNotMatch(providersSource, /Turn off Auto-sync history/);
@@ -733,15 +764,16 @@ test("provider discovery preserves missing API key environment variable names", 
   assert.match(providersSource, /Discovery failed: \$\{missingEnv\[1\]\} is not set/);
 });
 
-test("providers toast is locally anchored, dismissible, and auto-dismisses", async () => {
+test("providers toast uses the shared dismissible page toast", async () => {
   const [providersSource, pageToastSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
     readFile(pageToastPath, "utf8"),
   ]);
 
-  assert.match(providersSource, /toast\.tone !== "info"/);
-  assert.match(providersSource, /window\.setTimeout\(\(\) => dismissToast\(\), 3000\)/);
-  assert.match(providersSource, /<PageToast toast=\{toast\} onDismiss=\{dismissToast\} \/>/);
+  assert.match(providersSource, /const \{ showToast, updateToast \} = useToasts\(\)/);
+  assert.doesNotMatch(providersSource, /const \[toast, setToastState\]/);
+  assert.doesNotMatch(providersSource, /window\.setTimeout\(\(\) => dismissToast\(\), 3000\)/);
+  assert.doesNotMatch(providersSource, /<PageToast toast=\{toast\} onDismiss=\{dismissToast\} \/>/);
   assert.match(pageToastSource, /function ToastViewport/);
   assert.match(pageToastSource, /"fixed bottom-4 left-4 z-\[70\]/);
   assert.match(pageToastSource, /aria-label="Dismiss notification"/);
@@ -795,7 +827,7 @@ test("settings drawer reports the backend sync result", async () => {
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
   assert.match(drawerSource, /showToast\("Repairing history bucket\.\.\.", "loading"\)/);
   assert.match(drawerSource, /const message = await onSyncHistory\(targetProvider\)/);
-  assert.match(drawerSource, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "message"/);
+  assert.match(drawerSource, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "success"/);
   assert.doesNotMatch(drawerSource, /onMigrateOfficialHistory/);
   assert.doesNotMatch(drawerSource, /onRestoreOfficialHistory/);
   assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);

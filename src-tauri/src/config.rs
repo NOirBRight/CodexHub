@@ -759,6 +759,26 @@ sort_order = 7
     }
 
     #[test]
+    fn missing_unified_history_defaults_true_and_serializes() {
+        let root = temp_root("unified-history-default-true");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+        let value = serde_json::to_value(&loaded).expect("settings serialize");
+
+        assert!(loaded.unified_codex_history);
+        assert_eq!(value["unified_codex_history"], serde_json::json!(true));
+    }
+
+    #[test]
     fn switch_mode_custom_applies_config_overlay_without_history_sync() {
         let root = temp_root("switch-custom");
         let paths = test_paths(&root);

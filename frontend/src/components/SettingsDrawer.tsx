@@ -45,7 +45,7 @@ export function SettingsDrawer({
       updateToast(toastId, {
         action: null,
         text: savedMessage ?? "Settings saved",
-        tone: "message",
+        tone: "success",
       });
     } catch (err) {
       updateToast(toastId, {
@@ -67,7 +67,7 @@ export function SettingsDrawer({
       updateToast(toastId, {
         action: null,
         text: message,
-        tone: "message",
+        tone: "success",
       });
     } catch (err) {
       updateToast(toastId, {
@@ -95,7 +95,7 @@ export function SettingsDrawer({
       updateToast(toastId, {
         action: null,
         text: savedMessage ?? (enabled ? "Unified Codex history enabled" : "Official Codex history restored"),
-        tone: "message",
+        tone: "success",
       });
     } catch (err) {
       setDraft(previous);

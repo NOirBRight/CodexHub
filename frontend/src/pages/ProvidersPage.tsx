@@ -14,7 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { PageToast } from "../components/PageToast";
+import { useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
@@ -28,7 +28,6 @@ import type {
   UpstreamFormat,
   UpstreamFormatProbeResult,
 } from "../lib/types";
-import type { PageToastState, PageToastTone } from "../components/PageToast";
 
 const OFFICIAL_ID = "__official__";
 const ADD_ID = "__add__";
@@ -65,6 +64,7 @@ export function ProvidersPage({
   onGatewayChanged?: () => Promise<void>;
   onStartProxy?: () => Promise<void>;
 }) {
+  const { showToast, updateToast } = useToasts();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
@@ -77,7 +77,6 @@ export function ProvidersPage({
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
   const [busy, setBusy] = useState<string | null>("load");
-  const [toast, setToastState] = useState<PageToastState | null>(null);
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -147,31 +146,10 @@ export function ProvidersPage({
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
-  const error = toast?.tone === "error" ? toast.text : null;
-  const message = toast && toast.tone !== "error" ? toast.text : null;
-
-  useEffect(() => {
-    if (!toast || toast.tone !== "info") {
-      return;
-    }
-    const timer = window.setTimeout(() => dismissToast(), 3000);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  function showToast(text: string, tone: PageToastTone = "info", action?: PageToastState["action"]) {
-    setToastState({ action, id: "providers-page-toast", text, tone });
-  }
-
-  function dismissToast() {
-    setToastState(null);
-  }
-
   function setMessage(value: string | null) {
     if (value) {
-      showToast(value, "info");
-      return;
+      showToast(value, "message");
     }
-    setToastState((current) => (current?.tone === "info" ? null : current));
   }
 
   function setError(value: string | null) {
@@ -181,21 +159,49 @@ export function ProvidersPage({
         return;
       }
       showToast(value, "error");
-      return;
     }
-    setToastState((current) => (current?.tone === "error" ? null : current));
   }
 
   function showBackendDisconnectedToast() {
-    showToast("Backend is not connected", "error", {
-      label: "Start",
-      onClick: () => void startBackendFromToast(),
+    let toastId = "";
+    toastId = showToast({
+      text: "Backend is not connected",
+      tone: "error",
+      action: {
+        label: "Start",
+        onClick: () => void startBackendFromToast(toastId),
+      },
     });
   }
 
-  async function startBackendFromToast() {
+  function updateToastWithError(toastId: string, err: unknown) {
+    const text = messageFromError(err);
+    if (isBackendDisconnectedMessage(text)) {
+      updateToast(toastId, {
+        action: {
+          label: "Start",
+          onClick: () => void startBackendFromToast(toastId),
+        },
+        text: "Backend is not connected",
+        tone: "error",
+      });
+      return;
+    }
+    updateToast(toastId, {
+      action: null,
+      text,
+      tone: "error",
+    });
+  }
+
+  async function startBackendFromToast(toastId?: string) {
     setBusy("start");
-    showToast("Starting backend...", "loading");
+    const activeToastId = toastId ?? showToast("Starting backend...", "loading");
+    updateToast(activeToastId, {
+      action: null,
+      text: "Starting backend...",
+      tone: "loading",
+    });
     try {
       if (onStartProxy) {
         await onStartProxy();
@@ -204,9 +210,13 @@ export function ProvidersPage({
       }
       await load();
       await refreshGatewayState();
-      setMessage("Backend started");
+      updateToast(activeToastId, {
+        action: null,
+        text: "Backend started",
+        tone: "success",
+      });
     } catch (err) {
-      setError(messageFromError(err));
+      updateToastWithError(activeToastId, err);
     } finally {
       setBusy(null);
     }
@@ -220,11 +230,25 @@ export function ProvidersPage({
     }
   }
 
-  async function updateGatewayAfterCatalog(activeSettings?: Settings | null) {
+  async function updateGatewayAfterCatalog(activeSettings?: Settings | null, toastId?: string) {
+    if (toastId) {
+      updateToast(toastId, {
+        action: null,
+        text: "Generating model catalog...",
+        tone: "loading",
+      });
+    }
     await api.generateCatalog();
     const syncSettings = activeSettings ?? settingsDraft ?? settings;
     let syncResult: GatewayClientSyncSummary | null = null;
     if (syncSettings?.auto_sync_clients) {
+      if (toastId) {
+        updateToast(toastId, {
+          action: null,
+          text: "Syncing bound clients...",
+          tone: "loading",
+        });
+      }
       syncResult = await api.syncGatewayClients().catch((err) => ({
         applied: 0,
         skipped: 0,
@@ -289,50 +313,73 @@ export function ProvidersPage({
     }
   }
 
-  async function saveProviders(next: Provider[], regenerateCatalog = true, successMessage?: string) {
+  async function saveProviders(
+    next: Provider[],
+    regenerateCatalog = true,
+    successMessage?: string,
+    toastId?: string,
+  ) {
     setBusy("save");
+    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : "Updating provider catalog...", "loading");
     try {
       const saved = await api.saveProviders(next);
       setProviders(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog();
+        syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
       }
-      const toastMessage = catalogSyncToastMessage(successMessage, syncResult);
+      const toastMessage = catalogSyncToastMessage(successMessage ?? "Provider catalog updated", syncResult);
       if (syncResult?.failed) {
-        setError(toastMessage);
+        updateToast(activeToastId, {
+          action: null,
+          text: toastMessage ?? "Provider catalog update failed",
+          tone: "error",
+        });
       } else {
-        setMessage(toastMessage);
+        updateToast(activeToastId, {
+          action: null,
+          text: toastMessage ?? "Provider catalog updated",
+          tone: "success",
+        });
         setError(null);
       }
       return saved;
     } catch (err) {
-      setError(messageFromError(err));
+      updateToastWithError(activeToastId, err);
       throw err;
     } finally {
       setBusy(null);
     }
   }
 
-  async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string) {
+  async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string, toastId?: string) {
     setBusy("settings");
+    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : "Saving settings...", "loading");
     try {
       const saved = await api.saveSettings(next);
       setSettings(saved);
       setSettingsDraft(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog(saved);
+        syncResult = await updateGatewayAfterCatalog(saved, activeToastId);
       }
-      const toastMessage = catalogSyncToastMessage(successMessage, syncResult);
+      const toastMessage = catalogSyncToastMessage(successMessage ?? "Settings saved", syncResult);
       if (syncResult?.failed) {
-        setError(toastMessage);
+        updateToast(activeToastId, {
+          action: null,
+          text: toastMessage ?? "Settings saved; bound client sync failed",
+          tone: "error",
+        });
       } else {
-        setMessage(toastMessage);
+        updateToast(activeToastId, {
+          action: null,
+          text: toastMessage ?? "Settings saved",
+          tone: "success",
+        });
         setError(null);
       }
     } catch (err) {
-      setError(messageFromError(err));
+      updateToastWithError(activeToastId, err);
     } finally {
       setBusy(null);
     }
@@ -343,15 +390,21 @@ export function ProvidersPage({
       return;
     }
     setBusy("autostart");
+    const toastId = showToast(enabled ? "Enabling auto-start..." : "Disabling auto-start...", "loading");
     try {
       if (enabled) {
         await api.setAutostart(true);
       } else {
         await api.removeAutostart();
       }
-      await saveSettings({ ...settingsDraft, auto_start_proxy: enabled });
+      await saveSettings(
+        { ...settingsDraft, auto_start_proxy: enabled },
+        false,
+        enabled ? "Auto-start enabled" : "Auto-start disabled",
+        toastId,
+      );
     } catch (err) {
-      setError(messageFromError(err));
+      updateToastWithError(toastId, err);
       setBusy(null);
     }
   }
@@ -365,11 +418,18 @@ export function ProvidersPage({
   }
 
   function toggleProviderEnabled(providerId: string, enabled: boolean) {
+    const providerName = providers.find((provider) => provider.id === providerId)?.name ?? providerId;
+    const toastId = showToast(`${enabled ? "Enabling" : "Disabling"} ${providerName}...`, "loading");
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? { ...provider, enabled } : provider,
     );
     setProviders(nextProviders);
-    void saveProviders(nextProviders);
+    void saveProviders(
+      nextProviders,
+      true,
+      `${providerName} ${enabled ? "enabled" : "disabled"}`,
+      toastId,
+    );
   }
 
   async function reorderHubProviders(items: ProviderNavItem[]) {
@@ -384,14 +444,20 @@ export function ProvidersPage({
     });
 
     setProviders(nextProviders);
-    await saveProviders(nextProviders);
+    await saveProviders(nextProviders, true, "Provider order saved");
   }
 
   function toggleOfficialInclude(value: boolean) {
     if (!settingsDraft) {
       return;
     }
-    void saveSettings({ ...settingsDraft, include_official_models: value }, true);
+    const toastId = showToast(value ? "Including official models..." : "Excluding official models...", "loading");
+    void saveSettings(
+      { ...settingsDraft, include_official_models: value },
+      true,
+      value ? "Official models included" : "Official models excluded",
+      toastId,
+    );
   }
 
   function toggleOfficialModel(modelId: string, enabled: boolean) {
@@ -408,7 +474,13 @@ export function ProvidersPage({
     setOfficialModels((currentModels) =>
       currentModels.map((model) => (modelIdMatches(model.id, modelId) ? { ...model, enabled } : model)),
     );
-    void saveSettings(nextSettings, true);
+    const toastId = showToast(`${enabled ? "Enabling" : "Disabling"} ${modelId}...`, "loading");
+    void saveSettings(
+      nextSettings,
+      true,
+      `${modelId} ${enabled ? "enabled" : "disabled"}`,
+      toastId,
+    );
   }
 
   async function toggleCodexHubConnection() {
@@ -416,12 +488,16 @@ export function ProvidersPage({
     const actionLabel = nextMode === "custom" ? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";
     setConnectionPreview(nextMode === "custom");
     setBusy("route");
-    showToast(`${actionLabel}...`, "loading");
+    const toastId = showToast(`${actionLabel}...`, "loading");
     try {
       const status = await api.switchMode(nextMode, false);
       setCodexStatus(status);
       setConnectionPreview(null);
-      showToast(codexHubConnectionSuccessMessage(nextMode), "success");
+      updateToast(toastId, {
+        action: null,
+        text: codexHubConnectionSuccessMessage(nextMode),
+        tone: "success",
+      });
       setError(null);
       const targetProvider =
         nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
@@ -430,25 +506,41 @@ export function ProvidersPage({
       const message = messageFromError(err);
       if (isBackendDisconnectedMessage(message)) {
         setConnectionPreview(nextMode === "custom");
-        setError(message);
+        updateToastWithError(toastId, err);
         return;
       }
       if (!settingsDraft) {
-        setError(message);
+        updateToastWithError(toastId, err);
         return;
       }
       setConnectionPreview(null);
-      setError(codexHubConnectionErrorMessage(err));
+      const errorMessage = codexHubConnectionErrorMessage(err);
+      setError(errorMessage);
+      updateToast(toastId, {
+        action: null,
+        text: errorMessage,
+        tone: "error",
+      });
     } finally {
       setBusy(null);
     }
   }
 
   async function repairUnifiedHistoryInBackground(targetProvider: "custom" | "openai") {
+    const toastId = showToast("Repairing history bucket...", "loading");
     try {
-      await api.syncHistory(targetProvider);
+      const message = await api.syncHistory(targetProvider);
+      updateToast(toastId, {
+        action: null,
+        text: message,
+        tone: "success",
+      });
     } catch (err) {
-      showToast(`History repair failed: ${messageFromError(err)}`, "error");
+      updateToast(toastId, {
+        action: null,
+        text: `History repair failed: ${messageFromError(err)}`,
+        tone: "error",
+      });
     }
   }
 
@@ -464,12 +556,13 @@ export function ProvidersPage({
         official_model_sort_order: nextModels.map((model) => model.id),
       },
       true,
+      "Official model order saved",
     );
   }
 
   async function refreshProviderModels(provider: Provider) {
     setBusy(provider.id);
-    showToast(`Discovering ${provider.name} models...`, "loading");
+    const toastId = showToast(`Discovering ${provider.name} models...`, "loading");
     try {
       const models = await api.discoverProviderModels(provider.base_url, provider.api_key ?? "");
       const previousModelIds = new Set(provider.models.map((model) => model.id));
@@ -481,17 +574,22 @@ export function ProvidersPage({
         item.id === provider.id ? nextProvider : item,
       );
       setProviders(nextProviders);
-      await saveProviders(nextProviders);
       const addedCount = nextProvider.models.filter((model) => !previousModelIds.has(model.id)).length;
-      showToast(
+      await saveProviders(
+        nextProviders,
+        true,
         `${provider.name}: discovered ${models.length} model${models.length === 1 ? "" : "s"}, ${addedCount} new`,
-        "info",
+        toastId,
       );
       setModelDiscoveryError(null);
     } catch (err) {
       const discoveryError = shortProviderDiscoveryError(err);
       setModelDiscoveryError(discoveryError);
-      showToast(discoveryError, "error");
+      updateToast(toastId, {
+        action: null,
+        text: discoveryError,
+        tone: "error",
+      });
     } finally {
       setBusy(null);
     }
@@ -499,19 +597,28 @@ export function ProvidersPage({
 
   async function refreshOfficialModels() {
     setBusy("official-refresh");
+    const toastId = showToast("Refreshing official models...", "loading");
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
       setOfficialModels(sortOfficialModels(refreshed, settingsDraft?.official_model_sort_order ?? []));
-      const syncResult = await updateGatewayAfterCatalog();
+      const syncResult = await updateGatewayAfterCatalog(undefined, toastId);
       const toastMessage = catalogSyncToastMessage("Official models refreshed", syncResult);
       if (syncResult?.failed) {
-        setError(toastMessage);
+        updateToast(toastId, {
+          action: null,
+          text: toastMessage ?? "Official models refreshed; bound client sync failed",
+          tone: "error",
+        });
       } else {
-        setMessage(toastMessage);
+        updateToast(toastId, {
+          action: null,
+          text: toastMessage ?? "Official models refreshed",
+          tone: "success",
+        });
         setError(null);
       }
     } catch (err) {
-      setError(messageFromError(err));
+      updateToastWithError(toastId, err);
     } finally {
       setBusy(null);
     }
@@ -551,19 +658,27 @@ export function ProvidersPage({
 
   async function discoverForForm() {
     setBusy("discover");
-    showToast("Discovering models...", "loading");
+    const toastId = showToast("Discovering models...", "loading");
     try {
       const models = await api.discoverProviderModels(form.base_url, form.api_key);
       setForm((current) => ({
         ...current,
         models: mergeDiscoveredModels(current.models, models),
       }));
-      showToast(`Discovered ${models.length} model${models.length === 1 ? "" : "s"}`, "info");
+      updateToast(toastId, {
+        action: null,
+        text: `Discovered ${models.length} model${models.length === 1 ? "" : "s"}`,
+        tone: "success",
+      });
       setModelDiscoveryError(null);
     } catch (err) {
       const discoveryError = shortProviderDiscoveryError(err);
       setModelDiscoveryError(discoveryError);
-      showToast(discoveryError, "error");
+      updateToast(toastId, {
+        action: null,
+        text: discoveryError,
+        tone: "error",
+      });
     } finally {
       setBusy(null);
     }
@@ -572,14 +687,19 @@ export function ProvidersPage({
   async function probeUpstreamFormat(baseUrl: string, apiKey: string, model?: string | null) {
     setBusy("probe");
     setProbeResult(null);
+    const toastId = showToast("Testing provider capabilities...", "loading");
     try {
       const result = await api.probeUpstreamFormat(baseUrl, apiKey, model);
       setProbeResult(result);
-      setMessage(`Probe completed: ${upstreamFormatLabel(result.recommended_format)}`);
+      updateToast(toastId, {
+        action: null,
+        text: `Probe completed: ${upstreamFormatLabel(result.recommended_format)}`,
+        tone: "success",
+      });
       setError(null);
       return result;
     } catch (err) {
-      setError(messageFromError(err));
+      updateToastWithError(toastId, err);
       return null;
     } finally {
       setBusy(null);
@@ -657,7 +777,6 @@ export function ProvidersPage({
           onToggleProvider={toggleProviderEnabled}
           onToggleConnection={() => void toggleCodexHubConnection()}
           selectedId={selectedId}
-          toastVisible={Boolean(toast)}
         />
       </aside>
 
@@ -716,7 +835,6 @@ export function ProvidersPage({
 
         </div>
       </section>
-      {toast && <PageToast toast={toast} onDismiss={dismissToast} />}
     </main>
   );
 }
@@ -739,7 +857,6 @@ function ProviderSourceSidebar({
   onToggleProvider,
   onToggleConnection,
   selectedId,
-  toastVisible,
 }: {
   busy: string | null;
   codexAuthState: CodexAuthState;
@@ -758,7 +875,6 @@ function ProviderSourceSidebar({
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   onToggleConnection: () => void;
   selectedId: string;
-  toastVisible: boolean;
 }) {
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 p-3">
@@ -790,7 +906,6 @@ function ProviderSourceSidebar({
         onReorder={onReorder}
         onSelect={onSelect}
         onToggleProvider={onToggleProvider}
-        toastVisible={toastVisible}
       />
     </div>
   );
@@ -932,7 +1047,6 @@ function CodexHubProviderCard({
   onSelect,
   onToggleProvider,
   selectedId,
-  toastVisible,
 }: {
   activeAdd: boolean;
   connected: boolean;
@@ -945,14 +1059,13 @@ function CodexHubProviderCard({
   onSelect: (id: string) => void;
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   selectedId: string;
-  toastVisible: boolean;
 }) {
   return (
     <section
       className={cx(
         "grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-panel px-3 pt-3 shadow-card transition-colors",
         connected ? "bg-emerald-50/55" : "bg-surface",
-        toastVisible ? "pb-16" : "pb-3",
+        "pb-3",
       )}
     >
       <div className="flex items-start justify-between gap-3">

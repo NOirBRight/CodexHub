@@ -150,7 +150,7 @@ impl AppStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub auto_sync_history: bool,
-    #[serde(default)]
+    #[serde(default = "default_enabled")]
     pub unified_codex_history: bool,
     pub auto_start_proxy: bool,
     pub include_official_models: bool,

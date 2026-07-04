@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { CheckCircle2, Info, RefreshCcw, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Info, RefreshCcw, X } from "lucide-react";
 import { cx } from "../lib/format";
 
 export type PageToastTone = "message" | "info" | "success" | "error" | "loading";
@@ -40,6 +40,11 @@ type ToastContextValue = {
 interface PageToastProps {
   toast: PageToastState;
   onDismiss: () => void;
+}
+
+interface ToastItemProps {
+  dismissToast: (id: string) => void;
+  toast: PageToastState;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -122,26 +127,29 @@ function ToastViewport({
     <div className="fixed bottom-4 left-4 z-[70] flex max-w-[min(calc(100vw-2rem),460px)] flex-col gap-2">
       {toasts.map((toast) => (
         <ToastItem
+          dismissToast={dismissToast}
           key={toast.id}
           toast={toast}
-          onDismiss={() => dismissToast(toast.id)}
         />
       ))}
     </div>
   );
 }
 
-function ToastItem({ toast, onDismiss }: PageToastProps) {
+function ToastItem({ dismissToast, toast }: ToastItemProps) {
+  const dismissCurrentToast = useCallback(() => dismissToast(toast.id), [dismissToast, toast.id]);
+  const hasAction = Boolean(toast.action);
+
   useEffect(() => {
     const timeoutMs = toastTimeoutMs(toast);
     if (timeoutMs == null) {
       return;
     }
-    const timer = window.setTimeout(onDismiss, timeoutMs);
+    const timer = window.setTimeout(() => dismissToast(toast.id), timeoutMs);
     return () => window.clearTimeout(timer);
-  }, [onDismiss, toast]);
+  }, [dismissToast, hasAction, toast.id, toast.timeoutMs, toast.tone]);
 
-  return <PageToast toast={toast} onDismiss={onDismiss} />;
+  return <PageToast toast={toast} onDismiss={dismissCurrentToast} />;
 }
 
 export function PageToast({ toast, onDismiss }: PageToastProps) {
@@ -163,7 +171,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       ) : toast.tone === "success" ? (
         <CheckCircle2 size={14} className="text-emerald-600" />
       ) : toast.tone === "error" ? (
-        <span className="h-2 w-2 rounded-full bg-danger" />
+        <AlertCircle size={14} className="text-danger" />
       ) : (
         <Info size={14} className="text-action" />
       )}
