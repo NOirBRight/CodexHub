@@ -287,6 +287,10 @@ export interface Settings {
   gateway_enable_responses: boolean;
   gateway_enable_chat_completions: boolean;
   gateway_request_timeout_seconds: number;
+  gateway_auto_retry_enabled: boolean;
+  gateway_auto_retry_max_attempts: number;
+  gateway_image_proxy_enabled: boolean;
+  gateway_image_proxy_model: string;
   gateway_fast_model_variants: string[];
   official_disabled_models: string[];
   official_model_sort_order: string[];

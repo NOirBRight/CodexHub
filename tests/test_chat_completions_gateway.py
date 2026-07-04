@@ -518,7 +518,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         with patch(
             "codex_proxy.urlopen",
             side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body)],
-        ) as mock_urlopen:
+        ) as mock_urlopen, patch("codex_proxy.time.sleep"):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)

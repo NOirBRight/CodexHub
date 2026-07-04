@@ -421,7 +421,7 @@ export function ProvidersPage({
       const status = await api.switchMode(nextMode, false);
       setCodexStatus(status);
       setConnectionPreview(null);
-      setMessage(codexHubConnectionSuccessMessage(nextMode));
+      showToast(codexHubConnectionSuccessMessage(nextMode), "success");
       setError(null);
       const targetProvider =
         nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
@@ -446,10 +446,7 @@ export function ProvidersPage({
 
   async function repairUnifiedHistoryInBackground(targetProvider: "custom" | "openai") {
     try {
-      const message = await api.syncHistory(targetProvider);
-      if (!historyRepairAlreadyUnified(message)) {
-        showToast(historyRepairSuccessMessage(message), "success");
-      }
+      await api.syncHistory(targetProvider);
     } catch (err) {
       showToast(`History repair failed: ${messageFromError(err)}`, "error");
     }
@@ -2293,21 +2290,7 @@ function codexHubConnectionErrorMessage(err: unknown) {
 }
 
 function codexHubConnectionSuccessMessage(mode: string) {
-  return mode === "custom" ? "Connected Codex App to Codex Hub" : "Disconnected Codex App from Codex Hub";
-}
-
-function historyRepairAlreadyUnified(message: string) {
-  return /status=already-(unified|openai)/.test(message) || /dirty_state_rows=0/.test(message);
-}
-
-function historyRepairSuccessMessage(message: string) {
-  const stateRows = message.match(/state_rows=(\d+)/)?.[1] ?? "0";
-  const jsonlApplied = message.match(/jsonl_applied=(\d+)/)?.[1] ?? "0";
-  const jsonlSkipped = message.match(/jsonl_skipped=(\d+)/)?.[1] ?? "0";
-  if (jsonlSkipped !== "0") {
-    return `History bucket repaired (${stateRows} rows, ${jsonlApplied} files, ${jsonlSkipped} skipped)`;
-  }
-  return `History bucket repaired (${stateRows} rows, ${jsonlApplied} files)`;
+  return mode === "custom" ? "Connected to Codex Hub" : "Disconnected from Codex Hub";
 }
 
 function codexAuthStateFromGatewayStatus(status: GatewayStatus | null): CodexAuthState {

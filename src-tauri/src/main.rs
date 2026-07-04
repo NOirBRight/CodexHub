@@ -164,6 +164,14 @@ pub struct Settings {
     pub gateway_enable_responses: bool,
     pub gateway_enable_chat_completions: bool,
     pub gateway_request_timeout_seconds: u32,
+    #[serde(default = "default_enabled")]
+    pub gateway_auto_retry_enabled: bool,
+    #[serde(default = "default_gateway_auto_retry_max_attempts")]
+    pub gateway_auto_retry_max_attempts: u8,
+    #[serde(default)]
+    pub gateway_image_proxy_enabled: bool,
+    #[serde(default)]
+    pub gateway_image_proxy_model: String,
     #[serde(default = "default_fast_model_variants")]
     pub gateway_fast_model_variants: Vec<String>,
     #[serde(default)]
@@ -193,6 +201,10 @@ impl Default for Settings {
             gateway_enable_responses: true,
             gateway_enable_chat_completions: true,
             gateway_request_timeout_seconds: 120,
+            gateway_auto_retry_enabled: true,
+            gateway_auto_retry_max_attempts: default_gateway_auto_retry_max_attempts(),
+            gateway_image_proxy_enabled: false,
+            gateway_image_proxy_model: String::new(),
             gateway_fast_model_variants: default_fast_model_variants(),
             official_disabled_models: Vec::new(),
             official_model_sort_order: Vec::new(),
@@ -204,6 +216,10 @@ impl Default for Settings {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_gateway_auto_retry_max_attempts() -> u8 {
+    30
 }
 
 #[tauri::command]

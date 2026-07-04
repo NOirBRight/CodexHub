@@ -1,14 +1,15 @@
 import { Eye, EyeOff, History, Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
-import type { Settings } from "../lib/types";
+import type { Model, Settings } from "../lib/types";
 
 interface SettingsDrawerProps {
   busy?: string | null;
   open: boolean;
   settings: Settings | null;
+  visionModels: Model[];
   onClose: () => void;
-  onSave: (settings: Settings) => Promise<void>;
+  onSave: (settings: Settings) => Promise<string | void>;
   onSyncHistory: (targetProvider: string) => Promise<string>;
 }
 
@@ -19,6 +20,7 @@ export function SettingsDrawer({
   onSyncHistory,
   open,
   settings,
+  visionModels,
 }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [message, setMessage] = useState<string | null>(null);
@@ -34,8 +36,8 @@ export function SettingsDrawer({
     if (!draft) {
       return;
     }
-    await onSave(draft);
-    setMessage("Settings saved");
+    const savedMessage = await onSave(draft);
+    setMessage(savedMessage ?? "Settings saved");
   }
 
   async function repairHistory() {
@@ -170,6 +172,60 @@ export function SettingsDrawer({
                   label="Auto-start runtime"
                   onChange={(value) => setDraft({ ...draft, auto_start_proxy: value })}
                 />
+                <div className="grid gap-3 border-t border-line pt-3">
+                  <Toggle
+                    checked={draft.gateway_auto_retry_enabled}
+                    label="Auto retry"
+                    onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
+                  />
+                  <label className="grid gap-1 text-sm font-medium text-slate-700">
+                    Max attempts
+                    <input
+                      className="field h-9"
+                      type="number"
+                      min={1}
+                      max={30}
+                      value={draft.gateway_auto_retry_max_attempts}
+                      disabled={!draft.gateway_auto_retry_enabled}
+                      onChange={(event) =>
+                        setDraft({
+                          ...draft,
+                          gateway_auto_retry_max_attempts: clampRetryAttempts(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="grid gap-3 border-t border-line pt-3">
+                  <Toggle
+                    checked={draft.gateway_image_proxy_enabled}
+                    label="Image proxy"
+                    onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
+                  />
+                  <label className="grid gap-1 text-sm font-medium text-slate-700">
+                    Vision model
+                    <select
+                      className="field h-9"
+                      value={draft.gateway_image_proxy_model}
+                      disabled={!draft.gateway_image_proxy_enabled || visionModels.length === 0}
+                      onChange={(event) => setDraft({ ...draft, gateway_image_proxy_model: event.target.value })}
+                    >
+                      <option value="">
+                        {visionModels.length === 0 ? "No vision-capable models" : "Select a vision model"}
+                      </option>
+                      {visionModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {visionModelLabel(model)}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs font-normal text-slate-500">
+                      {visionModels.length === 0
+                        ? "Enable at least one image-capable catalog model first."
+                        : "Used only when a text-only target model receives image input."}
+                    </span>
+                  </label>
+                </div>
               </div>
             </section>
           </div>
@@ -192,6 +248,19 @@ export function SettingsDrawer({
       </div>
     </aside>
   );
+}
+
+function clampRetryAttempts(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 30;
+  }
+  return Math.max(1, Math.min(30, Math.round(parsed)));
+}
+
+function visionModelLabel(model: Model) {
+  const name = model.display_name?.trim();
+  return name && name !== model.id ? `${name} (${model.id})` : model.id;
 }
 
 function Toggle({

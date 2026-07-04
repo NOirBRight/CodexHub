@@ -1,9 +1,11 @@
 import os
 import io
 import json
+import tempfile
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 import codex_proxy
 from codex_proxy import (
@@ -189,6 +191,227 @@ class RoutingTests(unittest.TestCase):
         self.external_patch.start()
         self.addCleanup(self.external_patch.stop)
 
+    def test_gateway_auto_retry_settings_default_to_enabled_thirty_attempts(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(codex_proxy.gateway_auto_retry_enabled())
+            self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 30)
+
+    def test_gateway_retry_delay_caps_after_third_retry(self):
+        self.assertEqual([codex_proxy.gateway_retry_delay_seconds(attempt) for attempt in range(1, 6)], [2, 4, 6, 8, 8])
+
+    def test_open_upstream_response_retries_http_errors_for_any_provider(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(b'{"error":"rate limited"}'),
+        )
+        success = FakeResponse(b'{"id":"resp_retry"}')
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="volcengine",
+                upstream_format="responses",
+                timeout=1,
+                event_context={"request_id": "req_retry", "model": "volc/glm-5.2"},
+            )
+
+        self.assertIs(response, success)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(2)
+        retry_events = [
+            call for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        fields = retry_events[0].kwargs
+        self.assertEqual(fields["request_id"], "req_retry")
+        self.assertEqual(fields["model"], "volc/glm-5.2")
+        self.assertEqual(fields["upstream"], "volcengine")
+        self.assertEqual(fields["provider_id"], "volcengine")
+        self.assertEqual(fields["status"], 429)
+        self.assertEqual(fields["error"], "HTTPError")
+        self.assertEqual(fields["attempt"], 1)
+        self.assertEqual(fields["max_attempts"], 3)
+        self.assertEqual(fields["delay_ms"], 2000)
+
+    def test_open_upstream_response_does_not_retry_when_auto_retry_disabled(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            503,
+            "Unavailable",
+            {},
+            io.BytesIO(b'{"error":"down"}'),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(HTTPError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context={"request_id": "req_retry", "model": "volc/glm-5.2"},
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_image_proxy_replaces_images_for_text_only_target_model(self):
+        payload = {
+            "model": "volc/glm-5.2",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is this?"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        upstream = choose_upstream("volc/glm-5.2")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-cn/MiniMax-M3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._image_proxy_description_for_part", return_value="A blue chart.") as describe,
+        ):
+            changed = codex_proxy.apply_image_proxy_to_responses_payload(
+                payload,
+                "volc/glm-5.2",
+                upstream,
+                event_context={"request_id": "req_img"},
+            )
+
+        self.assertTrue(changed)
+        content = payload["input"][0]["content"]
+        self.assertEqual(content[1]["type"], "input_text")
+        self.assertIn("A blue chart.", content[1]["text"])
+        self.assertNotIn("image_url", content[1])
+        describe.assert_called_once()
+
+    def test_image_proxy_skips_target_model_that_supports_images(self):
+        payload = {
+            "model": "minimax-cn/MiniMax-M3",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}],
+                }
+            ],
+        }
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-cn/MiniMax-M3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._image_proxy_description_for_part") as describe,
+        ):
+            changed = codex_proxy.apply_image_proxy_to_responses_payload(
+                payload,
+                "minimax-cn/MiniMax-M3",
+                upstream,
+                event_context={"request_id": "req_img"},
+            )
+
+        self.assertFalse(changed)
+        self.assertEqual(payload["input"][0]["content"][0]["type"], "input_image")
+        describe.assert_not_called()
+
+    def test_image_proxy_requires_configured_vision_model_for_image_requests(self):
+        payload = {
+            "model": "volc/glm-5.2",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}],
+                }
+            ],
+        }
+        upstream = choose_upstream("volc/glm-5.2")
+
+        with patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "1", "CODEX_PROXY_IMAGE_PROXY_MODEL": ""}, clear=False):
+            with self.assertRaises(codex_proxy.ImageProxyError) as context:
+                codex_proxy.apply_image_proxy_to_responses_payload(
+                    payload,
+                    "volc/glm-5.2",
+                    upstream,
+                    event_context={"request_id": "req_img"},
+                )
+
+        self.assertIn("Vision model is not configured", str(context.exception))
+
+    def test_image_proxy_cache_hit_avoids_repeated_vision_call_and_raw_image_storage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = os.path.join(temp_dir, "image-proxy-cache.sqlite")
+            part = {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+            upstream = choose_upstream("minimax-cn/MiniMax-M3")
+            with (
+                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", cache_path),
+                patch("codex_proxy._call_vision_model_for_image_description", return_value="Cached description") as vision_call,
+            ):
+                first = codex_proxy._image_proxy_description_for_part(
+                    part,
+                    "minimax-cn/MiniMax-M3",
+                    upstream,
+                    event_context={"request_id": "req_img"},
+                )
+                second = codex_proxy._image_proxy_description_for_part(
+                    part,
+                    "minimax-cn/MiniMax-M3",
+                    upstream,
+                    event_context={"request_id": "req_img"},
+                )
+
+            self.assertEqual(first, "Cached description")
+            self.assertEqual(second, "Cached description")
+            vision_call.assert_called_once()
+            with open(cache_path, "rb") as handle:
+                self.assertNotIn(b"data:image/png;base64,abc", handle.read())
+
     def test_gpt_routes_to_official(self):
         upstream = choose_upstream("gpt-5.5")
         self.assertEqual(upstream["name"], "official")
@@ -207,6 +430,35 @@ class RoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(json.loads(body)["model"], "gpt-5.5")
+
+    def test_responses_to_chat_completion_body_preserves_input_images(self):
+        body = json.dumps(
+            {
+                "model": "minimax-cn/MiniMax-M3",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Describe this"},
+                            {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                        ],
+                    }
+                ],
+                "stream": False,
+            }
+        ).encode("utf-8")
+
+        payload = json.loads(_responses_request_to_chat_completion_body(body))
+
+        content = payload["messages"][0]["content"]
+        self.assertEqual(
+            content,
+            [
+                {"type": "text", "text": "Describe this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ],
+        )
 
     def test_denied_openai_alias_is_rejected_even_when_bare_model_allowed(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)

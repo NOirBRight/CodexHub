@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import io
 import json
 import logging
 import os
 import re
+import sqlite3
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -246,8 +248,21 @@ PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
+DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
+IMAGE_PROXY_PROMPT_VERSION = "v1"
+IMAGE_PROXY_PROMPT = (
+    "Describe the image in detail for a downstream text-only model. "
+    "Include visible text, objects, layout, colors, charts, and any details "
+    "that may affect the user's request. Do not mention that you are a proxy."
+)
 
 logger = logging.getLogger("codex_proxy")
+IMAGE_PROXY_CACHE_PATH = RUNTIME_PROXY_DIR / "image-proxy-cache.sqlite"
+IMAGE_PROXY_CACHE_LOCK = threading.Lock()
+
+
+class ImageProxyError(Exception):
+    """Raised when an image proxy request cannot be prepared safely."""
 
 
 def upstream_timeout_seconds() -> int:
@@ -270,6 +285,40 @@ def official_upstream_open_attempts() -> int:
     except ValueError:
         return DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
     return value if value > 0 else DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def gateway_auto_retry_enabled() -> bool:
+    return _env_flag("CODEX_PROXY_AUTO_RETRY_ENABLED", True)
+
+
+def gateway_auto_retry_max_attempts() -> int:
+    raw_value = os.environ.get("CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS")
+    if not raw_value:
+        return DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS
+    return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
+
+
+def gateway_retry_delay_seconds(attempt: int) -> int:
+    return min(max(1, attempt) * 2, 8)
+
+
+def gateway_image_proxy_enabled() -> bool:
+    return _env_flag("CODEX_PROXY_IMAGE_PROXY_ENABLED", False)
+
+
+def gateway_image_proxy_model() -> str:
+    return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
@@ -565,6 +614,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "api_key": external_model["api_key"],
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
+            "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
 
     if "/" in slug:
@@ -836,19 +886,50 @@ def _chat_content_text(value: Any) -> str:
     return "\n".join(fragments)
 
 
-def _responses_input_to_chat_messages(value: Any) -> list[dict[str, str]]:
+def _responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+
+    parts: list[dict[str, Any]] = []
+    text_fragments: list[str] = []
+    has_image = False
+    for part in value:
+        if not isinstance(part, Mapping):
+            continue
+        part_type = part.get("type")
+        if part_type in {"input_text", "output_text", "text"} and isinstance(part.get("text"), str):
+            text = part["text"]
+            text_fragments.append(text)
+            parts.append({"type": "text", "text": text})
+            continue
+        if part_type == "input_image" and isinstance(part.get("image_url"), str):
+            has_image = True
+            parts.append({"type": "image_url", "image_url": {"url": part["image_url"]}})
+            continue
+        if part_type == "input_image" and isinstance(part.get("file_id"), str):
+            has_image = True
+            parts.append({"type": "text", "text": f"[Image file: {part['file_id']}]"})
+
+    if has_image:
+        return parts or [{"type": "text", "text": ""}]
+    return "\n".join(fragment for fragment in text_fragments if fragment)
+
+
+def _responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, str):
         return [{"role": "user", "content": value}]
     if not isinstance(value, list):
         return []
 
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict) or item.get("type") != "message":
             continue
         role = item.get("role")
         role = role if role in {"system", "user", "assistant"} else "user"
-        content = _chat_content_text(item.get("content"))
+        content = _responses_content_to_chat_content(item.get("content"))
         messages.append({"role": role, "content": content})
     return messages
 
@@ -3246,6 +3327,394 @@ def _chat_completions_url(upstream: Mapping[str, Any]) -> str:
     return upstream["base_url"].rstrip("/") + "/chat/completions"
 
 
+def _modalities_include_image(value: Any) -> bool:
+    if not isinstance(value, (list, tuple, set)):
+        return False
+    return any(str(item).lower() == "image" for item in value)
+
+
+def _catalog_input_modalities(model_id: str | None, upstream: Mapping[str, Any] | None = None) -> Any:
+    candidates: list[str] = []
+    for value in (model_id, upstream.get("upstream_model") if upstream else None):
+        if not isinstance(value, str) or not value.strip():
+            continue
+        slug = canonical_model_id(value)
+        if not slug:
+            continue
+        candidates.append(slug)
+        if slug.startswith(OFFICIAL_ALIAS_PREFIX):
+            candidates.append(slug[len(OFFICIAL_ALIAS_PREFIX) :])
+        else:
+            candidates.append(f"{OFFICIAL_ALIAS_PREFIX}{slug}")
+
+    catalog = generated_catalog_by_slug()
+    for candidate in dict.fromkeys(candidates):
+        model = catalog.get(candidate)
+        if isinstance(model, Mapping) and "input_modalities" in model:
+            return model.get("input_modalities")
+    return None
+
+
+def model_supports_image(model_id: str | None, upstream: Mapping[str, Any] | None = None) -> bool:
+    if upstream and _modalities_include_image(upstream.get("input_modalities")):
+        return True
+    return _modalities_include_image(_catalog_input_modalities(model_id, upstream))
+
+
+def _is_image_part(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    part_type = value.get("type")
+    if part_type == "input_image":
+        return any(isinstance(value.get(key), str) and value.get(key) for key in ("image_url", "file_id"))
+    if part_type == "image_url":
+        image_url = value.get("image_url")
+        return isinstance(image_url, Mapping) and isinstance(image_url.get("url"), str) and bool(image_url.get("url"))
+    return False
+
+
+def _value_contains_image(value: Any) -> bool:
+    if _is_image_part(value):
+        return True
+    if isinstance(value, list):
+        return any(_value_contains_image(item) for item in value)
+    if isinstance(value, Mapping):
+        return any(_value_contains_image(item) for item in value.values())
+    return False
+
+
+def _normalized_vision_image_part(part: Mapping[str, Any]) -> dict[str, Any]:
+    if part.get("type") == "image_url" and isinstance(part.get("image_url"), Mapping):
+        image_url = part["image_url"].get("url")
+        output = {"type": "input_image", "image_url": image_url}
+    else:
+        output = {"type": "input_image"}
+        for key in ("image_url", "file_id"):
+            value = part.get(key)
+            if isinstance(value, str) and value:
+                output[key] = value
+    detail = part.get("detail")
+    if isinstance(detail, str) and detail:
+        output["detail"] = detail
+    return output
+
+
+def _image_proxy_cache_key(part: Mapping[str, Any], vision_model: str) -> str:
+    normalized = _normalized_vision_image_part(part)
+    raw = json.dumps(
+        {
+            "image": normalized,
+            "vision_model": vision_model,
+            "prompt_version": IMAGE_PROXY_PROMPT_VERSION,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _ensure_image_proxy_cache(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_proxy_cache (
+            cache_key TEXT PRIMARY KEY,
+            vision_model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            description TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def _image_proxy_cache_lookup(cache_key: str) -> str | None:
+    path = Path(IMAGE_PROXY_CACHE_PATH)
+    try:
+        with IMAGE_PROXY_CACHE_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                _ensure_image_proxy_cache(conn)
+                row = conn.execute(
+                    "SELECT description FROM image_proxy_cache WHERE cache_key = ?",
+                    (cache_key,),
+                ).fetchone()
+            finally:
+                conn.close()
+    except (OSError, sqlite3.DatabaseError) as exc:
+        logger.warning("image proxy cache lookup failed: %s", type(exc).__name__)
+        return None
+    if not row:
+        return None
+    description = row[0]
+    return description if isinstance(description, str) and description else None
+
+
+def _image_proxy_cache_store(cache_key: str, vision_model: str, description: str) -> None:
+    path = Path(IMAGE_PROXY_CACHE_PATH)
+    try:
+        with IMAGE_PROXY_CACHE_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                _ensure_image_proxy_cache(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO image_proxy_cache
+                    (cache_key, vision_model, prompt_version, description, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (cache_key, vision_model, IMAGE_PROXY_PROMPT_VERSION, description, int(time.time())),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except (OSError, sqlite3.DatabaseError) as exc:
+        logger.warning("image proxy cache store failed: %s", type(exc).__name__)
+
+
+def _extract_model_response_text(payload: Any) -> str:
+    text_parts: list[str] = []
+    if isinstance(payload, Mapping):
+        output = payload.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, Mapping):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if isinstance(part, Mapping) and part.get("type") in {"output_text", "text"}:
+                        text = part.get("text")
+                        if isinstance(text, str) and text:
+                            text_parts.append(text)
+        choices = payload.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, Mapping):
+                    continue
+                message = choice.get("message")
+                if not isinstance(message, Mapping):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, Mapping) and part.get("type") == "text":
+                            text = part.get("text")
+                            if isinstance(text, str) and text:
+                                text_parts.append(text)
+    return "\n".join(part.strip() for part in text_parts if part.strip()).strip()
+
+
+def _image_proxy_response_body(response: Any) -> bytes:
+    if _is_event_stream(response.headers):
+        events: list[Mapping[str, Any]] = []
+        while True:
+            line = response.readline()
+            if not line:
+                break
+            event = _parse_sse_json_payload(line)
+            if isinstance(event, Mapping):
+                events.append(event)
+        return _events_to_responses_body(events)
+
+    body = b""
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        body += chunk
+    return body
+
+
+def _call_vision_model_for_image_description(
+    part: Mapping[str, Any],
+    vision_model: str,
+    vision_upstream: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+) -> str:
+    payload = {
+        "model": vision_model,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": IMAGE_PROXY_PROMPT},
+                    _normalized_vision_image_part(part),
+                ],
+            }
+        ],
+        "stream": False,
+    }
+    body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    vision_context = dict(event_context or {})
+    vision_context["image_proxy"] = True
+    vision_context["vision_model"] = canonical_model_id(vision_model)
+    try:
+        body = compatible_request_body(body, vision_upstream, model_id=vision_model, event_context=vision_context)
+        upstream_format = str(vision_upstream.get("upstream_format", "responses"))
+        upstream_url = _responses_url(vision_upstream, "/v1/responses")
+        if upstream_format == "chat_completions":
+            body = _responses_request_to_chat_completion_body(body)
+            upstream_url = _chat_completions_url(vision_upstream)
+        headers = upstream_headers({"Content-Type": "application/json"}, vision_upstream)
+    except ValueError as exc:
+        raise ImageProxyError(f"Vision model request is invalid: {exc}") from exc
+
+    request = Request(upstream_url, data=body, headers=headers, method="POST")
+    with _open_upstream_response(
+        request,
+        upstream_name=str(vision_upstream.get("name", "unknown")),
+        upstream_format=upstream_format,
+        timeout=upstream_timeout_seconds(),
+        event_context=vision_context,
+    ) as response:
+        response_body = _image_proxy_response_body(response)
+
+    try:
+        response_payload = json.loads(response_body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ImageProxyError("Vision model returned an invalid response") from exc
+    description = _extract_model_response_text(response_payload)
+    if not description:
+        raise ImageProxyError("Vision model returned no image description")
+    return description
+
+
+def _image_proxy_description_for_part(
+    part: Mapping[str, Any],
+    vision_model: str,
+    vision_upstream: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+) -> str:
+    cache_key = _image_proxy_cache_key(part, vision_model)
+    cached = _image_proxy_cache_lookup(cache_key)
+    if cached is not None:
+        _write_adapter_event(event_context, "image_proxy_cache_hit", vision_model=canonical_model_id(vision_model))
+        return cached
+    description = _call_vision_model_for_image_description(part, vision_model, vision_upstream, event_context)
+    _image_proxy_cache_store(cache_key, vision_model, description)
+    return description
+
+
+def _image_description_part(description: str) -> dict[str, str]:
+    return {
+        "type": "input_text",
+        "text": f"Image proxy description:\n{description}",
+    }
+
+
+def _replace_image_parts(value: Any, describe: Any) -> tuple[Any, bool]:
+    if _is_image_part(value):
+        return _image_description_part(describe(value)), True
+    if isinstance(value, list):
+        changed = False
+        output = []
+        for item in value:
+            replacement, item_changed = _replace_image_parts(item, describe)
+            changed = changed or item_changed
+            output.append(replacement)
+        return output, changed
+    if isinstance(value, dict):
+        changed = False
+        output = dict(value)
+        for key, item in value.items():
+            replacement, item_changed = _replace_image_parts(item, describe)
+            if item_changed:
+                output[key] = replacement
+                changed = True
+        return output, changed
+    return value, False
+
+
+def apply_image_proxy_to_responses_payload(
+    payload: dict[str, Any],
+    target_model: str | None,
+    target_upstream: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+) -> bool:
+    if not gateway_image_proxy_enabled():
+        return False
+    if target_model and model_supports_image(target_model, target_upstream):
+        return False
+    if not _value_contains_image(payload.get("input")):
+        return False
+
+    vision_model = gateway_image_proxy_model()
+    if not vision_model:
+        raise ImageProxyError("Vision model is not configured for Image Proxy")
+    try:
+        vision_upstream = choose_upstream(vision_model)
+    except ValueError as exc:
+        raise ImageProxyError(f"Vision model is not available: {vision_model}: {exc}") from exc
+    if not model_supports_image(vision_model, vision_upstream):
+        raise ImageProxyError(f"Vision model does not support image input: {vision_model}")
+
+    descriptions: dict[str, str] = {}
+
+    def describe(part: Mapping[str, Any]) -> str:
+        cache_key = _image_proxy_cache_key(part, vision_model)
+        if cache_key not in descriptions:
+            descriptions[cache_key] = _image_proxy_description_for_part(
+                part,
+                vision_model,
+                vision_upstream,
+                event_context=event_context,
+            )
+        return descriptions[cache_key]
+
+    replacement, changed = _replace_image_parts(payload.get("input"), describe)
+    if changed:
+        payload["input"] = replacement
+        _write_adapter_event(
+            event_context,
+            "image_proxy_applied",
+            vision_model=canonical_model_id(vision_model),
+            target_model=canonical_model_id(target_model) if target_model else None,
+            image_count=len(descriptions),
+        )
+    return changed
+
+
+def _upstream_retry_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "code", None)
+    return status if isinstance(status, int) else None
+
+
+def _upstream_retry_attempts() -> int:
+    return gateway_auto_retry_max_attempts() if gateway_auto_retry_enabled() else 1
+
+
+def _emit_upstream_retry_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    attempt: int,
+    max_attempts: int,
+    exc: BaseException,
+    delay_seconds: int,
+) -> None:
+    _write_adapter_event(
+        event_context,
+        "upstream_retry",
+        upstream=upstream_name,
+        provider_id=upstream_name,
+        upstream_format=upstream_format,
+        status=_upstream_retry_status(exc),
+        attempt=attempt,
+        max_attempts=max_attempts,
+        delay_ms=delay_seconds * 1000,
+        error=type(exc).__name__,
+        detail=safe_upstream_error_detail(exc),
+    )
+
+
 def _open_upstream_response(
     request: Request,
     *,
@@ -3254,26 +3723,24 @@ def _open_upstream_response(
     timeout: int,
     event_context: Mapping[str, Any] | None = None,
 ) -> Any:
-    max_attempts = official_upstream_open_attempts() if upstream_name == "official" else 1
+    max_attempts = _upstream_retry_attempts()
     for attempt in range(1, max_attempts + 1):
         try:
             return urlopen(request, timeout=timeout)
-        except HTTPError:
-            raise
-        except (OSError, URLError) as exc:
+        except (HTTPError, IncompleteRead, OSError, URLError) as exc:
             if attempt >= max_attempts:
                 raise
-            _write_adapter_event(
+            delay_seconds = gateway_retry_delay_seconds(attempt)
+            _emit_upstream_retry_event(
                 event_context,
-                "upstream_open_retry",
-                upstream=upstream_name,
+                upstream_name=upstream_name,
                 upstream_format=upstream_format,
                 attempt=attempt,
                 max_attempts=max_attempts,
-                error=type(exc).__name__,
-                detail=safe_upstream_error_detail(exc),
+                exc=exc,
+                delay_seconds=delay_seconds,
             )
-            time.sleep(min(0.25 * attempt, 1.0))
+            time.sleep(delay_seconds)
     raise RuntimeError("unreachable upstream retry state")
 
 
@@ -3411,30 +3878,61 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             }
             usage_capture: dict[str, Any] = {}
             body = compatible_request_body(body, upstream, model_id=model, event_context=adapter_event_context)
+            try:
+                image_proxy_payload = json.loads(body.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                image_proxy_payload = None
+            if isinstance(image_proxy_payload, dict) and apply_image_proxy_to_responses_payload(
+                image_proxy_payload,
+                model,
+                upstream,
+                event_context=adapter_event_context,
+            ):
+                body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             upstream_url = _responses_url(upstream, "/v1/responses")
             if upstream_format == "chat_completions":
                 body = _responses_request_to_chat_completion_body(body)
                 upstream_url = _chat_completions_url(upstream)
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
             request = Request(upstream_url, data=body, headers=headers, method="POST")
-            with _open_upstream_response(
-                request,
-                upstream_name=upstream_name,
-                upstream_format=upstream_format,
-                timeout=upstream_timeout_seconds(),
-                event_context=adapter_event_context,
-            ) as response:
-                status = self._relay_upstream_response(
-                    response,
-                    upstream_name,
-                    request_id=request_id,
-                    model=model_canonical,
-                    upstream_format=upstream_format,
-                    inbound_format=inbound_format,
-                    caller_stream=caller_stream,
-                    event_context=adapter_event_context,
-                    usage_capture=usage_capture,
-                )
+            relay_attempts = _upstream_retry_attempts()
+            for relay_attempt in range(1, relay_attempts + 1):
+                try:
+                    with _open_upstream_response(
+                        request,
+                        upstream_name=upstream_name,
+                        upstream_format=upstream_format,
+                        timeout=upstream_timeout_seconds(),
+                        event_context=adapter_event_context,
+                    ) as response:
+                        status = self._relay_upstream_response(
+                            response,
+                            upstream_name,
+                            request_id=request_id,
+                            model=model_canonical,
+                            upstream_format=upstream_format,
+                            inbound_format=inbound_format,
+                            caller_stream=caller_stream,
+                            event_context=adapter_event_context,
+                            usage_capture=usage_capture,
+                        )
+                    break
+                except IncompleteRead as exc:
+                    if relay_attempt >= relay_attempts:
+                        raise
+                    delay_seconds = gateway_retry_delay_seconds(relay_attempt)
+                    _emit_upstream_retry_event(
+                        adapter_event_context,
+                        upstream_name=upstream_name,
+                        upstream_format=upstream_format,
+                        attempt=relay_attempt,
+                        max_attempts=relay_attempts,
+                        exc=exc,
+                        delay_seconds=delay_seconds,
+                    )
+                    time.sleep(delay_seconds)
+            else:
+                raise RuntimeError("unreachable upstream relay retry state")
             write_proxy_event(
                 "request_complete",
                 request_id=request_id,
@@ -3456,6 +3954,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **usage_capture,
                 **request_context,
             )
+        except ImageProxyError as exc:
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                upstream=upstream_name,
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                status=502,
+                error=type(exc).__name__,
+                detail=str(exc)[:300],
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._safe_send_json(502, {"error": "image_proxy_error", "detail": str(exc)}, request_id)
         except ValueError as exc:
             write_proxy_event(
                 "request_error",
@@ -3654,7 +4169,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **request_context,
             )
             request = Request(_responses_url(upstream, self.path), headers=headers, method=method)
-            with urlopen(request, timeout=upstream_timeout_seconds()) as response:
+            adapter_event_context = {
+                "request_id": request_id,
+                "model": None,
+                **request_context,
+            }
+            with _open_upstream_response(
+                request,
+                upstream_name=upstream_name,
+                upstream_format="responses",
+                timeout=upstream_timeout_seconds(),
+                event_context=adapter_event_context,
+            ) as response:
                 status = self._relay_upstream_response(response, upstream_name, request_id=request_id, model=None)
             write_proxy_event(
                 "request_complete",

@@ -108,6 +108,10 @@ struct SettingsDocument {
     gateway_enable_responses: Option<bool>,
     gateway_enable_chat_completions: Option<bool>,
     gateway_request_timeout_seconds: Option<u32>,
+    gateway_auto_retry_enabled: Option<bool>,
+    gateway_auto_retry_max_attempts: Option<u32>,
+    gateway_image_proxy_enabled: Option<bool>,
+    gateway_image_proxy_model: Option<String>,
     gateway_fast_model_variants: Option<Vec<String>>,
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
@@ -157,6 +161,21 @@ impl SettingsDocument {
                 .gateway_request_timeout_seconds
                 .map(|value| value.clamp(5, 600))
                 .unwrap_or(defaults.gateway_request_timeout_seconds),
+            gateway_auto_retry_enabled: self
+                .gateway_auto_retry_enabled
+                .unwrap_or(defaults.gateway_auto_retry_enabled),
+            gateway_auto_retry_max_attempts: self
+                .gateway_auto_retry_max_attempts
+                .map(sanitize_gateway_auto_retry_max_attempts)
+                .unwrap_or(defaults.gateway_auto_retry_max_attempts),
+            gateway_image_proxy_enabled: self
+                .gateway_image_proxy_enabled
+                .unwrap_or(defaults.gateway_image_proxy_enabled),
+            gateway_image_proxy_model: self
+                .gateway_image_proxy_model
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(defaults.gateway_image_proxy_model),
             gateway_fast_model_variants: self
                 .gateway_fast_model_variants
                 .unwrap_or(defaults.gateway_fast_model_variants),
@@ -172,6 +191,10 @@ impl SettingsDocument {
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }
+}
+
+fn sanitize_gateway_auto_retry_max_attempts(value: u32) -> u8 {
+    value.clamp(1, 30) as u8
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,6 +555,33 @@ fn build_start_command(
                 .gateway_request_timeout_seconds
                 .clamp(5, 600)
                 .to_string(),
+        )
+        .env(
+            "CODEX_PROXY_AUTO_RETRY_ENABLED",
+            if settings.gateway_auto_retry_enabled {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .env(
+            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS",
+            settings
+                .gateway_auto_retry_max_attempts
+                .clamp(1, 30)
+                .to_string(),
+        )
+        .env(
+            "CODEX_PROXY_IMAGE_PROXY_ENABLED",
+            if settings.gateway_image_proxy_enabled {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .env(
+            "CODEX_PROXY_IMAGE_PROXY_MODEL",
+            settings.gateway_image_proxy_model.trim(),
         );
     configure_start_stdio(&mut command);
     configure_detached(&mut command);
@@ -1537,6 +1587,10 @@ time.sleep(10)
         let paths = test_paths(&root);
         let settings = Settings {
             proxy_port: 4555,
+            gateway_auto_retry_enabled: true,
+            gateway_auto_retry_max_attempts: 23,
+            gateway_image_proxy_enabled: true,
+            gateway_image_proxy_model: "minimax-cn/MiniMax-M3".to_string(),
             ..Settings::default()
         };
 
@@ -1561,6 +1615,30 @@ time.sleep(10)
             .and_then(|value| value.as_ref())
             .map(PathBuf::from);
         assert_eq!(codex_home, Some(paths.codex_dir.clone()));
+        assert_eq!(
+            envs.get("CODEX_PROXY_AUTO_RETRY_ENABLED")
+                .and_then(|value| value.as_ref())
+                .and_then(|value| value.to_str()),
+            Some("1")
+        );
+        assert_eq!(
+            envs.get("CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS")
+                .and_then(|value| value.as_ref())
+                .and_then(|value| value.to_str()),
+            Some("23")
+        );
+        assert_eq!(
+            envs.get("CODEX_PROXY_IMAGE_PROXY_ENABLED")
+                .and_then(|value| value.as_ref())
+                .and_then(|value| value.to_str()),
+            Some("1")
+        );
+        assert_eq!(
+            envs.get("CODEX_PROXY_IMAGE_PROXY_MODEL")
+                .and_then(|value| value.as_ref())
+                .and_then(|value| value.to_str()),
+            Some("minimax-cn/MiniMax-M3")
+        );
     }
 
     #[test]

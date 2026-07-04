@@ -150,6 +150,10 @@ struct SettingsDocument {
     gateway_enable_responses: Option<bool>,
     gateway_enable_chat_completions: Option<bool>,
     gateway_request_timeout_seconds: Option<u32>,
+    gateway_auto_retry_enabled: Option<bool>,
+    gateway_auto_retry_max_attempts: Option<u32>,
+    gateway_image_proxy_enabled: Option<bool>,
+    gateway_image_proxy_model: Option<String>,
     gateway_fast_model_variants: Option<Vec<String>>,
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
@@ -199,6 +203,21 @@ impl SettingsDocument {
                 .gateway_request_timeout_seconds
                 .map(|value| value.clamp(5, 600))
                 .unwrap_or(defaults.gateway_request_timeout_seconds),
+            gateway_auto_retry_enabled: self
+                .gateway_auto_retry_enabled
+                .unwrap_or(defaults.gateway_auto_retry_enabled),
+            gateway_auto_retry_max_attempts: self
+                .gateway_auto_retry_max_attempts
+                .map(sanitize_gateway_auto_retry_max_attempts)
+                .unwrap_or(defaults.gateway_auto_retry_max_attempts),
+            gateway_image_proxy_enabled: self
+                .gateway_image_proxy_enabled
+                .unwrap_or(defaults.gateway_image_proxy_enabled),
+            gateway_image_proxy_model: self
+                .gateway_image_proxy_model
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(defaults.gateway_image_proxy_model),
             gateway_fast_model_variants: self
                 .gateway_fast_model_variants
                 .map(sanitize_fast_model_variants)
@@ -216,6 +235,10 @@ impl SettingsDocument {
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }
+}
+
+fn sanitize_gateway_auto_retry_max_attempts(value: u32) -> u8 {
+    value.clamp(1, 30) as u8
 }
 
 fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
@@ -618,6 +641,10 @@ sort_order = 7
             gateway_enable_responses: true,
             gateway_enable_chat_completions: false,
             gateway_request_timeout_seconds: 90,
+            gateway_auto_retry_enabled: false,
+            gateway_auto_retry_max_attempts: 7,
+            gateway_image_proxy_enabled: true,
+            gateway_image_proxy_model: "minimax-cn/MiniMax-M3".to_string(),
             gateway_fast_model_variants: vec!["openai/gpt-5.5".to_string()],
             official_disabled_models: vec!["openai/gpt-5.4-mini".to_string()],
             official_model_sort_order: vec![
@@ -635,12 +662,59 @@ sort_order = 7
         let written = fs::read_to_string(paths.settings_path()).expect("settings text");
         assert!(written.contains("\"proxy_port\": 4555"));
         assert!(written.contains("\"gateway_request_timeout_seconds\": 90"));
+        assert!(written.contains("\"gateway_auto_retry_enabled\": false"));
+        assert!(written.contains("\"gateway_auto_retry_max_attempts\": 7"));
+        assert!(written.contains("\"gateway_image_proxy_enabled\": true"));
+        assert!(written.contains("\"gateway_image_proxy_model\": \"minimax-cn/MiniMax-M3\""));
         assert!(written.contains("\"gateway_fast_model_variants\""));
         assert!(written.contains("\"official_disabled_models\""));
         assert!(written.contains("\"official_model_sort_order\""));
         assert!(written.contains("\"official_provider_sort_order\": 3"));
         assert!(written.contains("\"auto_sync_clients\": false"));
         assert!(written.contains("\"unified_codex_history\": false"));
+    }
+
+    #[test]
+    fn gateway_retry_and_image_proxy_settings_default_and_clamp() {
+        let root = temp_root("gateway-runtime-settings");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "gateway_auto_retry_max_attempts": 99,
+              "gateway_image_proxy_enabled": true,
+              "gateway_image_proxy_model": "  minimax-cn/MiniMax-M3  ",
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert!(loaded.gateway_auto_retry_enabled);
+        assert_eq!(loaded.gateway_auto_retry_max_attempts, 30);
+        assert!(loaded.gateway_image_proxy_enabled);
+        assert_eq!(loaded.gateway_image_proxy_model, "minimax-cn/MiniMax-M3");
+    }
+
+    #[test]
+    fn gateway_retry_attempts_clamp_to_minimum() {
+        let root = temp_root("gateway-runtime-settings-min");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "gateway_auto_retry_max_attempts": 0,
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert_eq!(loaded.gateway_auto_retry_max_attempts, 1);
     }
 
     #[test]
@@ -948,6 +1022,22 @@ sort_order = 7
         assert_eq!(
             left.gateway_request_timeout_seconds,
             right.gateway_request_timeout_seconds
+        );
+        assert_eq!(
+            left.gateway_auto_retry_enabled,
+            right.gateway_auto_retry_enabled
+        );
+        assert_eq!(
+            left.gateway_auto_retry_max_attempts,
+            right.gateway_auto_retry_max_attempts
+        );
+        assert_eq!(
+            left.gateway_image_proxy_enabled,
+            right.gateway_image_proxy_enabled
+        );
+        assert_eq!(
+            left.gateway_image_proxy_model,
+            right.gateway_image_proxy_model
         );
         assert_eq!(
             left.gateway_fast_model_variants,

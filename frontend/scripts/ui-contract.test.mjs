@@ -402,6 +402,43 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
   assert.doesNotMatch(drawerSource, />\s*Sync history\s*</);
 });
 
+test("settings drawer exposes gateway retry and image proxy controls", async () => {
+  const [drawerSource, appSource, typesSource] = await Promise.all([
+    readFile(settingsDrawerPath, "utf8"),
+    readFile(appPath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /gateway_auto_retry_enabled: boolean;/);
+  assert.match(typesSource, /gateway_auto_retry_max_attempts: number;/);
+  assert.match(typesSource, /gateway_image_proxy_enabled: boolean;/);
+  assert.match(typesSource, /gateway_image_proxy_model: string;/);
+  assert.match(drawerSource, /Auto retry/);
+  assert.match(drawerSource, /Max attempts/);
+  assert.match(drawerSource, /min=\{1\}/);
+  assert.match(drawerSource, /max=\{30\}/);
+  assert.match(drawerSource, /Image proxy/);
+  assert.match(drawerSource, /Vision model/);
+  assert.match(drawerSource, /visionModels/);
+  assert.match(drawerSource, /gateway_image_proxy_enabled/);
+  assert.match(drawerSource, /gateway_image_proxy_model/);
+  assert.match(appSource, /input_modalities\?\.\includes\("image"\)/);
+  assert.match(appSource, /visionModels=\{visionModels\}/);
+});
+
+test("settings save restarts running gateway when retry or image proxy runtime settings change", async () => {
+  const appSource = await readFile(appPath, "utf8");
+
+  assert.match(appSource, /function gatewayRuntimeSettingsChanged/);
+  assert.match(appSource, /gateway_auto_retry_enabled/);
+  assert.match(appSource, /gateway_auto_retry_max_attempts/);
+  assert.match(appSource, /gateway_image_proxy_enabled/);
+  assert.match(appSource, /gateway_image_proxy_model/);
+  assert.match(appSource, /runtime\.status\?\.proxy_running/);
+  assert.match(appSource, /api\.restartProxy\(\)/);
+  assert.match(appSource, /Gateway settings saved and runtime restarted/);
+});
+
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
@@ -615,7 +652,18 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.match(action, /setConnectionPreview\(null\);/);
   assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPreview\(nextMode === "custom"\);[\s\S]*setError\(message\);[\s\S]*return;[\s\S]*\}/);
   assert.doesNotMatch(action, /historyHint/);
-  assert.match(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
+  assert.match(action, /showToast\(codexHubConnectionSuccessMessage\(nextMode\), "success"\)/);
+  assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
+});
+
+test("background history repair is silent on success and only reports failures", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const repair = providersSource.match(/async function repairUnifiedHistoryInBackground[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
+
+  assert.match(repair, /await api\.syncHistory\(targetProvider\)/);
+  assert.match(repair, /History repair failed:/);
+  assert.doesNotMatch(repair, /historyRepairSuccessMessage/);
+  assert.doesNotMatch(repair, /showToast\(historyRepairSuccessMessage/);
 });
 
 test("Codex Hub connection failures no longer mention history sync", async () => {

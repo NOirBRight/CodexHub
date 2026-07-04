@@ -11,6 +11,7 @@ import type {
   GatewayStatus,
   GatewayUsageEvent,
   GatewayUsageSummary,
+  Model,
   Provider,
   Settings,
   TabId,
@@ -30,6 +31,7 @@ type RuntimeSnapshot = {
   gatewayUsageStatus: TelemetryStatus | null;
   usageError: string | null;
   gatewayClients: GatewayClientInfo[];
+  catalogModels: Model[];
 };
 
 type LoadRuntimeOptions = {
@@ -74,6 +76,28 @@ function mergeGatewayClients(
   });
 }
 
+function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings) {
+  if (!previous) {
+    return false;
+  }
+  return (
+    previous.gateway_auto_retry_enabled !== next.gateway_auto_retry_enabled ||
+    previous.gateway_auto_retry_max_attempts !== next.gateway_auto_retry_max_attempts ||
+    previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
+    previous.gateway_image_proxy_model !== next.gateway_image_proxy_model
+  );
+}
+
+function visionModelOptions(models: Model[]) {
+  return models
+    .filter((model) => model.enabled !== false && model.input_modalities?.includes("image"))
+    .sort((left, right) => {
+      const leftName = left.display_name?.trim() || left.id;
+      const rightName = right.display_name?.trim() || right.id;
+      return leftName.localeCompare(rightName);
+    });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
@@ -86,6 +110,7 @@ export default function App() {
     gatewayUsageStatus: null,
     usageError: null,
     gatewayClients: [],
+    catalogModels: [],
   });
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -122,6 +147,7 @@ export default function App() {
         settingsResult,
         providersResult,
         gatewayResult,
+        catalogResult,
         usageSnapshotResult,
       ] =
         await Promise.allSettled([
@@ -129,6 +155,7 @@ export default function App() {
           api.getSettings(),
           api.getProviders(),
           api.gatewayStatus(),
+          api.listModels(),
           api.gatewayUsageSnapshot(usageWindow),
         ]);
 
@@ -138,6 +165,7 @@ export default function App() {
         settings: settingsResult.status === "fulfilled" ? settingsResult.value : current.settings,
         providers: providersResult.status === "fulfilled" ? providersResult.value : current.providers,
         gatewayStatus: gatewayResult.status === "fulfilled" ? gatewayResult.value : current.gatewayStatus,
+        catalogModels: catalogResult.status === "fulfilled" ? catalogResult.value : current.catalogModels,
         gatewayUsageSummary:
           usageSnapshotResult.status === "fulfilled"
             ? usageSnapshotResult.value.summary
@@ -161,6 +189,7 @@ export default function App() {
         settingsResult,
         providersResult,
         gatewayResult,
+        catalogResult,
       ].find((result) => result.status === "rejected");
       if (rejected?.status === "rejected") {
         setBanner(messageFromError(rejected.reason));
@@ -193,6 +222,7 @@ export default function App() {
   }, [loadGatewayClients, loadRuntime]);
 
   const exportedCount = runtime.gatewayStatus?.official_models.length ?? 0;
+  const visionModels = visionModelOptions(runtime.catalogModels);
 
   async function runRuntimeAction(label: string, action: () => Promise<AppStatus>) {
     setBusy(label);
@@ -214,6 +244,9 @@ export default function App() {
       const previousUnified = runtime.settings?.unified_codex_history ?? true;
       const nextUnified = next.unified_codex_history ?? true;
       const currentMode = runtime.status?.mode;
+      const shouldRestartGateway = Boolean(
+        runtime.status?.proxy_running && gatewayRuntimeSettingsChanged(runtime.settings, next),
+      );
       if (runtime.settings && next.auto_start_proxy !== runtime.settings.auto_start_proxy) {
         if (next.auto_start_proxy) {
           await api.setAutostart(true);
@@ -235,8 +268,15 @@ export default function App() {
           historyMessage = await api.restoreOfficialHistoryFromUnified();
         }
       }
-      setBanner(historyMessage ?? "Settings saved");
+      let saveMessage = historyMessage ?? "Settings saved";
+      if (shouldRestartGateway) {
+        const status = await api.restartProxy();
+        setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
+        saveMessage = "Gateway settings saved and runtime restarted";
+      }
+      setBanner(saveMessage);
       await loadRuntime();
+      return saveMessage;
     } catch (err) {
       setBanner(messageFromError(err));
       throw err;
@@ -322,7 +362,9 @@ export default function App() {
             busy={busy}
             pending={contract.pendingBackend}
             clients={contract.gatewayClients as GatewayClientContract[]}
-            onApplySettings={saveSettings}
+            onApplySettings={async (settings) => {
+              await saveSettings(settings);
+            }}
             onRefreshClients={loadGatewayClients}
             onRestartProxy={() => runRuntimeAction("restart", api.restartProxy)}
             onStartProxy={() => runRuntimeAction("start", api.startProxy)}
@@ -336,6 +378,7 @@ export default function App() {
         busy={busy}
         open={settingsOpen}
         settings={runtime.settings}
+        visionModels={visionModels}
         onClose={() => setSettingsOpen(false)}
         onSave={saveSettings}
         onSyncHistory={syncHistory}
