@@ -249,6 +249,45 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 2000)
 
+    def test_open_upstream_response_does_not_retry_non_retryable_http_errors(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":"bad request"}'),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(HTTPError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context={"request_id": "req_bad_request", "model": "volc/glm-5.2"},
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        retry_events = [
+            call for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(retry_events, [])
+
     def test_open_upstream_response_does_not_retry_when_auto_retry_disabled(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         error = HTTPError(
@@ -766,7 +805,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(transformed)["max_output_tokens"], 131072)
 
-    def test_ollama_body_converts_compaction_input_to_system_message(self):
+    def test_ollama_body_converts_compaction_input_to_developer_message(self):
         upstream = choose_upstream("glm-5.2")
         body = json.dumps(
             {
@@ -785,11 +824,11 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(transformed)
 
         self.assertEqual(payload["input"][1]["type"], "message")
-        self.assertEqual(payload["input"][1]["role"], "system")
+        self.assertEqual(payload["input"][1]["role"], "developer")
         self.assertIn("Earlier useful context.", payload["input"][1]["content"])
         self.assertNotIn('"type":"compaction"', transformed.decode("utf-8"))
 
-    def test_ollama_body_converts_custom_tool_items_to_system_messages(self):
+    def test_ollama_body_converts_custom_tool_items_to_developer_messages(self):
         upstream = choose_upstream("glm-5.2")
         body = json.dumps(
             {
@@ -817,12 +856,12 @@ class RoutingTests(unittest.TestCase):
         raw = transformed.decode("utf-8")
 
         self.assertEqual(payload["input"][1]["type"], "message")
-        self.assertEqual(payload["input"][1]["role"], "system")
+        self.assertEqual(payload["input"][1]["role"], "developer")
         self.assertIn("Read-only Codex tool call transcript", payload["input"][1]["content"])
         self.assertIn("apply_patch", payload["input"][1]["content"])
         self.assertIn("*** Begin Patch", payload["input"][1]["content"])
         self.assertEqual(payload["input"][2]["type"], "message")
-        self.assertEqual(payload["input"][2]["role"], "system")
+        self.assertEqual(payload["input"][2]["role"], "developer")
         self.assertIn("Read-only Codex tool result transcript", payload["input"][2]["content"])
         self.assertIn("Success. Updated demo.txt", payload["input"][2]["content"])
         self.assertNotIn('"type":"custom_tool_call"', raw)
@@ -1009,7 +1048,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["tools"][0]["function"]["name"], "get_weather")
         self.assertEqual(payload["tool_choice"]["function"]["name"], "get_weather")
 
-    def test_external_body_converts_compaction_input_to_system_message(self):
+    def test_external_body_converts_compaction_input_to_developer_message(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
             ("minimax-cn/minimax-m3", "MiniMax-M3"),
@@ -1034,11 +1073,11 @@ class RoutingTests(unittest.TestCase):
 
                 self.assertEqual(payload["model"], upstream_model)
                 self.assertEqual(payload["input"][1]["type"], "message")
-                self.assertEqual(payload["input"][1]["role"], "system")
+                self.assertEqual(payload["input"][1]["role"], "developer")
                 self.assertIn("Earlier external-provider context.", payload["input"][1]["content"])
                 self.assertNotIn('"type":"compaction"', transformed.decode("utf-8"))
 
-    def test_external_body_converts_custom_tool_items_to_system_messages(self):
+    def test_external_body_converts_custom_tool_items_to_developer_messages(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
             ("minimax-cn/minimax-m3", "MiniMax-M3"),
@@ -1071,12 +1110,12 @@ class RoutingTests(unittest.TestCase):
 
                 self.assertEqual(payload["model"], upstream_model)
                 self.assertEqual(payload["input"][0]["type"], "message")
-                self.assertEqual(payload["input"][0]["role"], "system")
+                self.assertEqual(payload["input"][0]["role"], "developer")
                 self.assertIn("Read-only Codex tool call transcript", payload["input"][0]["content"])
                 self.assertIn("shell_command", payload["input"][0]["content"])
                 self.assertIn("rg custom_tool_call", payload["input"][0]["content"])
                 self.assertEqual(payload["input"][1]["type"], "message")
-                self.assertEqual(payload["input"][1]["role"], "system")
+                self.assertEqual(payload["input"][1]["role"], "developer")
                 self.assertIn("Read-only Codex tool result transcript", payload["input"][1]["content"])
                 self.assertIn("match", payload["input"][1]["content"])
                 self.assertNotIn('"type":"custom_tool_call"', raw)
@@ -1749,6 +1788,66 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["input"][1]["role"], "assistant")
         self.assertNotIn('"role":"system"', transformed.decode("utf-8"))
 
+    def test_official_request_downgrades_system_message_history(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Continue."},
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": "Codex native mcp__node_repl.js result\nstatus: completed",
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "official", "auth": "codex_auth"})
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertIn("Codex native mcp__node_repl.js result", payload["input"][1]["content"])
+        self.assertNotIn('"role":"system"', transformed.decode("utf-8"))
+
+    def test_official_request_does_not_inject_explicit_codex_native_tools(self):
+        body = json.dumps({"model": "gpt-5.5", "input": "hi"}).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "official", "auth": "codex_auth"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload.get("tools", []) if tool.get("type") == "function"}
+
+        self.assertNotIn("tool_search", tools_by_name)
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("mcp__node_repl__js", tools_by_name)
+
+    def test_official_browser_context_injects_skill_guidance_without_tools(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "# In app browser\nCurrent URL: https://example.test/page",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "official", "auth": "codex_auth"})
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=True)
+        tools_by_name = {tool["name"]: tool for tool in payload.get("tools", []) if tool.get("type") == "function"}
+
+        self.assertNotIn("tool_search", tools_by_name)
+        self.assertNotIn("mcp__node_repl__js", tools_by_name)
+        self.assertIn("browser:control-in-app-browser", transcript)
+        self.assertIn("node_repl js", transcript)
+        self.assertIn("browser session unavailable", transcript)
+        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertNotIn('"role":"system"', transformed.decode("utf-8"))
+
     def test_external_request_injects_explicit_codex_native_tools(self):
         body = json.dumps({"model": "glm-5.2", "input": "spawn a child"}).encode("utf-8")
 
@@ -1756,12 +1855,210 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
 
-        self.assertIn("tool_search", tools_by_name)
+        self.assertNotIn("tool_search", tools_by_name)
         self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
         self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
         self.assertIn("multi_agent_v1__close_agent", tools_by_name)
         self.assertIn("multi_agent_v1__resume_agent", tools_by_name)
         self.assertIn("multi_agent_v1__send_input", tools_by_name)
+
+    def test_external_request_flattens_mcp_node_repl_namespace_without_tool_search(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "run node repl sentinel",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "mcp__node_repl",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "js",
+                                "description": "Run JavaScript.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"code": {"type": "string"}},
+                                    "required": ["code"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            {
+                                "type": "function",
+                                "name": "js_reset",
+                                "parameters": {"type": "object", "additionalProperties": False},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+
+        self.assertFalse(any(tool.get("type") == "namespace" and tool.get("name") == "mcp__node_repl" for tool in payload["tools"]))
+        self.assertNotIn("tool_search", tools_by_name)
+        self.assertIn("mcp__node_repl__js", tools_by_name)
+        self.assertIn("mcp__node_repl__js_reset", tools_by_name)
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+
+    def test_external_request_adds_node_repl_single_step_completion_guidance(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Call mcp__node_repl__js exactly once, then stop tool use.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_node",
+                        "namespace": "mcp__node_repl",
+                        "name": "js",
+                        "arguments": json.dumps({"code": "nodeRepl.write(\"ok\")"}),
+                    },
+                    {"type": "function_call_output", "call_id": "call_node", "output": "ok"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        transcript = json.dumps(json.loads(transformed), ensure_ascii=True)
+
+        self.assertIn("Codex native mcp__node_repl.js result", transcript)
+        self.assertIn("required_next_action: write the final answer now", transcript)
+        self.assertIn("completed_tool_alias: mcp__node_repl__js", transcript)
+        self.assertIn("do not call mcp__node_repl__js or tool_search again", transcript)
+
+    def test_external_request_hides_node_repl_tools_after_single_step_result(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Call mcp__node_repl__js exactly once, then stop tool use.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_node",
+                        "namespace": "mcp__node_repl",
+                        "name": "js",
+                        "arguments": json.dumps({"code": "nodeRepl.write(\"ok\")"}),
+                    },
+                    {"type": "function_call_output", "call_id": "call_node", "output": "ok"},
+                ],
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "mcp__node_repl",
+                        "tools": [
+                            {"type": "function", "name": "js", "parameters": {"type": "object"}},
+                            {"type": "function", "name": "js_reset", "parameters": {"type": "object"}},
+                        ],
+                    },
+                    {"type": "function", "name": "mcp__node_repl__js", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "mcp__node_repl__js_reset", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertFalse(any(tool.get("type") == "namespace" and tool.get("name") == "mcp__node_repl" for tool in payload["tools"]))
+        self.assertNotIn("mcp__node_repl__js", tools_by_name)
+        self.assertNotIn("mcp__node_repl__js_reset", tools_by_name)
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("status: single_step_complete", transcript)
+        self.assertIn("required_next_action: write the final answer now", transcript)
+
+    def test_external_browser_comments_injects_browser_guidance_and_node_repl_alias(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "# Browser comments\nbutton is misaligned"}],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "mcp__node_repl",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "js",
+                                "description": "Run JavaScript.",
+                                "parameters": {"type": "object", "additionalProperties": True},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=True)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+
+        self.assertNotIn("tool_search", tools_by_name)
+        self.assertIn("mcp__node_repl__js", tools_by_name)
+        self.assertIn("mcp__node_repl__js", transcript)
+        self.assertIn("browser:control-in-app-browser", transcript)
+
+    def test_external_browser_context_keeps_node_repl_tools_after_result(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "# In app browser\nCurrent URL: https://example.test/page\nRead the current page title.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_node",
+                        "namespace": "mcp__node_repl",
+                        "name": "js",
+                        "arguments": json.dumps({"code": "nodeRepl.write(\"Example\")"}),
+                    },
+                    {"type": "function_call_output", "call_id": "call_node", "output": "Example"},
+                ],
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "mcp__node_repl",
+                        "tools": [
+                            {"type": "function", "name": "js", "parameters": {"type": "object"}},
+                            {"type": "function", "name": "js_reset", "parameters": {"type": "object"}},
+                        ],
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertIn("mcp__node_repl__js", tools_by_name)
+        self.assertIn("mcp__node_repl__js_reset", tools_by_name)
+        self.assertIn("browser:control-in-app-browser", transcript)
+        self.assertNotIn("status: single_step_complete", transcript)
 
     def test_external_request_hides_tool_search_after_multi_agent_discovery(self):
         body = json.dumps(
@@ -1816,6 +2113,7 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("Codex native multi_agent_v1.spawn_agent result", transcript)
         self.assertIn("agent_id: 019f-child", transcript)
         self.assertIn("status: spawned_child_wait_required", transcript)
+        self.assertFalse(any(tool.get("type") == "namespace" and tool.get("name") == "multi_agent_v1" for tool in payload["tools"]))
         wait_items = tools_by_name["multi_agent_v1__wait_agent"]["parameters"]["properties"]["targets"]["items"]
         self.assertEqual(wait_items["enum"], ["019f-child"])
 
@@ -1976,6 +2274,81 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("status: lifecycle_complete", transcript)
         self.assertIn("required_next_action: write the final concise report now", transcript)
 
+    def test_external_request_hides_multi_agent_tools_after_exactly_one_lifecycle_close(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Run exactly one subagent lifecycle: spawn_agent, wait_agent, close_agent.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"019f-child": {"completed": "child-ok"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close",
+                        "output": json.dumps({"previous_status": {"completed": "child-ok"}}),
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "multi_agent_v1",
+                        "tools": [
+                            {"type": "function", "name": "spawn_agent", "parameters": {"type": "object"}},
+                            {"type": "function", "name": "wait_agent", "parameters": {"type": "object"}},
+                            {"type": "function", "name": "close_agent", "parameters": {"type": "object"}},
+                        ],
+                    },
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertFalse(any(tool.get("type") == "namespace" and tool.get("name") == "multi_agent_v1" for tool in payload["tools"]))
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertNotIn(f"multi_agent_v1__{tool_name}", tools_by_name)
+        self.assertIn("status: lifecycle_complete", transcript)
+        self.assertIn("completed_tool_aliases: multi_agent_v1__spawn_agent", transcript)
+
     def test_external_response_normalizes_multi_agent_wait_alias_and_arguments(self):
         body = json.dumps(
             {
@@ -1997,6 +2370,27 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(call["namespace"], "multi_agent_v1")
         self.assertEqual(json.loads(call["arguments"])["targets"], ["019f-child"])
         self.assertEqual(json.loads(call["arguments"])["timeout_ms"], 1000)
+
+    def test_external_response_normalizes_mcp_node_repl_alias(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_node",
+                        "name": "mcp__node_repl__js",
+                        "arguments": json.dumps({"code": "1+1"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "js")
+        self.assertEqual(call["namespace"], "mcp__node_repl")
+        self.assertEqual(json.loads(call["arguments"])["code"], "1+1")
 
     def test_external_sse_normalizes_tool_search_function_call(self):
         payload = {

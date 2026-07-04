@@ -705,7 +705,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         # Last line should be [DONE]
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
 
-    def test_post_chat_completions_streaming_reports_upstream_retry_to_downstream(self):
+    def test_post_chat_completions_streaming_keeps_retry_events_out_of_downstream_stream(self):
         body = json.dumps({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -741,13 +741,19 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         self.assertEqual(mock_urlopen.call_count, 2)
         written = b"".join(handler.wfile.writes)
-        self.assertIn(b"event: codexhub.retry\n", written)
-        self.assertIn(b'"attempt":1', written)
-        self.assertIn(b'"max_attempts":2', written)
+        self.assertNotIn(b"event: codexhub.retry\n", written)
+        self.assertNotIn(b'"type":"codexhub.retry"', written)
         self.assertIn(b"Recovered", written)
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
+        chunks = [
+            json.loads(line.removeprefix(b"data: "))
+            for line in written.split(b"\n")
+            if line.startswith(b"data: {")
+        ]
+        self.assertTrue(chunks)
+        self.assertTrue(all(isinstance(chunk.get("choices"), list) for chunk in chunks))
 
-    def test_post_chat_completions_streaming_keeps_retry_and_final_error_in_sse(self):
+    def test_post_chat_completions_streaming_returns_final_json_error_without_retry_event(self):
         body = json.dumps({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -774,12 +780,14 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
-        self.assertIn(b"event: codexhub.retry\n", written)
-        self.assertIn(b"event: error\n", written)
-        self.assertIn(b'"type":"upstream_stream_error"', written)
-        self.assertIn(b'"error":"UpstreamProtocolError"', written)
+        self.assertNotIn(b"event: codexhub.retry\n", written)
+        self.assertNotIn(b'"type":"codexhub.retry"', written)
+        self.assertNotIn(b"event: error\n", written)
+        payload = json.loads(written)
+        self.assertEqual(payload["error"]["message"], "upstream returned json")
+        self.assertEqual(payload["error"]["type"], "upstream_error")
         self.assertNotIn(upstream_body, written)
-        self.assertFalse(written.rstrip().endswith(b"data: [DONE]"))
+        self.assertEqual(handler._fake.status, 502)
 
     def test_post_chat_completions_streaming_reports_read_errors_as_sse_error_not_empty_finish(self):
         cases = [
