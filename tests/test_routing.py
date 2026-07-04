@@ -208,6 +208,63 @@ class RoutingTests(unittest.TestCase):
             self.assertTrue(codex_proxy.gateway_auto_retry_enabled())
             self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 30)
 
+    def test_gateway_auto_retry_settings_fall_back_to_runtime_settings_when_env_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = os.path.join(temp_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "gateway_auto_retry_enabled": False,
+                        "gateway_auto_retry_max_attempts": 4,
+                    },
+                    handle,
+                )
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+            ):
+                self.assertFalse(codex_proxy.gateway_auto_retry_enabled())
+                self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 4)
+
+    def test_gateway_timeout_settings_fall_back_to_runtime_settings_when_env_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = os.path.join(temp_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as handle:
+                json.dump({"gateway_request_timeout_seconds": 45}, handle)
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+            ):
+                self.assertEqual(upstream_timeout_seconds(), 45)
+
+    def test_gateway_auto_retry_runtime_settings_override_stale_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = os.path.join(temp_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "gateway_auto_retry_enabled": False,
+                        "gateway_auto_retry_max_attempts": 2,
+                    },
+                    handle,
+                )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                        "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "30",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+            ):
+                self.assertFalse(codex_proxy.gateway_auto_retry_enabled())
+                self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 2)
+
     def test_gateway_retry_delay_caps_after_third_retry(self):
         self.assertEqual([codex_proxy.gateway_retry_delay_seconds(attempt) for attempt in range(1, 6)], [2, 4, 6, 8, 8])
 

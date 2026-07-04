@@ -168,13 +168,32 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn('model_reasoning_effort = "high"', updated)
             self.assertIn("[features]", updated)
 
-    def test_unified_history_injection_skips_explicit_model_provider(self):
+    def test_unified_history_injection_replaces_explicit_openai_provider(self):
         original = "\n".join(
             [
                 'model_provider = "openai"',
                 "",
                 "[model_providers.openai]",
                 'name = "OpenAI"',
+                "",
+            ]
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "injected")
+        self.assertIn('model_provider = "custom"', updated)
+        self.assertIn("[model_providers.custom]", updated)
+        self.assertIn("[model_providers.openai]", updated)
+        self.assertNotIn('model_provider = "openai"', updated)
+
+    def test_unified_history_injection_skips_non_openai_explicit_model_provider(self):
+        original = "\n".join(
+            [
+                'model_provider = "anthropic"',
+                "",
+                "[model_providers.anthropic]",
+                'name = "Anthropic"',
                 "",
             ]
         )

@@ -273,6 +273,7 @@ RETRY_REQUEST_MAIN_GENERATION = "main_generation"
 RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
 RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
 TRANSIENT_HTTP_RETRY_STATUSES = {408, 409, 421, 425, 429, 500, 502, 503, 504}
+AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES = {404, 405, 415, 422}
 PERMANENT_HTTP_ERROR_STATUSES = {
     400,
     401,
@@ -334,6 +335,15 @@ class ImageProxyError(Exception):
 
 
 def upstream_timeout_seconds() -> int:
+    settings_value = _runtime_settings_value("gateway_request_timeout_seconds")
+    if isinstance(settings_value, int):
+        return settings_value if settings_value > 0 else DEFAULT_UPSTREAM_TIMEOUT_SECONDS
+    if isinstance(settings_value, str):
+        try:
+            value = int(settings_value)
+        except ValueError:
+            value = DEFAULT_UPSTREAM_TIMEOUT_SECONDS
+        return value if value > 0 else DEFAULT_UPSTREAM_TIMEOUT_SECONDS
     raw_value = os.environ.get("CODEX_PROXY_UPSTREAM_TIMEOUT_SECONDS")
     if not raw_value:
         return DEFAULT_UPSTREAM_TIMEOUT_SECONDS
@@ -386,10 +396,23 @@ def _env_or_settings_flag(env_name: str, settings_name: str, default: bool) -> b
 
 
 def gateway_auto_retry_enabled() -> bool:
-    return _env_flag("CODEX_PROXY_AUTO_RETRY_ENABLED", True)
+    return _env_or_settings_flag(
+        "CODEX_PROXY_AUTO_RETRY_ENABLED",
+        "gateway_auto_retry_enabled",
+        True,
+    )
 
 
 def gateway_auto_retry_max_attempts() -> int:
+    settings_value = _runtime_settings_value("gateway_auto_retry_max_attempts")
+    if isinstance(settings_value, int):
+        return max(1, min(settings_value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
+    if isinstance(settings_value, str):
+        try:
+            value = int(settings_value)
+        except ValueError:
+            value = DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS
+        return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
     raw_value = os.environ.get("CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS")
     if not raw_value:
         return DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS
@@ -1721,11 +1744,20 @@ def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
         normalized_error.setdefault("type", "upstream_error")
         normalized_error.setdefault("code", payload.get("code"))
     else:
+        error_type = payload.get("type") if isinstance(payload.get("type"), str) else "upstream_error"
+        detail = payload.get("detail")
+        message = error if isinstance(error, str) and error else detail or "Upstream request failed"
+        if error_type == "upstream_stream_error" and isinstance(detail, str) and detail:
+            message = detail
         normalized_error = {
-            "message": error if isinstance(error, str) and error else payload.get("detail") or "Upstream request failed",
-            "type": payload.get("type") if isinstance(payload.get("type"), str) else "upstream_error",
-            "code": payload.get("code"),
+            "message": message,
+            "type": error_type,
+            "code": payload.get("code") or (error if error_type == "upstream_stream_error" else None),
         }
+    if isinstance(payload.get("status"), int):
+        normalized_error.setdefault("status", payload.get("status"))
+    if isinstance(payload.get("upstream"), str):
+        normalized_error.setdefault("upstream", payload.get("upstream"))
     return json.dumps({"error": normalized_error}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -4378,6 +4410,70 @@ def _downstream_stream_error_payload(
     }
 
 
+def _chat_completion_error_payload(
+    *,
+    upstream_name: str,
+    status: int = 502,
+    exc: BaseException | None = None,
+    error: str | None = None,
+    detail: str | None = None,
+    error_type: str = "upstream_error",
+) -> dict[str, Any]:
+    error_code = error or (type(exc).__name__ if exc is not None else "UpstreamError")
+    error_detail = detail or (safe_upstream_error_detail(exc) if exc is not None else "")
+    message = error_detail or error_code
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": error_code,
+            "status": status,
+            "upstream": upstream_name,
+        }
+    }
+
+
+def _json_error_payload_for_inbound_format(
+    *,
+    inbound_format: str,
+    upstream_name: str,
+    status: int,
+    exc: BaseException | None = None,
+    error: str | None = None,
+    detail: str | None = None,
+    error_type: str = "upstream_error",
+) -> dict[str, Any]:
+    if inbound_format == "chat_completions":
+        return _chat_completion_error_payload(
+            upstream_name=upstream_name,
+            status=status,
+            exc=exc,
+            error=error,
+            detail=detail,
+            error_type=error_type,
+        )
+    error_code = error or (type(exc).__name__ if exc is not None else "UpstreamError")
+    error_detail = detail or (safe_upstream_error_detail(exc) if exc is not None else "")
+    payload: dict[str, Any] = {"error": error_detail or error_code}
+    if error_detail:
+        payload["detail"] = error_detail
+    return payload
+
+
+def _upstream_format_candidates(upstream_format: str) -> tuple[str, ...]:
+    if upstream_format == "chat_completions":
+        return ("chat_completions",)
+    if upstream_format == "anthropic_messages":
+        raise ValueError("Anthropic Messages upstream is detected but Gateway /v1/messages conversion is not implemented yet")
+    if upstream_format == "auto":
+        return ("responses", "chat_completions")
+    return ("responses",)
+
+
+def _auto_protocol_fallback_allowed(exc: HTTPError) -> bool:
+    return _upstream_retry_status(exc) in AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES
+
+
 def _open_upstream_response(
     request: Request,
     *,
@@ -4583,13 +4679,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 progress_callback=emit_downstream_status if caller_stream else None,
             ):
                 body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            upstream_url = _responses_url(upstream, "/v1/responses")
-            if upstream_format == "chat_completions":
-                body = _responses_request_to_chat_completion_body(body)
-                upstream_url = _chat_completions_url(upstream)
+            responses_body = body
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
-            request = Request(upstream_url, data=body, headers=headers, method="POST")
             emit_retry_to_downstream = caller_stream and inbound_format == "responses"
+
+            def upstream_request_for_format(selected_format: str) -> Request:
+                if selected_format == "chat_completions":
+                    return Request(
+                        _chat_completions_url(upstream),
+                        data=_responses_request_to_chat_completion_body(responses_body),
+                        headers=headers,
+                        method="POST",
+                    )
+                return Request(
+                    _responses_url(upstream, "/v1/responses"),
+                    data=responses_body,
+                    headers=headers,
+                    method="POST",
+                )
 
             def emit_downstream_retry(payload: Mapping[str, Any]) -> None:
                 nonlocal downstream_sse_started
@@ -4620,60 +4727,97 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 notice_fields.update(retry_payload)
                 write_proxy_event("sse_retry_notice", **notice_fields)
 
-            relay_attempts = _upstream_retry_attempts()
-            for relay_attempt in range(1, relay_attempts + 1):
+            configured_upstream_format = upstream_format
+            selected_upstream_format = upstream_format
+            upstream_format_options = _upstream_format_candidates(configured_upstream_format)
+            for format_index, selected_upstream_format in enumerate(upstream_format_options):
+                request = upstream_request_for_format(selected_upstream_format)
+                relay_attempts = _upstream_retry_attempts()
                 try:
-                    with _open_upstream_response(
-                        request,
-                        upstream_name=upstream_name,
-                        upstream_format=upstream_format,
-                        timeout=upstream_timeout_seconds(),
-                        event_context=adapter_event_context,
-                        downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
-                        request_kind=RETRY_REQUEST_MAIN_GENERATION,
-                    ) as response:
-                        status = self._relay_upstream_response(
-                            response,
-                            upstream_name,
-                            request_id=request_id,
-                            model=model_canonical,
-                            upstream_format=upstream_format,
-                            inbound_format=inbound_format,
-                            caller_stream=caller_stream,
-                            event_context=adapter_event_context,
-                            usage_capture=usage_capture,
-                            headers_already_sent=downstream_sse_started,
-                        )
-                    break
-                except IncompleteRead as exc:
-                    if relay_attempt >= relay_attempts:
-                        raise
-                    delay_seconds = gateway_retry_delay_seconds(relay_attempt)
-                    _emit_upstream_retry_event(
-                        adapter_event_context,
-                        upstream_name=upstream_name,
-                        upstream_format=upstream_format,
-                        request_kind=RETRY_REQUEST_MAIN_GENERATION,
-                        attempt=relay_attempt,
-                        max_attempts=relay_attempts,
-                        exc=exc,
-                        delay_seconds=delay_seconds,
-                    )
-                    if emit_retry_to_downstream:
-                        emit_downstream_retry(
-                            _downstream_retry_payload(
+                    for relay_attempt in range(1, relay_attempts + 1):
+                        try:
+                            with _open_upstream_response(
+                                request,
                                 upstream_name=upstream_name,
-                                upstream_format=upstream_format,
+                                upstream_format=selected_upstream_format,
+                                timeout=upstream_timeout_seconds(),
+                                event_context=adapter_event_context,
+                                downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
+                                request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                            ) as response:
+                                status = self._relay_upstream_response(
+                                    response,
+                                    upstream_name,
+                                    request_id=request_id,
+                                    model=model_canonical,
+                                    upstream_format=selected_upstream_format,
+                                    inbound_format=inbound_format,
+                                    caller_stream=caller_stream,
+                                    event_context=adapter_event_context,
+                                    usage_capture=usage_capture,
+                                    headers_already_sent=downstream_sse_started,
+                                )
+                            break
+                        except IncompleteRead as exc:
+                            if relay_attempt >= relay_attempts:
+                                raise
+                            delay_seconds = gateway_retry_delay_seconds(relay_attempt)
+                            _emit_upstream_retry_event(
+                                adapter_event_context,
+                                upstream_name=upstream_name,
+                                upstream_format=selected_upstream_format,
                                 request_kind=RETRY_REQUEST_MAIN_GENERATION,
                                 attempt=relay_attempt,
                                 max_attempts=relay_attempts,
                                 exc=exc,
                                 delay_seconds=delay_seconds,
                             )
+                            emit_downstream_retry(
+                                _downstream_retry_payload(
+                                    upstream_name=upstream_name,
+                                    upstream_format=selected_upstream_format,
+                                    request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                                    attempt=relay_attempt,
+                                    max_attempts=relay_attempts,
+                                    exc=exc,
+                                    delay_seconds=delay_seconds,
+                                )
+                            )
+                            time.sleep(delay_seconds)
+                    else:
+                        raise RuntimeError("unreachable upstream relay retry state")
+                    upstream_format = selected_upstream_format
+                    break
+                except HTTPError as exc:
+                    next_format_available = format_index + 1 < len(upstream_format_options)
+                    if (
+                        configured_upstream_format == "auto"
+                        and selected_upstream_format == "responses"
+                        and next_format_available
+                        and not downstream_sse_started
+                        and _auto_protocol_fallback_allowed(exc)
+                    ):
+                        write_proxy_event(
+                            "upstream_protocol_fallback",
+                            request_id=request_id,
+                            model=model_canonical,
+                            model_requested=model_requested,
+                            model_canonical=model_canonical,
+                            upstream=upstream_name,
+                            provider_id=upstream_name,
+                            provider_hint=provider_hint,
+                            upstream_format=configured_upstream_format,
+                            failed_upstream_format=selected_upstream_format,
+                            next_upstream_format=upstream_format_options[format_index + 1],
+                            status=getattr(exc, "code", 502),
+                            error="HTTPError",
+                            detail=safe_upstream_error_detail(exc),
+                            **proxy_request_context,
                         )
-                    time.sleep(delay_seconds)
+                        continue
+                    raise
             else:
-                raise RuntimeError("unreachable upstream relay retry state")
+                raise RuntimeError("unreachable upstream protocol selection state")
             write_proxy_event(
                 "request_complete",
                 request_id=request_id,
@@ -4711,7 +4855,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **proxy_request_context,
             )
-            self._safe_send_json(502, {"error": "image_proxy_error", "detail": str(exc)}, request_id)
+            self._safe_send_downstream_json_error(
+                502,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                error="image_proxy_error",
+                detail=str(exc),
+                error_type="image_proxy_error",
+            )
         except ValueError as exc:
             write_proxy_event(
                 "request_error",
@@ -4728,10 +4881,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **proxy_request_context,
             )
-            self._safe_send_json(400, {"error": str(exc)}, request_id)
+            self._safe_send_downstream_json_error(
+                400,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                error=type(exc).__name__,
+                detail=str(exc),
+                error_type="invalid_request_error",
+            )
         except HTTPError as exc:
             if downstream_sse_started:
-                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    status=getattr(exc, "code", 502),
+                    exc=exc,
+                )
                 write_proxy_event(
                     "request_error",
                     request_id=request_id,
@@ -4802,9 +4969,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    exc=exc,
+                )
                 return
-            self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
+            self._safe_send_downstream_json_error(
+                502,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                detail=detail,
+            )
         except (OSError, URLError) as exc:
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
@@ -4820,9 +4998,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    exc=exc,
+                )
                 return
-            self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
+            self._safe_send_downstream_json_error(
+                502,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                detail=detail,
+            )
         except Exception as exc:
             detail = safe_upstream_error_detail(exc)
             logger.exception("unexpected proxy error request_id=%s", request_id)
@@ -4838,9 +5027,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_sse_error_event(upstream_name or "upstream_error", exc)
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    status=500,
+                    exc=exc,
+                )
                 return
-            self._safe_send_json(500, {"error": type(exc).__name__, "detail": detail}, request_id)
+            self._safe_send_downstream_json_error(
+                500,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                detail=detail,
+            )
 
     def _send_local_responses_no_content(self) -> None:
         request_id = uuid.uuid4().hex[:12]
@@ -5045,6 +5246,47 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             _downstream_stream_error_payload(upstream_name=upstream_name, exc=exc),
         )
 
+    def _write_downstream_sse_error(
+        self,
+        *,
+        inbound_format: str,
+        upstream_name: str,
+        status: int = 502,
+        exc: BaseException | None = None,
+        error: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        if inbound_format == "chat_completions":
+            self.wfile.write(
+                b"data: "
+                + json.dumps(
+                    _chat_completion_error_payload(
+                        upstream_name=upstream_name,
+                        status=status,
+                        exc=exc,
+                        error=error,
+                        detail=detail,
+                        error_type="upstream_stream_error",
+                    ),
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n\n"
+            )
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        if exc is not None:
+            self._write_sse_error_event(upstream_name, exc)
+            self.close_connection = True
+            return
+        self._write_sse_protocol_error_event(
+            upstream_name,
+            status,
+            detail or error or "upstream stream failed",
+        )
+        self.close_connection = True
+
     def _write_sse_protocol_error_event(self, upstream_name: str, status: int, detail: str) -> None:
         self._write_sse_event(
             "error",
@@ -5054,6 +5296,32 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error="UpstreamProtocolError",
                 detail=detail,
             ),
+        )
+
+    def _safe_send_downstream_json_error(
+        self,
+        status: int,
+        *,
+        inbound_format: str,
+        upstream_name: str,
+        request_id: str,
+        exc: BaseException | None = None,
+        error: str | None = None,
+        detail: str | None = None,
+        error_type: str = "upstream_error",
+    ) -> None:
+        self._safe_send_json(
+            status,
+            _json_error_payload_for_inbound_format(
+                inbound_format=inbound_format,
+                upstream_name=upstream_name,
+                status=status,
+                exc=exc,
+                error=error,
+                detail=detail,
+                error_type=error_type,
+            ),
+            request_id,
         )
 
     def _safe_send_json(self, status: int, payload: dict[str, Any], request_id: str) -> None:
@@ -5132,10 +5400,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 body = compatible_response_body(body, upstream_name, event_context=event_context)
             _capture_usage(usage_capture, _usage_from_json_body(body))
             if headers_already_sent:
-                self._write_sse_protocol_error_event(
-                    upstream_name,
-                    status,
-                    f"upstream returned non-SSE response after downstream SSE retry status: HTTP {status}",
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=status,
+                    error="UpstreamProtocolError",
+                    detail=f"upstream returned non-SSE response after downstream SSE retry status: HTTP {status}",
                 )
                 self.close_connection = True
                 _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
@@ -5182,7 +5452,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_sse_error_event(upstream_name, exc)
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        exc=exc,
+                    )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 for chunk in _response_events_to_chat_stream_chunks(events):
@@ -5224,7 +5498,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_sse_error_event(upstream_name, exc)
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        exc=exc,
+                    )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 if want_chat_output:
@@ -5277,7 +5555,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error=type(exc).__name__,
                     detail=safe_upstream_error_detail(exc),
                 )
-                self._write_sse_error_event(upstream_name, exc)
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    exc=exc,
+                )
                 _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
             if upstream_name != "official" and reasoning_stats["seen"]:

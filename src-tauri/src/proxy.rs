@@ -1619,11 +1619,9 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
             .expect("stop should not error when running proxy has no pid file");
 
         assert!(!status.proxy_running);
-        assert!(
-            status
-                .message
-                .contains("Proxy stopped gracefully without a proxy PID file")
-        );
+        assert!(status
+            .message
+            .contains("Proxy stopped gracefully without a proxy PID file"));
         assert_eq!(read_pid(&paths).expect("pid remains missing"), None);
         assert!(killer.killed.borrow().is_empty());
         assert!(inspector.inspected.borrow().is_empty());

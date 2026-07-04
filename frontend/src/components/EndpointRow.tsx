@@ -14,10 +14,10 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
   return (
     <div
       className={cx(
-        "grid gap-2 rounded-inner bg-surface text-sm shadow-control lg:items-center",
+        "grid items-center gap-2 rounded-inner bg-surface text-sm shadow-control",
         compact
-          ? "min-h-9 px-2 py-0.5 lg:grid-cols-[122px_minmax(0,1fr)_auto]"
-          : "px-3 py-2 lg:grid-cols-[130px_minmax(0,1fr)_auto]",
+          ? "min-h-9 grid-cols-[122px_minmax(0,1fr)_auto] px-2 py-0.5"
+          : "grid-cols-[130px_minmax(0,1fr)_auto] px-3 py-2",
       )}
     >
       <div className="min-w-0">

@@ -12,6 +12,8 @@ from urllib.request import Request, urlopen
 UPSTREAM_FORMAT_AUTO = "auto"
 UPSTREAM_FORMAT_RESPONSES = "responses"
 UPSTREAM_FORMAT_CHAT = "chat_completions"
+UPSTREAM_FORMAT_ANTHROPIC = "anthropic_messages"
+PROBE_REQUEST_TIMEOUT_SECONDS = 6
 
 
 def endpoint_url(base_url: str, path: str) -> str:
@@ -124,6 +126,14 @@ def chat_tool_payload(model: str, *, stream: bool) -> dict[str, Any]:
             }
         ],
         "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+    }
+
+
+def anthropic_text_payload(model: str) -> dict[str, Any]:
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": "Endpoint probe. Reply with exactly: OK"}],
+        "max_tokens": 32,
     }
 
 
@@ -306,17 +316,22 @@ def chat_stream_tool_ok(events: list[dict[str, Any]]) -> bool:
     return bool(first_call_id and name_seen and not id_conflict)
 
 
+def anthropic_text_ok(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    content = payload.get("content")
+    if isinstance(content, list):
+        return True
+    return isinstance(payload.get("id"), str) and payload.get("type") == "message"
+
+
 def recommended_format(result: dict[str, Any]) -> str:
-    responses_pass = (
-        result["responses_text_ok"]
-        and result["responses_tool_ok"]
-        and result["responses_tool_stream_ok"]
-    )
-    chat_pass = result["chat_text_ok"] and result["chat_tool_ok"] and result["chat_tool_stream_ok"]
-    if responses_pass:
+    if result.get("responses_text_ok"):
         return UPSTREAM_FORMAT_RESPONSES
-    if chat_pass:
+    if result.get("chat_text_ok"):
         return UPSTREAM_FORMAT_CHAT
+    if result.get("anthropic_text_ok"):
+        return UPSTREAM_FORMAT_ANTHROPIC
     return UPSTREAM_FORMAT_AUTO
 
 
@@ -335,6 +350,7 @@ def safe_error_detail(exc: BaseException) -> str:
 def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int) -> dict[str, Any]:
     started = time.monotonic()
     notes: list[str] = []
+    request_timeout = max(1, min(timeout, PROBE_REQUEST_TIMEOUT_SECONDS))
     result: dict[str, Any] = {
         "base_url": base_url,
         "model": requested_model.strip() if requested_model and requested_model.strip() else None,
@@ -345,11 +361,12 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         "chat_text_ok": False,
         "chat_tool_ok": False,
         "chat_tool_stream_ok": False,
+        "anthropic_text_ok": False,
         "recommended_format": UPSTREAM_FORMAT_AUTO,
         "notes": notes,
     }
 
-    ok, status, payload, detail = request_json(base_url, api_key, "/models", timeout=timeout)
+    ok, status, payload, detail = request_json(base_url, api_key, "/models", timeout=request_timeout)
     result["models_ok"] = ok
     if ok:
         model_ids = model_ids_from_payload(payload)
@@ -367,9 +384,8 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
 
     checks = [
         ("responses_text_ok", "/responses", responses_text_payload(model), lambda value: isinstance(value, dict)),
-        ("responses_tool_ok", "/responses", responses_tool_payload(model, stream=False), responses_tool_ok),
         ("chat_text_ok", "/chat/completions", chat_text_payload(model), lambda value: isinstance(value, dict)),
-        ("chat_tool_ok", "/chat/completions", chat_tool_payload(model, stream=False), chat_tool_ok),
+        ("anthropic_text_ok", "/messages", anthropic_text_payload(model), anthropic_text_ok),
     ]
     for key, path, body, validator in checks:
         ok, status, payload, detail = request_json(
@@ -378,7 +394,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
             path,
             method="POST",
             payload=body,
-            timeout=timeout,
+            timeout=request_timeout,
         )
         result[key] = bool(ok and validator(payload))
         label = key.removesuffix("_ok").replace("_", " ")
@@ -387,39 +403,15 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         else:
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
 
-    ok, status, events, detail = request_sse_events(
-        base_url,
-        api_key,
-        "/responses",
-        responses_tool_payload(model, stream=True),
-        timeout,
-    )
-    result["responses_tool_stream_ok"] = bool(ok and responses_stream_tool_ok(events))
-    if result["responses_tool_stream_ok"]:
-        notes.append("responses tool stream: OK")
-    else:
-        notes.append(f"responses tool stream: failed ({status or 'no status'}): {detail or 'missing stable call_id'}")
-
-    ok, status, events, detail = request_sse_events(
-        base_url,
-        api_key,
-        "/chat/completions",
-        chat_tool_payload(model, stream=True),
-        timeout,
-    )
-    result["chat_tool_stream_ok"] = bool(ok and chat_stream_tool_ok(events))
-    if result["chat_tool_stream_ok"]:
-        notes.append("chat tool stream: OK")
-    else:
-        notes.append(f"chat tool stream: failed ({status or 'no status'}): {detail or 'missing stable tool_call id'}")
-
     result["recommended_format"] = recommended_format(result)
     if result["recommended_format"] == UPSTREAM_FORMAT_RESPONSES:
-        notes.append("Recommended: Responses native")
+        notes.append("Recommended: Responses")
     elif result["recommended_format"] == UPSTREAM_FORMAT_CHAT:
-        notes.append("Recommended: Chat Completions translate")
+        notes.append("Recommended: Chat Completions")
+    elif result["recommended_format"] == UPSTREAM_FORMAT_ANTHROPIC:
+        notes.append("Recommended: Anthropic Messages detected; Gateway conversion is planned")
     else:
-        notes.append("Warning: tool streaming did not pass; Codex tools/subagents may fail.")
+        notes.append("Warning: no supported endpoint responded to the lightweight probe.")
 
     result["duration_ms"] = int((time.monotonic() - started) * 1000)
     return result

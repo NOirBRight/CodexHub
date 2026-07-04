@@ -352,14 +352,14 @@ export function GatewayPage({
   }
 
   return (
-    <main className="relative grid h-full min-h-0 min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]">
+    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[minmax(636px,1fr)_minmax(320px,340px)] gap-4">
       <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
         <section className="grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
-          <div className="grid min-w-0 grid-cols-1 items-stretch gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="grid min-w-0 grid-cols-[minmax(300px,1fr)_minmax(270px,0.95fr)] items-stretch gap-3">
             <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3 rounded-panel bg-panel p-3 shadow-card">
               <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <h2 className="text-base font-semibold text-ink">Local OpenAI-compatible endpoint</h2>
+                  <h2 className="truncate text-base font-semibold text-ink">Local endpoint</h2>
                   <p className="mt-1 max-h-8 max-w-xl overflow-hidden text-xs leading-4 text-slate-600 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
                     Local API key, port, and timeout for OpenAI-compatible clients.
                   </p>
@@ -383,7 +383,7 @@ export function GatewayPage({
               <div className="grid h-full min-w-0 content-start gap-2 rounded-inner bg-surface p-3 shadow-control">
                 <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
                   <span>API Key</span>
-                  <div className="grid min-w-0 grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+                  <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
                     <div className="relative min-w-0">
                       <input
                         className="field field-compact pr-9"
@@ -423,7 +423,7 @@ export function GatewayPage({
                     </button>
                   </div>
                 </label>
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
+                <div className="grid min-w-0 grid-cols-2 items-end gap-2">
                   <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
                     <span>Port</span>
                     <input
@@ -448,7 +448,7 @@ export function GatewayPage({
                   </label>
                   <button
                     type="button"
-                    className="focus-ring inline-flex h-9 self-end items-center justify-center gap-2 whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+                    className="focus-ring col-span-2 inline-flex h-9 self-end items-center justify-center gap-2 whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
                     disabled={Boolean(busy) || !settings}
                     onClick={() => void applyGatewaySettings()}
                   >
@@ -460,7 +460,7 @@ export function GatewayPage({
             </div>
 
             <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-panel bg-panel p-3 shadow-card">
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-3 gap-2">
                 <StatusCard
                   compact
                   label="Gateway"
@@ -482,9 +482,8 @@ export function GatewayPage({
               </div>
 
               <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-ink">Copy connection</h3>
-                  <span className="text-xs text-slate-500">OpenAI-compatible routes</span>
+                <div className="flex items-center justify-between gap-3 whitespace-nowrap">
+                  <h3 className="shrink-0 text-sm font-semibold text-ink">Copy connection</h3>
                 </div>
                 {endpoints.length > 0 ? (
                   <div className="grid h-full grid-rows-3 gap-2">

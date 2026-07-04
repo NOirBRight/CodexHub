@@ -142,7 +142,9 @@ def inject_unified_history_config(text: str) -> tuple[str, str]:
     if provider_id is not None:
         if provider_id == PROXY_PROVIDER_ID and has_exact_unified_official_provider(text):
             return text, "already_unified"
-        return text, "explicit_model_provider"
+        if provider_id != "openai":
+            return text, "explicit_model_provider"
+        text = strip_top_level_keys(text, {"model_provider"})
 
     custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
     if custom_section is not None and custom_section != unified_official_provider_values():

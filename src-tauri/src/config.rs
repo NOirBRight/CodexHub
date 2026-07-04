@@ -524,6 +524,10 @@ mod tests {
             base_url: "https://ark.cn-beijing.volces.com/api/coding/v3".to_string(),
             api_key: Some("{env:VOLCENGINE_API_KEY}".to_string()),
             upstream_format: Some(UpstreamFormat::ChatCompletions),
+            available_upstream_formats: Some(vec![
+                UpstreamFormat::Responses,
+                UpstreamFormat::ChatCompletions,
+            ]),
             display_prefix: Some("Volc".to_string()),
             sort_order: Some(2),
             enabled: true,
@@ -573,6 +577,8 @@ mod tests {
         assert!(written.contains("[[providers]]"));
         assert!(written.contains("[[providers.models]]"));
         assert!(written.contains("upstream_format = \"chat_completions\""));
+        assert!(written.contains("available_upstream_formats"));
+        assert!(written.contains("\"responses\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
         assert!(written.contains("aliases"));
         assert!(!written.contains("aliases = []"));
@@ -586,6 +592,37 @@ mod tests {
         assert!(written.contains("supported_reasoning_levels"));
         assert!(written.contains("\"xhigh\""));
         assert!(written.contains("default_reasoning_level = \"high\""));
+    }
+
+    #[test]
+    fn providers_toml_roundtrip_preserves_anthropic_endpoint_selection() {
+        let root = temp_root("providers-anthropic-format");
+        let paths = test_paths(&root);
+        let providers = vec![Provider {
+            id: "anthropic-direct".to_string(),
+            name: "Anthropic Direct".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: Some("{env:ANTHROPIC_API_KEY}".to_string()),
+            upstream_format: Some(UpstreamFormat::AnthropicMessages),
+            available_upstream_formats: Some(vec![UpstreamFormat::AnthropicMessages]),
+            display_prefix: Some("anthropic/".to_string()),
+            sort_order: Some(3),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "claude-sonnet-4-20250514".to_string(),
+                enabled: true,
+                ..Model::default()
+            }],
+        }];
+
+        save_providers_with_paths(providers.clone(), &paths).expect("providers save");
+        let loaded = get_providers_with_paths(&paths).expect("providers load");
+        let written = fs::read_to_string(paths.runtime_providers_path()).expect("providers text");
+
+        assert_json_eq(&loaded, &providers);
+        assert!(written.contains("upstream_format = \"anthropic_messages\""));
+        assert!(written.contains("available_upstream_formats = [\"anthropic_messages\"]"));
     }
 
     #[test]

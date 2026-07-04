@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from probe_upstream_format import (
+    UPSTREAM_FORMAT_ANTHROPIC,
     UPSTREAM_FORMAT_AUTO,
     UPSTREAM_FORMAT_CHAT,
     UPSTREAM_FORMAT_RESPONSES,
+    anthropic_text_ok,
     chat_stream_tool_ok,
     endpoint_url,
     model_ids_from_payload,
+    probe,
     recommended_format,
     responses_stream_tool_ok,
 )
@@ -95,13 +99,55 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             "chat_text_ok": True,
             "chat_tool_ok": True,
             "chat_tool_stream_ok": True,
+            "anthropic_text_ok": True,
         }
 
         self.assertEqual(recommended_format(result), UPSTREAM_FORMAT_RESPONSES)
-        result["responses_tool_stream_ok"] = False
+        result["responses_text_ok"] = False
         self.assertEqual(recommended_format(result), UPSTREAM_FORMAT_CHAT)
-        result["chat_tool_stream_ok"] = False
+        result["chat_text_ok"] = False
+        self.assertEqual(recommended_format(result), UPSTREAM_FORMAT_ANTHROPIC)
+        result["anthropic_text_ok"] = False
         self.assertEqual(recommended_format(result), UPSTREAM_FORMAT_AUTO)
+
+    def test_probe_collects_all_lightweight_endpoint_capabilities(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            self.assertEqual(base_url, "https://example.test/v1")
+            self.assertEqual(api_key, "test-key")
+            if path == "/models":
+                return True, 200, {"data": [{"id": "model-a"}]}, None
+            if path == "/responses":
+                return True, 200, {"id": "resp_1"}, None
+            if path == "/chat/completions":
+                return True, 200, {"choices": [{"message": {"content": "OK"}}]}, None
+            if path == "/messages":
+                return False, 404, None, "not found"
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json) as request_json:
+            result = probe("https://example.test/v1", "test-key", None, 2)
+
+        self.assertTrue(result["responses_text_ok"])
+        self.assertTrue(result["chat_text_ok"])
+        self.assertFalse(result["anthropic_text_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
+        self.assertEqual(
+            [call.args[2] for call in request_json.call_args_list],
+            ["/models", "/responses", "/chat/completions", "/messages"],
+        )
+
+    def test_anthropic_message_shape_detection_is_lightweight(self) -> None:
+        self.assertTrue(anthropic_text_ok({"id": "msg_1", "type": "message", "content": []}))
+        self.assertTrue(anthropic_text_ok({"content": [{"type": "text", "text": "OK"}]}))
+        self.assertFalse(anthropic_text_ok({"choices": []}))
 
 
 if __name__ == "__main__":

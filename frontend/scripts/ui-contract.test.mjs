@@ -28,11 +28,14 @@ async function readContract() {
 
 test("main navigation exposes only CodexHub and Gateway", async () => {
   const contract = await readContract();
+  const appSource = await readFile(appPath, "utf8");
 
   assert.deepEqual(
     contract.tabs.map((tab) => tab.label),
     ["CodexHub", "Gateway"],
   );
+  assert.doesNotMatch(appSource, /exportedCount/);
+  assert.doesNotMatch(appSource, /tab\.id === "gateway" && exportedCount/);
 });
 
 test("gateway request timeout defaults to 300 seconds across UI and runtime", async () => {
@@ -111,6 +114,9 @@ test("global controls use polished radius, shadow, and exact transitions", async
 
   assert.match(css, /\.focus-ring\s*\{[\s\S]*ring-action\/20/);
   assert.match(css, /\.field\s*\{[\s\S]*rounded-control[\s\S]*shadow-field[\s\S]*transition-\[box-shadow,border-color,background-color\]/);
+  assert.match(css, /\.select-trigger\s*\{[\s\S]*rounded-control[\s\S]*shadow-field[\s\S]*transition-\[box-shadow,border-color,background-color\]/);
+  assert.match(css, /\.select-popover\s*\{[\s\S]*rounded-inner[\s\S]*shadow-floating/);
+  assert.match(css, /\.select-option\s*\{[\s\S]*rounded-control[\s\S]*aria-selected:bg-action\/10/);
   assert.match(css, /\.mini-button\s*\{[\s\S]*rounded-control[\s\S]*shadow-control[\s\S]*active:scale-\[0\.96\]/);
   assert.doesNotMatch(css, /\.field\s*\{[\s\S]*rounded-md[\s\S]*shadow-subtle/);
 });
@@ -257,6 +263,8 @@ test("usage summary and chart use the same global time window", async () => {
   assert.match(usageSource, /hiddenSeriesKeys\.has\(segment\.key\)/);
   assert.match(usageSource, /onHiddenSeriesKeysChange=\{setHiddenSeriesKeys\}/);
   assert.match(usageSource, /<Metric label="Tokens" value=\{visibleSummary/);
+  assert.match(usageSource, /className="grid grid-cols-4 gap-2"/);
+  assert.doesNotMatch(usageSource, /sm:grid-cols-4/);
   assert.doesNotMatch(usageSource, /function filterEventsByRange/);
   assert.match(tauriSource, /startTs/);
   assert.match(tauriSource, /endTs/);
@@ -307,19 +315,25 @@ test("gateway layout reserves space for the client rail", async () => {
     readFile(stackedUsagePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /min-w-0 grid-cols-1 gap-4 lg:grid-cols-\[minmax\(0,1fr\)_minmax\(320px,360px\)\]/);
+  assert.match(gatewaySource, /min-w-\[972px\] grid-cols-\[minmax\(636px,1fr\)_minmax\(320px,340px\)\] gap-4/);
   assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
   assert.match(gatewaySource, /grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface/);
   assert.match(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
   assert.match(gatewaySource, /\[-webkit-line-clamp:2\]/);
   assert.match(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
   assert.doesNotMatch(gatewaySource, /Clients discover models from/);
-  assert.match(gatewaySource, /grid-cols-1 items-stretch gap-3 lg:grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
-  assert.match(gatewaySource, /grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)_auto\] items-end gap-2/);
+  assert.match(gatewaySource, /grid-cols-\[minmax\(300px,1fr\)_minmax\(270px,0\.95fr\)\] items-stretch gap-3/);
+  assert.match(gatewaySource, /grid min-w-0 grid-cols-\[minmax\(0,1fr\)_auto_auto\] items-center gap-2/);
+  assert.match(gatewaySource, /grid-cols-2 items-end gap-2/);
+  assert.match(gatewaySource, /className="focus-ring col-span-2 inline-flex h-9 self-end/);
   assert.match(gatewaySource, /whitespace-nowrap rounded-control bg-ink/);
+  assert.match(gatewaySource, /className="flex items-center justify-between gap-3 whitespace-nowrap"/);
+  assert.match(gatewaySource, /<h3 className="shrink-0 text-sm font-semibold text-ink">Copy connection<\/h3>/);
   assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
   assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
-  assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-2">/);
+  assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-1\.5">/);
+  assert.doesNotMatch(gatewaySource, /OpenAI-compatible routes/);
+  assert.doesNotMatch(gatewaySource, /sm:grid-cols-\[minmax\(0,1fr\)_auto_auto\]/);
   assert.doesNotMatch(gatewaySource, /min-w-\[1200px\]/);
   assert.doesNotMatch(gatewaySource, /0\.86fr|1\.14fr/);
 });
@@ -565,40 +579,177 @@ test("provider model removal persists through provider save path", async () => {
 test("providers page uses stable zero-min split columns", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
 
-  assert.match(providersSource, /grid-cols-\[minmax\(0,4fr\)_minmax\(0,6fr\)\]/);
+  assert.match(providersSource, /min-w-\[972px\] grid-cols-\[minmax\(0,4fr\)_minmax\(0,6fr\)\]/);
   assert.match(providersSource, /<aside className="min-h-0 min-w-0 overflow-hidden/);
   assert.match(providersSource, /<section className="min-h-0 min-w-0 overflow-hidden/);
   assert.doesNotMatch(providersSource, /grid-cols-\[minmax\(360px,4fr\)_minmax\(0,6fr\)\]/);
 });
 
-test("app content region does not create provider-level scrollbars", async () => {
+test("app content region owns horizontal overflow for minimum-width pages", async () => {
   const appSource = await readFile(appPath, "utf8");
 
-  assert.match(appSource, /className="min-h-0 overflow-hidden p-4"/);
-  assert.doesNotMatch(appSource, /className="min-h-0 overflow-auto p-4"/);
+  assert.match(appSource, /h-screen min-h-\[768px\] min-w-0/);
+  assert.doesNotMatch(appSource, /min-w-\[1004px\]/);
+  assert.match(appSource, /className="min-h-0 overflow-x-auto overflow-y-hidden p-4"/);
+  assert.doesNotMatch(appSource, /className="min-h-0 overflow-hidden p-4"/);
 });
 
 test("provider detail keeps model area tall and moves the scrollbar outside cards", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
-  const providerCapabilitiesPanel =
-    providersSource.match(/function ProviderCapabilitiesPanel[\s\S]*?function boolCapabilityState/)?.[0] ?? "";
+  const endpointSelectionPanel =
+    providersSource.match(/function EndpointSelectionPanel[\s\S]*?function EndpointFormatSelect/)?.[0] ?? "";
+  const endpointFormatSelect =
+    providersSource.match(/function EndpointFormatSelect[\s\S]*?function normalizedEndpointFormat/)?.[0] ?? "";
+  const modelIdentity = providersSource.match(/function ModelIdentity[\s\S]*?function ModelEditorOverlay/)?.[0] ?? "";
+  const modelTestStateIcon = providersSource.match(/function ModelTestStateIcon[\s\S]*?function normalizedEndpointFormat/)?.[0] ?? "";
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function ModelIdentity/)?.[0] ?? "";
+  const headerRow = providersSource.match(/function HeaderRow[\s\S]*?function Toggle/)?.[0] ?? "";
 
   assert.match(providerDetail, /className="grid gap-2 border-b border-line p-4"/);
-  assert.match(providerDetail, /className="grid gap-2 lg:grid-cols-2"/);
+  assert.match(providerDetail, /className="grid grid-cols-2 gap-2"/);
   assert.match(providerDetail, /className="field field-compact"/);
-  assert.match(providerDetail, /className="lg:col-span-2"/);
-  assert.match(providerDetail, /<div className="lg:col-span-2">\s*<ProviderCapabilitiesPanel/);
+  assert.match(providerDetail, /className="col-span-2"/);
+  assert.match(providerDetail, /<div className="col-span-2">\s*<EndpointSelectionPanel/);
   assert.doesNotMatch(providerDetail, /className="grid gap-4 border-b border-line p-5"/);
-  assert.match(providerCapabilitiesPanel, /className="flex min-w-0 items-center gap-2/);
-  assert.match(providerCapabilitiesPanel, /className="flex shrink-0 gap-2/);
-  assert.doesNotMatch(providerCapabilitiesPanel, /Adapter \{/);
-  assert.doesNotMatch(providerCapabilitiesPanel, /justify-between/);
-  assert.doesNotMatch(providerCapabilitiesPanel, /flex-wrap/);
+  assert.doesNotMatch(providerDetail, /lg:grid-cols-2/);
+  assert.doesNotMatch(providerDetail, /lg:col-span-2/);
+  assert.match(endpointSelectionPanel, /className="grid min-w-0 gap-1 text-sm font-medium text-slate-700"/);
+  assert.match(endpointSelectionPanel, /grid min-w-0 grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-2/);
+  assert.match(endpointSelectionPanel, /availableFormats\?: UpstreamFormat\[\] \| null;/);
+  assert.match(endpointSelectionPanel, /const mergedAvailableFormats = mergeEndpointFormats\(availableFormats, probeAvailableFormats\(result\)\);/);
+  assert.match(endpointSelectionPanel, /<EndpointFormatSelect availableFormats=\{mergedAvailableFormats\} value=\{selected\} onChange=\{onChange\} \/>/);
+  assert.match(endpointSelectionPanel, /<TestStateIcon state=\{testState\} size=\{16\} \/>/);
+  assert.match(endpointSelectionPanel, /status-pop border-emerald-200 bg-emerald-50 text-emerald-700/);
+  assert.match(endpointSelectionPanel, /status-pop border-red-200 bg-red-50 text-danger/);
+  assert.match(endpointSelectionPanel, /Endpoint Selection/);
+  assert.match(endpointFormatSelect, /className="select-trigger h-9 w-full"/);
+  assert.match(endpointFormatSelect, /className="select-popover absolute left-0 top-\[calc\(100%\+6px\)\] z-30 w-full min-w-\[240px\]"/);
+  assert.match(endpointFormatSelect, /className="select-option"/);
+  assert.match(endpointFormatSelect, /optionAvailable && <EndpointAvailableChip \/>/);
+  assert.doesNotMatch(endpointFormatSelect, /selectedOption && <Check/);
+  assert.doesNotMatch(endpointFormatSelect, /<EndpointAvailableChip \/>[\s\S]*<\/button>\s*\{open/);
+  assert.doesNotMatch(endpointFormatSelect, /selectedAvailable/);
+  assert.doesNotMatch(endpointSelectionPanel, /Adapter \{/);
+  assert.doesNotMatch(endpointSelectionPanel, /rounded-inner border border-line bg-panel/);
+  assert.doesNotMatch(endpointSelectionPanel, /upstreamFormatShortLabel/);
+  assert.doesNotMatch(endpointSelectionPanel, /flex-wrap/);
+  assert.doesNotMatch(providersSource, /Provider test result/);
+  assert.doesNotMatch(providersSource, /Apply recommendation/);
+  assert.doesNotMatch(providersSource, /Saved:/);
+  assert.doesNotMatch(providersSource, /Responses available/);
+  assert.doesNotMatch(endpointFormatSelect, /<select/);
+  assert.match(headerRow, /className="grid grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3"/);
+  assert.match(headerRow, /flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap/);
+  assert.doesNotMatch(headerRow, /lg:grid-cols-\[minmax\(0,1fr\)_auto\]/);
+  assert.doesNotMatch(headerRow, /flex-wrap/);
 
   assert.match(modelSection, /className="min-h-0 overflow-auto -mr-3 pr-3"/);
+  assert.match(modelSection, /flex shrink-0 flex-nowrap items-center justify-end gap-2 whitespace-nowrap/);
+  assert.match(modelSection, /grid min-h-\[52px\] grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3/);
+  assert.match(modelSection, /onTestModel\?: \(model: Model\) => Promise<boolean>;/);
+  assert.match(modelSection, /<ModelIdentity[\s\S]*onTest=\{onTestModel \? \(\) => void runModelTest\(model\) : undefined\}/);
+  assert.match(modelIdentity, /title=\{`Test model \$\{copyValue\}`\}/);
+  assert.match(modelIdentity, /aria-label=\{`Test model \$\{copyValue\}`\}/);
+  assert.match(modelIdentity, /<ModelTestStateIcon state=\{testState\} size=\{13\} \/>/);
+  assert.doesNotMatch(modelIdentity, />\s*Test\s*</);
+  assert.match(modelTestStateIcon, /return <Cable size=\{size\} className="shrink-0" \/>;/);
+  assert.doesNotMatch(modelSection, /flex flex-wrap items-center gap-2 text-xs text-slate-500 lg:justify-end/);
+  assert.doesNotMatch(modelSection, /lg:grid-cols-\[minmax\(0,1fr\)_auto\] lg:items-center/);
   assert.doesNotMatch(modelSection, /className="min-h-0 overflow-auto pr-1"/);
+});
+
+test("provider endpoint probe persists detected formats and selects the recommendation", async () => {
+  const [providersSource, typesSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+  const pageSource = providersSource.match(/export function ProvidersPage[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
+  const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
+  const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
+
+  assert.match(typesSource, /available_upstream_formats\?: UpstreamFormat\[\] \| null;/);
+  assert.match(pageSource, /async function persistProviderProbeResult\(providerId: string, result: UpstreamFormatProbeResult\)/);
+  assert.match(
+    pageSource,
+    /upstream_format:\s*result\.recommended_format !== "auto" \? result\.recommended_format : provider\.upstream_format/,
+  );
+  assert.match(pageSource, /available_upstream_formats: probeAvailableFormats\(result\)/);
+  assert.match(pageSource, /const saved = await api\.saveProviders\(nextProviders\);/);
+  assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
+  assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
+  assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
+  assert.match(
+    providerDetail,
+    /if \(result && result\.recommended_format !== "auto"\) \{[\s\S]*upstream_format: result\.recommended_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\)/,
+  );
+  assert.match(
+    addProviderPanel,
+    /upstream_format: result\.recommended_format !== "auto" \? result\.recommended_format : form\.upstream_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\)/,
+  );
+  assert.match(
+    providersSource,
+    /if \(result\.recommended_format !== "auto" && !formats\.includes\(result\.recommended_format\)\) \{[\s\S]*formats\.push\(result\.recommended_format\);/,
+  );
+});
+
+test("model test buttons use the selected endpoint connectivity check", async () => {
+  const [providersSource, tauriSource, typesSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+  const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
+  const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const modelTestBlocks = [...providersSource.matchAll(/async function testModel\(model: Model\)[\s\S]*?\n  }\n/g)].map(
+    (match) => match[0],
+  );
+
+  assert.match(typesSource, /export interface ModelEndpointTestResult/);
+  assert.match(tauriSource, /testModelEndpoint: \(baseUrl: string, apiKey: string, model: string, upstreamFormat: UpstreamFormat\)/);
+  assert.match(tauriSource, /call<ModelEndpointTestResult>\("test_model_endpoint"/);
+  assert.equal(modelTestBlocks.length, 2);
+  for (const block of modelTestBlocks) {
+    assert.match(block, /const upstreamFormat = normalizedEndpointFormat/);
+    assert.match(block, /api\.testModelEndpoint/);
+    assert.match(block, /Testing \$\{label\} on \$\{endpointLabel\}/);
+    assert.match(block, /\$\{endpointLabel\} connected \(HTTP \$\{result\.status\}\)/);
+    assert.doesNotMatch(block, /api\.probeUpstreamFormat/);
+    assert.doesNotMatch(block, /probeResultSummary/);
+  }
+  assert.match(officialDetail, /async function testOfficialModel\(model: Model\)/);
+  assert.match(officialDetail, /api\.testModelEndpoint\([\s\S]*"https:\/\/api\.openai\.com\/v1"[\s\S]*"\{env:OPENAI_API_KEY\}"[\s\S]*officialModelProbeId\(model\)[\s\S]*"responses"/);
+  assert.match(officialDetail, /onTestModel=\{testOfficialModel\}/);
+  assert.match(officialDetail, /modelTestDisabled=\{authState !== "authorized"\}/);
+  assert.match(providerDetail, /onTestModel=\{testModel\}/);
+  assert.match(addProviderPanel, /onTestModel=\{testModel\}/);
+  assert.match(providersSource, /function officialModelProbeId\(model: Model\)/);
+});
+
+test("add provider only prompts and saves when a name is present", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const selectProvider = providersSource.match(/function selectProvider\(id: string\)[\s\S]*?async function savePendingProviderNavigation/)?.[0] ?? "";
+  const savePending =
+    providersSource.match(/async function savePendingProviderNavigation\(\)[\s\S]*?function discardPendingProviderNavigation/)?.[0] ?? "";
+  const discardPending =
+    providersSource.match(/function discardPendingProviderNavigation\(\)[\s\S]*?function setMessage/)?.[0] ?? "";
+  const addSave = providersSource.match(/async function saveAddProviderForm[\s\S]*?async function addProvider/)?.[0] ?? "";
+  const dirtyHelper = providersSource.match(/function isAddProviderFormDirty[\s\S]*?function pendingProviderName/)?.[0] ?? "";
+
+  assert.doesNotMatch(providersSource, /Discover models before saving the provider\./);
+  assert.match(providersSource, /const canAdd = Boolean\(form\.name\.trim\(\)\);/);
+  assert.doesNotMatch(providersSource, /const canAdd = form\.name\.trim\(\) && form\.base_url\.trim\(\);/);
+  assert.match(selectProvider, /selectedId === ADD_ID/);
+  assert.match(selectProvider, /isAddProviderFormDirty\(form\)[\s\S]*kind: "add"/);
+  assert.match(selectProvider, /setForm\(emptyProvider\);[\s\S]*setSelectedId\(id\);/);
+  assert.match(dirtyHelper, /return Boolean\(form\.name\.trim\(\)\);/);
+  assert.doesNotMatch(dirtyHelper, /base_url|api_key|models\.length/);
+  assert.match(savePending, /pending\.kind === "add"/);
+  assert.match(savePending, /const addedId = await saveAddProviderForm\(pending\.form, pending\.targetId\);/);
+  assert.match(discardPending, /pending\.kind === "add"[\s\S]*setForm\(emptyProvider\)/);
+  assert.match(addSave, /base_url: nextForm\.base_url\.trim\(\)/);
+  assert.match(addSave, /return null;/);
 });
 
 test("official model rows remain pointer-interactive while editing is disabled", async () => {
@@ -621,14 +772,17 @@ test("official OpenAI source uses the same row card and toggle pattern as provid
   assert.match(sidebar, /enabledModelCount=\{officialEnabledCount\}/);
   assert.match(sidebar, /included=\{officialIncluded\}/);
   assert.match(sidebar, /onToggleInclude=\{onToggleOfficialInclude\}/);
+  assert.doesNotMatch(sidebar, /connected=\{codexConnected\}/);
   assert.match(officialCard, /<ProviderNavButton/);
   assert.match(officialCard, /label="OpenAI"/);
   assert.match(officialCard, /meta=\{`\$\{enabledModelCount\}\/\$\{modelCount\} models`\}/);
   assert.match(officialCard, /enabled=\{included\}/);
   assert.match(officialCard, /onToggle=\{onToggleInclude\}/);
-  assert.match(officialCard, /<ConnectedSurfaceFlow \/>/);
-  assert.match(officialCard, /border-emerald-300\/70 bg-emerald-50\/55/);
-  assert.match(officialCard, /border-transparent bg-surface/);
+  assert.match(officialCard, /activeTone="neutral"/);
+  assert.match(officialCard, /border border-line bg-surface p-3 shadow-card/);
+  assert.doesNotMatch(officialCard, /<ConnectedSurfaceFlow \/>/);
+  assert.doesNotMatch(officialCard, /border-emerald-300\/70 bg-emerald-50\/55/);
+  assert.doesNotMatch(officialCard, /border-transparent bg-surface/);
   assert.match(officialCard, /active=\{active\}/);
   assert.doesNotMatch(officialCard, /<SourceMetric label="Official models"/);
   assert.doesNotMatch(officialCard, /active \? "border-action bg-blue-50\/70"/);
@@ -708,7 +862,7 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.doesNotMatch(link, /border-dashed/);
 
   // Cards no longer reserve space for protruding wires or toast layout.
-  assert.match(providersSource, /rounded-panel border p-3 shadow-card/);
+  assert.match(providersSource, /rounded-panel border border-line bg-surface p-3 shadow-card/);
   assert.doesNotMatch(providersSource, /rounded-panel p-3 pb-8 shadow-card/);
   assert.doesNotMatch(providersSource, /toastVisible=\{Boolean\(toast\)\}/);
   assert.doesNotMatch(providersSource, /toastVisible: boolean;/);
@@ -883,7 +1037,9 @@ test("model copy uses provider-qualified identifiers", async () => {
   assert.match(providersSource, /aria-label=\{copied \? `Copied model ID \$\{copyValue\}` : `Copy model ID \$\{copyValue\}`\}/);
   assert.match(providersSource, /inline-flex h-6 w-6 shrink-0/);
   assert.doesNotMatch(providersSource, /\{copied \? "Copied" : "Copy"\}/);
-  assert.match(providersSource, /<ModelIdentity model=\{model\} providerId=\{providerId\} \/>/);
+  assert.match(providersSource, /<ModelIdentity[\s\S]*model=\{model\}[\s\S]*providerId=\{providerId\}[\s\S]*onTest=\{onTestModel \? \(\) => void runModelTest\(model\) : undefined\}/);
+  assert.match(providersSource, /title=\{`Test model \$\{copyValue\}`\}/);
+  assert.match(providersSource, /aria-label=\{`Test model \$\{copyValue\}`\}/);
 });
 
 test("provider write actions keep explicit success feedback", async () => {

@@ -223,7 +223,6 @@ export default function App() {
     };
   }, [loadGatewayClients, loadRuntime]);
 
-  const exportedCount = runtime.gatewayStatus?.official_models.length ?? 0;
   const visionModels = visionModelOptions(runtime.catalogModels);
 
   async function runRuntimeAction(
@@ -329,7 +328,7 @@ export default function App() {
   }
 
   return (
-    <div className="grid h-screen min-h-[768px] min-w-[1024px] grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+    <div className="grid h-screen min-h-[768px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
       <RuntimeBar
         busy={busy}
         message={banner}
@@ -352,11 +351,6 @@ export default function App() {
             onClick={() => setActiveTab(tab.id as TabId)}
           >
             {tab.label}
-            {tab.id === "gateway" && exportedCount > 0 && (
-              <span className="ml-2 rounded-full bg-panel px-1.5 py-0.5 text-[11px] text-slate-500 shadow-control">
-                {exportedCount}
-              </span>
-            )}
             {activeTab === tab.id && (
               <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-ink" />
             )}
@@ -367,7 +361,7 @@ export default function App() {
         </span>
       </nav>
 
-      <div className="min-h-0 overflow-hidden p-4">
+      <div className="min-h-0 overflow-x-auto overflow-y-hidden p-4">
         {activeTab === "codexhub" ? (
           <ProvidersPage
             gatewayStatus={runtime.gatewayStatus}

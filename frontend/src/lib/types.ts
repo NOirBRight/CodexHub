@@ -33,7 +33,7 @@ export interface MetadataProvenance {
   confidence: string;
 }
 
-export type UpstreamFormat = "auto" | "responses" | "chat_completions";
+export type UpstreamFormat = "auto" | "responses" | "chat_completions" | "anthropic_messages";
 
 export interface Provider {
   id: string;
@@ -41,6 +41,7 @@ export interface Provider {
   base_url: string;
   api_key?: string | null;
   upstream_format?: UpstreamFormat | null;
+  available_upstream_formats?: UpstreamFormat[] | null;
   display_prefix?: string | null;
   sort_order?: number | null;
   enabled: boolean;
@@ -58,9 +59,17 @@ export interface UpstreamFormatProbeResult {
   chat_text_ok: boolean;
   chat_tool_ok: boolean;
   chat_tool_stream_ok: boolean;
+  anthropic_text_ok: boolean;
   recommended_format: UpstreamFormat;
   notes: string[];
   duration_ms?: number | null;
+}
+
+export interface ModelEndpointTestResult {
+  ok: boolean;
+  upstream_format: UpstreamFormat;
+  endpoint: string;
+  status: number;
 }
 
 export interface AppStatus {

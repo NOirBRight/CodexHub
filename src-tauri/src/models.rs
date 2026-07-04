@@ -1,7 +1,7 @@
-use crate::{MetadataProvenance, Model, ModelPricing};
+use crate::{MetadataProvenance, Model, ModelPricing, UpstreamFormat};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::time::Duration;
 
 const OFFICIAL_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 
@@ -69,6 +70,121 @@ pub fn probe_upstream_format(
 
     serde_json::from_str(stdout.trim())
         .map_err(|error| format!("upstream format probe returned invalid JSON: {error}"))
+}
+
+pub fn test_model_endpoint(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    upstream_format: &UpstreamFormat,
+) -> Result<Value, String> {
+    test_model_endpoint_with_timeout(
+        base_url,
+        api_key,
+        model,
+        upstream_format,
+        MODEL_TEST_TIMEOUT,
+    )
+}
+
+fn test_model_endpoint_with_timeout(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    upstream_format: &UpstreamFormat,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("model is required for endpoint connectivity test".to_string());
+    }
+
+    let api_key = resolve_api_key(api_key)?;
+    let (format_id, label, path, payload) = model_test_payload(model, upstream_format);
+    let endpoint = provider_api_endpoint(base_url, path)?;
+    let client = Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| format!("failed to build HTTP client for {label} model test: {error}"))?;
+    let mut request = client
+        .post(&endpoint)
+        .header(ACCEPT, "application/json")
+        .header(CONTENT_TYPE, "application/json")
+        .json(&payload);
+
+    if let Some(api_key) = api_key.as_deref() {
+        if matches!(upstream_format, UpstreamFormat::AnthropicMessages)
+            && is_direct_anthropic_endpoint(&endpoint)
+        {
+            request = request
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01");
+        } else {
+            request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+        }
+    }
+
+    let response = request.send().map_err(|error| {
+        format!(
+            "{label} model test request failed: {}",
+            safe_http_error(error)
+        )
+    })?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "{label} model test failed with HTTP status {status}: {}",
+            compact_response_body(&body)
+        ));
+    }
+
+    Ok(json!({
+        "ok": true,
+        "upstream_format": format_id,
+        "endpoint": endpoint,
+        "status": status.as_u16(),
+    }))
+}
+
+fn model_test_payload(
+    model: &str,
+    upstream_format: &UpstreamFormat,
+) -> (&'static str, &'static str, &'static str, Value) {
+    match upstream_format {
+        UpstreamFormat::ChatCompletions => (
+            "chat_completions",
+            "Chat Completions",
+            "/chat/completions",
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "Endpoint connectivity probe. Reply exactly: OK"}],
+                "max_tokens": 16,
+                "stream": false,
+            }),
+        ),
+        UpstreamFormat::AnthropicMessages => (
+            "anthropic_messages",
+            "Anthropic Messages",
+            "/messages",
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "Endpoint connectivity probe. Reply exactly: OK"}],
+                "max_tokens": 16,
+            }),
+        ),
+        UpstreamFormat::Auto | UpstreamFormat::Responses => (
+            "responses",
+            "Responses",
+            "/responses",
+            json!({
+                "model": model,
+                "input": "Endpoint connectivity probe. Reply exactly: OK",
+                "max_output_tokens": 16,
+                "stream": false,
+            }),
+        ),
+    }
 }
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
@@ -208,6 +324,24 @@ fn provider_models_endpoint(base_url: &str) -> Result<String, String> {
     }
 }
 
+fn provider_api_endpoint(base_url: &str, path: &str) -> Result<String, String> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("provider base_url is required for endpoint connectivity test".to_string());
+    }
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        Ok(format!("{base_url}{path}"))
+    } else {
+        Ok(format!("{base_url}/v1{path}"))
+    }
+}
+
 fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
@@ -245,6 +379,13 @@ fn env_placeholder_name(value: &str) -> Result<Option<String>, String> {
         return Err(format!("invalid API key environment placeholder: {name}"));
     }
     Ok(Some(name.to_string()))
+}
+
+fn is_direct_anthropic_endpoint(endpoint: &str) -> bool {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .is_some_and(|host| host == "api.anthropic.com" || host.ends_with(".anthropic.com"))
 }
 
 fn ollama_show_endpoint(base_url: &str) -> Option<String> {
@@ -363,6 +504,41 @@ fn ollama_reasoning_levels(model_id: &str) -> Vec<String> {
 
 fn safe_http_error(error: reqwest::Error) -> String {
     error.without_url().to_string()
+}
+
+fn compact_response_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "empty response".to_string();
+    }
+    let message = serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .or_else(|| value.get("error"))
+                .and_then(|item| {
+                    if let Some(message) = item.as_str() {
+                        Some(message.to_string())
+                    } else if let Some(message) = item.get("message").and_then(Value::as_str) {
+                        Some(message.to_string())
+                    } else {
+                        serde_json::to_string(item).ok()
+                    }
+                })
+                .or_else(|| serde_json::to_string(&value).ok())
+        })
+        .unwrap_or_else(|| trimmed.replace(['\r', '\n'], " "));
+    truncate_for_status(&message, 320)
+}
+
+fn truncate_for_status(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    output.push_str("...");
+    output
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1040,9 +1216,9 @@ mod tests {
         discover_provider_models_with_timeout, enrich_models_with_ollama_show,
         generate_catalog_with_runner, list_model_metadata, list_models,
         merge_metadata_with_overrides, ollama_show_endpoint, refresh_official_models_from_endpoint,
-        CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
+        test_model_endpoint_with_timeout, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
-    use crate::{MetadataProvenance, Model};
+    use crate::{MetadataProvenance, Model, UpstreamFormat};
     use reqwest::blocking::Client;
     use std::cell::RefCell;
     use std::fs;
@@ -1165,6 +1341,31 @@ mod tests {
                 .contains("authorization: bearer provider-secret"));
             server.join();
         }
+    }
+
+    #[test]
+    fn model_endpoint_test_posts_only_the_selected_endpoint() {
+        let server = MockServer::json(r#"{"id":"chatcmpl-test"}"#, Duration::ZERO);
+
+        let result = test_model_endpoint_with_timeout(
+            &format!("{}/v1", server.base_url()),
+            " provider-secret ",
+            "model-a",
+            &UpstreamFormat::ChatCompletions,
+            Duration::from_secs(2),
+        )
+        .expect("model endpoint test");
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["upstream_format"], "chat_completions");
+        assert_eq!(result["status"], 200);
+        let request = server.request();
+        assert!(request.starts_with("POST /v1/chat/completions "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer provider-secret"));
+        assert!(request.contains(r#""model":"model-a""#));
+        server.join();
     }
 
     #[test]

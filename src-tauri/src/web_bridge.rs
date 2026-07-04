@@ -251,6 +251,25 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
                 .map(ToOwned::to_owned);
             to_value(gateway::provider_probe_upstream_format(provider_id, model))
         }
+        "test_model_endpoint" => {
+            let base_url = string_arg(&request.args, "baseUrl")?;
+            let api_key = string_arg(&request.args, "apiKey")?;
+            let model = string_arg(&request.args, "model")?;
+            let upstream_format = serde_json::from_value(
+                request
+                    .args
+                    .get("upstreamFormat")
+                    .cloned()
+                    .ok_or_else(|| "upstreamFormat argument is required".to_string())?,
+            )
+            .map_err(|error| format!("invalid upstreamFormat argument: {error}"))?;
+            to_value(models::test_model_endpoint(
+                &base_url,
+                &api_key,
+                &model,
+                &upstream_format,
+            ))
+        }
         "gateway_status" => to_value(gateway::gateway_status()),
         "gateway_test_request" => {
             let kind = serde_json::from_value(

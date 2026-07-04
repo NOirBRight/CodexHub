@@ -57,6 +57,12 @@ shadow depth to separate panels without looking like a web dashboard.
 - Nested rows: 12px radius and either `surface` or white fill. Selected rows may
   use a very light action tint plus `raised` shadow.
 - Inputs: 10px radius, `field` shadow, clear focus ring, no harsh blue outline.
+- Select-like dropdowns: use the shared `select-trigger`, `select-popover`,
+  and `select-option` classes for app-styled controls. The trigger should align
+  to input height, use `field` shadow, show a chevron icon, and open a floating
+  popover where the selected option is highlighted and secondary state is shown
+  with compact option-level chips. Avoid native `<select>` controls on
+  primary configuration surfaces where visual consistency matters.
 - Buttons: 10px radius, `control` shadow, exact property transitions, optional
   `active:scale-[0.96]`.
 - Segmented controls: outer pill or 16px rounded track with 10-12px active

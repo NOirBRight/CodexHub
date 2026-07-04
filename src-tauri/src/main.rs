@@ -102,6 +102,8 @@ pub struct Provider {
     pub base_url: String,
     pub api_key: Option<String>,
     pub upstream_format: Option<UpstreamFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_upstream_formats: Option<Vec<UpstreamFormat>>,
     pub display_prefix: Option<String>,
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]
@@ -118,6 +120,7 @@ pub enum UpstreamFormat {
     Auto,
     Responses,
     ChatCompletions,
+    AnthropicMessages,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,6 +295,16 @@ fn provider_probe_upstream_format(
     model: Option<String>,
 ) -> Result<serde_json::Value, String> {
     gateway::provider_probe_upstream_format(provider_id, model)
+}
+
+#[tauri::command]
+fn test_model_endpoint(
+    base_url: String,
+    api_key: String,
+    model: String,
+    upstream_format: UpstreamFormat,
+) -> Result<serde_json::Value, String> {
+    models::test_model_endpoint(&base_url, &api_key, &model, &upstream_format)
 }
 
 #[tauri::command]
@@ -646,6 +659,7 @@ fn run_gui() {
             discover_provider_models,
             probe_upstream_format,
             provider_probe_upstream_format,
+            test_model_endpoint,
             gateway_status,
             gateway_test_request,
             gateway_recent_events,

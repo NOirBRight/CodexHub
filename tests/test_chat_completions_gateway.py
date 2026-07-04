@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import codex_proxy
 from codex_proxy import (
@@ -417,6 +417,17 @@ class _FakeSseResponse:
         return False
 
 
+def _http_error(status, body=None):
+    body = body or json.dumps({"error": "upstream protocol unsupported"}).encode("utf-8")
+    return HTTPError(
+        "https://example.test/v1/responses",
+        status,
+        "upstream error",
+        {"Content-Type": "application/json", "Content-Length": str(len(body))},
+        io.BytesIO(body),
+    )
+
+
 class ChatCompletionsEndpointTests(unittest.TestCase):
     """End-to-end tests for POST /v1/chat/completions through the proxy."""
 
@@ -461,6 +472,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         handler.wfile = fake.wfile
         handler._fake = fake
         return handler
+
+    def _chat_sse_error(self, written):
+        self.assertNotIn(b"event: error\n", written)
+        self.assertFalse(written.rstrip().endswith(b"data: [DONE]"))
+        lines = [line for line in written.split(b"\n") if line.startswith(b"data: {")]
+        self.assertTrue(lines)
+        payload = json.loads(lines[-1].removeprefix(b"data: "))
+        self.assertIsInstance(payload.get("error"), dict)
+        return payload["error"]
 
     def test_post_chat_completions_routes_to_official_and_injects_subscription_token(self):
         body = json.dumps({
@@ -655,7 +675,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         mock_urlopen.assert_not_called()
         written = b"".join(handler.wfile.writes)
         result = json.loads(written)
-        self.assertIn("model is required", result["error"])
+        self.assertIn("model is required", result["error"]["message"])
+        self.assertEqual(result["error"]["type"], "invalid_request_error")
         self.assertEqual(handler._fake.status, 400)
 
     def test_provider_scoped_chat_completions_routes_slash_model_as_provider_relative(self):
@@ -1241,10 +1262,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         payload = json.loads(written)
         self.assertEqual(payload["error"]["message"], "upstream returned json")
         self.assertEqual(payload["error"]["type"], "upstream_error")
+        self.assertIsInstance(payload["error"], dict)
         self.assertNotIn(upstream_body, written)
         self.assertEqual(handler._fake.status, 502)
 
-    def test_post_chat_completions_streaming_reports_read_errors_as_sse_error_not_empty_finish(self):
+    def test_post_chat_completions_streaming_reports_read_errors_as_chat_sse_error(self):
         cases = [
             TimeoutError("The read operation timed out"),
             OSError("socket reset"),
@@ -1268,11 +1290,247 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     CodexProxyHandler.do_POST(handler)
 
                 written = b"".join(handler.wfile.writes)
-                self.assertIn(b"event: error\n", written)
-                self.assertIn(b'"type":"upstream_stream_error"', written)
-                self.assertIn(f'"error":"{type(exc).__name__}"'.encode("utf-8"), written)
+                error = self._chat_sse_error(written)
+                self.assertEqual(error["type"], "upstream_stream_error")
+                self.assertEqual(error["code"], type(exc).__name__)
+                self.assertEqual(error["status"], 502)
+                self.assertEqual(error["upstream"], "official")
                 self.assertNotIn(b"finish_reason", written)
-                self.assertFalse(written.rstrip().endswith(b"data: [DONE]"))
+
+    def test_provider_chat_streaming_reports_chat_upstream_read_errors_as_chat_sse_error(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        chat_sse_lines = [
+            b'data: {"id":"chatcmpl_s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n',
+            b'\n',
+            OSError("chat stream reset"),
+        ]
+
+        with (
+            patch("codex_proxy.load_policy", return_value=policy),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_sse_lines)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        error = self._chat_sse_error(written)
+        self.assertEqual(error["type"], "upstream_stream_error")
+        self.assertEqual(error["code"], "OSError")
+        self.assertEqual(error["upstream"], "volcengine")
+
+    def test_post_chat_completions_non_streaming_open_failure_returns_chat_error_object(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+
+        with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch("codex_proxy.urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertIsInstance(result["error"], dict)
+        self.assertEqual(result["error"]["type"], "upstream_error")
+        self.assertEqual(result["error"]["code"], "URLError")
+        self.assertEqual(result["error"]["status"], 502)
+        self.assertEqual(handler._fake.status, 502)
+
+    def test_post_responses_streaming_keeps_responses_sse_error_shape(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "input": "Hello",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/responses")
+        sse_lines = [
+            b'data: {"type":"response.created","response":{"id":"resp_s","model":"gpt-5.5"}}\n',
+            b'\n',
+            OSError("responses stream reset"),
+        ]
+
+        with patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"event: error\n", written)
+        self.assertIn(b'"type":"upstream_stream_error"', written)
+        self.assertIn(b'"error":"OSError"', written)
+
+    def test_auto_upstream_format_uses_responses_when_responses_succeeds(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "auto/glm-5.2",
+            "provider_alias": "auto",
+            "upstream_name": "auto_provider",
+            "display_prefix": "Auto",
+            "base_url": "https://auto.example.test/v1",
+            "api_key": "auto-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "auto",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_auto",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Responses OK", "annotations": []}],
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertTrue(mock_urlopen.call_args.args[0].full_url.endswith("/responses"))
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["choices"][0]["message"]["content"], "Responses OK")
+
+    def test_auto_upstream_format_falls_back_to_chat_for_protocol_http_error(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "auto/glm-5.2",
+            "provider_alias": "auto",
+            "upstream_name": "auto_provider",
+            "display_prefix": "Auto",
+            "base_url": "https://auto.example.test/v1",
+            "api_key": "auto-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "auto",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
+        chat_body = json.dumps({
+            "id": "chatcmpl_auto",
+            "object": "chat.completion",
+            "model": "glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Chat fallback OK"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", side_effect=[_http_error(404), _FakeJsonResponse(chat_body)]) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertTrue(mock_urlopen.call_args_list[0].args[0].full_url.endswith("/responses"))
+        self.assertTrue(mock_urlopen.call_args_list[1].args[0].full_url.endswith("/chat/completions"))
+        chat_payload = json.loads(mock_urlopen.call_args_list[1].args[0].data)
+        self.assertIn("messages", chat_payload)
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["choices"][0]["message"]["content"], "Chat fallback OK")
+
+    def test_auto_upstream_format_does_not_fallback_after_responses_stream_starts(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "auto/glm-5.2",
+            "provider_alias": "auto",
+            "upstream_name": "auto_provider",
+            "display_prefix": "Auto",
+            "base_url": "https://auto.example.test/v1",
+            "api_key": "auto-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "auto",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
+        sse_lines = [
+            b'data: {"type":"response.created","response":{"id":"resp_auto","model":"glm-5.2"}}\n',
+            b'\n',
+            OSError("stream reset after start"),
+        ]
+
+        with (
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        error = self._chat_sse_error(b"".join(handler.wfile.writes))
+        self.assertEqual(error["type"], "upstream_stream_error")
+        self.assertEqual(error["upstream"], "auto_provider")
 
     def test_post_chat_completions_404_for_unknown_path(self):
         handler = self._make_handler(b'{}', path="/v1/unknown")

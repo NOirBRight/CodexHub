@@ -94,8 +94,36 @@ html.sortable-list-dragging * {
   @apply h-9;
 }
 
+.select-trigger {
+  @apply focus-ring inline-flex min-w-0 items-center justify-between gap-2 rounded-control border border-line bg-surface px-3 text-sm font-medium text-ink shadow-field transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-white focus-visible:border-action/40;
+}
+
+.select-popover {
+  @apply rounded-inner border border-line bg-surface p-1 shadow-floating;
+}
+
+.select-option {
+  @apply focus-ring flex min-h-9 w-full items-center justify-between gap-2 rounded-control px-2.5 py-1.5 text-left text-sm text-ink transition-[background-color,color] duration-150 ease-out hover:bg-panel aria-selected:bg-action/10 aria-selected:text-action;
+}
+
 .mini-button {
   @apply focus-ring h-8 rounded-control border border-line bg-surface px-2 text-xs font-medium text-slate-700 shadow-control transition-[box-shadow,border-color,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96];
+}
+
+.status-pop {
+  animation: status-pop 420ms cubic-bezier(0.2, 0.9, 0.24, 1);
+}
+
+@keyframes status-pop {
+  0% {
+    transform: scale(0.92);
+  }
+  55% {
+    transform: scale(1.04);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
 
 .codexhub-flow-beam {

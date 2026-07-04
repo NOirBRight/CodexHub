@@ -14,9 +14,11 @@ import type {
   GatewayUsageSnapshot,
   GatewayUsageSummary,
   Model,
+  ModelEndpointTestResult,
   Provider,
   Settings,
   SubagentMatrixStatus,
+  UpstreamFormat,
   UpstreamFormatProbeResult,
   UsageQueryWindow,
 } from "./types";
@@ -124,6 +126,13 @@ export const api = {
     call<UpstreamFormatProbeResult>("provider_probe_upstream_format", {
       providerId,
       model: model ?? null,
+    }),
+  testModelEndpoint: (baseUrl: string, apiKey: string, model: string, upstreamFormat: UpstreamFormat) =>
+    call<ModelEndpointTestResult>("test_model_endpoint", {
+      baseUrl,
+      apiKey,
+      model,
+      upstreamFormat,
     }),
   gatewayStatus: () => call<GatewayStatus>("gateway_status"),
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>

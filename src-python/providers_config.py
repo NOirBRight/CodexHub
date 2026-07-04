@@ -43,7 +43,7 @@ EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
     "volc": "volcengine",
 }
 EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
-UPSTREAM_FORMATS = {"auto", "responses", "chat_completions"}
+UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages"}
 
 
 @dataclass
@@ -70,6 +70,7 @@ class ProviderConfig:
     base_url: str
     api_key: str
     upstream_format: str = "auto"
+    available_upstream_formats: tuple[str, ...] = ()
     display_prefix: str | None = None
     sort_order: int = 0
     enabled: bool = True
@@ -288,6 +289,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             base_url=_string_field(raw_provider.get("base_url")),
             api_key=_string_field(raw_provider.get("api_key")),
             upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
+            available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
@@ -319,6 +321,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             chunks.append(_toml_string_line("display_prefix", provider.display_prefix))
         if provider.upstream_format:
             chunks.append(_toml_string_line("upstream_format", provider.upstream_format))
+        if provider.available_upstream_formats:
+            chunks.append(_toml_string_list_line("available_upstream_formats", provider.available_upstream_formats))
         chunks.extend(
             [
                 _toml_int_line("sort_order", provider.sort_order),
@@ -468,6 +472,16 @@ def _string_tuple_field(value: Any, default: tuple[str, ...]) -> tuple[str, ...]
 def _upstream_format_field(value: Any) -> str:
     upstream_format = _string_field(value, "auto").strip().lower()
     return upstream_format if upstream_format in UPSTREAM_FORMATS else "auto"
+
+
+def _upstream_formats_field(value: Any) -> tuple[str, ...]:
+    formats = _string_tuple_field(value, ())
+    result: list[str] = []
+    for item in formats:
+        upstream_format = _upstream_format_field(item)
+        if upstream_format != "auto" and upstream_format not in result:
+            result.append(upstream_format)
+    return tuple(result)
 
 
 def _int_field(value: Any, default: int) -> int:

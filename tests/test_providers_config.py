@@ -263,6 +263,7 @@ enabled = true
                 base_url="https://case.example/v1",
                 api_key="case-secret",
                 upstream_format="chat_completions",
+                available_upstream_formats=("responses", "chat_completions"),
                 models=[
                     ModelConfig(
                         id="alias-model",
@@ -292,6 +293,7 @@ enabled = true
         self.assertEqual(loaded[0].models[0].supported_reasoning_levels, ("low", "high", "xhigh"))
         self.assertEqual(loaded[0].models[0].default_reasoning_level, "high")
         self.assertEqual(loaded[0].upstream_format, "chat_completions")
+        self.assertEqual(loaded[0].available_upstream_formats, ("responses", "chat_completions"))
         self.assertIsNone(loaded[0].models[1].upstream_model)
         self.assertIn('upstream_model = "Live-Case-Model"', raw_toml)
         self.assertIn('aliases = ["legacy-case-model"]', raw_toml)
@@ -299,6 +301,7 @@ enabled = true
         self.assertIn('supported_reasoning_levels = ["low", "high", "xhigh"]', raw_toml)
         self.assertIn('default_reasoning_level = "high"', raw_toml)
         self.assertIn('upstream_format = "chat_completions"', raw_toml)
+        self.assertIn('available_upstream_formats = ["responses", "chat_completions"]', raw_toml)
 
         index = build_external_model_index(loaded)
         self.assertEqual(index["case-provider/alias-model"]["upstream_model"], "Live-Case-Model")
@@ -307,6 +310,33 @@ enabled = true
         self.assertEqual(index["case-provider/alias-model"]["supported_reasoning_levels"], ("low", "high", "xhigh"))
         self.assertEqual(index["case-provider/alias-model"]["default_reasoning_level"], "high")
         self.assertEqual(index["case-provider/Fallback-Model"]["upstream_model"], "Fallback-Model")
+
+    def test_anthropic_endpoint_selection_load_save_and_index(self):
+        providers = [
+            ProviderConfig(
+                id="anthropic-direct",
+                name="Anthropic Direct",
+                base_url="https://api.anthropic.com",
+                api_key="{env:ANTHROPIC_API_KEY}",
+                upstream_format="anthropic_messages",
+                models=[ModelConfig(id="claude-sonnet-4-20250514", sort_order=1)],
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            save_providers(providers, path)
+            loaded = load_providers(path)
+            raw_toml = path.read_text(encoding="utf-8")
+
+        self.assertEqual(loaded[0].upstream_format, "anthropic_messages")
+        self.assertIn('upstream_format = "anthropic_messages"', raw_toml)
+
+        index = build_external_model_index(loaded, require_api_key=False)
+        self.assertEqual(
+            index["anthropic-direct/claude-sonnet-4-20250514"]["upstream_format"],
+            "anthropic_messages",
+        )
 
     def test_external_model_index_preserves_exact_case_and_explicit_aliases(self):
         providers = [

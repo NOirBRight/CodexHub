@@ -1,4 +1,4 @@
-use crate::{config, models, Provider, Settings};
+use crate::{config, models, Provider, Settings, UpstreamFormat};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -123,8 +123,44 @@ struct GatewayClientProviderGroup {
     client_provider_id: String,
     display_name: String,
     base_url: String,
+    endpoint_selection: GatewayClientEndpointSelection,
+    responses_path: String,
     chat_completions_path: String,
     models: Vec<GatewayClientProviderModel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayClientEndpointSelection {
+    Responses,
+    ChatCompletions,
+    AnthropicMessages,
+}
+
+impl GatewayClientEndpointSelection {
+    fn opencode_npm(self) -> &'static str {
+        match self.openai_compatible_selection() {
+            GatewayClientEndpointSelection::Responses => "@ai-sdk/openai",
+            GatewayClientEndpointSelection::ChatCompletions => "@ai-sdk/openai-compatible",
+            GatewayClientEndpointSelection::AnthropicMessages => "@ai-sdk/openai-compatible",
+        }
+    }
+
+    fn pi_api(self) -> &'static str {
+        match self.openai_compatible_selection() {
+            GatewayClientEndpointSelection::Responses => "openai-responses",
+            GatewayClientEndpointSelection::ChatCompletions => "openai-completions",
+            GatewayClientEndpointSelection::AnthropicMessages => "openai-completions",
+        }
+    }
+
+    fn openai_compatible_selection(self) -> Self {
+        match self {
+            GatewayClientEndpointSelection::AnthropicMessages => {
+                GatewayClientEndpointSelection::ChatCompletions
+            }
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1366,7 +1402,9 @@ fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Ve
                 supports_responses: provider
                     .upstream_format
                     .as_ref()
-                    .map(|format| !matches!(format, crate::UpstreamFormat::ChatCompletions))
+                    .map(|format| {
+                        matches!(format, UpstreamFormat::Auto | UpstreamFormat::Responses)
+                    })
                     .unwrap_or(true),
                 supports_chat_completions: true,
                 context_window: model
@@ -1592,7 +1630,7 @@ fn is_managed_codexhub_provider_entry(provider_id: &str, entry: &Value) -> bool 
         || entry
             .get("api")
             .and_then(Value::as_str)
-            .is_some_and(|api| api == "openai-completions")
+            .is_some_and(|api| matches!(api, "openai-completions" | "openai-responses"))
         || entry
             .get("kind")
             .and_then(Value::as_str)
@@ -1642,6 +1680,34 @@ fn gateway_client_provider_chat_path(provider_id: &str) -> String {
     )
 }
 
+fn gateway_client_provider_responses_path(provider_id: &str) -> String {
+    format!(
+        "/v1/providers/{}/responses",
+        gateway_provider_path_segment(provider_id)
+    )
+}
+
+fn gateway_client_provider_endpoint_selection(
+    provider_id: &str,
+    providers: &[Provider],
+) -> GatewayClientEndpointSelection {
+    if provider_id == "openai" {
+        return GatewayClientEndpointSelection::Responses;
+    }
+    match providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .and_then(|provider| provider.upstream_format.as_ref())
+    {
+        Some(UpstreamFormat::Responses) => GatewayClientEndpointSelection::Responses,
+        Some(UpstreamFormat::ChatCompletions) => GatewayClientEndpointSelection::ChatCompletions,
+        Some(UpstreamFormat::AnthropicMessages) => {
+            GatewayClientEndpointSelection::AnthropicMessages
+        }
+        Some(UpstreamFormat::Auto) | None => GatewayClientEndpointSelection::ChatCompletions,
+    }
+}
+
 fn gateway_client_provider_label(provider_id: &str, providers: &[Provider]) -> String {
     if provider_id == "openai" {
         return "OpenAI".to_string();
@@ -1684,12 +1750,16 @@ fn gateway_client_provider_groups(
             *index
         } else {
             let label = gateway_client_provider_label(&provider_id, providers);
+            let endpoint_selection =
+                gateway_client_provider_endpoint_selection(&provider_id, providers);
             let index = groups.len();
             group_indices.insert(provider_id.clone(), index);
             groups.push(GatewayClientProviderGroup {
                 client_provider_id: codexhub_client_provider_id(&provider_id),
                 display_name: format!("CodexHub {label}"),
                 base_url: gateway_client_provider_base_url(settings, &provider_id),
+                endpoint_selection,
+                responses_path: gateway_client_provider_responses_path(&provider_id),
                 chat_completions_path: gateway_client_provider_chat_path(&provider_id),
                 models: Vec::new(),
             });
@@ -4192,7 +4262,7 @@ fn opencode_config_text(
             group.client_provider_id.clone(),
             json!({
                 "name": group.display_name.clone(),
-                "npm": "@ai-sdk/openai-compatible",
+                "npm": group.endpoint_selection.opencode_npm(),
                 "options": {
                     "baseURL": group.base_url.clone(),
                     "apiKey": settings.gateway_client_key,
@@ -4280,7 +4350,7 @@ fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProvider
         .collect::<Vec<_>>();
     json!({
         "baseUrl": group.base_url.clone(),
-        "api": "openai-completions",
+        "api": group.endpoint_selection.pi_api(),
         "apiKey": settings.gateway_client_key,
         "authHeader": true,
         "compat": {
@@ -4352,8 +4422,9 @@ fn omp_models_yml_text(
     let mut output = "providers:\n".to_string();
     for group in &groups.providers {
         let base_url = yaml_scalar(&group.base_url);
+        let api = group.endpoint_selection.pi_api();
         output.push_str(&format!(
-            "  {}:\n    baseUrl: {base_url}\n    api: openai-completions\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
+            "  {}:\n    baseUrl: {base_url}\n    api: {api}\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
             group.client_provider_id
         ));
         for gateway_model in &group.models {
@@ -4399,6 +4470,11 @@ fn zcode_catalog_provider_value(
         .iter()
         .map(zcode_model_value)
         .collect::<Vec<_>>();
+    let openai_compatible_path = match group.endpoint_selection.openai_compatible_selection() {
+        GatewayClientEndpointSelection::Responses => group.responses_path.clone(),
+        GatewayClientEndpointSelection::ChatCompletions
+        | GatewayClientEndpointSelection::AnthropicMessages => group.chat_completions_path.clone(),
+    };
     json!({
         "id": group.client_provider_id.clone(),
         "name": group.display_name.clone(),
@@ -4407,7 +4483,7 @@ fn zcode_catalog_provider_value(
         "endpoints": {
             "baseURL": gateway_base_without_v1(settings),
             "paths": {
-                "openai-compatible": group.chat_completions_path.clone(),
+                "openai-compatible": openai_compatible_path,
             },
         },
         "apiKeyRequired": true,
@@ -4912,7 +4988,7 @@ mod tests {
         restore_latest_backup, sanitize_event, sanitize_text, usage_pricing_by_model,
         zcode_catalog_text, UsagePricing,
     };
-    use crate::{Model, Provider, Settings};
+    use crate::{Model, Provider, Settings, UpstreamFormat};
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
@@ -4927,6 +5003,7 @@ mod tests {
             base_url: "https://api.minimax.chat/v1".to_string(),
             api_key: None,
             upstream_format: None,
+            available_upstream_formats: None,
             display_prefix: Some("minimax/".to_string()),
             sort_order: None,
             enabled: true,
@@ -4956,6 +5033,7 @@ mod tests {
                 base_url: "https://ollama.com/v1".to_string(),
                 api_key: None,
                 upstream_format: None,
+                available_upstream_formats: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -4974,6 +5052,7 @@ mod tests {
                 base_url: "https://ark.example.test/v1".to_string(),
                 api_key: None,
                 upstream_format: None,
+                available_upstream_formats: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -4992,6 +5071,7 @@ mod tests {
                 base_url: "https://api.minimaxi.com/v1".to_string(),
                 api_key: None,
                 upstream_format: None,
+                available_upstream_formats: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -5015,6 +5095,7 @@ mod tests {
             base_url: "https://api.minimaxi.com/v1".to_string(),
             api_key: None,
             upstream_format: None,
+            available_upstream_formats: None,
             display_prefix: Some("MiniMax.cn".to_string()),
             sort_order: Some(1),
             enabled: true,
@@ -5190,6 +5271,7 @@ mod tests {
                 base_url: "https://ollama.com/v1".to_string(),
                 api_key: None,
                 upstream_format: None,
+                available_upstream_formats: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5207,6 +5289,7 @@ mod tests {
                 base_url: "https://ark.example.test/v1".to_string(),
                 api_key: None,
                 upstream_format: None,
+                available_upstream_formats: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5224,6 +5307,7 @@ mod tests {
                 base_url: "https://api.minimaxi.com/v1".to_string(),
                 api_key: None,
                 upstream_format: None,
+                available_upstream_formats: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -5288,9 +5372,123 @@ mod tests {
         assert_eq!(minimax_models["minimax-m3"]["name"], "MiniMax M3");
         assert_eq!(
             value
+                .pointer("/provider/codexhub-openai/npm")
+                .and_then(serde_json::Value::as_str),
+            Some("@ai-sdk/openai")
+        );
+        assert_eq!(
+            value
+                .pointer("/provider/codexhub-minimax/npm")
+                .and_then(serde_json::Value::as_str),
+            Some("@ai-sdk/openai-compatible")
+        );
+        assert_eq!(
+            value
                 .pointer("/provider/codexhub-minimax/options/baseURL")
                 .and_then(serde_json::Value::as_str),
             Some("http://127.0.0.1:9099/v1/providers/minimax")
+        );
+    }
+
+    #[test]
+    fn client_exports_use_explicit_responses_provider_protocols() {
+        let root = unique_temp_dir("codexhub-responses-provider-export");
+        let models_path = root.join("models.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings {
+            include_official_models: false,
+            ..Settings::default()
+        };
+        let mut providers = client_export_test_providers();
+        providers[0].upstream_format = Some(UpstreamFormat::Responses);
+
+        let opencode_text =
+            opencode_config_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+        let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+        let pi_text =
+            pi_models_text(&models_path, &settings, &providers, "minimax/minimax-m3").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let omp_text = omp_models_yml_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+        let zcode_text = zcode_catalog_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+        let zcode_value: serde_json::Value = serde_json::from_str(&zcode_text).unwrap();
+        let zcode_provider = zcode_value
+            .pointer("/providers")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "codexhub-minimax")
+            .unwrap();
+
+        assert_eq!(
+            opencode_value
+                .pointer("/provider/codexhub-minimax/npm")
+                .and_then(serde_json::Value::as_str),
+            Some("@ai-sdk/openai")
+        );
+        assert_eq!(
+            pi_value
+                .pointer("/providers/codexhub-minimax/api")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert!(omp_text.contains("codexhub-minimax:"));
+        assert!(omp_text.contains("api: openai-responses"));
+        assert_eq!(
+            zcode_provider
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/v1/providers/minimax/responses")
+        );
+    }
+
+    #[test]
+    fn client_exports_use_explicit_chat_provider_protocols() {
+        let root = unique_temp_dir("codexhub-chat-provider-export");
+        let models_path = root.join("models.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings {
+            include_official_models: false,
+            ..Settings::default()
+        };
+        let mut providers = client_export_test_providers();
+        providers[0].upstream_format = Some(UpstreamFormat::ChatCompletions);
+
+        let opencode_text =
+            opencode_config_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+        let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+        let pi_text =
+            pi_models_text(&models_path, &settings, &providers, "minimax/minimax-m3").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let omp_text = omp_models_yml_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+        let zcode_text = zcode_catalog_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+        let zcode_value: serde_json::Value = serde_json::from_str(&zcode_text).unwrap();
+        let zcode_provider = zcode_value
+            .pointer("/providers")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "codexhub-minimax")
+            .unwrap();
+
+        assert_eq!(
+            opencode_value
+                .pointer("/provider/codexhub-minimax/npm")
+                .and_then(serde_json::Value::as_str),
+            Some("@ai-sdk/openai-compatible")
+        );
+        assert_eq!(
+            pi_value
+                .pointer("/providers/codexhub-minimax/api")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-completions")
+        );
+        assert!(omp_text.contains("codexhub-minimax:"));
+        assert!(omp_text.contains("api: openai-completions"));
+        assert_eq!(
+            zcode_provider
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/v1/providers/minimax/chat/completions")
         );
     }
 
@@ -5415,6 +5613,18 @@ mod tests {
         assert!(settings_value.get("enabledModels").is_none());
         assert_eq!(settings_value["defaultProvider"], "codexhub-openai");
         assert_eq!(settings_value["defaultModel"], "gpt-5.5");
+        assert_eq!(
+            models_value
+                .pointer("/providers/codexhub-openai/api")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            models_value
+                .pointer("/providers/codexhub-minimax/api")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-completions")
+        );
         assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
         assert!(minimax_models
             .iter()
@@ -5479,8 +5689,10 @@ mod tests {
         let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
 
         assert!(text.contains("codexhub-openai:"));
+        assert!(text.contains("api: openai-responses"));
         assert!(text.contains("id: gpt-5.5"));
         assert!(text.contains("codexhub-minimax:"));
+        assert!(text.contains("api: openai-completions"));
         assert!(text.contains("id: minimax-m3"));
         assert!(text.contains("name: \"MiniMax M3\""));
         assert!(!text.contains("minimax/minimax-m3-lite"));
@@ -5498,6 +5710,7 @@ mod tests {
             base_url: "https://ollama.com/v1".to_string(),
             api_key: None,
             upstream_format: None,
+            available_upstream_formats: None,
             display_prefix: Some("Ollama".to_string()),
             sort_order: None,
             enabled: true,
@@ -5548,6 +5761,12 @@ mod tests {
         assert!(!minimax_models
             .iter()
             .any(|model| model["id"] == "minimax-m3-lite"));
+        assert_eq!(
+            openai
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/v1/providers/openai/responses")
+        );
         assert_eq!(
             minimax
                 .pointer("/endpoints/paths/openai-compatible")
@@ -6212,7 +6431,7 @@ mod tests {
         );
         assert_eq!(
             provider.get("api").and_then(serde_json::Value::as_str),
-            Some("openai-completions")
+            Some("openai-responses")
         );
         assert_eq!(
             provider.get("apiKey").and_then(serde_json::Value::as_str),
@@ -6366,7 +6585,7 @@ mod tests {
         let models = fs::read_to_string(&models_path).unwrap();
         assert!(models.contains("providers:\n  codexhub-openai:"));
         assert!(models.contains("baseUrl: http://127.0.0.1:9099/v1/providers/openai"));
-        assert!(models.contains("api: openai-completions"));
+        assert!(models.contains("api: openai-responses"));
         assert!(models.contains("apiKey: codexhub-proxy"));
         assert!(models.contains("id: gpt-5.5"));
     }
@@ -6488,7 +6707,7 @@ mod tests {
             provider
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
-            Some("/v1/providers/openai/chat/completions")
+            Some("/v1/providers/openai/responses")
         );
         assert_eq!(
             provider

@@ -1,6 +1,8 @@
 import {
   Brain,
+  Cable,
   Check,
+  ChevronDown,
   Copy,
   Eye,
   EyeOff,
@@ -13,7 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
@@ -44,17 +46,41 @@ const emptyProvider = {
   name: "",
   base_url: "",
   api_key: "",
-  upstream_format: "auto" as UpstreamFormat,
+  upstream_format: "responses" as UpstreamFormat,
+  available_upstream_formats: [] as UpstreamFormat[],
   display_prefix: "",
   models: [] as Model[],
 };
 
 const reasoningLevelOptions = ["low", "medium", "high", "xhigh", "max"];
+const endpointSelectionOptions: Array<{ value: UpstreamFormat; label: string }> = [
+  { value: "responses", label: "Responses" },
+  { value: "chat_completions", label: "Chat Completions" },
+  { value: "anthropic_messages", label: "Anthropic Messages" },
+];
 
 type ProviderNavItem =
   { id: string; sort_order: number; provider: Provider };
 type CodexAuthState = "authorized" | "missing" | "unknown";
 type ConnectionMode = "official" | "custom";
+type ProviderDraftState = {
+  providerId: string;
+  draft: Provider;
+  dirty: boolean;
+};
+type AddProviderForm = typeof emptyProvider;
+type PendingProviderNavigation =
+  | {
+      kind: "existing";
+      targetId: string;
+      draft: Provider;
+    }
+  | {
+      kind: "add";
+      targetId: string;
+      form: AddProviderForm;
+    };
+type InlineTestState = "idle" | "testing" | "success" | "error";
 
 export function ProvidersPage({
   gatewayStatus: gatewayStatusSnapshot,
@@ -79,6 +105,19 @@ export function ProvidersPage({
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
   const [busy, setBusy] = useState<string | null>("load");
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
+  const dirtyProviderDraftRef = useRef<ProviderDraftState | null>(null);
+  const [pendingProviderNavigation, setPendingProviderNavigation] =
+    useState<PendingProviderNavigation | null>(null);
+
+  const trackProviderDraft = useCallback((state: ProviderDraftState) => {
+    if (!state.dirty) {
+      if (dirtyProviderDraftRef.current?.providerId === state.providerId) {
+        dirtyProviderDraftRef.current = null;
+      }
+      return;
+    }
+    dirtyProviderDraftRef.current = state;
+  }, []);
 
   useEffect(() => {
     void load();
@@ -140,13 +179,70 @@ export function ProvidersPage({
         return left.id.localeCompare(right.id);
       });
   }, [providers]);
-  const canAdd = form.name.trim() && form.base_url.trim();
+  const canAdd = Boolean(form.name.trim());
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
   const realCodexConnected = codexStatus?.mode === "custom";
   const codexConnected = realCodexConnected;
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
+
+  function selectProvider(id: string) {
+    if (id === selectedId) {
+      return;
+    }
+    if (selectedId === ADD_ID) {
+      if (isAddProviderFormDirty(form)) {
+        setPendingProviderNavigation({ kind: "add", targetId: id, form });
+        return;
+      }
+      setForm(emptyProvider);
+      setSelectedId(id);
+      return;
+    }
+    const dirtyDraft = dirtyProviderDraftRef.current;
+    if (dirtyDraft?.dirty && dirtyDraft.providerId === selectedId) {
+      setPendingProviderNavigation({ kind: "existing", targetId: id, draft: dirtyDraft.draft });
+      return;
+    }
+    setSelectedId(id);
+  }
+
+  async function savePendingProviderNavigation() {
+    const pending = pendingProviderNavigation;
+    if (!pending) {
+      return;
+    }
+    try {
+      if (pending.kind === "existing") {
+        await updateProvider(pending.draft, `${pending.draft.name} saved`);
+        dirtyProviderDraftRef.current = null;
+      } else if (pending.kind === "add") {
+        const addedId = await saveAddProviderForm(pending.form, pending.targetId);
+        if (!addedId) {
+          return;
+        }
+      }
+      setPendingProviderNavigation(null);
+      setSelectedId(pending.targetId);
+    } catch {
+      // saveProviders already surfaces the failure.
+    }
+  }
+
+  function discardPendingProviderNavigation() {
+    const pending = pendingProviderNavigation;
+    if (!pending) {
+      return;
+    }
+    dirtyProviderDraftRef.current = null;
+    if (pending.kind === "add") {
+      setForm(emptyProvider);
+    }
+    setPendingProviderNavigation(null);
+    setSelectedId(pending.targetId);
+  }
+
   function setMessage(value: string | null) {
     if (value) {
       showToast(value, "message");
@@ -695,7 +791,7 @@ export function ProvidersPage({
   async function probeUpstreamFormat(baseUrl: string, apiKey: string, model?: string | null) {
     setBusy("probe");
     setProbeResult(null);
-    const toastId = showToast("Testing provider capabilities...", "loading");
+    const toastId = showToast("Testing endpoint selection...", "loading");
     try {
       const result = await api.probeUpstreamFormat(baseUrl, apiKey, model);
       setProbeResult(result);
@@ -714,6 +810,27 @@ export function ProvidersPage({
     }
   }
 
+  async function persistProviderProbeResult(providerId: string, result: UpstreamFormatProbeResult) {
+    const nextProviders = providers.map((provider) =>
+      provider.id === providerId
+        ? {
+            ...provider,
+            upstream_format:
+              result.recommended_format !== "auto" ? result.recommended_format : provider.upstream_format,
+            available_upstream_formats: probeAvailableFormats(result),
+          }
+        : provider,
+    );
+    setProviders(nextProviders);
+    try {
+      const saved = await api.saveProviders(nextProviders);
+      setProviders(saved);
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    }
+  }
+
   function providerProbeModel(provider: Provider) {
     const model = provider.models.find((item) => item.enabled) ?? provider.models[0];
     return model?.upstream_model?.trim() || model?.id || null;
@@ -724,34 +841,35 @@ export function ProvidersPage({
     return model?.upstream_model?.trim() || model?.id || null;
   }
 
-  async function addProvider() {
-    const id = form.id.trim() || slugify(form.name);
+  async function saveAddProviderForm(nextForm: AddProviderForm, targetId?: string) {
+    const id = nextForm.id.trim() || slugify(nextForm.name);
     if (!id) {
       setError("Provider name is required");
-      return;
+      return null;
     }
     if (providers.some((provider) => provider.id === id)) {
-      setError(`Provider already exists: ${form.name.trim()}`);
-      return;
+      setError(`Provider already exists: ${nextForm.name.trim()}`);
+      return null;
     }
 
-    const models = renumberModels(form.models.map((model) => normalizeModel(model)));
+    const models = renumberModels(nextForm.models.map((model) => normalizeModel(model)));
     const nextSortOrder =
       Math.max(
         0,
         ...providers.map((provider) => provider.sort_order ?? 0),
       ) + 1;
-    const providerName = form.name.trim();
+    const providerName = nextForm.name.trim();
     await saveProviders(
       [
         ...providers,
         {
           id,
           name: providerName,
-          base_url: form.base_url.trim(),
-          api_key: form.api_key.trim() || null,
-          upstream_format: form.upstream_format,
-          display_prefix: form.display_prefix.trim() || null,
+          base_url: nextForm.base_url.trim(),
+          api_key: nextForm.api_key.trim() || null,
+          upstream_format: nextForm.upstream_format,
+          available_upstream_formats: normalizeEndpointFormats(nextForm.available_upstream_formats),
+          display_prefix: nextForm.display_prefix.trim() || null,
           sort_order: nextSortOrder,
           enabled: true,
           models,
@@ -760,12 +878,18 @@ export function ProvidersPage({
       true,
       `${providerName} added`,
     );
-    setSelectedId(id);
+    setSelectedId(targetId ?? id);
     setForm(emptyProvider);
+    return id;
+  }
+
+  async function addProvider() {
+    await saveAddProviderForm(form);
   }
 
   return (
-    <main className="relative grid h-full min-h-0 min-w-[980px] grid-cols-[minmax(0,4fr)_minmax(0,6fr)] gap-4">
+    <>
+    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[minmax(0,4fr)_minmax(0,6fr)] gap-4">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
@@ -778,10 +902,10 @@ export function ProvidersPage({
           officialIncluded={settings?.include_official_models ?? false}
           officialCount={officialModels.length}
           providerModelCount={providerModelCount}
-          onAdd={() => setSelectedId(ADD_ID)}
+          onAdd={() => selectProvider(ADD_ID)}
           items={providerNavItems}
           onReorder={(items) => void reorderHubProviders(items)}
-          onSelect={setSelectedId}
+          onSelect={selectProvider}
           onToggleOfficialInclude={toggleOfficialInclude}
           onToggleProvider={toggleProviderEnabled}
           onToggleConnection={() => void toggleCodexHubConnection()}
@@ -803,13 +927,14 @@ export function ProvidersPage({
                 onDiscover={() => void discoverForForm()}
                 onFormChange={setForm}
                 onProbe={() =>
-                  void probeUpstreamFormat(form.base_url, form.api_key, formProbeModel()).then((result) => {
+                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModel()).then((result) => {
                     if (result && result.recommended_format !== "auto") {
                       setForm((current) => ({
                         ...current,
                         upstream_format: result.recommended_format,
                       }));
                     }
+                    return result;
                   })
                 }
               />
@@ -832,8 +957,16 @@ export function ProvidersPage({
                 provider={selectedProvider}
                 onChange={(provider) => void updateProvider(provider)}
                 onDelete={() => void deleteProvider(selectedProvider.id)}
+                onDraftStateChange={trackProviderDraft}
                 onProbe={(provider) =>
-                  probeUpstreamFormat(provider.base_url, provider.api_key ?? "", providerProbeModel(provider))
+                  probeUpstreamFormat(provider.base_url, provider.api_key ?? "", providerProbeModel(provider)).then(
+                    (result) => {
+                      if (result) {
+                        void persistProviderProbeResult(provider.id, result);
+                      }
+                      return result;
+                    },
+                  )
                 }
                 onRefresh={(provider) => void refreshProviderModels(provider)}
               />
@@ -845,6 +978,70 @@ export function ProvidersPage({
         </div>
       </section>
     </main>
+    {pendingProviderNavigation && (
+      <UnsavedProviderChangesDialog
+        busy={busy === "save"}
+        providerName={pendingProviderName(pendingProviderNavigation)}
+        onCancel={() => setPendingProviderNavigation(null)}
+        onDiscard={discardPendingProviderNavigation}
+        onSave={() => void savePendingProviderNavigation()}
+      />
+    )}
+    </>
+  );
+}
+
+function UnsavedProviderChangesDialog({
+  busy,
+  onCancel,
+  onDiscard,
+  onSave,
+  providerName,
+}: {
+  busy: boolean;
+  onCancel: () => void;
+  onDiscard: () => void;
+  onSave: () => void;
+  providerName: string;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
+      <div className="grid w-full max-w-[420px] gap-4 rounded-md border border-line bg-white p-5 shadow-xl">
+        <div className="min-w-0">
+          <h3 className="truncate text-base font-semibold">Save provider changes?</h3>
+          <p className="mt-1 text-sm leading-5 text-slate-600">
+            {providerName || "This provider"} has unsaved changes.
+          </p>
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            className="focus-ring inline-flex h-9 items-center justify-center rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="focus-ring inline-flex h-9 items-center justify-center rounded-md border border-line bg-white px-3 text-sm font-semibold hover:bg-slate-100"
+            disabled={busy}
+            onClick={onDiscard}
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+            disabled={busy}
+            onClick={onSave}
+          >
+            <Save size={16} />
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -892,7 +1089,6 @@ function ProviderSourceSidebar({
       <OfficialOpenAICard
         authState={codexAuthState}
         active={selectedId === OFFICIAL_ID}
-        connected={codexConnected}
         enabledModelCount={officialEnabledCount}
         included={officialIncluded}
         modelCount={officialCount}
@@ -965,7 +1161,6 @@ function ConnectedSurfaceFlow() {
 function OfficialOpenAICard({
   active,
   authState,
-  connected,
   enabledModelCount,
   included,
   modelCount,
@@ -974,7 +1169,6 @@ function OfficialOpenAICard({
 }: {
   active: boolean;
   authState: CodexAuthState;
-  connected: boolean;
   enabledModelCount: number;
   included: boolean;
   modelCount: number;
@@ -984,15 +1178,7 @@ function OfficialOpenAICard({
   const authChip = codexAuthChip(authState);
 
   return (
-    <section
-      className={cx(
-        "relative grid gap-3 overflow-hidden rounded-panel border p-3 shadow-card transition-[background-color,border-color,box-shadow] duration-150 ease-out",
-        connected
-          ? "border-emerald-300/70 bg-emerald-50/55 shadow-[0_0_0_1px_rgba(16,185,129,0.08),0_18px_40px_rgba(15,118,110,0.10)]"
-          : "border-transparent bg-surface",
-      )}
-    >
-      {connected && <ConnectedSurfaceFlow />}
+    <section className="relative grid gap-3 overflow-hidden rounded-panel border border-line bg-surface p-3 shadow-card transition-[background-color,border-color,box-shadow] duration-150 ease-out">
       <button type="button" className="focus-ring rounded-inner text-left" onClick={onSelect}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1006,6 +1192,7 @@ function OfficialOpenAICard({
       <div className="rounded-inner bg-surface shadow-control">
         <ProviderNavButton
           active={active}
+          activeTone="neutral"
           enabled={included}
           label="OpenAI"
           meta={`${enabledModelCount}/${modelCount} models`}
@@ -1211,6 +1398,7 @@ function SourceMetric({ label, value }: { label: string; value: string }) {
 
 function ProviderNavButton({
   active,
+  activeTone = "default",
   enabled,
   highlightShape = "full",
   label,
@@ -1220,6 +1408,7 @@ function ProviderNavButton({
   toggleLabel,
 }: {
   active: boolean;
+  activeTone?: "default" | "neutral";
   enabled: boolean;
   highlightShape?: "full" | "right";
   label: string;
@@ -1233,7 +1422,11 @@ function ProviderNavButton({
       className={cx(
         "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 text-sm transition-[box-shadow,background-color] duration-150 ease-out",
         highlightShape === "right" ? "rounded-r-inner" : "rounded-inner",
-        active ? "bg-blue-50 text-action shadow-raised" : "hover:bg-panel hover:shadow-control",
+        active
+          ? activeTone === "neutral"
+            ? "bg-panel-soft text-ink shadow-raised ring-1 ring-line"
+            : "bg-blue-50 text-action shadow-raised"
+          : "hover:bg-panel hover:shadow-control",
       )}
     >
       <button type="button" className="focus-ring min-w-0 text-left" onClick={onClick}>
@@ -1269,6 +1462,35 @@ function OfficialDetail({
   onReorder: (models: Model[]) => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
 }) {
+  const { showToast, updateToast } = useToasts();
+
+  async function testOfficialModel(model: Model) {
+    const label = displayModel(model);
+    const endpointLabel = upstreamFormatLabel("responses");
+    const toastId = showToast(`Testing ${label} on ${endpointLabel}...`, "loading");
+    try {
+      const result = await api.testModelEndpoint(
+        "https://api.openai.com/v1",
+        "{env:OPENAI_API_KEY}",
+        officialModelProbeId(model),
+        "responses",
+      );
+      updateToast(toastId, {
+        action: null,
+        text: `${label}: ${endpointLabel} connected (HTTP ${result.status})`,
+        tone: "success",
+      });
+      return true;
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: `${label}: ${endpointLabel} connection failed - ${messageFromError(err)}`,
+        tone: "error",
+      });
+      return false;
+    }
+  }
+
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
       <div className="grid gap-4 border-b border-line p-5">
@@ -1289,9 +1511,11 @@ function OfficialDetail({
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
         onReorder={onReorder}
+        onTestModel={testOfficialModel}
         reorderable={false}
         refreshBusy={busy === "official-refresh"}
         onToggleOfficialModel={onToggleModel}
+        modelTestDisabled={authState !== "authorized"}
       />
     </div>
   );
@@ -1302,6 +1526,7 @@ function ProviderDetail({
   discoverError,
   onChange,
   onDelete,
+  onDraftStateChange,
   onProbe,
   onRefresh,
   probeResult,
@@ -1311,17 +1536,50 @@ function ProviderDetail({
   discoverError?: string | null;
   onChange: (provider: Provider, successMessage?: string) => void;
   onDelete: () => void;
+  onDraftStateChange: (state: ProviderDraftState) => void;
   onProbe: (provider: Provider) => Promise<UpstreamFormatProbeResult | null>;
   onRefresh: (provider: Provider) => void;
   probeResult: UpstreamFormatProbeResult | null;
   provider: Provider;
 }) {
-  const [draft, setDraft] = useState(provider);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(provider);
+  const { showToast, updateToast } = useToasts();
+  const normalizedProvider = useMemo(() => normalizeProviderEndpointSelection(provider), [provider]);
+  const [draft, setDraft] = useState(() => normalizedProvider);
+  const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
+  const dirty = JSON.stringify(draft) !== JSON.stringify(normalizedProvider);
 
   useEffect(() => {
-    setDraft(provider);
-  }, [provider]);
+    setDraft(normalizedProvider);
+    setEndpointTestState(hasAvailableEndpointFormats(normalizedProvider.available_upstream_formats) ? "success" : "idle");
+  }, [provider.id, normalizedProvider]);
+
+  useEffect(() => {
+    const availableFormats = normalizeEndpointFormats(provider.available_upstream_formats);
+    setDraft((current) =>
+      current.id === provider.id
+        ? {
+            ...current,
+            available_upstream_formats: availableFormats,
+          }
+        : current,
+    );
+    if (availableFormats.length) {
+      setEndpointTestState("success");
+    }
+  }, [provider.id, provider.available_upstream_formats]);
+
+  useEffect(() => {
+    if (probeResult) {
+      setEndpointTestState("success");
+    }
+  }, [probeResult]);
+
+  useEffect(() => {
+    onDraftStateChange({ providerId: provider.id, draft, dirty });
+    return () => {
+      onDraftStateChange({ providerId: provider.id, draft: normalizedProvider, dirty: false });
+    };
+  }, [dirty, draft, normalizedProvider, onDraftStateChange, provider.id]);
 
   function updateModel(modelId: string, patch: Partial<Model>) {
     setDraft((current) => ({
@@ -1351,9 +1609,48 @@ function ProviderDetail({
   }
 
   async function runProbe() {
+    setEndpointTestState("testing");
     const result = await onProbe(draft);
     if (result && result.recommended_format !== "auto") {
-      setDraft((current) => ({ ...current, upstream_format: result.recommended_format }));
+      setDraft((current) => ({
+        ...current,
+        upstream_format: result.recommended_format,
+        available_upstream_formats: probeAvailableFormats(result),
+      }));
+    } else if (result) {
+      setDraft((current) => ({
+        ...current,
+        available_upstream_formats: probeAvailableFormats(result),
+      }));
+    }
+    setEndpointTestState(result ? "success" : "error");
+  }
+
+  async function testModel(model: Model) {
+    const label = displayModel(model);
+    const upstreamFormat = normalizedEndpointFormat(draft.upstream_format);
+    const endpointLabel = upstreamFormatLabel(upstreamFormat);
+    const toastId = showToast(`Testing ${label} on ${endpointLabel}...`, "loading");
+    try {
+      const result = await api.testModelEndpoint(
+        draft.base_url,
+        draft.api_key ?? "",
+        modelProbeId(model),
+        upstreamFormat,
+      );
+      updateToast(toastId, {
+        action: null,
+        text: `${label}: ${endpointLabel} connected (HTTP ${result.status})`,
+        tone: "success",
+      });
+      return true;
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: `${label}: ${endpointLabel} connection failed - ${messageFromError(err)}`,
+        tone: "error",
+      });
+      return false;
     }
   }
 
@@ -1363,29 +1660,18 @@ function ProviderDetail({
         <HeaderRow
           title={provider.name}
           actions={
-            <>
-              <button
-                type="button"
-                className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
-                disabled={busy === "probe" || !draft.base_url.trim()}
-                onClick={() => void runProbe()}
-              >
-                <FlaskConical size={16} />
-                Test
-              </button>
-              <IconButton
-                title="Delete provider"
-                danger
-                disabled={busy === "save"}
-                onClick={onDelete}
-              >
-                <Trash2 size={16} />
-              </IconButton>
-            </>
+            <IconButton
+              title="Delete provider"
+              danger
+              disabled={busy === "save"}
+              onClick={onDelete}
+            >
+              <Trash2 size={16} />
+            </IconButton>
           }
         />
 
-        <div className="grid gap-2 lg:grid-cols-2">
+        <div className="grid grid-cols-2 gap-2">
           <Field label="Name">
             <input
               className="field field-compact"
@@ -1399,28 +1685,25 @@ function ProviderDetail({
               onChange={(apiKey) => setDraft({ ...draft, api_key: apiKey || null })}
             />
           </Field>
-          <Field label="Base URL" className="lg:col-span-2">
+          <Field label="Base URL" className="col-span-2">
             <input
               className="field field-compact"
               value={draft.base_url}
               onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}
             />
           </Field>
-          <div className="lg:col-span-2">
-            <ProviderCapabilitiesPanel
-              format={draft.upstream_format ?? "auto"}
+          <div className="col-span-2">
+            <EndpointSelectionPanel
+              value={draft.upstream_format ?? "auto"}
               result={probeResult}
+              availableFormats={draft.available_upstream_formats}
+              probeDisabled={busy === "probe" || !draft.base_url.trim()}
+              testState={endpointTestState}
+              onChange={(upstreamFormat) => setDraft({ ...draft, upstream_format: upstreamFormat })}
+              onProbe={() => void runProbe()}
             />
           </div>
         </div>
-        {probeResult && (
-          <ProbeResultPanel
-            result={probeResult}
-            onApply={() =>
-              setDraft({ ...draft, upstream_format: probeResult.recommended_format })
-            }
-          />
-        )}
       </div>
 
       <ModelSection
@@ -1433,8 +1716,10 @@ function ProviderDetail({
         onDiscover={() => onRefresh(draft)}
         onReorder={(models) => setDraft({ ...draft, models: renumberModels(models) })}
         onRemove={removeModel}
+        onTestModel={testModel}
         onToggle={(modelId, enabled) => updateModel(modelId, { enabled })}
         onUpdate={updateModel}
+        modelTestDisabled={!draft.base_url.trim()}
       />
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
         <button
@@ -1458,11 +1743,13 @@ function ModelSection({
   discoverDisabled,
   discoverError,
   models,
+  modelTestDisabled,
   onAdd,
   onDiscover,
   onRefresh,
   onRemove,
   onReorder,
+  onTestModel,
   officialDisabledModels,
   providerId,
   reorderable = true,
@@ -1477,11 +1764,13 @@ function ModelSection({
   discoverDisabled?: boolean;
   discoverError?: string | null;
   models: Model[];
+  modelTestDisabled?: boolean;
   onAdd?: () => string | undefined;
   onDiscover?: () => void;
   onRefresh?: () => void;
   onRemove?: (modelId: string) => void;
   onReorder: (models: Model[]) => void;
+  onTestModel?: (model: Model) => Promise<boolean>;
   officialDisabledModels?: string[];
   providerId?: string;
   reorderable?: boolean;
@@ -1491,6 +1780,8 @@ function ModelSection({
   onUpdate?: (modelId: string, patch: Partial<Model>) => void;
 }) {
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
+  const [modelTestStates, setModelTestStates] = useState<Record<string, InlineTestState>>({});
+  const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const editingModel = editingModelId ? models.find((model) => model.id === editingModelId) ?? null : null;
 
   function addAndEdit() {
@@ -1503,6 +1794,17 @@ function ModelSection({
   function applyModelUpdate(modelId: string, nextModel: Model) {
     onUpdate?.(modelId, nextModel);
     setEditingModelId(null);
+  }
+
+  async function runModelTest(model: Model) {
+    if (!onTestModel || testingModelId) {
+      return;
+    }
+    setTestingModelId(model.id);
+    setModelTestStates((current) => ({ ...current, [model.id]: "testing" }));
+    const ok = await onTestModel(model);
+    setModelTestStates((current) => ({ ...current, [model.id]: ok ? "success" : "error" }));
+    setTestingModelId(null);
   }
 
   function renderModelRow(model: Model) {
@@ -1519,7 +1821,7 @@ function ModelSection({
       setEditingModelId(model.id);
     }
     const actions = (
-      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 lg:justify-end">
+      <div className="flex shrink-0 flex-nowrap items-center justify-end gap-2 whitespace-nowrap text-xs text-slate-500">
         {modelCapabilityTags(model).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
@@ -1545,7 +1847,7 @@ function ModelSection({
     return (
       <div
         className={cx(
-          "grid min-h-[52px] gap-3 px-3 py-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center",
+          "grid min-h-[52px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-2",
           rowInteractable && "cursor-pointer",
           !modelEnabled && "opacity-70",
         )}
@@ -1566,7 +1868,13 @@ function ModelSection({
             : undefined
         }
       >
-        <ModelIdentity model={model} providerId={providerId} />
+        <ModelIdentity
+          model={model}
+          providerId={providerId}
+          testDisabled={modelTestDisabled || Boolean(testingModelId)}
+          testState={modelTestStates[model.id] ?? "idle"}
+          onTest={onTestModel ? () => void runModelTest(model) : undefined}
+        />
         <div
           onClick={(event) => event.stopPropagation()}
           onKeyDown={(event) => event.stopPropagation()}
@@ -1674,7 +1982,19 @@ function providerQualifiedModelId(providerId: string, modelId: string) {
   return `${cleanProviderId}/${cleanModelId}`;
 }
 
-function ModelIdentity({ model, providerId }: { model: Model; providerId?: string }) {
+function ModelIdentity({
+  model,
+  onTest,
+  providerId,
+  testDisabled,
+  testState = "idle",
+}: {
+  model: Model;
+  onTest?: () => void;
+  providerId?: string;
+  testDisabled?: boolean;
+  testState?: InlineTestState;
+}) {
   const [copied, setCopied] = useState(false);
   const copyValue = providerId ? providerQualifiedModelId(providerId, model.id) : model.id;
 
@@ -1687,6 +2007,11 @@ function ModelIdentity({ model, providerId }: { model: Model; providerId?: strin
     } catch {
       setCopied(false);
     }
+  }
+
+  function testCurrentModel(event: React.MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    onTest?.();
   }
 
   return (
@@ -1703,6 +2028,25 @@ function ModelIdentity({ model, providerId }: { model: Model; providerId?: strin
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
         </button>
+        {onTest && (
+          <button
+            type="button"
+            className={cx(
+              "focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border text-slate-500 transition-[background-color,border-color,color,transform] duration-150 ease-out active:scale-[0.96]",
+              testState === "success"
+                ? "status-pop border-emerald-200 bg-emerald-50 text-emerald-700"
+                : testState === "error"
+                  ? "status-pop border-red-200 bg-red-50 text-danger"
+                  : "border-transparent text-slate-500 hover:border-line hover:bg-panel hover:text-ink",
+            )}
+            disabled={testDisabled || testState === "testing"}
+            onClick={testCurrentModel}
+            title={`Test model ${copyValue}`}
+            aria-label={`Test model ${copyValue}`}
+          >
+            <ModelTestStateIcon state={testState} size={13} />
+          </button>
+        )}
       </span>
     </div>
   );
@@ -1929,7 +2273,7 @@ function optionalPositiveNumber(value: string) {
 
 function CapabilityChip({ icon, label }: { icon?: React.ReactNode; label: string }) {
   return (
-    <span className="inline-flex h-6 items-center gap-1.5 rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
+    <span className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
       {icon}
       {label}
     </span>
@@ -1957,7 +2301,7 @@ function SwitchControl({
   return (
     <label
       className={cx(
-        "inline-flex h-6 items-center gap-2 text-xs font-semibold text-slate-600",
+        "inline-flex h-6 shrink-0 items-center gap-2 whitespace-nowrap text-xs font-semibold text-slate-600",
         showLabel && "rounded-full border border-line bg-panel pl-2 pr-1",
       )}
     >
@@ -2045,6 +2389,48 @@ function normalizeModel(model: Model): Model {
         ? model.default_reasoning_level
         : null,
   };
+}
+
+function normalizeProviderEndpointSelection(provider: Provider): Provider {
+  return {
+    ...provider,
+    upstream_format:
+      !provider.upstream_format || provider.upstream_format === "auto"
+        ? "responses"
+        : provider.upstream_format,
+    available_upstream_formats: normalizeEndpointFormats(provider.available_upstream_formats),
+  };
+}
+
+function normalizeEndpointFormats(values?: Array<UpstreamFormat | null | undefined> | null): UpstreamFormat[] {
+  if (!values?.length) {
+    return [];
+  }
+  const available = new Set(values.filter((value): value is UpstreamFormat => Boolean(value)));
+  return endpointSelectionOptions
+    .map((option) => option.value)
+    .filter((value) => value !== "auto" && available.has(value));
+}
+
+function mergeEndpointFormats(
+  ...groups: Array<Array<UpstreamFormat | null | undefined> | null | undefined>
+): UpstreamFormat[] {
+  return normalizeEndpointFormats(groups.flatMap((group) => group ?? []));
+}
+
+function hasAvailableEndpointFormats(values?: Array<UpstreamFormat | null | undefined> | null) {
+  return normalizeEndpointFormats(values).length > 0;
+}
+
+function isAddProviderFormDirty(form: AddProviderForm) {
+  return Boolean(form.name.trim());
+}
+
+function pendingProviderName(pending: PendingProviderNavigation) {
+  if (pending.kind === "existing") {
+    return pending.draft.name;
+  }
+  return pending.form.name.trim() || "New provider";
 }
 
 function sortOfficialModels(models: Model[], sortOrder: string[]) {
@@ -2161,9 +2547,18 @@ function AddProviderPanel({
   onAdd: () => void;
   onDiscover: () => void;
   onFormChange: (form: typeof emptyProvider) => void;
-  onProbe: () => void;
+  onProbe: () => Promise<UpstreamFormatProbeResult | null>;
   probeResult: UpstreamFormatProbeResult | null;
 }) {
+  const { showToast, updateToast } = useToasts();
+  const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
+
+  useEffect(() => {
+    if (probeResult) {
+      setEndpointTestState("success");
+    }
+  }, [probeResult]);
+
   function updateModel(modelId: string, patch: Partial<Model>) {
     onFormChange({
       ...form,
@@ -2182,37 +2577,57 @@ function AddProviderPanel({
     return id;
   }
 
+  async function runProbe() {
+    setEndpointTestState("testing");
+    const result = await onProbe();
+    if (result) {
+      onFormChange({
+        ...form,
+        upstream_format: result.recommended_format !== "auto" ? result.recommended_format : form.upstream_format,
+        available_upstream_formats: probeAvailableFormats(result),
+      });
+    }
+    setEndpointTestState(result ? "success" : "error");
+  }
+
+  async function testModel(model: Model) {
+    const label = displayModel(model);
+    const upstreamFormat = normalizedEndpointFormat(form.upstream_format);
+    const endpointLabel = upstreamFormatLabel(upstreamFormat);
+    const toastId = showToast(`Testing ${label} on ${endpointLabel}...`, "loading");
+    try {
+      const result = await api.testModelEndpoint(
+        form.base_url,
+        form.api_key,
+        modelProbeId(model),
+        upstreamFormat,
+      );
+      updateToast(toastId, {
+        action: null,
+        text: `${label}: ${endpointLabel} connected (HTTP ${result.status})`,
+        tone: "success",
+      });
+      return true;
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: `${label}: ${endpointLabel} connection failed - ${messageFromError(err)}`,
+        tone: "error",
+      });
+      return false;
+    }
+  }
+
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
-      <div className="grid gap-4 border-b border-line p-5">
-        <HeaderRow
-          title="Add provider"
-          subtitle="Discover models before saving the provider."
-          actions={
-            <button
-              type="button"
-              className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
-              disabled={busy === "probe" || !form.base_url.trim()}
-              onClick={onProbe}
-            >
-              <FlaskConical size={16} />
-              Test
-            </button>
-          }
-        />
-        <div className="grid gap-3">
+      <div className="grid gap-2 border-b border-line p-4">
+        <HeaderRow title="Add provider" />
+        <div className="grid grid-cols-2 gap-2">
           <Field label="Name">
             <input
-              className="field"
+              className="field field-compact"
               value={form.name}
               onChange={(event) => onFormChange({ ...form, name: event.target.value })}
-            />
-          </Field>
-          <Field label="Base URL">
-            <input
-              className="field"
-              value={form.base_url}
-              onChange={(event) => onFormChange({ ...form, base_url: event.target.value })}
             />
           </Field>
           <Field label="API key">
@@ -2221,14 +2636,25 @@ function AddProviderPanel({
               onChange={(apiKey) => onFormChange({ ...form, api_key: apiKey })}
             />
           </Field>
-          <ProviderCapabilitiesPanel format={form.upstream_format} result={probeResult} />
+          <Field label="Base URL" className="col-span-2">
+            <input
+              className="field field-compact"
+              value={form.base_url}
+              onChange={(event) => onFormChange({ ...form, base_url: event.target.value })}
+            />
+          </Field>
+          <div className="col-span-2">
+            <EndpointSelectionPanel
+              value={form.upstream_format}
+              result={probeResult}
+              availableFormats={form.available_upstream_formats}
+              probeDisabled={busy === "probe" || !form.base_url.trim()}
+              testState={endpointTestState}
+              onChange={(upstreamFormat) => onFormChange({ ...form, upstream_format: upstreamFormat })}
+              onProbe={() => void runProbe()}
+            />
+          </div>
         </div>
-        {probeResult && (
-          <ProbeResultPanel
-            result={probeResult}
-            onApply={() => onFormChange({ ...form, upstream_format: probeResult.recommended_format })}
-          />
-        )}
       </div>
 
       <ModelSection
@@ -2242,8 +2668,10 @@ function AddProviderPanel({
         onRemove={(modelId) =>
           onFormChange({ ...form, models: form.models.filter((model) => model.id !== modelId) })
         }
+        onTestModel={testModel}
         onToggle={(modelId, enabled) => updateModel(modelId, { enabled })}
         onUpdate={updateModel}
+        modelTestDisabled={!form.base_url.trim()}
       />
 
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
@@ -2261,153 +2689,202 @@ function AddProviderPanel({
   );
 }
 
-type ProviderCapabilityState = "ok" | "fail" | "unknown" | "configured";
-
-function ProviderCapabilitiesPanel({
-  format,
+function EndpointSelectionPanel({
+  availableFormats,
+  onChange,
+  onProbe,
+  probeDisabled,
   result,
+  testState,
+  value,
 }: {
-  format?: UpstreamFormat | null;
-  result: UpstreamFormatProbeResult | null;
+  availableFormats?: UpstreamFormat[] | null;
+  onChange: (value: UpstreamFormat) => void;
+  onProbe: () => void;
+  probeDisabled: boolean;
+  result?: UpstreamFormatProbeResult | null;
+  testState: InlineTestState;
+  value?: UpstreamFormat | null;
 }) {
-  const configuredFormat = format ?? "auto";
-  const hasProbe = Boolean(result);
-  const responsesState = hasProbe
-    ? boolCapabilityState(
-        Boolean(result?.responses_text_ok || result?.responses_tool_ok || result?.responses_tool_stream_ok),
-      )
-    : configuredFormat === "responses"
-      ? "configured"
-      : "unknown";
-  const chatState = hasProbe
-    ? boolCapabilityState(Boolean(result?.chat_text_ok || result?.chat_tool_ok || result?.chat_tool_stream_ok))
-    : configuredFormat === "chat_completions"
-      ? "configured"
-      : "unknown";
-  const items: Array<{ label: string; state: ProviderCapabilityState }> = [
-    { label: "Responses", state: responsesState },
-    { label: "Chat Completions", state: chatState },
-  ];
+  const selected = normalizedEndpointFormat(value);
+  const mergedAvailableFormats = mergeEndpointFormats(availableFormats, probeAvailableFormats(result));
 
   return (
-    <div className="flex min-w-0 items-center gap-2 rounded-md border border-line bg-panel px-3 py-2">
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Provider capabilities
-        </span>
-        <div className="flex shrink-0 gap-2">
-          {items.map((item) => (
-            <ProviderCapabilityChip key={item.label} label={item.label} state={item.state} />
-          ))}
-        </div>
+    <div className="grid min-w-0 gap-1 text-sm font-medium text-slate-700">
+      <span>Endpoint Selection</span>
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+        <EndpointFormatSelect availableFormats={mergedAvailableFormats} value={selected} onChange={onChange} />
+        <button
+          type="button"
+          className={cx(
+            "mini-button inline-flex h-9 shrink-0 items-center justify-center gap-2 px-3 text-sm font-semibold disabled:bg-slate-100",
+            testState === "success" && "status-pop border-emerald-200 bg-emerald-50 text-emerald-700",
+            testState === "error" && "status-pop border-red-200 bg-red-50 text-danger",
+          )}
+          disabled={probeDisabled || testState === "testing"}
+          onClick={onProbe}
+        >
+          <TestStateIcon state={testState} size={16} />
+          Test
+        </button>
       </div>
     </div>
   );
 }
 
-function boolCapabilityState(value: boolean): ProviderCapabilityState {
-  return value ? "ok" : "fail";
+function EndpointFormatSelect({
+  availableFormats,
+  onChange,
+  value,
+}: {
+  availableFormats: UpstreamFormat[];
+  onChange: (value: UpstreamFormat) => void;
+  value: UpstreamFormat;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = endpointSelectionOptions.find((option) => option.value === value) ?? endpointSelectionOptions[0];
+  const available = new Set(availableFormats);
+
+  return (
+    <div
+      className="relative min-w-0"
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget as Node | null;
+        if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="select-trigger h-9 w-full"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="truncate">{selected.label}</span>
+        <ChevronDown size={15} className="shrink-0 text-slate-500" />
+      </button>
+      {open && (
+        <div className="select-popover absolute left-0 top-[calc(100%+6px)] z-30 w-full min-w-[240px]" role="listbox">
+          {endpointSelectionOptions.map((option) => {
+            const selectedOption = option.value === value;
+            const optionAvailable = available.has(option.value);
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className="select-option"
+                role="option"
+                aria-selected={selectedOption}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <span className="truncate">{option.label}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {optionAvailable && <EndpointAvailableChip />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
-function ProviderCapabilityChip({
-  label,
-  state,
-}: {
-  label: string;
-  state: ProviderCapabilityState;
-}) {
-  const stateLabel =
-    state === "ok"
-      ? "OK"
-      : state === "fail"
-        ? "Fail"
-        : state === "configured"
-          ? "Configured"
-          : "Unknown";
+function EndpointAvailableChip() {
   return (
-    <span
-      className={cx(
-        "inline-flex h-7 items-center gap-2 rounded-full border px-2.5 text-xs font-semibold",
-        state === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
-        state === "fail" && "border-red-200 bg-red-50 text-red-700",
-        state === "configured" && "border-blue-200 bg-blue-50 text-blue-700",
-        state === "unknown" && "border-line bg-white text-slate-500",
-      )}
-    >
-      <span>{label}</span>
-      <span className="text-[10px] uppercase tracking-wide opacity-70">{stateLabel}</span>
+    <span className="shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold leading-4 text-emerald-700">
+      available
     </span>
   );
 }
 
-function ProbeResultPanel({
-  onApply,
-  result,
-}: {
-  onApply: () => void;
-  result: UpstreamFormatProbeResult;
-}) {
-  const canApply = result.recommended_format !== "auto";
-  const responsesOk = Boolean(
-    result.responses_text_ok || result.responses_tool_ok || result.responses_tool_stream_ok,
-  );
-  const chatOk = Boolean(result.chat_text_ok || result.chat_tool_ok || result.chat_tool_stream_ok);
-
-  return (
-    <div className="border-t border-line pt-3">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold">Provider test result</h3>
-          <p className="mt-1 truncate text-xs text-slate-500">
-            {result.model ? `Model ${result.model}` : "No model selected"} - Recommended:{" "}
-            {upstreamFormatLabel(result.recommended_format)}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="focus-ring inline-flex h-8 items-center justify-center rounded-md bg-action px-3 text-xs font-semibold text-white disabled:bg-slate-300"
-          disabled={!canApply}
-          onClick={onApply}
-        >
-          Apply recommendation
-        </button>
-      </div>
-      <div className="grid gap-2 text-xs sm:grid-cols-2">
-        <ProbeCheck label="Responses" ok={responsesOk} />
-        <ProbeCheck label="Chat Completions" ok={chatOk} />
-      </div>
-      {result.notes.length > 0 && (
-        <div className="mt-3 max-h-24 overflow-auto border-l-2 border-line pl-3 text-xs leading-5 text-slate-600">
-          {result.notes.map((note, index) => (
-            <div key={`${index}-${note}`} className="truncate">
-              {note}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function TestStateIcon({ size, state }: { size: number; state: InlineTestState }) {
+  if (state === "testing") {
+    return <RefreshCcw size={size} className="shrink-0 animate-spin" />;
+  }
+  if (state === "success") {
+    return <Check size={size} className="shrink-0" />;
+  }
+  if (state === "error") {
+    return <X size={size} className="shrink-0" />;
+  }
+  return <FlaskConical size={size} className="shrink-0" />;
 }
 
-function ProbeCheck({ label, ok }: { label: string; ok: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-3 bg-panel px-2 py-1.5">
-      <span className="truncate text-slate-600">{label}</span>
-      <span className={cx("font-semibold tabular-nums", ok ? "text-ok" : "text-danger")}>
-        {ok ? "OK" : "Fail"}
-      </span>
-    </div>
-  );
+function ModelTestStateIcon({ size, state }: { size: number; state: InlineTestState }) {
+  if (state === "testing") {
+    return <RefreshCcw size={size} className="shrink-0 animate-spin" />;
+  }
+  if (state === "success") {
+    return <Check size={size} className="shrink-0" />;
+  }
+  if (state === "error") {
+    return <X size={size} className="shrink-0" />;
+  }
+  return <Cable size={size} className="shrink-0" />;
+}
+
+function normalizedEndpointFormat(value?: UpstreamFormat | null): UpstreamFormat {
+  if (value === "chat_completions" || value === "anthropic_messages") {
+    return value;
+  }
+  return "responses";
 }
 
 function upstreamFormatLabel(value?: UpstreamFormat | null) {
   if (value === "responses") {
-    return "Responses native";
+    return "Responses";
   }
   if (value === "chat_completions") {
-    return "Chat Completions translate";
+    return "Chat Completions";
   }
-  return "Auto detect";
+  if (value === "anthropic_messages") {
+    return "Anthropic Messages";
+  }
+  return "Responses";
+}
+
+function probeAvailableFormats(result?: UpstreamFormatProbeResult | null): UpstreamFormat[] {
+  if (!result) {
+    return [];
+  }
+  const formats: UpstreamFormat[] = [];
+  if (result.responses_text_ok || result.responses_tool_ok || result.responses_tool_stream_ok) {
+    formats.push("responses");
+  }
+  if (result.chat_text_ok || result.chat_tool_ok || result.chat_tool_stream_ok) {
+    formats.push("chat_completions");
+  }
+  if (result.anthropic_text_ok) {
+    formats.push("anthropic_messages");
+  }
+  if (result.recommended_format !== "auto" && !formats.includes(result.recommended_format)) {
+    formats.push(result.recommended_format);
+  }
+  return formats;
+}
+
+function probeResultSummary(result: UpstreamFormatProbeResult) {
+  const availableFormats = probeAvailableFormats(result).map(upstreamFormatLabel);
+  if (availableFormats.length) {
+    return `${availableFormats.join(", ")} available`;
+  }
+  return `recommended ${upstreamFormatLabel(result.recommended_format)}`;
+}
+
+function modelProbeId(model: Model) {
+  return model.upstream_model?.trim() || model.id;
+}
+
+function officialModelProbeId(model: Model) {
+  const modelId = modelProbeId(model);
+  return modelId.startsWith("openai/") ? modelId.slice("openai/".length) : modelId;
 }
 
 function shortProviderDiscoveryError(err: unknown) {
@@ -2462,12 +2939,12 @@ function HeaderRow({
   title: string;
 }) {
   return (
-    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
       <div className="min-w-0">
         <h2 className="truncate text-base font-semibold">{title}</h2>
         {subtitle && <p className="mt-1 truncate text-sm text-slate-500">{subtitle}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {actions && <div className="flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap">{actions}</div>}
     </div>
   );
 }

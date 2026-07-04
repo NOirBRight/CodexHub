@@ -70,7 +70,7 @@ interface ChartHover {
 
 const STACK_COLORS = ["#3941ff", "#00a8a8", "#7c3aed", "#0ea5e9", "#b1a7ff", "#10b981", "#1e293b"];
 const TOOLTIP_GAP = 16;
-const TOOLTIP_WIDTH = 190;
+const TOOLTIP_WIDTH = 250;
 const TOOLTIP_EDGE_MARGIN = 12;
 const OTHER_SERIES_KEY = "__other__";
 
@@ -188,7 +188,7 @@ export function StackedUsageChartShell({
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="shrink-0 text-sm font-semibold text-ink">Usage &amp; Cost</h2>
         </div>
-        <div className="flex shrink-0 items-center justify-end gap-2">
+        <div className="flex shrink-0 items-center justify-end gap-1.5">
           <UsageDropdown
             label="Metric"
             open={metricOpen}
@@ -253,7 +253,7 @@ export function StackedUsageChartShell({
           />
 
           <div ref={customRangeRef} className="relative">
-            <div className="grid grid-cols-[54px_54px_74px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
+            <div className="grid grid-cols-[44px_44px_64px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
               {[
                 { value: "7d", label: "7D" },
                 { value: "1m", label: "1M" },
@@ -286,7 +286,7 @@ export function StackedUsageChartShell({
         </div>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-4 gap-2">
         <Metric label="Tokens" value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens) : "Unknown"} />
         <Metric label="Requests" value={visibleSummary ? formatNumber(visibleSummary.requests) : "Unknown"} />
         <Metric label="Est. cost" value={costLabel(visibleSummary)} title={visibleSummary?.cost_label ?? undefined} />
@@ -334,7 +334,7 @@ function UsageDropdown<T extends string>({
     <div className="relative">
       <button
         type="button"
-        className="focus-ring flex h-8 w-[124px] items-center justify-between gap-1.5 rounded-full bg-surface px-3 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
+        className="focus-ring flex h-8 w-[108px] items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
         aria-expanded={open}
         onClick={onToggle}
       >
@@ -343,7 +343,7 @@ function UsageDropdown<T extends string>({
         <ChevronDown size={13} className="text-ink" />
       </button>
       {open && (
-        <div className="absolute right-0 top-9 z-20 w-[124px] space-y-1 rounded-panel bg-surface p-1 shadow-floating">
+        <div className="absolute right-0 top-9 z-20 w-[108px] space-y-1 rounded-panel bg-surface p-1 shadow-floating">
           {options.map((option) => {
             const selected = value === option.value;
             return (
@@ -502,7 +502,7 @@ function StackedUsageChart({
   const valueLabel = metric === "request" ? "requests" : "tokens";
   const layers = buildChartLayers(visibleBuckets, visibleSeries, maxTotal);
   const isModelBreakdown = breakdown === "model";
-  const tooltipWidth = isModelBreakdown ? 320 : TOOLTIP_WIDTH;
+  const tooltipWidth = isModelBreakdown ? 300 : TOOLTIP_WIDTH;
   const activeIndex = hover?.index ?? Math.max(0, visibleBuckets.findIndex((bucket) => bucket.total > 0));
   const activeBucket = visibleBuckets[activeIndex];
   const activeSegments = activeBucket?.segments.filter((segment) => segment.value > 0) ?? [];
@@ -588,131 +588,160 @@ function StackedUsageChart({
 
   return (
     <div className="grid h-full min-h-[300px] p-4">
-      <div className="relative h-full min-h-[250px] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
-        <div className="absolute bottom-14 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
-          <span title={formatNumber(maxTotal)}>{formatAxisNumber(maxTotal)}</span>
-          <span className="self-center" title={formatNumber(Math.round(maxTotal / 2))}>
-            {formatAxisNumber(Math.round(maxTotal / 2))}
-          </span>
-          <span>0</span>
-        </div>
-        <div
-          className="absolute inset-x-14 bottom-14 top-6"
-          onMouseMove={handleHover}
-          onMouseLeave={() => setHover(null)}
-        >
-          <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${breakdown} ${valueLabel} usage`}>
-            {[0, 25, 50, 75, 100].map((y) => (
-              <line
-                key={y}
-                x1="0"
-                x2="100"
-                y1={y}
-                y2={y}
-                stroke="#e2e8f0"
-                strokeWidth="0.45"
-                vectorEffect="non-scaling-stroke"
-                strokeDasharray={y === 0 ? "0" : y === 25 ? "3 3" : "0"}
-              />
-            ))}
-            {hasData && layers.map((layer) => (
-              <path
-                key={`${metric}:${breakdown}:${layer.key}:area`}
-                d={areaPath(layer.topPoints, layer.basePoints)}
-                fill={layer.color}
-                fillOpacity="0.18"
-              />
-            ))}
-            {hasData && layers.map((layer) => (
-              <path
-                key={`${metric}:${breakdown}:${layer.key}:line`}
-                d={linePath(layer.topPoints)}
-                fill="none"
-                stroke={layer.color}
-                strokeWidth="2"
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
-            {hasData && activeBucket && hover && (
-              <line
-                x1={bucketX(activeIndex, buckets.length)}
-                x2={bucketX(activeIndex, buckets.length)}
-                y1="0"
-                y2="100"
-                stroke="#94a3b8"
-                strokeWidth="1"
-                strokeDasharray="4 4"
-                vectorEffect="non-scaling-stroke"
-              />
-            )}
-          </svg>
-          {hasData && hover && activeTopPoints.map(({ color, point }) => (
-            <span
-              key={`${metric}:${breakdown}:${color}:${point.x}-${point.y}-${point.value}`}
-              className="pointer-events-none absolute h-2 w-2 rounded-full border-2 border-white shadow-sm"
-              style={{
-                backgroundColor: color,
-                left: `${point.x}%`,
-                top: `${point.y}%`,
-                transform: "translate(-50%, -50%)",
-              }}
-            />
-          ))}
-          {hasData ? (
-            <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 grid h-2 items-end gap-1 opacity-0"
-              style={{ gridTemplateColumns: columns }}
-            >
-              {buckets.map((bucket, index) => (
-                <span
-                  key={`${bucket.label}-${bucket.start.toISOString()}`}
-                  title={`${bucket.label} - ${formatNumber(visibleBuckets[index]?.total ?? 0)} ${valueLabel}`}
+      <div className="grid h-full min-h-[250px] grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
+        <div className="relative min-h-0">
+          <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
+            <span title={formatNumber(maxTotal)}>{formatAxisNumber(maxTotal)}</span>
+            <span className="self-center" title={formatNumber(Math.round(maxTotal / 2))}>
+              {formatAxisNumber(Math.round(maxTotal / 2))}
+            </span>
+            <span>0</span>
+          </div>
+          <div
+            className="absolute inset-x-14 bottom-8 top-6"
+            onMouseMove={handleHover}
+            onMouseLeave={() => setHover(null)}
+          >
+            <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${breakdown} ${valueLabel} usage`}>
+              {[0, 25, 50, 75, 100].map((y) => (
+                <line
+                  key={y}
+                  x1="0"
+                  x2="100"
+                  y1={y}
+                  y2={y}
+                  stroke="#e2e8f0"
+                  strokeWidth="0.45"
+                  vectorEffect="non-scaling-stroke"
+                  strokeDasharray={y === 0 ? "0" : y === 25 ? "3 3" : "0"}
                 />
               ))}
-            </div>
-          ) : (
-            <div className="pointer-events-none relative z-10 grid h-full min-h-[226px] place-items-center p-5">
-              <PendingPanel
-                compact
-                className="w-full max-w-[480px] py-3"
-                label={
-                  allSeriesHidden
-                    ? "series hidden"
-                    : summary && summary.requests > 0
-                      ? "event window empty"
-                      : "pending data"
-                }
-                title={
-                  allSeriesHidden
-                    ? "Usage series hidden"
-                    : metric === "request"
-                      ? "Request usage"
-                      : "Token usage"
-                }
-                message={
-                  allSeriesHidden
-                    ? "Use the legend to restore a series."
-                    : summary && summary.requests > 0
-                      ? `No ${valueLabel} in the selected range for this ${breakdown} breakdown.`
-                      : pendingMessage
-                }
+              {hasData && layers.map((layer) => (
+                <path
+                  key={`${metric}:${breakdown}:${layer.key}:area`}
+                  d={areaPath(layer.topPoints, layer.basePoints)}
+                  fill={layer.color}
+                  fillOpacity="0.18"
+                />
+              ))}
+              {hasData && layers.map((layer) => (
+                <path
+                  key={`${metric}:${breakdown}:${layer.key}:line`}
+                  d={linePath(layer.topPoints)}
+                  fill="none"
+                  stroke={layer.color}
+                  strokeWidth="2"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+              {hasData && activeBucket && hover && (
+                <line
+                  x1={bucketX(activeIndex, buckets.length)}
+                  x2={bucketX(activeIndex, buckets.length)}
+                  y1="0"
+                  y2="100"
+                  stroke="#94a3b8"
+                  strokeWidth="1"
+                  strokeDasharray="4 4"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
+            </svg>
+            {hasData && hover && activeTopPoints.map(({ color, point }) => (
+              <span
+                key={`${metric}:${breakdown}:${color}:${point.x}-${point.y}-${point.value}`}
+                className="pointer-events-none absolute h-2 w-2 rounded-full border-2 border-white shadow-sm"
+                style={{
+                  backgroundColor: color,
+                  left: `${point.x}%`,
+                  top: `${point.y}%`,
+                  transform: "translate(-50%, -50%)",
+                }}
               />
+            ))}
+            {hasData ? (
+              <div
+                className="pointer-events-none absolute inset-x-0 bottom-0 grid h-2 items-end gap-1 opacity-0"
+                style={{ gridTemplateColumns: columns }}
+              >
+                {buckets.map((bucket, index) => (
+                  <span
+                    key={`${bucket.label}-${bucket.start.toISOString()}`}
+                    title={`${bucket.label} - ${formatNumber(visibleBuckets[index]?.total ?? 0)} ${valueLabel}`}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="pointer-events-none relative z-10 grid h-full min-h-[226px] place-items-center p-5">
+                <PendingPanel
+                  compact
+                  className="w-full max-w-[480px] py-3"
+                  label={
+                    allSeriesHidden
+                      ? "series hidden"
+                      : summary && summary.requests > 0
+                        ? "event window empty"
+                        : "pending data"
+                  }
+                  title={
+                    allSeriesHidden
+                      ? "Usage series hidden"
+                      : metric === "request"
+                        ? "Request usage"
+                        : "Token usage"
+                  }
+                  message={
+                    allSeriesHidden
+                      ? "Use the legend to restore a series."
+                      : summary && summary.requests > 0
+                        ? `No ${valueLabel} in the selected range for this ${breakdown} breakdown.`
+                        : pendingMessage
+                  }
+                />
+              </div>
+            )}
+          </div>
+          <div className="absolute inset-x-14 bottom-2 h-5 text-center text-[10px] font-semibold text-slate-400">
+            {buckets.map((bucket, index) => (
+              <span
+                key={`${bucket.label}-${bucket.start.toISOString()}`}
+                className="absolute top-0 -translate-x-1/2 truncate"
+                style={{ left: `${bucketX(index, buckets.length)}%` }}
+              >
+                {bucket.label}
+              </span>
+            ))}
+          </div>
+          {hasData && hover && activeBucket && (
+            <div
+              ref={tooltipRef}
+              className="pointer-events-none absolute z-20 rounded-inner bg-surface p-3 text-xs shadow-floating"
+              style={{
+                left: boundedTooltipLeft,
+                top: tooltipTop,
+                width: tooltipWidth,
+              }}
+            >
+              <div className="mb-2 font-semibold text-ink">{activeBucketDateLabel}</div>
+              <div className="grid gap-1">
+                {activeSegments.map((segment) => (
+                  <div
+                    key={segment.key}
+                    className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2"
+                  >
+                    <i className="mt-[3px] h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />
+                    <span className="min-w-0 whitespace-normal break-words leading-4 text-slate-600">
+                      {segment.label}
+                    </span>
+                    <span className="font-mono font-semibold leading-4 text-ink">{formatNumber(segment.value)}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
-        <div className="absolute inset-x-14 bottom-8 h-5 text-center text-[10px] font-semibold text-slate-400">
-          {buckets.map((bucket, index) => (
-            <span
-              key={`${bucket.label}-${bucket.start.toISOString()}`}
-              className="absolute top-0 -translate-x-1/2 truncate"
-              style={{ left: `${bucketX(index, buckets.length)}%` }}
-            >
-              {bucket.label}
-            </span>
-          ))}
-        </div>
         {series.length > 0 && (
-          <div className="absolute inset-x-10 bottom-2 z-20 flex min-h-4 flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] font-semibold text-slate-500">
+          <div className="flex max-h-16 min-h-8 flex-wrap items-start justify-center gap-x-3 gap-y-1 overflow-y-auto border-t border-slate-100 px-8 py-2 text-[10px] font-semibold text-slate-500">
             {series.map((item) => {
               const hidden = hiddenSeriesKeys.has(item.key);
               return (
@@ -720,11 +749,9 @@ function StackedUsageChart({
                   key={item.key}
                   type="button"
                   className={cx(
-                    "focus-ring inline-flex min-h-5 rounded-full px-1 transition-[opacity,background-color] duration-150 ease-out hover:bg-panel",
+                    "focus-ring inline-flex min-h-5 max-w-[260px] items-start gap-1.5 rounded-full px-1 transition-[opacity,background-color] duration-150 ease-out hover:bg-panel",
                     hidden && "opacity-45",
-                    isModelBreakdown
-                      ? "max-w-[360px] items-start gap-1.5 leading-4"
-                      : "min-w-0 items-center gap-1.5",
+                    "leading-4",
                   )}
                   aria-pressed={!hidden}
                   title={`${hidden ? "Show" : "Hide"} ${item.label}`}
@@ -736,9 +763,7 @@ function StackedUsageChart({
                   />
                   <span
                     className={cx(
-                      isModelBreakdown
-                        ? "min-w-0 whitespace-normal break-words text-left"
-                        : "max-w-32 truncate",
+                      "min-w-0 whitespace-normal break-words text-left",
                       hidden && "line-through",
                     )}
                     title={item.label}
@@ -748,43 +773,6 @@ function StackedUsageChart({
                 </button>
               );
             })}
-          </div>
-        )}
-        {hasData && hover && activeBucket && (
-          <div
-            ref={tooltipRef}
-            className="pointer-events-none absolute z-20 rounded-inner bg-surface p-3 text-xs shadow-floating"
-            style={{
-              left: boundedTooltipLeft,
-              top: tooltipTop,
-              width: tooltipWidth,
-            }}
-          >
-            <div className="mb-2 font-semibold text-ink">{activeBucketDateLabel}</div>
-            <div className="grid gap-1">
-              {activeSegments.map((segment) => (
-                <div
-                  key={segment.key}
-                  className={
-                    isModelBreakdown
-                      ? "grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2"
-                      : "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2"
-                  }
-                >
-                  <i className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />
-                  <span
-                    className={
-                      isModelBreakdown
-                        ? "min-w-0 whitespace-normal break-words leading-4 text-slate-600"
-                        : "truncate text-slate-600"
-                    }
-                  >
-                    {segment.label}
-                  </span>
-                  <span className="font-mono font-semibold leading-4 text-ink">{formatNumber(segment.value)}</span>
-                </div>
-              ))}
-            </div>
           </div>
         )}
       </div>
@@ -1235,9 +1223,10 @@ function breakdownSegment(event: GatewayUsageEvent, breakdown: UsageBreakdown, p
 
   if (breakdown === "model") {
     const model = event.model?.trim() || "Unknown model";
+    const modelId = displayModelId(model);
     return {
-      key: `model:${provider.toLowerCase()}:${model}`,
-      label: `${providerName} / ${model}`,
+      key: `model:${provider.toLowerCase()}:${modelId.toLowerCase()}`,
+      label: `${providerName} / ${modelId}`,
     };
   }
 
@@ -1249,8 +1238,8 @@ function breakdownSegment(event: GatewayUsageEvent, breakdown: UsageBreakdown, p
 
 function providerLabelMap(providers: Provider[]) {
   const labels = new Map<string, string>([
-    ["official", "Official OpenAI"],
-    ["official_openai", "Official OpenAI"],
+    ["official", "OpenAI"],
+    ["official_openai", "OpenAI"],
   ]);
   for (const provider of providers) {
     labels.set(provider.id.toLowerCase(), provider.name);
@@ -1268,6 +1257,12 @@ function providerLabel(provider: string, providerLabels: Map<string, string>) {
     return "Unknown";
   }
   return titleizeProviderId(provider);
+}
+
+function displayModelId(model: string) {
+  const value = model.trim();
+  const slashIndex = value.indexOf("/");
+  return slashIndex >= 0 && slashIndex < value.length - 1 ? value.slice(slashIndex + 1) : value;
 }
 
 function titleizeProviderId(provider: string) {
