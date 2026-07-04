@@ -24,8 +24,9 @@ export function GatewayClientCard({
   info,
   onSwitchMode,
 }: GatewayClientCardProps) {
-  const routeMode = busyMode ?? routeModeFromInfo(info);
+  const routeMode = routeModeFromInfo(info);
   const routeValue = routeMode === "unknown" ? null : routeMode;
+  const pendingRouteValue = busy ? busyMode ?? null : null;
   const hasInfo = Boolean(info);
   const installed = Boolean(info?.installed);
   const autoApplySupported = Boolean(info?.auto_apply_supported);
@@ -91,6 +92,7 @@ export function GatewayClientCard({
           ariaLabel={`${client.name} route mode`}
           className="grid-cols-2 [&_button]:min-h-7 [&_button]:py-1 [&_button]:text-xs"
           disabled={busy || Boolean(routeDisabledReason)}
+          pendingValue={pendingRouteValue}
           value={routeValue}
           options={routeOptions}
           onChange={onSwitchMode}

@@ -12,6 +12,7 @@ interface SegmentedSwitchProps<T extends string> {
   className?: string;
   disabled?: boolean;
   options: Array<SegmentedOption<T>>;
+  pendingValue?: T | null;
   value: T | null;
   onChange?: (value: T) => void;
 }
@@ -22,6 +23,7 @@ export function SegmentedSwitch<T extends string>({
   disabled,
   onChange,
   options,
+  pendingValue,
   value,
 }: SegmentedSwitchProps<T>) {
   return (
@@ -35,17 +37,23 @@ export function SegmentedSwitch<T extends string>({
     >
       {options.map((option) => {
         const active = option.value === value;
+        const pending = !active && option.value === pendingValue;
         return (
           <button
             key={option.value}
             type="button"
             className={cx(
               "focus-ring min-h-8 rounded-control px-3 py-1.5 text-sm font-semibold transition-[box-shadow,background-color,color,transform] duration-150 ease-out active:scale-[0.96]",
-              active ? "bg-ink text-white shadow-raised" : "text-slate-600 hover:bg-surface",
+              active
+                ? "bg-ink text-white shadow-raised"
+                : pending
+                  ? "bg-slate-200/80 text-slate-500 shadow-control"
+                  : "text-slate-600 hover:bg-surface",
               option.description && "text-left",
             )}
             disabled={disabled || option.disabled}
             aria-pressed={active}
+            aria-busy={pending || undefined}
             onClick={() => onChange?.(option.value)}
           >
             <span className="block truncate">{option.label}</span>

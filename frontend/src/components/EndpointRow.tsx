@@ -30,14 +30,14 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
       <button
         type="button"
         className={cx(
-          "focus-ring inline-flex w-[76px] items-center justify-center gap-1 rounded-control bg-panel px-2 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]",
-          compact ? "h-7" : "h-8",
+          "focus-ring inline-flex shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]",
+          compact ? "h-7 w-7" : "h-8 w-8",
         )}
-        title={copied ? "Copied" : "Copy"}
+        aria-label={copied ? `${label} copied` : `Copy ${label}`}
+        title={copied ? "Copied" : `Copy ${label}`}
         onClick={onCopy}
       >
         {copied ? <Check size={13} /> : <Copy size={13} />}
-        {copied ? "Copied" : "Copy"}
       </button>
     </div>
   );

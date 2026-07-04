@@ -54,6 +54,7 @@ const reasoningLevelOptions = ["low", "medium", "high", "xhigh", "max"];
 type ProviderNavItem =
   { id: string; sort_order: number; provider: Provider };
 type CodexAuthState = "authorized" | "missing" | "unknown";
+type ConnectionMode = "official" | "custom";
 
 export function ProvidersPage({
   gatewayStatus: gatewayStatusSnapshot,
@@ -69,7 +70,7 @@ export function ProvidersPage({
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(null);
-  const [connectionPreview, setConnectionPreview] = useState<boolean | null>(null);
+  const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>("unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>([]);
@@ -142,7 +143,7 @@ export function ProvidersPage({
   const canAdd = form.name.trim() && form.base_url.trim();
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
   const realCodexConnected = codexStatus?.mode === "custom";
-  const codexConnected = connectionPreview ?? realCodexConnected;
+  const codexConnected = realCodexConnected;
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
@@ -291,7 +292,7 @@ export function ProvidersPage({
       setSettings(normalizedSettings);
       setSettingsDraft(normalizedSettings);
       setCodexStatus(nextCodexStatus);
-      setConnectionPreview(null);
+      setConnectionPendingMode(null);
       setLoadedGatewayStatus(gatewayStatus);
       setCodexAuthState(codexAuthStateFromGatewayStatus(gatewayStatus));
       setProviders(nextProviders);
@@ -484,36 +485,32 @@ export function ProvidersPage({
   }
 
   async function toggleCodexHubConnection() {
-    const nextMode = codexConnected ? "official" : "custom";
+    const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
     const actionLabel = nextMode === "custom" ? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";
-    setConnectionPreview(nextMode === "custom");
+    setConnectionPendingMode(nextMode);
     setBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
       const status = await api.switchMode(nextMode, false);
       setCodexStatus(status);
-      setConnectionPreview(null);
-      updateToast(toastId, {
-        action: null,
-        text: codexHubConnectionSuccessMessage(nextMode),
-        tone: "success",
-      });
+      setConnectionPendingMode(null);
       setError(null);
       const targetProvider =
         nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
-      void repairUnifiedHistoryInBackground(targetProvider);
+      void repairUnifiedHistoryInBackground(targetProvider, toastId, codexHubConnectionSuccessMessage(nextMode));
     } catch (err) {
       const message = messageFromError(err);
       if (isBackendDisconnectedMessage(message)) {
-        setConnectionPreview(nextMode === "custom");
+        setConnectionPendingMode(null);
         updateToastWithError(toastId, err);
         return;
       }
       if (!settingsDraft) {
+        setConnectionPendingMode(null);
         updateToastWithError(toastId, err);
         return;
       }
-      setConnectionPreview(null);
+      setConnectionPendingMode(null);
       const errorMessage = codexHubConnectionErrorMessage(err);
       setError(errorMessage);
       updateToast(toastId, {
@@ -526,19 +523,30 @@ export function ProvidersPage({
     }
   }
 
-  async function repairUnifiedHistoryInBackground(targetProvider: "custom" | "openai") {
-    const toastId = showToast("Repairing history bucket...", "loading");
+  async function repairUnifiedHistoryInBackground(
+    targetProvider: "custom" | "openai",
+    toastId?: string,
+    prefix?: string,
+  ) {
+    const activeToastId = toastId ?? showToast("Repairing history bucket...", "loading");
+    updateToast(activeToastId, {
+      action: null,
+      text: prefix ? `${prefix}; repairing history bucket...` : "Repairing history bucket...",
+      tone: "loading",
+    });
     try {
       const message = await api.syncHistory(targetProvider);
-      updateToast(toastId, {
+      updateToast(activeToastId, {
         action: null,
-        text: message,
+        text: prefix ? `${prefix}; ${message}` : message,
         tone: "success",
       });
     } catch (err) {
-      updateToast(toastId, {
+      updateToast(activeToastId, {
         action: null,
-        text: `History repair failed: ${messageFromError(err)}`,
+        text: prefix
+          ? `${prefix}; history repair failed: ${messageFromError(err)}`
+          : `History repair failed: ${messageFromError(err)}`,
         tone: "error",
       });
     }
@@ -762,6 +770,7 @@ export function ProvidersPage({
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
           codexConnected={codexConnected}
+          connectionPendingMode={connectionPendingMode}
           gatewayStatus={gatewayStatus}
           busy={busy}
           enabledProviderModels={enabledProviderModels}
@@ -843,6 +852,7 @@ function ProviderSourceSidebar({
   busy,
   codexAuthState,
   codexConnected,
+  connectionPendingMode,
   enabledProviderModels,
   gatewayStatus,
   items,
@@ -861,6 +871,7 @@ function ProviderSourceSidebar({
   busy: string | null;
   codexAuthState: CodexAuthState;
   codexConnected: boolean;
+  connectionPendingMode: ConnectionMode | null;
   enabledProviderModels: number;
   gatewayStatus: GatewayStatus | null;
   items: ProviderNavItem[];
@@ -890,8 +901,8 @@ function ProviderSourceSidebar({
       />
       <HubConnectionBridge
         connected={codexConnected}
-        connecting={busy === "route"}
-        disabled={busy === "route"}
+        pendingMode={connectionPendingMode}
+        disabled={busy === "route" || Boolean(connectionPendingMode)}
         onToggle={onToggleConnection}
       />
       <CodexHubProviderCard
@@ -942,6 +953,15 @@ function ConnectionLink({ connected }: { connected: boolean }) {
   );
 }
 
+function ConnectedSurfaceFlow() {
+  return (
+    <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]" aria-hidden="true">
+      <span className="codexhub-card-flow absolute left-0 top-0 h-px w-1/2" />
+      <span className="codexhub-card-flow codexhub-card-flow-delay absolute bottom-0 left-0 h-px w-1/2" />
+    </span>
+  );
+}
+
 function OfficialOpenAICard({
   active,
   authState,
@@ -966,10 +986,13 @@ function OfficialOpenAICard({
   return (
     <section
       className={cx(
-        "grid gap-3 rounded-panel p-3 shadow-card transition-[background-color,box-shadow] duration-150 ease-out",
-        connected ? "bg-emerald-50/55" : "bg-surface",
+        "relative grid gap-3 overflow-hidden rounded-panel border p-3 shadow-card transition-[background-color,border-color,box-shadow] duration-150 ease-out",
+        connected
+          ? "border-emerald-300/70 bg-emerald-50/55 shadow-[0_0_0_1px_rgba(16,185,129,0.08),0_18px_40px_rgba(15,118,110,0.10)]"
+          : "border-transparent bg-surface",
       )}
     >
+      {connected && <ConnectedSurfaceFlow />}
       <button type="button" className="focus-ring rounded-inner text-left" onClick={onSelect}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -997,20 +1020,25 @@ function OfficialOpenAICard({
 
 function HubConnectionBridge({
   connected,
-  connecting,
   disabled,
   onToggle,
+  pendingMode,
 }: {
   connected: boolean;
-  connecting: boolean;
   disabled: boolean;
   onToggle: () => void;
+  pendingMode: ConnectionMode | null;
 }) {
-  const label = connecting
+  const label = pendingMode === "custom"
     ? "Connecting"
+    : pendingMode === "official"
+      ? "Disconnecting"
     : connected
       ? "Connected to Codex Hub"
       : "Connect to Codex Hub";
+  const icon = pendingMode === "official" || (!pendingMode && !connected)
+    ? <Link2Off size={15} className={pendingMode ? "opacity-70" : undefined} />
+    : <Link2 size={15} className={pendingMode ? "opacity-70" : undefined} />;
 
   return (
     <div className="relative grid grid-cols-[44px_minmax(0,1fr)] items-center gap-2.5 px-1 py-1.5">
@@ -1018,17 +1046,25 @@ function HubConnectionBridge({
       <button
         type="button"
         className={cx(
-          "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-80",
-          connecting && "animate-pulse",
-          connected
+          "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-100",
+          pendingMode && "animate-pulse bg-slate-200/85 text-slate-600",
+          !pendingMode && connected
             ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
-            : "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
+            : !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
         )}
         disabled={disabled}
         onClick={onToggle}
-        title={connected ? "Disconnect Codex App from Hub" : "Connect Codex App to Hub"}
+        title={
+          pendingMode === "custom"
+            ? "Connecting Codex App to Hub"
+            : pendingMode === "official"
+              ? "Disconnecting Codex App from Hub"
+              : connected
+                ? "Disconnect Codex App from Hub"
+                : "Connect Codex App to Hub"
+        }
       >
-        {connected ? <Link2 size={15} /> : <Link2Off size={15} />}
+        {icon}
         {label}
       </button>
     </div>
@@ -1063,11 +1099,14 @@ function CodexHubProviderCard({
   return (
     <section
       className={cx(
-        "grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-panel px-3 pt-3 shadow-card transition-colors",
-        connected ? "bg-emerald-50/55" : "bg-surface",
+        "relative grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-panel border px-3 pt-3 shadow-card transition-[background-color,border-color,box-shadow]",
+        connected
+          ? "border-emerald-300/70 bg-emerald-50/55 shadow-[0_0_0_1px_rgba(16,185,129,0.08),0_18px_40px_rgba(15,118,110,0.10)]"
+          : "border-transparent bg-surface",
         "pb-3",
       )}
     >
+      {connected && <ConnectedSurfaceFlow />}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold">Codex Hub</h2>
@@ -1657,13 +1696,12 @@ function ModelIdentity({ model, providerId }: { model: Model; providerId?: strin
         <span className="min-w-0 truncate font-mono">{model.id}</span>
         <button
           type="button"
-          className="focus-ring inline-flex h-6 w-[72px] shrink-0 items-center justify-center gap-1 rounded border border-transparent px-1.5 text-[11px] font-semibold text-slate-500 hover:border-line hover:bg-panel hover:text-ink"
+          className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-slate-500 transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
           onClick={copyModelId}
-          title={`Copy model ID: ${copyValue}`}
-          aria-label={`Copy model ID ${copyValue}`}
+          title={copied ? "Copied" : `Copy model ID: ${copyValue}`}
+          aria-label={copied ? `Copied model ID ${copyValue}` : `Copy model ID ${copyValue}`}
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? "Copied" : "Copy"}
         </button>
       </span>
     </div>

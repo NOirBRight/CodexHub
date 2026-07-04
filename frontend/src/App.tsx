@@ -302,7 +302,7 @@ export default function App() {
         setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
         saveMessage = "Gateway settings saved and runtime restarted";
       }
-      setBanner(saveMessage);
+      setBanner(null);
       await loadRuntime();
       return saveMessage;
     } catch (err) {

@@ -200,7 +200,7 @@ impl Default for Settings {
             gateway_enable_models: true,
             gateway_enable_responses: true,
             gateway_enable_chat_completions: true,
-            gateway_request_timeout_seconds: 120,
+            gateway_request_timeout_seconds: 300,
             gateway_auto_retry_enabled: true,
             gateway_auto_retry_max_attempts: default_gateway_auto_retry_max_attempts(),
             gateway_image_proxy_enabled: false,

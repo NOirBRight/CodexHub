@@ -1,5 +1,5 @@
-import { History, Save, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Check, ChevronDown, Save, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
 import type { Model, Settings } from "../lib/types";
@@ -29,9 +29,19 @@ export function SettingsDrawer({
   const [historyBusy, setHistoryBusy] = useState(false);
 
   useEffect(() => {
-    setDraft(settings);
-    setHistoryBusy(false);
+    if (!open) {
+      setDraft(settings);
+      setHistoryBusy(false);
+      return;
+    }
+    setDraft((current) => current ?? settings);
   }, [settings, open]);
+
+  useEffect(() => {
+    if (open) {
+      setHistoryBusy(false);
+    }
+  }, [open]);
 
   async function saveDraft() {
     if (!draft) {
@@ -153,35 +163,35 @@ export function SettingsDrawer({
                   label="Unified Codex history"
                   onChange={(value) => void toggleUnifiedHistory(value)}
                 />
-                <button
-                  type="button"
-                  className="focus-ring inline-flex h-9 items-center justify-start gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-                  disabled={Boolean(busy) || historyBusy}
-                  onClick={() => void repairHistory()}
-                >
-                  <History size={15} />
-                  Repair history bucket
-                </button>
                 <Toggle
                   checked={draft.auto_sync_clients}
                   label="Auto-sync bound clients"
                   onChange={(value) => setDraft({ ...draft, auto_sync_clients: value })}
                 />
+                <button
+                  type="button"
+                  className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                  disabled={Boolean(busy) || historyBusy}
+                  onClick={() => void repairHistory()}
+                >
+                  Repair history bucket
+                </button>
               </div>
             </section>
 
             <section className="grid gap-3">
-              <SectionHeaderToggle
-                checked={draft.gateway_auto_retry_enabled}
-                disabled={Boolean(busy)}
-                title="Auto retry"
-                onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
-              />
+              <h3 className="text-sm font-semibold text-ink">Auto retry</h3>
               <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
-                  <span>Max attempts</span>
+                <Toggle
+                  checked={draft.gateway_auto_retry_enabled}
+                  disabled={Boolean(busy)}
+                  label="Enabled"
+                  onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
+                />
+                <label className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-3 rounded-inner bg-surface px-3 py-1.5 text-sm font-medium text-slate-700 shadow-control">
+                  <span className="min-w-0 truncate">Max attempts</span>
                   <input
-                    className="field h-9"
+                    className="h-6 w-9 min-w-0 rounded-control border border-transparent bg-transparent px-0 text-center text-sm font-semibold tabular-nums text-ink shadow-none outline-none transition-[box-shadow,border-color,background-color] duration-150 ease-out [appearance:textfield] focus:border-action/40 focus:bg-surface focus:shadow-field disabled:text-slate-400 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                     type="number"
                     min={1}
                     max={30}
@@ -199,31 +209,23 @@ export function SettingsDrawer({
             </section>
 
             <section className="grid gap-3">
-              <SectionHeaderToggle
-                checked={draft.gateway_image_proxy_enabled}
-                disabled={Boolean(busy)}
-                title="Image proxy"
-                onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
-              />
+              <h3 className="text-sm font-semibold text-ink">Image proxy</h3>
               <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
-                  <span>Vision model</span>
-                  <select
-                    className="field h-9"
+                <Toggle
+                  checked={draft.gateway_image_proxy_enabled}
+                  disabled={Boolean(busy)}
+                  label="Enabled"
+                  onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
+                />
+                <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
+                  <span className="min-w-0 truncate">Vision model</span>
+                  <VisionModelSelect
+                    models={visionModels}
                     value={draft.gateway_image_proxy_model}
                     disabled={!draft.gateway_image_proxy_enabled || visionModels.length === 0}
-                    onChange={(event) => setDraft({ ...draft, gateway_image_proxy_model: event.target.value })}
-                  >
-                    <option value="">
-                      {visionModels.length === 0 ? "No vision-capable models" : "Select a vision model"}
-                    </option>
-                    {visionModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {visionModelLabel(model)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    onChange={(value) => setDraft({ ...draft, gateway_image_proxy_model: value })}
+                  />
+                </div>
               </div>
             </section>
           </div>
@@ -255,9 +257,69 @@ function clampRetryAttempts(value: string) {
   return Math.max(1, Math.min(30, Math.round(parsed)));
 }
 
-function visionModelLabel(model: Model) {
-  const name = model.display_name?.trim();
-  return name && name !== model.id ? `${name} (${model.id})` : model.id;
+interface VisionModelParts {
+  modelId: string;
+  provider: string;
+  title: string;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  official: "OpenAI",
+  openai: "OpenAI",
+  "ollama-cloud": "Ollama Cloud",
+  ollama: "Ollama",
+  volc: "Volc",
+  xunfei: "Xunfei",
+  "minimax-cn": "MiniMax.cn",
+};
+
+function visionModelParts(model: Model): VisionModelParts {
+  const rawId = model.id.trim();
+  const slashIndex = rawId.indexOf("/");
+  const modelId = slashIndex > 0 ? rawId.slice(slashIndex + 1) : rawId;
+  const idProvider = slashIndex > 0 ? providerLabel(rawId.slice(0, slashIndex)) : "";
+  const displayProvider = providerFromDisplayName(model.display_name, modelId);
+  const sourceProvider = model.source_kind === "official" ? "OpenAI" : providerLabel(model.source_kind ?? "");
+  const provider = idProvider || displayProvider || sourceProvider || "Provider";
+
+  return {
+    modelId,
+    provider,
+    title: `${modelId} - ${provider}`,
+  };
+}
+
+function providerFromDisplayName(displayName: string | null | undefined, modelId: string) {
+  const name = displayName?.trim();
+  if (!name) {
+    return "";
+  }
+  const firstToken = name.split(/\s+/)[0]?.trim();
+  if (!firstToken || normalizeProviderToken(modelId).startsWith(normalizeProviderToken(firstToken))) {
+    return "";
+  }
+  return firstToken;
+}
+
+function providerLabel(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  const known = PROVIDER_LABELS[normalized];
+  if (known) {
+    return known;
+  }
+  return value
+    .trim()
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function normalizeProviderToken(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function Toggle({
@@ -275,25 +337,6 @@ function Toggle({
     <label className="flex min-h-9 items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
       <span className="min-w-0 truncate">{label}</span>
       <SwitchControl checked={checked} disabled={disabled} onChange={onChange} />
-    </label>
-  );
-}
-
-function SectionHeaderToggle({
-  checked,
-  disabled,
-  onChange,
-  title,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (value: boolean) => void;
-  title: string;
-}) {
-  return (
-    <label className="flex min-h-9 items-center justify-between gap-3">
-      <h3 className="min-w-0 truncate text-sm font-semibold text-ink">{title}</h3>
-      <SwitchControl checked={checked} disabled={disabled} onChange={onChange} ariaLabel={title} />
     </label>
   );
 }
@@ -322,5 +365,158 @@ function SwitchControl({
       <span className="absolute inset-0 rounded-full bg-slate-200 shadow-control transition-colors peer-checked:bg-action peer-disabled:opacity-60" />
       <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
     </span>
+  );
+}
+
+function VisionModelSelect({
+  disabled,
+  models,
+  onChange,
+  value,
+}: {
+  disabled?: boolean;
+  models: Model[];
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const selectedModel = models.find((model) => model.id === value);
+  const selectedParts = selectedModel ? visionModelParts(selectedModel) : null;
+  const label = models.length === 0 ? "No vision models" : selectedParts?.title ?? "Select model";
+
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false);
+    }
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && ref.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  function selectModel(nextValue: string) {
+    onChange(nextValue);
+    setOpen(false);
+  }
+
+  return (
+    <div ref={ref} className="relative min-w-0">
+      <button
+        type="button"
+        className={cx(
+          "focus-ring flex h-7 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-control border border-transparent bg-panel px-2 text-left text-sm font-medium text-ink shadow-field transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-white disabled:cursor-not-allowed disabled:text-slate-400 disabled:shadow-control",
+          open && "border-action/40 bg-white shadow-raised",
+        )}
+        disabled={disabled}
+        title={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {selectedParts ? (
+          <VisionModelValue parts={selectedParts} />
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-slate-500">{label}</span>
+        )}
+        <ChevronDown
+          size={16}
+          className={cx(
+            "shrink-0 text-slate-500 transition-transform duration-150 ease-out",
+            open && "rotate-180 text-ink",
+          )}
+        />
+      </button>
+
+      {open && (
+        <div
+          className="absolute bottom-[calc(100%+6px)] left-0 right-0 z-[80] max-h-56 min-w-0 overflow-auto overscroll-contain rounded-overlay bg-surface p-1 shadow-overlay"
+          role="listbox"
+        >
+          <VisionModelOption
+            label="Select model"
+            selected={!value}
+            onSelect={() => selectModel("")}
+          />
+          {models.map((model) => (
+            <VisionModelOption
+              key={model.id}
+              parts={visionModelParts(model)}
+              selected={model.id === value}
+              onSelect={() => selectModel(model.id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VisionModelValue({ parts }: { parts: VisionModelParts }) {
+  return (
+    <span className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+      <span className="min-w-0 truncate font-mono text-[12px] font-semibold leading-5 text-ink">
+        {parts.modelId}
+      </span>
+      <span className="shrink-0 truncate text-[11px] font-medium leading-5 text-slate-500">{parts.provider}</span>
+    </span>
+  );
+}
+
+function VisionModelOption({
+  label,
+  onSelect,
+  parts,
+  selected,
+}: {
+  label?: string;
+  onSelect: () => void;
+  parts?: VisionModelParts;
+  selected: boolean;
+}) {
+  const title = parts?.title ?? label ?? "";
+
+  return (
+    <button
+      type="button"
+      className={cx(
+        "focus-ring flex min-h-8 w-full min-w-0 items-center justify-between gap-2 rounded-control px-2.5 py-1 text-left text-sm font-medium transition-[background-color,color] duration-150 ease-out",
+        selected ? "bg-panel text-ink" : "text-slate-600 hover:bg-panel hover:text-ink",
+      )}
+      role="option"
+      aria-selected={selected}
+      title={title}
+      onClick={onSelect}
+    >
+      {parts ? (
+        <VisionModelValue parts={parts} />
+      ) : (
+        <span className="min-w-0 flex-1 truncate text-slate-500">{label}</span>
+      )}
+      {selected && <Check size={15} className="shrink-0 text-action" />}
+    </button>
   );
 }

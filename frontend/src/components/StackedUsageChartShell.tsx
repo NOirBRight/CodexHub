@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { PendingPanel } from "./PendingPanel";
 import { cx } from "../lib/format";
 import type { GatewayUsageEvent, GatewayUsageSummary, Provider, TelemetryStatus, UsageQueryWindow } from "../lib/types";
@@ -92,6 +92,7 @@ export function StackedUsageChartShell({
   const [breakdownOpen, setBreakdownOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const [customRange, setCustomRange] = useState<DateSpan>(initialCustomRange);
+  const [hiddenSeriesKeys, setHiddenSeriesKeys] = useState<Set<string>>(() => new Set());
   const [calendarMonth, setCalendarMonth] = useState(() => startOfMonth(initialCustomRange.start));
   const customRangeRef = useRef<HTMLDivElement | null>(null);
 
@@ -105,11 +106,32 @@ export function StackedUsageChartShell({
     () => stacked.buckets.map((bucket) => bucket.label),
     [stacked.buckets],
   );
-  const telemetryMessage = usageTelemetryMessage(telemetryStatus);
+  const visibleSummary = useMemo(
+    () =>
+      visibleUsageSummary({
+        breakdown,
+        customRange,
+        events,
+        hiddenSeriesKeys,
+        providerLabels,
+        range,
+        series: stacked.series,
+        summary,
+      }),
+    [breakdown, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary],
+  );
 
   useEffect(() => {
     onWindowChange?.(queryWindow);
   }, [onWindowChange, queryWindow.endTs, queryWindow.startTs]);
+
+  useEffect(() => {
+    setHiddenSeriesKeys((current) => {
+      const validKeys = new Set(stacked.series.map((item) => item.key));
+      const next = new Set(Array.from(current).filter((key) => validKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [stacked.series]);
 
   useEffect(() => {
     if (!customOpen) {
@@ -165,14 +187,6 @@ export function StackedUsageChartShell({
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="shrink-0 text-sm font-semibold text-ink">Usage &amp; Cost</h2>
-          {telemetryMessage && (
-            <span
-              className="min-w-0 max-w-[260px] truncate rounded-full bg-panel px-2 py-1 text-[11px] font-semibold text-slate-500 shadow-control"
-              title={telemetryMessage}
-            >
-              {telemetryMessage}
-            </span>
-          )}
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2">
           <UsageDropdown
@@ -273,10 +287,10 @@ export function StackedUsageChartShell({
       </div>
 
       <div className="grid gap-2 sm:grid-cols-4">
-        <Metric label="Tokens" value={summary?.total_tokens ? formatNumber(summary.total_tokens) : "Unknown"} />
-        <Metric label="Requests" value={summary ? formatNumber(summary.requests) : "Unknown"} />
-        <Metric label="Est. cost" value={costLabel(summary)} title={summary?.cost_label ?? undefined} />
-        <Metric label="Cached input" value={cachedInputLabel(summary)} title={cachedInputTitle(summary)} />
+        <Metric label="Tokens" value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens) : "Unknown"} />
+        <Metric label="Requests" value={visibleSummary ? formatNumber(visibleSummary.requests) : "Unknown"} />
+        <Metric label="Est. cost" value={costLabel(visibleSummary)} title={visibleSummary?.cost_label ?? undefined} />
+        <Metric label="Cached input" value={cachedInputLabel(visibleSummary)} title={cachedInputTitle(visibleSummary)} />
       </div>
 
       <div className="relative min-h-0 overflow-hidden rounded-panel bg-panel shadow-inner">
@@ -286,10 +300,12 @@ export function StackedUsageChartShell({
           <StackedUsageChart
             breakdown={breakdown}
             buckets={stacked.buckets}
+            hiddenSeriesKeys={hiddenSeriesKeys}
             metric={metric}
+            onHiddenSeriesKeysChange={setHiddenSeriesKeys}
             pendingMessage={pendingMessage}
             series={stacked.series}
-            summary={summary}
+            summary={visibleSummary}
           />
         )}
       </div>
@@ -451,20 +467,23 @@ function MonthGrid({
 function StackedUsageChart({
   breakdown,
   buckets,
+  hiddenSeriesKeys,
   metric,
+  onHiddenSeriesKeysChange,
   pendingMessage,
   series,
   summary,
 }: {
   breakdown: UsageBreakdown;
   buckets: StackBucket[];
+  hiddenSeriesKeys: Set<string>;
   metric: UsageMetric;
+  onHiddenSeriesKeysChange: Dispatch<SetStateAction<Set<string>>>;
   pendingMessage: string;
   series: StackSeries[];
   summary: GatewayUsageSummary | null;
 }) {
   const [hover, setHover] = useState<ChartHover | null>(null);
-  const [hiddenSeriesKeys, setHiddenSeriesKeys] = useState<Set<string>>(() => new Set());
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const [tooltipHeight, setTooltipHeight] = useState(0);
   const visibleSeries = series.filter((item) => !hiddenSeriesKeys.has(item.key));
@@ -524,14 +543,6 @@ function StackedUsageChart({
     setTooltipHeight(0);
   }, [breakdown, buckets, metric, series]);
 
-  useEffect(() => {
-    setHiddenSeriesKeys((current) => {
-      const validKeys = new Set(series.map((item) => item.key));
-      const next = new Set(Array.from(current).filter((key) => validKeys.has(key)));
-      return next.size === current.size ? current : next;
-    });
-  }, [series]);
-
   useLayoutEffect(() => {
     if (!hover || !tooltipRef.current) {
       return;
@@ -563,7 +574,7 @@ function StackedUsageChart({
   }
 
   function toggleSeries(key: string) {
-    setHiddenSeriesKeys((current) => {
+    onHiddenSeriesKeysChange((current) => {
       const next = new Set(current);
       if (next.has(key)) {
         next.delete(key);
@@ -935,6 +946,98 @@ function buildStackedBuckets(
   };
 }
 
+function visibleUsageSummary({
+  breakdown,
+  customRange,
+  events,
+  hiddenSeriesKeys,
+  providerLabels,
+  range,
+  series,
+  summary,
+}: {
+  breakdown: UsageBreakdown;
+  customRange: DateSpan;
+  events: GatewayUsageEvent[];
+  hiddenSeriesKeys: Set<string>;
+  providerLabels: Map<string, string>;
+  range: UsageRange;
+  series: StackSeries[];
+  summary: GatewayUsageSummary | null;
+}) {
+  if (hiddenSeriesKeys.size === 0) {
+    return summary;
+  }
+
+  const span = rangeToSpan(range, customRange);
+  const startTime = span.start.getTime();
+  const endTime = endOfDay(span.end).getTime();
+  const visibleTopKeys = new Set(series.filter((item) => item.key !== OTHER_SERIES_KEY).map((item) => item.key));
+  const hideOther = hiddenSeriesKeys.has(OTHER_SERIES_KEY);
+  let requests = 0;
+  let successfulRequests = 0;
+  let missingUsageRequests = 0;
+  let totalTokens = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedInputTokens = 0;
+  let hasCachedInput = false;
+
+  for (const event of events) {
+    if (!event.ts) {
+      continue;
+    }
+    const time = Date.parse(event.ts);
+    if (Number.isNaN(time) || time < startTime || time > endTime) {
+      continue;
+    }
+    const segment = breakdownSegment(event, breakdown, providerLabels);
+    if (hiddenSeriesKeys.has(segment.key) || (hideOther && !visibleTopKeys.has(segment.key))) {
+      continue;
+    }
+
+    requests += 1;
+    if (event.status !== null && event.status !== undefined && event.status >= 200 && event.status < 400) {
+      successfulRequests += 1;
+    }
+
+    const total = tokenTotal(event);
+    if (total === null) {
+      missingUsageRequests += 1;
+    } else {
+      totalTokens += total;
+    }
+    inputTokens += event.input_tokens ?? 0;
+    outputTokens += event.output_tokens ?? 0;
+    if (event.cached_input_tokens !== null && event.cached_input_tokens !== undefined) {
+      hasCachedInput = true;
+      cachedInputTokens += event.cached_input_tokens;
+    }
+  }
+
+  const estimatedCost =
+    summary?.estimated_cost_usd !== null &&
+    summary?.estimated_cost_usd !== undefined &&
+    summary.total_tokens !== null &&
+    summary.total_tokens !== undefined &&
+    summary.total_tokens > 0
+      ? summary.estimated_cost_usd * (totalTokens / summary.total_tokens)
+      : null;
+
+  return {
+    requests,
+    successful_requests: successfulRequests,
+    missing_usage_requests: missingUsageRequests,
+    total_tokens: totalTokens,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cached_input_tokens: hasCachedInput ? cachedInputTokens : null,
+    cache_hit_rate: hasCachedInput && inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null,
+    estimated_cost_usd: estimatedCost,
+    cost_label: estimatedCost !== null ? "Filtered estimate based on visible token share." : summary?.cost_label ?? "Unknown",
+  };
+}
+
 function bucketSpecs(range: UsageRange, groupBy: UsageGroup, customRange: DateSpan): BucketSpec[] {
   const span = rangeToSpan(range, customRange);
   const dayCount = Math.max(1, differenceInDays(span.start, span.end) + 1);
@@ -1214,23 +1317,6 @@ function formatCompactAxisValue(value: number) {
     return value.toFixed(0);
   }
   return value.toFixed(1).replace(/\.0$/, "");
-}
-
-function usageTelemetryMessage(status?: TelemetryStatus | null) {
-  if (!status || (!status.backfill_pending && status.lag_bytes <= 0)) {
-    return null;
-  }
-  return `Indexing usage... ${formatByteCount(status.lag_bytes)} pending`;
-}
-
-function formatByteCount(value: number) {
-  if (value >= 1_048_576) {
-    return `${formatCompactAxisValue(value / 1_048_576)} MB`;
-  }
-  if (value >= 1024) {
-    return `${formatCompactAxisValue(value / 1024)} KB`;
-  }
-  return `${formatNumber(value)} B`;
 }
 
 function costLabel(summary: GatewayUsageSummary | null) {

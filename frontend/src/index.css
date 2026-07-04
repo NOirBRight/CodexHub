@@ -114,6 +114,21 @@ html.sortable-list-dragging * {
   animation-delay: -1.4s;
 }
 
+.codexhub-card-flow {
+  animation: codexhub-card-flow 3.4s cubic-bezier(0.37, 0, 0.32, 1) infinite;
+  background: linear-gradient(
+    90deg,
+    rgba(16, 185, 129, 0),
+    rgba(16, 185, 129, 0.65),
+    rgba(16, 185, 129, 0)
+  );
+  filter: blur(0.4px);
+}
+
+.codexhub-card-flow-delay {
+  animation-delay: -1.7s;
+}
+
 @keyframes codexhub-flow-up {
   0% {
     opacity: 0;
@@ -128,5 +143,22 @@ html.sortable-list-dragging * {
   100% {
     opacity: 0;
     transform: translate(-50%, -44px);
+  }
+}
+
+@keyframes codexhub-card-flow {
+  0% {
+    opacity: 0;
+    transform: translateX(-120%);
+  }
+  24% {
+    opacity: 0.75;
+  }
+  78% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(240%);
   }
 }

@@ -59,13 +59,13 @@ export function RuntimeBar({
         </div>
         <button
           type="button"
-          className="focus-ring inline-flex h-8 items-center justify-center gap-1 rounded-control bg-surface px-2 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+          className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-surface text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           disabled={Boolean(busy)}
           onClick={running ? onStop : onStart}
+          aria-label={running ? "Stop the local Gateway runtime" : "Start the local Gateway runtime"}
           title={running ? "Stop the local Gateway runtime" : "Start the local Gateway runtime"}
         >
           {running ? <Square size={13} /> : <Play size={13} />}
-          {running ? "Stop" : "Start"}
         </button>
         <button
           type="button"

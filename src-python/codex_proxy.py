@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import tomllib
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
@@ -249,12 +249,14 @@ PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
-IMAGE_PROXY_PROMPT_VERSION = "v1"
+IMAGE_PROXY_PROMPT_VERSION = "v2"
 IMAGE_PROXY_PROMPT = (
     "Describe the image in detail for a downstream text-only model. "
     "Include visible text, objects, layout, colors, charts, and any details "
-    "that may affect the user's request. Do not mention that you are a proxy."
+    "that may affect the user's request. Return only the final visual "
+    "description. Do not include reasoning, caveats, or mention that you are a proxy."
 )
+IMAGE_PROXY_PROGRESS_TEXT = "Analyzing image...\n\n"
 
 logger = logging.getLogger("codex_proxy")
 IMAGE_PROXY_CACHE_PATH = RUNTIME_PROXY_DIR / "image-proxy-cache.sqlite"
@@ -294,6 +296,29 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw_value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _runtime_settings_value(name: str) -> Any:
+    try:
+        with (RUNTIME_PROXY_DIR / "settings.json").open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    return payload.get(name)
+
+
+def _env_or_settings_flag(env_name: str, settings_name: str, default: bool) -> bool:
+    settings_value = _runtime_settings_value(settings_name)
+    if isinstance(settings_value, bool):
+        return settings_value
+    if isinstance(settings_value, str):
+        return settings_value.strip().lower() not in {"0", "false", "no", "off", ""}
+    raw_value = os.environ.get(env_name)
+    if raw_value is not None:
+        return raw_value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return default
+
+
 def gateway_auto_retry_enabled() -> bool:
     return _env_flag("CODEX_PROXY_AUTO_RETRY_ENABLED", True)
 
@@ -314,10 +339,17 @@ def gateway_retry_delay_seconds(attempt: int) -> int:
 
 
 def gateway_image_proxy_enabled() -> bool:
-    return _env_flag("CODEX_PROXY_IMAGE_PROXY_ENABLED", False)
+    return _env_or_settings_flag(
+        "CODEX_PROXY_IMAGE_PROXY_ENABLED",
+        "gateway_image_proxy_enabled",
+        False,
+    )
 
 
 def gateway_image_proxy_model() -> str:
+    settings_value = _runtime_settings_value("gateway_image_proxy_model")
+    if isinstance(settings_value, str) and settings_value.strip():
+        return settings_value.strip()
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
 
 
@@ -877,6 +909,46 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
 
 def _sse_json_line(payload: Mapping[str, Any], line_ending: bytes) -> bytes:
     return b"data: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + line_ending
+
+
+def _chat_stream_status_chunk(
+    status: Mapping[str, Any],
+    model: str | None,
+) -> dict[str, Any]:
+    return {
+        "id": f"chatcmpl_{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": IMAGE_PROXY_PROGRESS_TEXT},
+                "finish_reason": None,
+            }
+        ],
+        "codexhub_status": dict(status),
+    }
+
+
+def _responses_stream_status_event(status: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": IMAGE_PROXY_PROGRESS_TEXT,
+        "codexhub_status": dict(status),
+    }
+
+
+def _downstream_stream_status_payload(
+    inbound_format: str,
+    status: Mapping[str, Any],
+    model: str | None,
+) -> dict[str, Any]:
+    if inbound_format == "chat_completions":
+        return _chat_stream_status_chunk(status, model)
+    return _responses_stream_status_event(status)
 
 
 def _chat_content_text(value: Any) -> str:
@@ -1461,6 +1533,8 @@ def _response_body_to_chat_completion_body(body: bytes) -> bytes:
     payload = json.loads(body.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         return body
+    if "error" in payload and not isinstance(payload.get("output"), list):
+        return _chat_completion_error_body(payload)
 
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -1515,6 +1589,23 @@ def _response_body_to_chat_completion_body(body: bytes) -> bytes:
         chat_payload["usage"] = usage
 
     return json.dumps(chat_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        normalized_error = dict(error)
+        if not isinstance(normalized_error.get("message"), str):
+            normalized_error["message"] = json.dumps(error, ensure_ascii=True, separators=(",", ":"))
+        normalized_error.setdefault("type", "upstream_error")
+        normalized_error.setdefault("code", payload.get("code"))
+    else:
+        normalized_error = {
+            "message": error if isinstance(error, str) and error else payload.get("detail") or "Upstream request failed",
+            "type": payload.get("type") if isinstance(payload.get("type"), str) else "upstream_error",
+            "code": payload.get("code"),
+        }
+    return json.dumps({"error": normalized_error}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
 def _response_events_to_chat_stream_chunks(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -2885,6 +2976,7 @@ def compatible_request_body(
     upstream: Mapping[str, Any],
     model_id: str | None = None,
     event_context: Mapping[str, Any] | None = None,
+    inject_codex_tools: bool = True,
 ) -> bytes:
     try:
         payload = json.loads(body.decode("utf-8-sig"))
@@ -2959,28 +3051,29 @@ def compatible_request_body(
             lifecycle_complete=lifecycle_complete,
         )
         changed = True
-    tool_names_before = _function_tool_names(payload.get("tools"))
-    if _inject_explicit_codex_tools(
-        payload,
-        include_tool_search=include_tool_search,
-        include_multi_agent_tools=not lifecycle_complete,
-        include_spawn_agent=include_spawn_agent,
-        include_wait_agent=include_wait_agent,
-        include_close_agent=include_close_agent,
-        open_agent_ids=open_agent_ids,
-        wait_agent_ids=wait_agent_ids,
-        close_agent_ids=close_agent_ids,
-    ):
-        added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
-        _write_adapter_event(
-            event_context,
-            "explicit_codex_tools_injected",
-            upstream=upstream_name,
-            model=payload.get("model") if isinstance(payload.get("model"), str) else None,
-            added_tool_count=len(added_tool_names),
-            added_tool_names=added_tool_names,
-        )
-        changed = True
+    if inject_codex_tools:
+        tool_names_before = _function_tool_names(payload.get("tools"))
+        if _inject_explicit_codex_tools(
+            payload,
+            include_tool_search=include_tool_search,
+            include_multi_agent_tools=not lifecycle_complete,
+            include_spawn_agent=include_spawn_agent,
+            include_wait_agent=include_wait_agent,
+            include_close_agent=include_close_agent,
+            open_agent_ids=open_agent_ids,
+            wait_agent_ids=wait_agent_ids,
+            close_agent_ids=close_agent_ids,
+        ):
+            added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
+            _write_adapter_event(
+                event_context,
+                "explicit_codex_tools_injected",
+                upstream=upstream_name,
+                model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                added_tool_count=len(added_tool_names),
+                added_tool_names=added_tool_names,
+            )
+            changed = True
     model_id = payload.get("model")
     max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
     if max_output_tokens is not None:
@@ -3414,6 +3507,25 @@ def _image_proxy_cache_key(part: Mapping[str, Any], vision_model: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _image_proxy_unique_image_count(value: Any, vision_model: str) -> int:
+    cache_keys: set[str] = set()
+
+    def collect(item: Any) -> None:
+        if _is_image_part(item):
+            cache_keys.add(_image_proxy_cache_key(item, vision_model))
+            return
+        if isinstance(item, list):
+            for child in item:
+                collect(child)
+            return
+        if isinstance(item, Mapping):
+            for child in item.values():
+                collect(child)
+
+    collect(value)
+    return len(cache_keys)
+
+
 def _ensure_image_proxy_cache(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -3537,6 +3649,8 @@ def _call_vision_model_for_image_description(
     vision_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
 ) -> str:
+    started_at = time.monotonic()
+    upstream_format = str(vision_upstream.get("upstream_format") or "responses")
     payload = {
         "model": vision_model,
         "input": [
@@ -3549,15 +3663,20 @@ def _call_vision_model_for_image_description(
                 ],
             }
         ],
-        "stream": False,
+        "stream": upstream_format != "chat_completions",
     }
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     vision_context = dict(event_context or {})
     vision_context["image_proxy"] = True
     vision_context["vision_model"] = canonical_model_id(vision_model)
     try:
-        body = compatible_request_body(body, vision_upstream, model_id=vision_model, event_context=vision_context)
-        upstream_format = str(vision_upstream.get("upstream_format", "responses"))
+        body = compatible_request_body(
+            body,
+            vision_upstream,
+            model_id=vision_model,
+            event_context=vision_context,
+            inject_codex_tools=False,
+        )
         upstream_url = _responses_url(vision_upstream, "/v1/responses")
         if upstream_format == "chat_completions":
             body = _responses_request_to_chat_completion_body(body)
@@ -3567,22 +3686,80 @@ def _call_vision_model_for_image_description(
         raise ImageProxyError(f"Vision model request is invalid: {exc}") from exc
 
     request = Request(upstream_url, data=body, headers=headers, method="POST")
-    with _open_upstream_response(
-        request,
-        upstream_name=str(vision_upstream.get("name", "unknown")),
+    vision_upstream_name = str(vision_upstream.get("name", "unknown"))
+    _write_adapter_event(
+        event_context,
+        "image_proxy_vision_request_start",
+        vision_model=canonical_model_id(vision_model),
+        upstream=vision_upstream_name,
         upstream_format=upstream_format,
-        timeout=upstream_timeout_seconds(),
-        event_context=vision_context,
-    ) as response:
-        response_body = _image_proxy_response_body(response)
+        stream=payload["stream"],
+    )
+    try:
+        with _open_upstream_response(
+            request,
+            upstream_name=vision_upstream_name,
+            upstream_format=upstream_format,
+            timeout=upstream_timeout_seconds(),
+            event_context=vision_context,
+            max_attempts=1,
+        ) as response:
+            response_status = getattr(response, "status", None)
+            response_body = _image_proxy_response_body(response)
+    except BaseException as exc:
+        _write_adapter_event(
+            event_context,
+            "image_proxy_vision_request_error",
+            vision_model=canonical_model_id(vision_model),
+            upstream=vision_upstream_name,
+            upstream_format=upstream_format,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            error=type(exc).__name__,
+            detail=safe_upstream_error_detail(exc),
+        )
+        raise
 
     try:
         response_payload = json.loads(response_body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _write_adapter_event(
+            event_context,
+            "image_proxy_vision_request_error",
+            vision_model=canonical_model_id(vision_model),
+            upstream=vision_upstream_name,
+            upstream_format=upstream_format,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            status=response_status if isinstance(response_status, int) else None,
+            error=type(exc).__name__,
+            detail="Vision model returned an invalid response",
+        )
         raise ImageProxyError("Vision model returned an invalid response") from exc
     description = _extract_model_response_text(response_payload)
     if not description:
+        _write_adapter_event(
+            event_context,
+            "image_proxy_vision_request_error",
+            vision_model=canonical_model_id(vision_model),
+            upstream=vision_upstream_name,
+            upstream_format=upstream_format,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            status=response_status if isinstance(response_status, int) else None,
+            error="EmptyImageDescription",
+            detail="Vision model returned no image description",
+            **_normalize_usage_for_event(_usage_from_payload(response_payload)),
+        )
         raise ImageProxyError("Vision model returned no image description")
+    _write_adapter_event(
+        event_context,
+        "image_proxy_vision_request_complete",
+        vision_model=canonical_model_id(vision_model),
+        upstream=vision_upstream_name,
+        upstream_format=upstream_format,
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+        status=response_status if isinstance(response_status, int) else None,
+        description_length=len(description),
+        **_normalize_usage_for_event(_usage_from_payload(response_payload)),
+    )
     return description
 
 
@@ -3605,7 +3782,13 @@ def _image_proxy_description_for_part(
 def _image_description_part(description: str) -> dict[str, str]:
     return {
         "type": "input_text",
-        "text": f"Image proxy description:\n{description}",
+        "text": (
+            "The Gateway has already read the user's attached image. "
+            "Use the visual context below as the image content when answering. "
+            "Do not mention the Gateway, preprocessing, replacement, missing images, "
+            "or inability to view the original attachment. Answer directly.\n\n"
+            f"Visual context:\n{description}"
+        ),
     }
 
 
@@ -3637,6 +3820,7 @@ def apply_image_proxy_to_responses_payload(
     target_model: str | None,
     target_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> bool:
     if not gateway_image_proxy_enabled():
         return False
@@ -3656,10 +3840,28 @@ def apply_image_proxy_to_responses_payload(
         raise ImageProxyError(f"Vision model does not support image input: {vision_model}")
 
     descriptions: dict[str, str] = {}
+    progress_sent = False
+    image_count = _image_proxy_unique_image_count(payload.get("input"), vision_model)
+
+    def emit_progress_once() -> None:
+        nonlocal progress_sent
+        if progress_sent or progress_callback is None:
+            return
+        progress_callback(
+            {
+                "type": "image_proxy",
+                "status": "reading",
+                "image_count": image_count,
+                "vision_model": canonical_model_id(vision_model),
+            }
+        )
+        progress_sent = True
 
     def describe(part: Mapping[str, Any]) -> str:
         cache_key = _image_proxy_cache_key(part, vision_model)
         if cache_key not in descriptions:
+            if _image_proxy_cache_lookup(cache_key) is None:
+                emit_progress_once()
             descriptions[cache_key] = _image_proxy_description_for_part(
                 part,
                 vision_model,
@@ -3688,6 +3890,13 @@ def _upstream_retry_status(exc: BaseException) -> int | None:
 
 def _upstream_retry_attempts() -> int:
     return gateway_auto_retry_max_attempts() if gateway_auto_retry_enabled() else 1
+
+
+def _upstream_error_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, HTTPError):
+        status = _upstream_retry_status(exc)
+        return status in {408, 409, 429} or (status is not None and 500 <= status <= 599)
+    return isinstance(exc, (IncompleteRead, OSError, URLError))
 
 
 def _emit_upstream_retry_event(
@@ -3764,13 +3973,14 @@ def _open_upstream_response(
     timeout: int,
     event_context: Mapping[str, Any] | None = None,
     downstream_retry_callback: Any = None,
+    max_attempts: int | None = None,
 ) -> Any:
-    max_attempts = _upstream_retry_attempts()
-    for attempt in range(1, max_attempts + 1):
+    retry_attempts = _upstream_retry_attempts() if max_attempts is None else max(1, max_attempts)
+    for attempt in range(1, retry_attempts + 1):
         try:
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
-            if attempt >= max_attempts:
+            if attempt >= retry_attempts or not _upstream_error_retryable(exc):
                 raise
             delay_seconds = gateway_retry_delay_seconds(attempt)
             _emit_upstream_retry_event(
@@ -3778,7 +3988,7 @@ def _open_upstream_response(
                 upstream_name=upstream_name,
                 upstream_format=upstream_format,
                 attempt=attempt,
-                max_attempts=max_attempts,
+                max_attempts=retry_attempts,
                 exc=exc,
                 delay_seconds=delay_seconds,
             )
@@ -3788,7 +3998,7 @@ def _open_upstream_response(
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
                         attempt=attempt,
-                        max_attempts=max_attempts,
+                        max_attempts=retry_attempts,
                         exc=exc,
                         delay_seconds=delay_seconds,
                     )
@@ -3930,6 +4140,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "model": model_canonical,
                 **request_context,
             }
+
+            def emit_downstream_status(status_payload: Mapping[str, Any]) -> None:
+                nonlocal downstream_sse_started
+                if not caller_stream:
+                    return
+                if not downstream_sse_started:
+                    self._send_sse_headers(200, upstream_name)
+                    downstream_sse_started = True
+                self._write_sse_data(
+                    _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
+                )
+
             usage_capture: dict[str, Any] = {}
             body = compatible_request_body(body, upstream, model_id=model, event_context=adapter_event_context)
             try:
@@ -3941,6 +4163,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model,
                 upstream,
                 event_context=adapter_event_context,
+                progress_callback=emit_downstream_status if caller_stream else None,
             ):
                 body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             upstream_url = _responses_url(upstream, "/v1/responses")
@@ -3949,10 +4172,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_url = _chat_completions_url(upstream)
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
             request = Request(upstream_url, data=body, headers=headers, method="POST")
+            emit_retry_to_downstream = caller_stream and inbound_format == "responses"
 
             def emit_downstream_retry(payload: Mapping[str, Any]) -> None:
                 nonlocal downstream_sse_started
-                if not caller_stream:
+                if not emit_retry_to_downstream:
                     return
                 if not downstream_sse_started:
                     self._send_sse_headers(200, upstream_name)
@@ -3968,7 +4192,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         timeout=upstream_timeout_seconds(),
                         event_context=adapter_event_context,
-                        downstream_retry_callback=emit_downstream_retry if caller_stream else None,
+                        downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
                     ) as response:
                         status = self._relay_upstream_response(
                             response,
@@ -3996,16 +4220,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         exc=exc,
                         delay_seconds=delay_seconds,
                     )
-                    emit_downstream_retry(
-                        _downstream_retry_payload(
-                            upstream_name=upstream_name,
-                            upstream_format=upstream_format,
-                            attempt=relay_attempt,
-                            max_attempts=relay_attempts,
-                            exc=exc,
-                            delay_seconds=delay_seconds,
+                    if emit_retry_to_downstream:
+                        emit_downstream_retry(
+                            _downstream_retry_payload(
+                                upstream_name=upstream_name,
+                                upstream_format=upstream_format,
+                                attempt=relay_attempt,
+                                max_attempts=relay_attempts,
+                                exc=exc,
+                                delay_seconds=delay_seconds,
+                            )
                         )
-                    )
                     time.sleep(delay_seconds)
             else:
                 raise RuntimeError("unreachable upstream relay retry state")
@@ -4091,6 +4316,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     "upstream_error",
                     request_id=request_id,
                     model=canonical_model_id(model) if model else None,
+                    upstream_format=upstream_format,
                     inbound_format=inbound_format,
                     event_context=adapter_event_context,
                 )
@@ -4365,6 +4591,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             + b"\n\n"
         )
+        self.wfile.flush()
+
+    def _write_sse_data(self, payload: Mapping[str, Any]) -> None:
+        self.wfile.write(_sse_json_line(payload, b"\n") + b"\n")
         self.wfile.flush()
 
     def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:

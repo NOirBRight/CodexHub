@@ -6,6 +6,7 @@ const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
+const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
 const indexCssPath = new URL("../src/index.css", import.meta.url);
 const pageToastPath = new URL("../src/components/PageToast.tsx", import.meta.url);
@@ -32,6 +33,21 @@ test("main navigation exposes only CodexHub and Gateway", async () => {
     contract.tabs.map((tab) => tab.label),
     ["CodexHub", "Gateway"],
   );
+});
+
+test("gateway request timeout defaults to 300 seconds across UI and runtime", async () => {
+  const [settingsSource, gatewaySource, tauriSource] = await Promise.all([
+    readFile(settingsLibPath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+  ]);
+
+  assert.match(settingsSource, /gateway_request_timeout_seconds:\s*300/);
+  assert.doesNotMatch(settingsSource, /gateway_request_timeout_seconds:\s*120/);
+  assert.doesNotMatch(gatewaySource, /gateway_request_timeout_seconds\s*\?\?\s*120/);
+  assert.doesNotMatch(gatewaySource, /setDraftTimeout\(settings\?\.gateway_request_timeout_seconds\s*\?\?\s*120\)/);
+  assert.match(tauriSource, /gateway_request_timeout_seconds:\s*300/);
+  assert.doesNotMatch(tauriSource, /gateway_request_timeout_seconds:\s*120/);
 });
 
 test("runtime header removes flow chips and exposes desktop window controls", async () => {
@@ -99,17 +115,18 @@ test("global controls use polished radius, shadow, and exact transitions", async
   assert.doesNotMatch(css, /\.field\s*\{[\s\S]*rounded-md[\s\S]*shadow-subtle/);
 });
 
-test("copy buttons keep a fixed width when copied feedback appears", async () => {
+test("copy buttons keep stable dimensions when copied feedback appears", async () => {
   const [endpointSource, gatewaySource, providersSource] = await Promise.all([
     readFile(endpointRowPath, "utf8"),
     readFile(gatewayPagePath, "utf8"),
     readFile(providersPagePath, "utf8"),
   ]);
 
-  assert.match(endpointSource, /inline-flex w-\[76px\]/);
+  assert.match(endpointSource, /inline-flex shrink-0/);
+  assert.match(endpointSource, /compact \? "h-7 w-7" : "h-8 w-8"/);
   assert.doesNotMatch(endpointSource, /min-w-\[70px\]/);
-  assert.match(gatewaySource, /inline-flex h-8 w-\[76px\]/);
-  assert.match(providersSource, /inline-flex h-6 w-\[72px\]/);
+  assert.match(gatewaySource, /inline-flex h-9 w-9 shrink-0/);
+  assert.match(providersSource, /inline-flex h-6 w-6 shrink-0/);
   assert.doesNotMatch(providersSource, /min-w-\[66px\]/);
 });
 
@@ -235,6 +252,11 @@ test("usage summary and chart use the same global time window", async () => {
   assert.match(gatewaySource, /onUsageWindowChange/);
   assert.match(usageSource, /onWindowChange\?\.\(queryWindow\)/);
   assert.match(usageSource, /function usageQueryWindow/);
+  assert.match(usageSource, /const \[hiddenSeriesKeys, setHiddenSeriesKeys\] = useState<Set<string>>/);
+  assert.match(usageSource, /visibleUsageSummary\(/);
+  assert.match(usageSource, /hiddenSeriesKeys\.has\(segment\.key\)/);
+  assert.match(usageSource, /onHiddenSeriesKeysChange=\{setHiddenSeriesKeys\}/);
+  assert.match(usageSource, /<Metric label="Tokens" value=\{visibleSummary/);
   assert.doesNotMatch(usageSource, /function filterEventsByRange/);
   assert.match(tauriSource, /startTs/);
   assert.match(tauriSource, /endTs/);
@@ -258,7 +280,7 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
     /usageSnapshotResult/,
   );
   assert.match(usageSource, /telemetryStatus/);
-  assert.match(usageSource, /Indexing usage/);
+  assert.doesNotMatch(usageSource, /Indexing usage/);
   assert.match(gatewaySource, /lastUsageErrorToast/);
   assert.match(gatewaySource, /const text = isBackendDisconnectedMessage\(usageError\)[\s\S]*`Usage telemetry delayed: \$\{usageError\}`;/);
   assert.match(gatewaySource, /if \(isBackendDisconnectedMessage\(usageError\)\) \{\s*showBackendDisconnectedToast\(\);\s*return;\s*\}/);
@@ -310,17 +332,38 @@ test("gateway copy actions use inline copied state instead of success toasts", a
 
   assert.match(gatewaySource, /const \[copiedTarget, setCopiedTarget\]/);
   assert.match(gatewaySource, /markCopied\(target\)/);
-  assert.match(endpointSource, /copied \? "Copied" : "Copy"/);
+  assert.match(gatewaySource, /aria-label=\{apiKeyCopied \? "API key copied" : "Copy API key"\}/);
+  assert.match(gatewaySource, /title=\{apiKeyCopied \? "Copied" : "Copy API key"\}/);
+  assert.match(gatewaySource, /aria-label="Regenerate API key"/);
+  assert.match(gatewaySource, /title="Regenerate API key"/);
+  assert.match(endpointSource, /aria-label=\{copied \? `\$\{label\} copied` : `Copy \$\{label\}`\}/);
+  assert.match(endpointSource, /title=\{copied \? "Copied" : `Copy \$\{label\}`\}/);
+  assert.match(endpointSource, /compact \? "h-7 w-7" : "h-8 w-8"/);
+  assert.doesNotMatch(endpointSource, /copied \? "Copied" : "Copy"/);
+  assert.doesNotMatch(gatewaySource, /\{apiKeyCopied \? "Copied" : "Copy"\}/);
+  assert.doesNotMatch(gatewaySource, />\s*Regenerate\s*<\/button>/);
   assert.doesNotMatch(gatewaySource, /setMessage\(`\$\{label\} copied`\)/);
 });
 
 test("gateway client route switching reports completion", async () => {
-  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+  const [gatewaySource, cardSource, segmentedSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(gatewayClientCardPath, "utf8"),
+    readFile(segmentedSwitchPath, "utf8"),
+  ]);
 
   assert.match(gatewaySource, /Switching \$\{clientName\} to \$\{routeName\}/);
   assert.match(gatewaySource, /showToast\(`Switching \$\{clientName\} to \$\{routeName\}\.\.\.`, "loading"\)/);
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
   assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: `\$\{clientName\} switched to \$\{routeName\}`,[\s\S]*tone: "success"/);
+  assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
+  assert.match(cardSource, /const pendingRouteValue = busy \? busyMode \?\? null : null;/);
+  assert.match(cardSource, /pendingValue=\{pendingRouteValue\}/);
+  assert.doesNotMatch(cardSource, /busyMode \?\? routeModeFromInfo\(info\)/);
+  assert.match(segmentedSource, /pendingValue\?: T \| null;/);
+  assert.match(segmentedSource, /const pending = !active && option\.value === pendingValue;/);
+  assert.match(segmentedSource, /pending[\s\S]*\? "bg-slate-200\/80 text-slate-500 shadow-control"/);
+  assert.match(segmentedSource, /aria-busy=\{pending \|\| undefined\}/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -428,6 +471,9 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
   assert.match(drawerSource, /Repair history bucket/);
   assert.match(drawerSource, /draft\.unified_codex_history \? "custom" : "openai"/);
   assert.match(drawerSource, /onClick=\{\(\) => void repairHistory\(\)\}/);
+  assert.doesNotMatch(drawerSource, /<History/);
+  assert.ok(drawerSource.indexOf("Auto-sync bound clients") < drawerSource.indexOf("Repair history bucket"));
+  assert.match(drawerSource, /setDraft\(\(current\) => current \?\? settings\)/);
   assert.doesNotMatch(drawerSource, /Migrate official history/);
   assert.doesNotMatch(drawerSource, /Restore migrated official history/);
   assert.doesNotMatch(drawerSource, /Auto-sync history/);
@@ -445,13 +491,37 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(typesSource, /gateway_auto_retry_max_attempts: number;/);
   assert.match(typesSource, /gateway_image_proxy_enabled: boolean;/);
   assert.match(typesSource, /gateway_image_proxy_model: string;/);
-  assert.match(drawerSource, /title="Auto retry"/);
+  assert.match(drawerSource, /<h3 className="text-sm font-semibold text-ink">Auto retry<\/h3>/);
   assert.match(drawerSource, /gateway_auto_retry_enabled/);
+  assert.match(drawerSource, /label="Enabled"/);
   assert.match(drawerSource, /Max attempts/);
+  assert.match(drawerSource, /grid min-h-9 min-w-0 grid-cols-\[minmax\(0,1fr\)_36px\] items-center gap-3 rounded-inner bg-surface/);
+  assert.match(drawerSource, /px-3 py-1\.5 text-sm font-medium text-slate-700 shadow-control/);
+  assert.match(drawerSource, /className="h-6 w-9 min-w-0/);
+  assert.doesNotMatch(drawerSource, /grid min-h-10 min-w-0 grid-cols-\[minmax\(0,1fr\)_36px\]/);
+  assert.match(drawerSource, /border border-transparent bg-transparent/);
+  assert.match(drawerSource, /focus:border-action\/40 focus:bg-surface focus:shadow-field/);
+  assert.doesNotMatch(drawerSource, /className="field field-compact min-w-0"/);
   assert.match(drawerSource, /min=\{1\}/);
   assert.match(drawerSource, /max=\{30\}/);
-  assert.match(drawerSource, /title="Image proxy"/);
+  assert.match(drawerSource, /<h3 className="text-sm font-semibold text-ink">Image proxy<\/h3>/);
   assert.match(drawerSource, /Vision model/);
+  assert.match(drawerSource, /function VisionModelSelect/);
+  assert.match(drawerSource, /grid min-h-9 min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(0,190px\)\] items-center gap-3 rounded-inner bg-surface/);
+  assert.match(drawerSource, /function visionModelParts\(model: Model\): VisionModelParts/);
+  assert.match(drawerSource, /const modelId = slashIndex > 0 \? rawId\.slice\(slashIndex \+ 1\) : rawId/);
+  assert.match(drawerSource, /providerFromDisplayName\(model\.display_name, modelId\)/);
+  assert.match(drawerSource, /function VisionModelValue/);
+  assert.match(drawerSource, /rounded-overlay bg-surface p-1 shadow-overlay/);
+  assert.match(drawerSource, /role="listbox"/);
+  assert.match(drawerSource, /absolute bottom-\[calc\(100%\+6px\)\] left-0 right-0/);
+  assert.doesNotMatch(drawerSource, /top-\[calc\(100%\+6px\)\]/);
+  assert.match(drawerSource, /relative min-w-0/);
+  assert.match(drawerSource, /flex h-7 w-full min-w-0/);
+  assert.match(drawerSource, /grid min-w-0 flex-1 grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-2/);
+  assert.doesNotMatch(drawerSource, /visionModelLabel/);
+  assert.doesNotMatch(drawerSource, /\$\{name\} \(\$\{model\.id\}\)/);
+  assert.doesNotMatch(drawerSource, /<select/);
   assert.match(drawerSource, /visionModels/);
   assert.match(drawerSource, /gateway_image_proxy_enabled/);
   assert.match(drawerSource, /gateway_image_proxy_model/);
@@ -470,6 +540,8 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.match(appSource, /runtime\.status\?\.proxy_running/);
   assert.match(appSource, /api\.restartProxy\(\)/);
   assert.match(appSource, /Gateway settings saved and runtime restarted/);
+  assert.match(appSource, /setBanner\(null\)/);
+  assert.doesNotMatch(appSource, /setBanner\(saveMessage\)/);
 });
 
 test("gateway client card does not render a disabled fake updater", async () => {
@@ -552,7 +624,9 @@ test("official OpenAI source uses the same row card and toggle pattern as provid
   assert.match(officialCard, /meta=\{`\$\{enabledModelCount\}\/\$\{modelCount\} models`\}/);
   assert.match(officialCard, /enabled=\{included\}/);
   assert.match(officialCard, /onToggle=\{onToggleInclude\}/);
-  assert.match(officialCard, /connected \? "bg-emerald-50\/55" : "bg-surface"/);
+  assert.match(officialCard, /<ConnectedSurfaceFlow \/>/);
+  assert.match(officialCard, /border-emerald-300\/70 bg-emerald-50\/55/);
+  assert.match(officialCard, /border-transparent bg-surface/);
   assert.match(officialCard, /active=\{active\}/);
   assert.doesNotMatch(officialCard, /<SourceMetric label="Official models"/);
   assert.doesNotMatch(officialCard, /active \? "border-action bg-blue-50\/70"/);
@@ -603,7 +677,8 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   const link = providersSource.match(/function ConnectionLink[\s\S]*?function OfficialOpenAICard/)?.[0] ?? "";
   const hubCard = providersSource.match(/function CodexHubProviderCard[\s\S]*?function gatewayStatusChip/)?.[0] ?? "";
 
-  assert.match(sidebar, /connecting=\{busy === "route"\}/);
+  assert.match(sidebar, /pendingMode=\{connectionPendingMode\}/);
+  assert.match(sidebar, /disabled=\{busy === "route" \|\| Boolean\(connectionPendingMode\)\}/);
   assert.doesNotMatch(providersSource, /function SourceRailStep/);
   assert.match(providersSource, /grid-rows-\[auto_auto_minmax\(0,1fr\)\] gap-2 p-3/);
 
@@ -631,11 +706,11 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.doesNotMatch(link, /border-dashed/);
 
   // Cards no longer reserve space for protruding wires or toast layout.
-  assert.match(providersSource, /rounded-panel p-3 shadow-card/);
+  assert.match(providersSource, /rounded-panel border p-3 shadow-card/);
   assert.doesNotMatch(providersSource, /rounded-panel p-3 pb-8 shadow-card/);
   assert.doesNotMatch(providersSource, /toastVisible=\{Boolean\(toast\)\}/);
   assert.doesNotMatch(providersSource, /toastVisible: boolean;/);
-  assert.match(providersSource, /grid h-full min-h-0 grid-rows-\[auto_auto_minmax\(0,1fr\)_auto\] gap-3 overflow-hidden rounded-panel px-3 pt-3 shadow-card/);
+  assert.match(providersSource, /grid h-full min-h-0 grid-rows-\[auto_auto_minmax\(0,1fr\)_auto\] gap-3 overflow-hidden rounded-panel border px-3 pt-3 shadow-card/);
   assert.doesNotMatch(providersSource, /px-3 pt-8 shadow-card/);
   assert.doesNotMatch(providersSource, /toastVisible \? "pb-16" : "pb-3"/);
   assert.doesNotMatch(providersSource, /pb-16/);
@@ -649,10 +724,16 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.match(css, /transform:\s*translate\(-50%, var\(--flow-distance, 92px\)\)/);
   assert.match(css, /transform:\s*translate\(-50%, -44px\)/);
   assert.match(css, /filter:\s*blur\(1\.5px\)/);
+  assert.match(providersSource, /function ConnectedSurfaceFlow/);
+  assert.match(providersSource, /codexhub-card-flow absolute left-0 top-0 h-px w-1\/2/);
+  assert.match(providersSource, /codexhub-card-flow codexhub-card-flow-delay absolute bottom-0 left-0 h-px w-1\/2/);
+  assert.match(css, /\.codexhub-card-flow/);
+  assert.match(css, /@keyframes codexhub-card-flow/);
 
   // Connection band is flat (no third card), link rail beside the CTA.
-  assert.match(bridge, /connecting:/);
+  assert.match(bridge, /pendingMode: ConnectionMode \| null;/);
   assert.match(bridge, /Connecting/);
+  assert.match(bridge, /Disconnecting/);
   assert.match(bridge, /Connect to Codex Hub/);
   assert.match(bridge, /Connected to Codex Hub/);
   assert.match(bridge, /<ConnectionLink connected=\{connected\} \/>/);
@@ -660,11 +741,12 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.doesNotMatch(bridge, /shadow-card/);
   assert.doesNotMatch(bridge, /rounded-panel/);
   assert.doesNotMatch(bridge, /bg-emerald-50\/55/);
-  assert.match(bridge, /animate-pulse/);
-  assert.match(bridge, /\{connected \? <Link2 size=\{15\} \/> : <Link2Off size=\{15\} \/>\}/);
+  assert.match(bridge, /pendingMode && "animate-pulse bg-slate-200\/85 text-slate-600"/);
+  assert.match(bridge, /\{icon\}/);
   assert.match(bridge, /h-11/);
-  assert.match(bridge, /connected[\s\S]*\? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"[\s\S]*: "bg-ink text-white hover:bg-slate-800 hover:shadow-raised"/);
-  assert.match(hubCard, /connected \? "bg-emerald-50\/55" : "bg-surface"/);
+  assert.match(bridge, /!pendingMode && connected[\s\S]*\? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"[\s\S]*: !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised"/);
+  assert.match(hubCard, /border-emerald-300\/70 bg-emerald-50\/55/);
+  assert.match(hubCard, /border-transparent bg-surface/);
   assert.match(providersSource, /return \{ label: "Unknown", tone: "pending" \};/);
   assert.doesNotMatch(providersSource, /Gateway unknown/);
   assert.match(providersSource, /rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline/);
@@ -674,33 +756,37 @@ test("Codex Hub connection action reports progress immediately", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(providersSource, /const \[connectionPreview, setConnectionPreview\] = useState<boolean \| null>\(null\);/);
+  assert.match(providersSource, /const \[connectionPendingMode, setConnectionPendingMode\] = useState<ConnectionMode \| null>\(null\);/);
   assert.match(providersSource, /const realCodexConnected = codexStatus\?\.mode === "custom";/);
-  assert.match(providersSource, /const codexConnected = connectionPreview \?\? realCodexConnected;/);
+  assert.match(providersSource, /const codexConnected = realCodexConnected;/);
+  assert.doesNotMatch(providersSource, /connectionPreview/);
   assert.doesNotMatch(action, /if \(!settingsDraft\) \{\s*return;\s*\}/);
   assert.match(action, /const actionLabel = nextMode === "custom" \? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";/);
-  assert.match(action, /const nextMode = codexConnected \? "official" : "custom";/);
-  assert.match(action, /setConnectionPreview\(nextMode === "custom"\);[\s\S]*setBusy\("route"\);/);
+  assert.match(action, /const nextMode: ConnectionMode = realCodexConnected \? "official" : "custom";/);
+  assert.match(action, /setConnectionPendingMode\(nextMode\);[\s\S]*setBusy\("route"\);/);
   assert.match(action, /showToast\(`\$\{actionLabel\}\.\.\.`, "loading"\);/);
   assert.ok(action.indexOf("showToast(`${actionLabel}...`, \"loading\");") < action.indexOf("api.switchMode("));
   assert.match(action, /api\.switchMode\(nextMode, false\)/);
-  assert.match(action, /setConnectionPreview\(null\);/);
-  assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPreview\(nextMode === "custom"\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(action, /setConnectionPendingMode\(null\);/);
+  assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPendingMode\(null\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /function updateToastWithError\(toastId: string, err: unknown\)[\s\S]*label: "Start"[\s\S]*startBackendFromToast\(toastId\)/);
   assert.doesNotMatch(action, /historyHint/);
-  assert.match(action, /updateToast\(toastId,[\s\S]*text: codexHubConnectionSuccessMessage\(nextMode\),[\s\S]*tone: "success"/);
+  assert.match(action, /repairUnifiedHistoryInBackground\(targetProvider, toastId, codexHubConnectionSuccessMessage\(nextMode\)\)/);
+  assert.doesNotMatch(action, /updateToast\(toastId,[\s\S]*text: codexHubConnectionSuccessMessage\(nextMode\),[\s\S]*tone: "success"/);
   assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
 
-test("background history repair reports progress and settles the same toast", async () => {
+test("background history repair can reuse the connection toast", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const repair = providersSource.match(/async function repairUnifiedHistoryInBackground[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(repair, /const toastId = showToast\("Repairing history bucket\.\.\.", "loading"\)/);
+  assert.match(repair, /toastId\?: string/);
+  assert.match(repair, /prefix\?: string/);
+  assert.match(repair, /const activeToastId = toastId \?\? showToast\("Repairing history bucket\.\.\.", "loading"\)/);
   assert.match(repair, /await api\.syncHistory\(targetProvider\)/);
-  assert.match(repair, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "success"/);
-  assert.match(repair, /History repair failed:/);
-  assert.match(repair, /updateToast\(toastId,[\s\S]*History repair failed: \$\{messageFromError\(err\)\}[\s\S]*tone: "error"/);
+  assert.match(repair, /updateToast\(activeToastId,[\s\S]*text: prefix \? `\$\{prefix\}; \$\{message\}` : message,[\s\S]*tone: "success"/);
+  assert.match(repair, /history repair failed:/);
+  assert.match(repair, /updateToast\(activeToastId,[\s\S]*`\$\{prefix\}; history repair failed: \$\{messageFromError\(err\)\}`[\s\S]*tone: "error"/);
   assert.doesNotMatch(repair, /historyRepairSuccessMessage/);
 });
 
@@ -791,7 +877,10 @@ test("model copy uses provider-qualified identifiers", async () => {
 
   assert.match(providersSource, /function providerQualifiedModelId\(providerId: string, modelId: string\)/);
   assert.match(providersSource, /navigator\.clipboard\.writeText\(copyValue\)/);
-  assert.match(providersSource, /\{copied \? "Copied" : "Copy"\}/);
+  assert.match(providersSource, /title=\{copied \? "Copied" : `Copy model ID: \$\{copyValue\}`\}/);
+  assert.match(providersSource, /aria-label=\{copied \? `Copied model ID \$\{copyValue\}` : `Copy model ID \$\{copyValue\}`\}/);
+  assert.match(providersSource, /inline-flex h-6 w-6 shrink-0/);
+  assert.doesNotMatch(providersSource, /\{copied \? "Copied" : "Copy"\}/);
   assert.match(providersSource, /<ModelIdentity model=\{model\} providerId=\{providerId\} \/>/);
 });
 

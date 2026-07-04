@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
@@ -99,6 +100,11 @@ class FakeContextResponse(FakeResponse):
 
 class RoutingTests(unittest.TestCase):
     def setUp(self):
+        self.runtime_proxy_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.runtime_proxy_dir.cleanup)
+        self.runtime_proxy_patch = patch("codex_proxy.RUNTIME_PROXY_DIR", Path(self.runtime_proxy_dir.name))
+        self.runtime_proxy_patch.start()
+        self.addCleanup(self.runtime_proxy_patch.stop)
         self.catalog_patch = patch(
             "codex_proxy.generated_catalog_slugs",
             return_value={
@@ -249,6 +255,45 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 2000)
 
+    def test_open_upstream_response_does_not_retry_non_retryable_http_errors(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":"bad request"}'),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(HTTPError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context={"request_id": "req_bad_request", "model": "volc/glm-5.2"},
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        retry_events = [
+            call for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(retry_events, [])
+
     def test_open_upstream_response_does_not_retry_when_auto_retry_disabled(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         error = HTTPError(
@@ -322,8 +367,67 @@ class RoutingTests(unittest.TestCase):
         content = payload["input"][0]["content"]
         self.assertEqual(content[1]["type"], "input_text")
         self.assertIn("A blue chart.", content[1]["text"])
+        self.assertIn("The Gateway has already read the user's attached image", content[1]["text"])
+        self.assertIn("Use the visual context below as the image content", content[1]["text"])
+        self.assertIn("Do not mention the Gateway, preprocessing, replacement", content[1]["text"])
+        self.assertNotIn("replaced the original image", content[1]["text"])
+        self.assertNotIn("I only received", content[1]["text"])
         self.assertNotIn("image_url", content[1])
         describe.assert_called_once()
+
+    def test_image_proxy_settings_fall_back_to_runtime_settings_when_env_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = os.path.join(temp_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "gateway_image_proxy_enabled": True,
+                        "gateway_image_proxy_model": "  kimi-k2.6  ",
+                    },
+                    handle,
+                )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+            ):
+                os.environ.pop("CODEX_PROXY_IMAGE_PROXY_ENABLED", None)
+                os.environ.pop("CODEX_PROXY_IMAGE_PROXY_MODEL", None)
+                self.assertTrue(codex_proxy.gateway_image_proxy_enabled())
+                self.assertEqual(codex_proxy.gateway_image_proxy_model(), "kimi-k2.6")
+
+    def test_image_proxy_runtime_settings_override_stale_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = os.path.join(temp_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "gateway_image_proxy_enabled": True,
+                        "gateway_image_proxy_model": "kimi-k2.6",
+                    },
+                    handle,
+                )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "0",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-cn/MiniMax-M3",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+            ):
+                self.assertTrue(codex_proxy.gateway_image_proxy_enabled())
+                self.assertEqual(codex_proxy.gateway_image_proxy_model(), "kimi-k2.6")
 
     def test_image_proxy_skips_target_model_that_supports_images(self):
         payload = {
@@ -383,6 +487,125 @@ class RoutingTests(unittest.TestCase):
                 )
 
         self.assertIn("Vision model is not configured", str(context.exception))
+
+    def test_image_proxy_vision_request_does_not_inject_codex_tools(self):
+        response_body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "A small attachment thumbnail."}],
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+        ):
+            description = codex_proxy._call_vision_model_for_image_description(
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                "minimax-cn/MiniMax-M3",
+                upstream,
+                event_context={"request_id": "req_img", "image_proxy": True},
+            )
+
+        self.assertEqual(description, "A small attachment thumbnail.")
+        request = mock_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "MiniMax-M3")
+        self.assertNotIn("tools", payload)
+
+    def test_image_proxy_vision_request_logs_duration_and_usage(self):
+        response_body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "A small attachment thumbnail."}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "total_tokens": 18,
+                    "output_tokens_details": {"reasoning_tokens": 3},
+                },
+            }
+        ).encode("utf-8")
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+        events: list[tuple[str, dict[str, object]]] = []
+
+        def capture_event(event: str, **fields: object) -> None:
+            events.append((event, fields))
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)),
+            patch("codex_proxy.write_proxy_event", side_effect=capture_event),
+        ):
+            description = codex_proxy._call_vision_model_for_image_description(
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                "minimax-cn/MiniMax-M3",
+                upstream,
+                event_context={"request_id": "req_img", "image_proxy": True},
+            )
+
+        self.assertEqual(description, "A small attachment thumbnail.")
+        event_names = [name for name, _ in events]
+        self.assertIn("image_proxy_vision_request_start", event_names)
+        self.assertIn("image_proxy_vision_request_complete", event_names)
+        complete_fields = dict(events[event_names.index("image_proxy_vision_request_complete")][1])
+        self.assertEqual(complete_fields["request_id"], "req_img")
+        self.assertEqual(complete_fields["vision_model"], "minimax-cn/MiniMax-M3")
+        self.assertEqual(complete_fields["upstream"], upstream["name"])
+        self.assertEqual(complete_fields["description_length"], len("A small attachment thumbnail."))
+        self.assertGreaterEqual(complete_fields["duration_ms"], 0)
+        self.assertEqual(complete_fields["usage_input_tokens"], 11)
+        self.assertEqual(complete_fields["usage_output_tokens"], 7)
+        self.assertEqual(complete_fields["usage_reasoning_tokens"], 3)
+
+    def test_image_proxy_vision_request_does_not_inherit_gateway_auto_retry(self):
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+        events: list[tuple[str, dict[str, object]]] = []
+        upstream_error = HTTPError(
+            "https://vision.example.test/v1/responses",
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b"server error"),
+        )
+
+        def capture_event(event: str, **fields: object) -> None:
+            events.append((event, fields))
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "30",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=upstream_error) as mock_urlopen,
+            patch("codex_proxy.write_proxy_event", side_effect=capture_event),
+            patch("codex_proxy.time.sleep"),
+        ):
+            with self.assertRaises(HTTPError):
+                codex_proxy._call_vision_model_for_image_description(
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    "minimax-cn/MiniMax-M3",
+                    upstream,
+                    event_context={"request_id": "req_img", "image_proxy": True},
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        event_names = [name for name, _ in events]
+        self.assertNotIn("upstream_retry", event_names)
+        self.assertIn("image_proxy_vision_request_error", event_names)
 
     def test_image_proxy_cache_hit_avoids_repeated_vision_call_and_raw_image_storage(self):
         with tempfile.TemporaryDirectory() as temp_dir:

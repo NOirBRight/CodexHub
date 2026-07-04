@@ -67,7 +67,7 @@ export function GatewayPage({
   const { showToast, updateToast } = useToasts();
   const [draftPort, setDraftPort] = useState(settings?.proxy_port ?? status?.port ?? 9099);
   const [draftKey, setDraftKey] = useState(settings?.gateway_client_key ?? "");
-  const [draftTimeout, setDraftTimeout] = useState(settings?.gateway_request_timeout_seconds ?? 120);
+  const [draftTimeout, setDraftTimeout] = useState(settings?.gateway_request_timeout_seconds ?? 300);
   const [clientBusy, setClientBusy] = useState<string | null>(null);
   const [clientRefreshBusy, setClientRefreshBusy] = useState(false);
   const [showDraftKey, setShowDraftKey] = useState(false);
@@ -78,7 +78,7 @@ export function GatewayPage({
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
     setDraftKey(settings?.gateway_client_key ?? "");
-    setDraftTimeout(settings?.gateway_request_timeout_seconds ?? 120);
+    setDraftTimeout(settings?.gateway_request_timeout_seconds ?? 300);
   }, [settings, status?.port]);
 
   useEffect(
@@ -386,7 +386,7 @@ export function GatewayPage({
                   <div className="grid min-w-0 grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
                     <div className="relative min-w-0">
                       <input
-                        className="field h-8 pr-9"
+                        className="field field-compact pr-9"
                         type={showDraftKey ? "text" : "password"}
                         autoComplete="off"
                         value={draftKey}
@@ -404,28 +404,30 @@ export function GatewayPage({
                     </div>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 w-[76px] items-center justify-center gap-1 rounded-control bg-panel px-2 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       disabled={!draftKey}
+                      aria-label={apiKeyCopied ? "API key copied" : "Copy API key"}
+                      title={apiKeyCopied ? "Copied" : "Copy API key"}
                       onClick={() => void copyText("gateway-api-key", draftKey)}
                     >
                       {apiKeyCopied ? <Check size={14} /> : <Copy size={14} />}
-                      {apiKeyCopied ? "Copied" : "Copy"}
                     </button>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-panel px-3 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      aria-label="Regenerate API key"
+                      title="Regenerate API key"
                       onClick={regenerateClientKey}
                     >
                       <RefreshCcw size={14} />
-                      Regenerate
                     </button>
                   </div>
                 </label>
                 <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
                   <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
-                    <span>Listen Port</span>
+                    <span>Port</span>
                     <input
-                      className="field h-8"
+                      className="field field-compact"
                       type="number"
                       min={1024}
                       max={65535}
@@ -434,9 +436,9 @@ export function GatewayPage({
                     />
                   </label>
                   <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
-                    <span>Request Timeout</span>
+                    <span>Timeout</span>
                     <input
-                      className="field h-8"
+                      className="field field-compact"
                       type="number"
                       min={5}
                       max={600}
@@ -446,7 +448,7 @@ export function GatewayPage({
                   </label>
                   <button
                     type="button"
-                    className="focus-ring inline-flex h-8 items-center justify-center gap-2 whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+                    className="focus-ring inline-flex h-9 self-end items-center justify-center gap-2 whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
                     disabled={Boolean(busy) || !settings}
                     onClick={() => void applyGatewaySettings()}
                   >

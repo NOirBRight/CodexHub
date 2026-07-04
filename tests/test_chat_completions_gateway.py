@@ -1,7 +1,9 @@
 import io
 import json
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
 
@@ -419,6 +421,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
     """End-to-end tests for POST /v1/chat/completions through the proxy."""
 
     def setUp(self):
+        self.runtime_proxy_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.runtime_proxy_dir.cleanup)
+        self.runtime_proxy_patch = patch("codex_proxy.RUNTIME_PROXY_DIR", Path(self.runtime_proxy_dir.name))
+        self.runtime_proxy_patch.start()
+        self.addCleanup(self.runtime_proxy_patch.stop)
         self.catalog_patch = patch("codex_proxy.generated_catalog_slugs", return_value={"gpt-5.5"})
         self.catalog_patch.start()
         self.addCleanup(self.catalog_patch.stop)
@@ -672,6 +679,420 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(sent_payload["model"], "anthropic/claude-sonnet-4")
         self.assertEqual(handler._fake.status, 200)
 
+    def test_provider_scoped_chat_completions_image_proxy_uses_streaming_responses_vision(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        image_url = "data:image/png;base64,e2UydC12aXNpb24tcHJveHktZmFsbGJhY2t9"
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please inspect this attachment."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/ollama-cloud/chat/completions")
+
+        vision_responses_events = [
+            b'data: {"type":"response.created","response":{"id":"resp_vision","model":"minimax-m3","output":[]}}\n',
+            b'\n',
+            b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_vision","type":"message","role":"assistant","content":[]}}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Streaming image description."}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.done","output_index":0,"content_index":0,"text":"Streaming image description."}\n',
+            b'\n',
+            b'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_vision","type":"message","role":"assistant","content":[{"type":"output_text","text":"Streaming image description.","annotations":[]}]}}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_vision","model":"minimax-m3","status":"completed","output":[{"id":"msg_vision","type":"message","role":"assistant","content":[{"type":"output_text","text":"Streaming image description.","annotations":[]}]}]}}\n',
+            b'\n',
+            b'',
+        ]
+        main_upstream_body = json.dumps({
+            "id": "resp_main",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Main response", "annotations": []}],
+            }],
+        }).encode("utf-8")
+
+        catalog = {
+            "gpt-5.5": {"slug": "gpt-5.5"},
+            "glm-5.2": {"slug": "glm-5.2", "input_modalities": ["text"]},
+            "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "input_modalities": ["text"]},
+            "minimax-m3": {"slug": "minimax-m3", "input_modalities": ["text", "image"]},
+            "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "OLLAMA_API_KEY": "ollama-test-token",
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
+                        "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
+                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "codex_proxy.load_policy",
+                    return_value=replace(
+                        policy,
+                        allowed_provider_models=policy.allowed_provider_models
+                        + ("glm-5.2", "ollama-cloud/glm-5.2", "minimax-m3", "ollama-cloud/minimax-m3"),
+                    ),
+                ),
+                patch(
+                    "codex_proxy.urlopen",
+                    side_effect=[
+                        _FakeSseResponse(vision_responses_events),
+                        _FakeJsonResponse(main_upstream_body),
+                    ],
+                ) as mock_urlopen,
+            ):
+                CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        vision_responses_request = mock_urlopen.call_args_list[0].args[0]
+        vision_responses_payload = json.loads(vision_responses_request.data)
+        self.assertTrue(vision_responses_request.full_url.endswith("/responses"))
+        self.assertEqual(vision_responses_payload["model"], "minimax-m3")
+        self.assertTrue(vision_responses_payload["stream"])
+        self.assertNotIn("tools", vision_responses_payload)
+
+        main_request = mock_urlopen.call_args_list[1].args[0]
+        main_payload = json.loads(main_request.data)
+        self.assertTrue(main_request.full_url.endswith("/responses"))
+        encoded_main = json.dumps(main_payload)
+        self.assertIn("Streaming image description.", encoded_main)
+        self.assertNotIn(image_url, encoded_main)
+
+        written = b"".join(handler.wfile.writes)
+        result = json.loads(written)
+        self.assertEqual(result["choices"][0]["message"]["content"], "Main response")
+
+    def test_provider_scoped_chat_completions_streaming_image_proxy_emits_compatible_progress_chunk(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        image_url = "data:image/png;base64,e2UydC12aXNpb24tcHJvZ3Jlc3N9"
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please inspect this attachment."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/ollama-cloud/chat/completions")
+
+        vision_responses_events = [
+            b'data: {"type":"response.output_text.delta","delta":"Streaming image description."}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_vision","model":"minimax-m3","status":"completed","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+        main_responses_events = [
+            b'data: {"type":"response.created","response":{"id":"resp_main","model":"glm-5.2"}}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.delta","delta":"Main response"}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_main","model":"glm-5.2","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+        catalog = {
+            "gpt-5.5": {"slug": "gpt-5.5"},
+            "glm-5.2": {"slug": "glm-5.2", "input_modalities": ["text"]},
+            "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "input_modalities": ["text"]},
+            "minimax-m3": {"slug": "minimax-m3", "input_modalities": ["text", "image"]},
+            "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "OLLAMA_API_KEY": "ollama-test-token",
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
+                        "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
+                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "codex_proxy.load_policy",
+                    return_value=replace(
+                        policy,
+                        allowed_provider_models=policy.allowed_provider_models
+                        + ("glm-5.2", "ollama-cloud/glm-5.2", "minimax-m3", "ollama-cloud/minimax-m3"),
+                    ),
+                ),
+                patch(
+                    "codex_proxy.urlopen",
+                    side_effect=[
+                        _FakeSseResponse(vision_responses_events),
+                        _FakeSseResponse(main_responses_events),
+                    ],
+                ),
+            ):
+                CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertNotIn(b"event: codexhub.", written)
+        data_lines = [line for line in written.split(b"\n") if line.startswith(b"data: {")]
+        self.assertTrue(data_lines)
+        first_chunk = json.loads(data_lines[0].removeprefix(b"data: "))
+        self.assertEqual(first_chunk["object"], "chat.completion.chunk")
+        self.assertEqual(
+            first_chunk["choices"],
+            [{"index": 0, "delta": {"role": "assistant", "content": "Analyzing image...\n\n"}, "finish_reason": None}],
+        )
+        self.assertEqual(first_chunk["codexhub_status"]["type"], "image_proxy")
+        self.assertEqual(first_chunk["codexhub_status"]["status"], "reading")
+        self.assertEqual(first_chunk["codexhub_status"]["image_count"], 1)
+        self.assertIn(b"Main response", written)
+        self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
+
+    def test_provider_scoped_responses_streaming_image_proxy_emits_compatible_progress_event(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        image_url = "data:image/png;base64,e2UydC12aXNpb24tcmVzcG9uc2VzLXByb2dyZXNzfQ=="
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Please inspect this attachment."},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/ollama-cloud/responses")
+
+        vision_responses_events = [
+            b'data: {"type":"response.output_text.delta","delta":"Streaming image description."}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_vision","model":"minimax-m3","status":"completed","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+        main_responses_events = [
+            b'data: {"type":"response.created","response":{"id":"resp_main","model":"glm-5.2"}}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.delta","delta":"Main response"}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_main","model":"glm-5.2","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+        catalog = {
+            "gpt-5.5": {"slug": "gpt-5.5"},
+            "glm-5.2": {"slug": "glm-5.2", "input_modalities": ["text"]},
+            "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "input_modalities": ["text"]},
+            "minimax-m3": {"slug": "minimax-m3", "input_modalities": ["text", "image"]},
+            "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "OLLAMA_API_KEY": "ollama-test-token",
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
+                        "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
+                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "codex_proxy.load_policy",
+                    return_value=replace(
+                        policy,
+                        allowed_provider_models=policy.allowed_provider_models
+                        + ("glm-5.2", "ollama-cloud/glm-5.2", "minimax-m3", "ollama-cloud/minimax-m3"),
+                    ),
+                ),
+                patch(
+                    "codex_proxy.urlopen",
+                    side_effect=[
+                        _FakeSseResponse(vision_responses_events),
+                        _FakeSseResponse(main_responses_events),
+                    ],
+                ),
+            ):
+                CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertNotIn(b"event: codexhub.", written)
+        data_lines = [line for line in written.split(b"\n") if line.startswith(b"data: {")]
+        self.assertTrue(data_lines)
+        first_event = json.loads(data_lines[0].removeprefix(b"data: "))
+        self.assertEqual(first_event["type"], "response.output_text.delta")
+        self.assertEqual(first_event["delta"], "Analyzing image...\n\n")
+        self.assertEqual(first_event["codexhub_status"]["type"], "image_proxy")
+        self.assertEqual(first_event["codexhub_status"]["status"], "reading")
+        self.assertEqual(first_event["codexhub_status"]["image_count"], 1)
+        self.assertIn(b"Main response", written)
+
+    def test_provider_scoped_chat_completions_image_proxy_supports_chat_completions_vision(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        image_url = "data:image/png;base64,e2UydC12aXNpb24tY2hhdC1mb3JtYXR9"
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please inspect this attachment."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+
+        target_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        vision_model = {
+            "alias": "vision-chat/m3",
+            "provider_alias": "vision-chat",
+            "upstream_name": "vision_chat",
+            "display_prefix": "VisionChat",
+            "base_url": "https://vision.example.test/v1",
+            "api_key": "vision-test-token",
+            "upstream_model": "m3",
+            "upstream_format": "chat_completions",
+            "priority_base": 300,
+            "context_window": 1000000,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        vision_chat_body = json.dumps({
+            "id": "chatcmpl_vision",
+            "object": "chat.completion",
+            "model": "m3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Chat-format image description."},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+        main_upstream_body = json.dumps({
+            "id": "resp_main",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Main response", "annotations": []}],
+            }],
+        }).encode("utf-8")
+        catalog = {
+            "gpt-5.5": {"slug": "gpt-5.5"},
+            "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+            "vision-chat/m3": {"slug": "vision-chat/m3", "input_modalities": ["text", "image"]},
+        }
+
+        def resolve_external_model(slug):
+            return {
+                "volc/glm-5.2": target_model,
+                "vision-chat/m3": vision_model,
+            }.get(slug)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "vision-chat/m3",
+                        "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
+                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "codex_proxy.load_policy",
+                    return_value=replace(
+                        policy,
+                        allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
+                    ),
+                ),
+                patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
+                patch(
+                    "codex_proxy.urlopen",
+                    side_effect=[
+                        _FakeJsonResponse(vision_chat_body),
+                        _FakeJsonResponse(main_upstream_body),
+                    ],
+                ) as mock_urlopen,
+            ):
+                CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        vision_request = mock_urlopen.call_args_list[0].args[0]
+        vision_payload = json.loads(vision_request.data)
+        self.assertEqual(vision_request.full_url, "https://vision.example.test/v1/chat/completions")
+        self.assertEqual(vision_payload["model"], "m3")
+        self.assertFalse(vision_payload["stream"])
+        self.assertIn("messages", vision_payload)
+        self.assertNotIn("tools", vision_payload)
+        self.assertIn(image_url, json.dumps(vision_payload))
+
+        main_request = mock_urlopen.call_args_list[1].args[0]
+        main_payload = json.loads(main_request.data)
+        self.assertEqual(main_request.full_url, "https://ark.example.test/v1/responses")
+        encoded_main = json.dumps(main_payload)
+        self.assertIn("Chat-format image description.", encoded_main)
+        self.assertNotIn(image_url, encoded_main)
+
+        written = b"".join(handler.wfile.writes)
+        result = json.loads(written)
+        self.assertEqual(result["choices"][0]["message"]["content"], "Main response")
+
     def test_post_chat_completions_streaming_converts_responses_sse_to_chat_sse(self):
         body = json.dumps({
             "model": "gpt-5.5",
@@ -705,7 +1126,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         # Last line should be [DONE]
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
 
-    def test_post_chat_completions_streaming_reports_upstream_retry_to_downstream(self):
+    def test_post_chat_completions_streaming_keeps_retry_events_out_of_downstream_stream(self):
         body = json.dumps({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -741,13 +1162,19 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         self.assertEqual(mock_urlopen.call_count, 2)
         written = b"".join(handler.wfile.writes)
-        self.assertIn(b"event: codexhub.retry\n", written)
-        self.assertIn(b'"attempt":1', written)
-        self.assertIn(b'"max_attempts":2', written)
+        self.assertNotIn(b"event: codexhub.retry\n", written)
+        self.assertNotIn(b'"type":"codexhub.retry"', written)
         self.assertIn(b"Recovered", written)
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
+        chunks = [
+            json.loads(line.removeprefix(b"data: "))
+            for line in written.split(b"\n")
+            if line.startswith(b"data: {")
+        ]
+        self.assertTrue(chunks)
+        self.assertTrue(all(isinstance(chunk.get("choices"), list) for chunk in chunks))
 
-    def test_post_chat_completions_streaming_keeps_retry_and_final_error_in_sse(self):
+    def test_post_chat_completions_streaming_returns_final_json_error_without_retry_event(self):
         body = json.dumps({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -774,12 +1201,14 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
-        self.assertIn(b"event: codexhub.retry\n", written)
-        self.assertIn(b"event: error\n", written)
-        self.assertIn(b'"type":"upstream_stream_error"', written)
-        self.assertIn(b'"error":"UpstreamProtocolError"', written)
+        self.assertNotIn(b"event: codexhub.retry\n", written)
+        self.assertNotIn(b'"type":"codexhub.retry"', written)
+        self.assertNotIn(b"event: error\n", written)
+        payload = json.loads(written)
+        self.assertEqual(payload["error"]["message"], "upstream returned json")
+        self.assertEqual(payload["error"]["type"], "upstream_error")
         self.assertNotIn(upstream_body, written)
-        self.assertFalse(written.rstrip().endswith(b"data: [DONE]"))
+        self.assertEqual(handler._fake.status, 502)
 
     def test_post_chat_completions_streaming_reports_read_errors_as_sse_error_not_empty_finish(self):
         cases = [
