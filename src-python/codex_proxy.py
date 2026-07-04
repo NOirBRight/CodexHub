@@ -269,6 +269,51 @@ PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
+RETRY_REQUEST_MAIN_GENERATION = "main_generation"
+RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
+TRANSIENT_HTTP_RETRY_STATUSES = {408, 409, 421, 425, 429, 500, 502, 503, 504}
+PERMANENT_HTTP_ERROR_STATUSES = {
+    400,
+    401,
+    403,
+    404,
+    405,
+    406,
+    407,
+    410,
+    411,
+    412,
+    413,
+    414,
+    415,
+    416,
+    417,
+    418,
+    422,
+    426,
+    428,
+    431,
+    451,
+    501,
+    505,
+}
+PERMANENT_UPSTREAM_ERROR_VALUES = {
+    "authentication_error",
+    "billing_hard_limit_reached",
+    "billing_not_active",
+    "context_length_exceeded",
+    "insufficient_quota",
+    "invalid_api_key",
+    "invalid_image",
+    "invalid_request_error",
+    "model_not_found",
+    "not_found_error",
+    "permission_denied",
+    "permission_error",
+    "unsupported_image",
+    "unsupported_parameter",
+    "unsupported_value",
+}
 IMAGE_PROXY_PROMPT_VERSION = "v1"
 IMAGE_PROXY_PROMPT = (
     "Describe the image in detail for a downstream text-only model. "
@@ -3856,6 +3901,7 @@ def _call_vision_model_for_image_description(
         upstream_format=upstream_format,
         timeout=upstream_timeout_seconds(),
         event_context=vision_context,
+        request_kind=RETRY_REQUEST_IMAGE_PROXY_VISION,
     ) as response:
         response_body = _image_proxy_response_body(response)
 
@@ -3973,10 +4019,98 @@ def _upstream_retry_attempts() -> int:
     return gateway_auto_retry_max_attempts() if gateway_auto_retry_enabled() else 1
 
 
-def _upstream_error_retryable(exc: BaseException) -> bool:
+def _http_retry_header_override(exc: HTTPError) -> bool | None:
+    value = _get_header(getattr(exc, "headers", {}), "x-should-retry")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return None
+
+
+def _http_error_body_bytes(exc: HTTPError) -> bytes:
+    cached = getattr(exc, "_codexhub_error_body", None)
+    if isinstance(cached, bytes):
+        return cached
+    fp = getattr(exc, "fp", None)
+    if fp is None:
+        return b""
+    try:
+        body = fp.read()
+    except OSError:
+        return b""
+    replacement = io.BytesIO(body)
+    exc.fp = replacement
+    exc.file = replacement
+    setattr(exc, "_codexhub_error_body", body)
+    return body
+
+
+def _http_error_payload(exc: HTTPError) -> Mapping[str, Any] | None:
+    body = _http_error_body_bytes(exc)
+    if not body:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _http_error_values(exc: HTTPError) -> set[str]:
+    payload = _http_error_payload(exc)
+    if not isinstance(payload, Mapping):
+        return set()
+    error = payload.get("error")
+    values: set[str] = set()
+    if isinstance(error, Mapping):
+        for key in ("type", "code", "param", "message"):
+            value = error.get(key)
+            if isinstance(value, str) and value:
+                values.add(value.strip().lower())
+    elif isinstance(error, str) and error:
+        values.add(error.strip().lower())
+    for key in ("type", "code", "detail", "message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            values.add(value.strip().lower())
+    return values
+
+
+def _has_permanent_upstream_error_value(exc: HTTPError) -> bool:
+    values = _http_error_values(exc)
+    if not values:
+        return False
+    for value in values:
+        if value in PERMANENT_UPSTREAM_ERROR_VALUES:
+            return True
+    return False
+
+
+def _upstream_error_retryable(
+    exc: BaseException,
+    *,
+    request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
+) -> bool:
     if isinstance(exc, HTTPError):
+        override = _http_retry_header_override(exc)
+        if override is not None:
+            return override
         status = _upstream_retry_status(exc)
-        return status in {408, 409, 429} or (status is not None and 500 <= status <= 599)
+        if status in PERMANENT_HTTP_ERROR_STATUSES:
+            return False
+        if status == 429 and _has_permanent_upstream_error_value(exc):
+            return False
+        if _has_permanent_upstream_error_value(exc):
+            return False
+        if status in TRANSIENT_HTTP_RETRY_STATUSES:
+            return True
+        if status is not None and 520 <= status <= 599:
+            return True
+        return False
     return isinstance(exc, (IncompleteRead, OSError, URLError))
 
 
@@ -3985,6 +4119,7 @@ def _emit_upstream_retry_event(
     *,
     upstream_name: str,
     upstream_format: str,
+    request_kind: str,
     attempt: int,
     max_attempts: int,
     exc: BaseException,
@@ -3996,6 +4131,8 @@ def _emit_upstream_retry_event(
         upstream=upstream_name,
         provider_id=upstream_name,
         upstream_format=upstream_format,
+        request_kind=request_kind,
+        retryable=True,
         status=_upstream_retry_status(exc),
         attempt=attempt,
         max_attempts=max_attempts,
@@ -4009,6 +4146,7 @@ def _downstream_retry_payload(
     *,
     upstream_name: str,
     upstream_format: str,
+    request_kind: str,
     attempt: int,
     max_attempts: int,
     exc: BaseException,
@@ -4018,6 +4156,7 @@ def _downstream_retry_payload(
         "type": "codexhub.retry",
         "upstream": upstream_name,
         "upstream_format": upstream_format,
+        "request_kind": request_kind,
         "status": _upstream_retry_status(exc),
         "attempt": attempt,
         "max_attempts": max_attempts,
@@ -4054,19 +4193,21 @@ def _open_upstream_response(
     timeout: int,
     event_context: Mapping[str, Any] | None = None,
     downstream_retry_callback: Any = None,
+    request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
 ) -> Any:
     max_attempts = _upstream_retry_attempts()
     for attempt in range(1, max_attempts + 1):
         try:
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
-            if attempt >= max_attempts or not _upstream_error_retryable(exc):
+            if attempt >= max_attempts or not _upstream_error_retryable(exc, request_kind=request_kind):
                 raise
             delay_seconds = gateway_retry_delay_seconds(attempt)
             _emit_upstream_retry_event(
                 event_context,
                 upstream_name=upstream_name,
                 upstream_format=upstream_format,
+                request_kind=request_kind,
                 attempt=attempt,
                 max_attempts=max_attempts,
                 exc=exc,
@@ -4077,6 +4218,7 @@ def _open_upstream_response(
                     _downstream_retry_payload(
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
+                        request_kind=request_kind,
                         attempt=attempt,
                         max_attempts=max_attempts,
                         exc=exc,
@@ -4260,6 +4402,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         timeout=upstream_timeout_seconds(),
                         event_context=adapter_event_context,
                         downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
+                        request_kind=RETRY_REQUEST_MAIN_GENERATION,
                     ) as response:
                         status = self._relay_upstream_response(
                             response,
@@ -4282,6 +4425,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         adapter_event_context,
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
+                        request_kind=RETRY_REQUEST_MAIN_GENERATION,
                         attempt=relay_attempt,
                         max_attempts=relay_attempts,
                         exc=exc,
@@ -4291,6 +4435,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         _downstream_retry_payload(
                             upstream_name=upstream_name,
                             upstream_format=upstream_format,
+                            request_kind=RETRY_REQUEST_MAIN_GENERATION,
                             attempt=relay_attempt,
                             max_attempts=relay_attempts,
                             exc=exc,
@@ -4572,6 +4717,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format="responses",
                 timeout=upstream_timeout_seconds(),
                 event_context=adapter_event_context,
+                request_kind="official_control",
             ) as response:
                 status = self._relay_upstream_response(response, upstream_name, request_id=request_id, model=None)
             write_proxy_event(

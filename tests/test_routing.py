@@ -249,26 +249,140 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 2000)
 
-    def test_open_upstream_response_does_not_retry_non_retryable_http_errors(self):
+    def test_open_upstream_response_does_not_retry_permanent_http_errors(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
-        error = HTTPError(
+        for status in (400, 401, 403, 404, 413, 415, 422, 501, 505):
+            with self.subTest(status=status):
+                self.write_proxy_event.reset_mock()
+                error = HTTPError(
+                    "https://ark.example.test/v1/responses",
+                    status,
+                    "Permanent Error",
+                    {},
+                    io.BytesIO(b'{"error":{"type":"invalid_request_error","message":"bad request"}}'),
+                )
+
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                        },
+                        clear=False,
+                    ),
+                    patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+                    patch("codex_proxy.time.sleep") as mock_sleep,
+                ):
+                    with self.assertRaises(HTTPError):
+                        codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="volcengine",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req_bad_request", "model": "volc/glm-5.2"},
+                            request_kind="main_generation",
+                        )
+
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
+                retry_events = [
+                    call for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "upstream_retry"
+                ]
+                self.assertEqual(retry_events, [])
+
+    def test_open_upstream_response_retries_transient_http_errors(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        for status in (408, 409, 421, 425, 429, 500, 502, 503, 504, 520):
+            with self.subTest(status=status):
+                self.write_proxy_event.reset_mock()
+                error = HTTPError(
+                    "https://ark.example.test/v1/responses",
+                    status,
+                    "Transient Error",
+                    {},
+                    io.BytesIO(b'{"error":{"type":"rate_limit_exceeded","message":"try later"}}'),
+                )
+                success = FakeResponse(b'{"id":"resp_retry"}')
+
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                        },
+                        clear=False,
+                    ),
+                    patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+                    patch("codex_proxy.time.sleep") as mock_sleep,
+                ):
+                    response = codex_proxy._open_upstream_response(
+                        request,
+                        upstream_name="volcengine",
+                        upstream_format="responses",
+                        timeout=1,
+                        event_context={"request_id": "req_transient", "model": "volc/glm-5.2"},
+                        request_kind="main_generation",
+                    )
+
+                self.assertIs(response, success)
+                self.assertEqual(mock_urlopen.call_count, 2)
+                mock_sleep.assert_called_once_with(2)
+
+    def test_open_upstream_response_respects_x_should_retry_headers(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        forced_retry = HTTPError(
             "https://ark.example.test/v1/responses",
             400,
             "Bad Request",
-            {},
-            io.BytesIO(b'{"error":"bad request"}'),
+            {"x-should-retry": "true"},
+            io.BytesIO(b'{"error":{"type":"invalid_request_error"}}'),
         )
+        forced_no_retry = HTTPError(
+            "https://ark.example.test/v1/responses",
+            503,
+            "Unavailable",
+            {"x-should-retry": "false"},
+            io.BytesIO(b'{"error":{"type":"server_error"}}'),
+        )
+        success = FakeResponse(b'{"id":"resp_retry"}')
 
         with (
             patch.dict(
                 os.environ,
                 {
                     "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
-                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+            patch("codex_proxy.urlopen", side_effect=[forced_retry, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            self.assertIs(
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    request_kind="main_generation",
+                ),
+                success,
+            )
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=forced_no_retry) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
             with self.assertRaises(HTTPError):
@@ -277,16 +391,49 @@ class RoutingTests(unittest.TestCase):
                     upstream_name="volcengine",
                     upstream_format="responses",
                     timeout=1,
-                    event_context={"request_id": "req_bad_request", "model": "volc/glm-5.2"},
+                    request_kind="main_generation",
                 )
-
         self.assertEqual(mock_urlopen.call_count, 1)
         mock_sleep.assert_not_called()
-        retry_events = [
-            call for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "upstream_retry"
+
+    def test_open_upstream_response_does_not_retry_quota_or_context_errors(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        cases = [
+            (429, b'{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}'),
+            (400, b'{"error":{"type":"context_length_exceeded","code":"context_length_exceeded"}}'),
+            (422, b'{"error":{"type":"invalid_request_error","code":"invalid_image"}}'),
         ]
-        self.assertEqual(retry_events, [])
+        for status, body in cases:
+            with self.subTest(status=status, body=body):
+                error = HTTPError(
+                    "https://ark.example.test/v1/responses",
+                    status,
+                    "Permanent Error",
+                    {},
+                    io.BytesIO(body),
+                )
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                        },
+                        clear=False,
+                    ),
+                    patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+                    patch("codex_proxy.time.sleep") as mock_sleep,
+                ):
+                    with self.assertRaises(HTTPError):
+                        codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="volcengine",
+                            upstream_format="responses",
+                            timeout=1,
+                            request_kind="image_proxy_vision",
+                        )
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
 
     def test_open_upstream_response_does_not_retry_when_auto_retry_disabled(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
