@@ -2,12 +2,13 @@ import { Check, ChevronDown, Save, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
-import type { Model, Settings } from "../lib/types";
+import type { Model, Provider, Settings } from "../lib/types";
 import { useToasts } from "./PageToast";
 
 interface SettingsDrawerProps {
   busy?: string | null;
   open: boolean;
+  providers: Provider[];
   settings: Settings | null;
   visionModels: Model[];
   onClose: () => void;
@@ -21,6 +22,7 @@ export function SettingsDrawer({
   onSave,
   onSyncHistory,
   open,
+  providers,
   settings,
   visionModels,
 }: SettingsDrawerProps) {
@@ -221,6 +223,7 @@ export function SettingsDrawer({
                   <span className="min-w-0 truncate">Vision model</span>
                   <VisionModelSelect
                     models={visionModels}
+                    providers={providers}
                     value={draft.gateway_image_proxy_model}
                     disabled={!draft.gateway_image_proxy_enabled || visionModels.length === 0}
                     onChange={(value) => setDraft({ ...draft, gateway_image_proxy_model: value })}
@@ -263,29 +266,22 @@ interface VisionModelParts {
   title: string;
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-  official: "OpenAI",
-  openai: "OpenAI",
-  "ollama-cloud": "Ollama Cloud",
-  ollama: "Ollama",
-  volc: "Volc",
-  xunfei: "Xunfei",
-  "minimax-cn": "MiniMax.cn",
-};
-
-function visionModelParts(model: Model): VisionModelParts {
+function visionModelParts(model: Model, providerLabels: Map<string, string>): VisionModelParts {
   const rawId = model.id.trim();
   const slashIndex = rawId.indexOf("/");
   const modelId = slashIndex > 0 ? rawId.slice(slashIndex + 1) : rawId;
-  const idProvider = slashIndex > 0 ? providerLabel(rawId.slice(0, slashIndex)) : "";
-  const displayProvider = providerFromDisplayName(model.display_name, modelId);
-  const sourceProvider = model.source_kind === "official" ? "OpenAI" : providerLabel(model.source_kind ?? "");
+  const idProvider = slashIndex > 0 ? providerLabel(rawId.slice(0, slashIndex), providerLabels) : "";
+  const displayProvider = providerLabel(providerFromDisplayName(model.display_name, modelId), providerLabels);
+  const sourceProvider =
+    model.source_kind === "official"
+      ? "OpenAI"
+      : providerLabel(model.source_kind ?? "", providerLabels);
   const provider = idProvider || displayProvider || sourceProvider || "Provider";
 
   return {
     modelId,
     provider,
-    title: `${modelId} - ${provider}`,
+    title: `${modelId} ${provider}`,
   };
 }
 
@@ -301,21 +297,48 @@ function providerFromDisplayName(displayName: string | null | undefined, modelId
   return firstToken;
 }
 
-function providerLabel(value: string) {
+function providerLabel(value: string, providerLabels: Map<string, string>) {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
     return "";
   }
-  const known = PROVIDER_LABELS[normalized];
+  const known = providerLabels.get(normalized);
   if (known) {
     return known;
+  }
+  if (normalized === "official" || normalized === "official-openai" || normalized === "official_openai") {
+    return "OpenAI";
   }
   return value
     .trim()
     .split(/[-_\s]+/)
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map(formatProviderToken)
     .join(" ");
+}
+
+function providerLabelMap(providers: Provider[]) {
+  const labels = new Map<string, string>();
+  for (const provider of providers) {
+    const name = provider.name.trim() || provider.id;
+    labels.set(provider.id.trim().toLowerCase(), name);
+    const displayPrefix = provider.display_prefix?.trim();
+    if (displayPrefix) {
+      labels.set(displayPrefix.toLowerCase(), name);
+    }
+  }
+  return labels;
+}
+
+function formatProviderToken(part: string) {
+  const lower = part.toLowerCase();
+  if (lower === "openai") {
+    return "OpenAI";
+  }
+  if (lower === "cn") {
+    return "CN";
+  }
+  return `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`;
 }
 
 function normalizeProviderToken(value: string) {
@@ -372,17 +395,20 @@ function VisionModelSelect({
   disabled,
   models,
   onChange,
+  providers,
   value,
 }: {
   disabled?: boolean;
   models: Model[];
   onChange: (value: string) => void;
+  providers: Provider[];
   value: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
+  const providerLabels = providerLabelMap(providers);
   const selectedModel = models.find((model) => model.id === value);
-  const selectedParts = selectedModel ? visionModelParts(selectedModel) : null;
+  const selectedParts = selectedModel ? visionModelParts(selectedModel, providerLabels) : null;
   const label = models.length === 0 ? "No vision models" : selectedParts?.title ?? "Select model";
 
   useEffect(() => {
@@ -464,7 +490,7 @@ function VisionModelSelect({
           {models.map((model) => (
             <VisionModelOption
               key={model.id}
-              parts={visionModelParts(model)}
+              parts={visionModelParts(model, providerLabels)}
               selected={model.id === value}
               onSelect={() => selectModel(model.id)}
             />

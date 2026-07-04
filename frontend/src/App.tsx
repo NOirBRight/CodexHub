@@ -405,6 +405,7 @@ export default function App() {
       <SettingsDrawer
         busy={busy}
         open={settingsOpen}
+        providers={runtime.providers}
         settings={runtime.settings}
         visionModels={visionModels}
         onClose={() => setSettingsOpen(false)}

@@ -508,9 +508,11 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(drawerSource, /Vision model/);
   assert.match(drawerSource, /function VisionModelSelect/);
   assert.match(drawerSource, /grid min-h-9 min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(0,190px\)\] items-center gap-3 rounded-inner bg-surface/);
-  assert.match(drawerSource, /function visionModelParts\(model: Model\): VisionModelParts/);
+  assert.match(drawerSource, /function visionModelParts\(model: Model, providerLabels: Map<string, string>\): VisionModelParts/);
   assert.match(drawerSource, /const modelId = slashIndex > 0 \? rawId\.slice\(slashIndex \+ 1\) : rawId/);
-  assert.match(drawerSource, /providerFromDisplayName\(model\.display_name, modelId\)/);
+  assert.match(drawerSource, /providerLabel\(providerFromDisplayName\(model\.display_name, modelId\), providerLabels\)/);
+  assert.match(drawerSource, /provider\.display_prefix\?\.trim\(\)/);
+  assert.match(drawerSource, /labels\.set\(displayPrefix\.toLowerCase\(\), name\)/);
   assert.match(drawerSource, /function VisionModelValue/);
   assert.match(drawerSource, /rounded-overlay bg-surface p-1 shadow-overlay/);
   assert.match(drawerSource, /role="listbox"/);
