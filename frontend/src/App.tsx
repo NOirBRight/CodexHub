@@ -245,8 +245,23 @@ export default function App() {
     }
   }
 
+  async function syncHistory(targetProvider: string) {
+    setBusy("history");
+    try {
+      const message = await api.syncHistory(targetProvider);
+      setBanner(message);
+      return message;
+    } catch (err) {
+      const message = messageFromError(err);
+      setBanner(message);
+      throw err;
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
-    <div className="grid h-screen min-h-[768px] min-w-[1024px] grid-rows-[auto_auto_minmax(0,1fr)] bg-panel text-ink">
+    <div className="grid h-screen min-h-[768px] min-w-[1024px] grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
       <RuntimeBar
         busy={busy}
         message={banner}
@@ -257,7 +272,7 @@ export default function App() {
         onStop={() => void runRuntimeAction("stop", api.stopProxy)}
       />
 
-      <nav className="flex min-h-[45px] items-center gap-1 border-b border-line bg-white px-4">
+      <nav className="flex min-h-[45px] items-center gap-1 bg-surface px-4 shadow-hairline">
         {contract.tabs.map((tab) => (
           <button
             key={tab.id}
@@ -270,7 +285,7 @@ export default function App() {
           >
             {tab.label}
             {tab.id === "gateway" && exportedCount > 0 && (
-              <span className="ml-2 rounded-full border border-line bg-panel px-1.5 py-0.5 text-[11px] text-slate-500">
+              <span className="ml-2 rounded-full bg-panel px-1.5 py-0.5 text-[11px] text-slate-500 shadow-control">
                 {exportedCount}
               </span>
             )}
@@ -292,6 +307,7 @@ export default function App() {
               await loadRuntime();
               await loadGatewayClients();
             }}
+            onStartProxy={() => runRuntimeAction("start", api.startProxy)}
           />
         ) : (
           <GatewayPage
@@ -322,21 +338,12 @@ export default function App() {
         settings={runtime.settings}
         onClose={() => setSettingsOpen(false)}
         onSave={saveSettings}
-        onSyncHistory={async (targetProvider) => {
-          setBusy("history");
-          try {
-            const message = await api.syncHistory(targetProvider);
-            setBanner(message);
-            return message;
-          } finally {
-            setBusy(null);
-          }
-        }}
+        onSyncHistory={syncHistory}
       />
       {settingsOpen && (
         <button
           type="button"
-          className="fixed inset-0 z-40 cursor-default bg-black/10"
+          className="fixed inset-0 z-40 cursor-default bg-black/10 backdrop-blur-[1px]"
           aria-label="Close settings"
           onClick={() => setSettingsOpen(false)}
         />

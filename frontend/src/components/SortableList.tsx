@@ -262,16 +262,16 @@ export function SortableList<T>({
             ref={(node) => setRowRef(id, node)}
             data-sortable-row="true"
             className={cx(
-              "group grid grid-cols-[30px_minmax(0,1fr)] items-stretch rounded-md border border-line bg-white shadow-subtle transition-[border-color,box-shadow,opacity,transform] duration-150 ease-out",
+              "group grid grid-cols-[30px_minmax(0,1fr)] items-stretch rounded-inner bg-surface shadow-card transition-[box-shadow,opacity,transform] duration-150 ease-out hover:shadow-raised",
               draggedId === id && "invisible pointer-events-none border-transparent bg-transparent shadow-none",
-              dropTargetId === id && draggedId !== id && "border-action shadow-md",
+              dropTargetId === id && draggedId !== id && "shadow-raised ring-2 ring-action/20",
             )}
           >
             <button
               type="button"
               data-sortable-handle="true"
               className={cx(
-                "focus-ring flex touch-none select-none items-center justify-center border-r border-transparent bg-transparent text-slate-300 transition-colors hover:text-slate-500 group-hover:border-line group-hover:text-slate-400 [&_*]:pointer-events-none",
+                "focus-ring flex touch-none select-none items-center justify-center rounded-l-inner border-r border-transparent bg-transparent text-slate-300 transition-colors hover:text-slate-500 group-hover:border-line group-hover:text-slate-400 [&_*]:pointer-events-none",
                 draggedId ? "cursor-grabbing" : "cursor-grab",
               )}
               aria-label="Reorder"
@@ -290,7 +290,7 @@ export function SortableList<T>({
       {dragGhost && draggedItem
         ? createPortal(
             <div
-              className="pointer-events-none fixed z-50 grid grid-cols-[30px_minmax(0,1fr)] items-stretch rounded-md border border-action bg-white opacity-95 shadow-xl"
+              className="pointer-events-none fixed z-50 grid grid-cols-[30px_minmax(0,1fr)] items-stretch rounded-inner bg-surface opacity-95 shadow-floating ring-2 ring-action/20"
               style={{
                 left: dragGhost.x,
                 top: dragGhost.y,

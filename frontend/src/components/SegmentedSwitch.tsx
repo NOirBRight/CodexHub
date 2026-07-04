@@ -27,7 +27,7 @@ export function SegmentedSwitch<T extends string>({
   return (
     <div
       className={cx(
-        "grid rounded-md border border-line bg-panel p-1 shadow-subtle",
+        "grid rounded-panel bg-panel p-1 shadow-control",
         className,
       )}
       role="group"
@@ -40,8 +40,8 @@ export function SegmentedSwitch<T extends string>({
             key={option.value}
             type="button"
             className={cx(
-              "focus-ring min-h-8 rounded px-3 py-1.5 text-sm font-semibold transition-colors",
-              active ? "bg-ink text-white shadow-subtle" : "text-slate-600 hover:bg-white",
+              "focus-ring min-h-8 rounded-control px-3 py-1.5 text-sm font-semibold transition-[box-shadow,background-color,color,transform] duration-150 ease-out active:scale-[0.96]",
+              active ? "bg-ink text-white shadow-raised" : "text-slate-600 hover:bg-surface",
               option.description && "text-left",
             )}
             disabled={disabled || option.disabled}

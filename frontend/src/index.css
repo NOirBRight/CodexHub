@@ -4,12 +4,14 @@
 
 :root {
   color: #1f2933;
-  background: #eef2f7;
+  background: #f8f8f7;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -20,6 +22,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background: #f8f8f7;
 }
 
 button,
@@ -79,11 +82,12 @@ html.sortable-list-dragging * {
 }
 
 .focus-ring {
-  @apply outline-none ring-action/30 focus-visible:ring-2 focus-visible:ring-offset-2;
+  --tw-ring-offset-color: #f8f8f7;
+  @apply outline-none ring-action/20 focus-visible:ring-2 focus-visible:ring-offset-2;
 }
 
 .field {
-  @apply focus-ring h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink shadow-subtle placeholder:text-slate-400;
+  @apply focus-ring h-10 w-full rounded-control border border-line bg-surface px-3 text-sm text-ink shadow-field placeholder:text-slate-400 transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-white focus-visible:border-action/40;
 }
 
 .field-compact {
@@ -91,5 +95,38 @@ html.sortable-list-dragging * {
 }
 
 .mini-button {
-  @apply focus-ring h-8 rounded-md border border-line bg-panel px-2 text-xs font-medium text-slate-700 hover:bg-slate-100;
+  @apply focus-ring h-8 rounded-control border border-line bg-surface px-2 text-xs font-medium text-slate-700 shadow-control transition-[box-shadow,border-color,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96];
+}
+
+.codexhub-flow-beam {
+  animation: codexhub-flow-up 2.8s cubic-bezier(0.37, 0, 0.32, 1) infinite;
+  background: linear-gradient(
+    180deg,
+    rgba(16, 185, 129, 0),
+    rgba(52, 211, 153, 0.85),
+    rgba(16, 185, 129, 0)
+  );
+  border-radius: 999px;
+  filter: blur(1.5px);
+}
+
+.codexhub-flow-beam-delay {
+  animation-delay: -1.4s;
+}
+
+@keyframes codexhub-flow-up {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, var(--flow-distance, 92px));
+  }
+  22% {
+    opacity: 0.85;
+  }
+  78% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -44px);
+  }
 }

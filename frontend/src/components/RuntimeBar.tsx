@@ -31,11 +31,11 @@ export function RuntimeBar({
 
   return (
     <header
-      className="flex min-h-[56px] items-center gap-3 overflow-hidden border-b border-line bg-white pl-4 shadow-subtle"
+      className="flex min-h-[56px] items-center gap-3 overflow-hidden bg-surface pl-4 shadow-hairline"
       data-tauri-drag-region
     >
       <div className="flex shrink-0 items-center gap-2">
-        <span className="grid h-8 w-8 place-items-center rounded-full border border-line bg-white shadow-subtle">
+        <span className="grid h-8 w-8 place-items-center rounded-full bg-surface shadow-control">
           <img src={codexLogo} alt="" className="h-5 w-5" aria-hidden="true" />
         </span>
         <span className="truncate text-base font-semibold text-ink">CodexHub</span>
@@ -45,7 +45,7 @@ export function RuntimeBar({
 
       <div className="flex shrink-0 items-center gap-2">
         <div
-          className="flex h-8 max-w-[360px] items-center gap-2 rounded-md border border-line bg-panel px-2 text-xs"
+          className="flex h-8 max-w-[360px] items-center gap-2 rounded-control bg-panel px-2 text-xs shadow-control"
           title={message ?? `${address} ${running ? "running" : "stopped"}`}
         >
           <span className={cx("h-2 w-2 rounded-full", running ? "bg-ok" : "bg-danger")} />
@@ -59,7 +59,7 @@ export function RuntimeBar({
         </div>
         <button
           type="button"
-          className="focus-ring inline-flex h-8 items-center justify-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-semibold text-slate-700 hover:bg-panel"
+          className="focus-ring inline-flex h-8 items-center justify-center gap-1 rounded-control bg-surface px-2 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           disabled={Boolean(busy)}
           onClick={running ? onStop : onStart}
           title={running ? "Stop the local Gateway runtime" : "Start the local Gateway runtime"}
@@ -69,7 +69,7 @@ export function RuntimeBar({
         </button>
         <button
           type="button"
-          className="focus-ring grid h-8 w-8 place-items-center rounded-md border border-line bg-white text-slate-600 hover:bg-panel"
+          className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           onClick={onOpenSettings}
           title="Settings"
         >
@@ -132,7 +132,7 @@ function WindowControlButton({
     <button
       type="button"
       className={cx(
-        "focus-ring grid h-9 w-10 place-items-center text-slate-600 hover:bg-panel hover:text-ink",
+        "focus-ring grid h-9 w-10 place-items-center rounded-control text-slate-600 transition-[background-color,color,transform] duration-150 ease-out hover:bg-panel hover:text-ink active:scale-[0.96]",
         danger && "hover:bg-red-50 hover:text-danger",
       )}
       aria-label={label}

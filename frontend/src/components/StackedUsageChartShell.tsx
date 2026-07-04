@@ -10,7 +10,6 @@ interface StackedUsageChartShellProps {
   providers: Provider[];
   summary: GatewayUsageSummary | null;
   telemetryStatus?: TelemetryStatus | null;
-  usageError?: string | null;
 }
 
 type UsageRange = "7d" | "1m" | "custom";
@@ -81,7 +80,6 @@ export function StackedUsageChartShell({
   providers,
   summary,
   telemetryStatus,
-  usageError,
 }: StackedUsageChartShellProps) {
   const initialCustomRange = useMemo(() => defaultCustomRange(), []);
   const [range, setRange] = useState<UsageRange>("7d");
@@ -106,7 +104,7 @@ export function StackedUsageChartShell({
     () => stacked.buckets.map((bucket) => bucket.label),
     [stacked.buckets],
   );
-  const telemetryMessage = usageTelemetryMessage(telemetryStatus, usageError);
+  const telemetryMessage = usageTelemetryMessage(telemetryStatus);
 
   useEffect(() => {
     onWindowChange?.(queryWindow);
@@ -162,20 +160,20 @@ export function StackedUsageChartShell({
   }
 
   return (
-    <section className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 rounded-md border border-line bg-white p-4 shadow-subtle">
-      <div className="flex items-center justify-between gap-3">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 overflow-hidden rounded-panel bg-surface p-4 shadow-card">
+      <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="shrink-0 text-sm font-semibold text-ink">Usage &amp; Cost</h2>
           {telemetryMessage && (
             <span
-              className="min-w-0 truncate rounded-full border border-line bg-panel px-2 py-1 text-[11px] font-semibold text-slate-500"
+              className="min-w-0 max-w-[260px] truncate rounded-full bg-panel px-2 py-1 text-[11px] font-semibold text-slate-500 shadow-control"
               title={telemetryMessage}
             >
               {telemetryMessage}
             </span>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center justify-end gap-2">
           <UsageDropdown
             label="Metric"
             open={metricOpen}
@@ -240,7 +238,7 @@ export function StackedUsageChartShell({
           />
 
           <div ref={customRangeRef} className="relative">
-            <div className="grid grid-cols-[54px_54px_74px] rounded-full border border-line bg-panel p-0.5 text-[11px] shadow-subtle">
+            <div className="grid grid-cols-[54px_54px_74px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
               {[
                 { value: "7d", label: "7D" },
                 { value: "1m", label: "1M" },
@@ -251,7 +249,7 @@ export function StackedUsageChartShell({
                   type="button"
                   className={
                     range === option.value
-                      ? "h-7 rounded-full bg-white px-2 font-semibold text-ink shadow-subtle"
+                      ? "h-7 rounded-full bg-surface px-2 font-semibold text-ink shadow-raised"
                       : "h-7 rounded-full px-2 font-semibold text-slate-500 hover:text-ink"
                   }
                   aria-pressed={range === option.value}
@@ -280,7 +278,7 @@ export function StackedUsageChartShell({
         <Metric label="Cached input" value={cachedInputLabel(summary)} title={cachedInputTitle(summary)} />
       </div>
 
-      <div className="relative min-h-0 overflow-hidden rounded-md border border-line bg-panel">
+      <div className="relative min-h-0 overflow-hidden rounded-panel bg-panel shadow-inner">
         {metric === "token" && !stacked.hasData ? (
           <NoTokenChart axis={axis} pendingMessage={pendingMessage} summary={summary} />
         ) : (
@@ -319,7 +317,7 @@ function UsageDropdown<T extends string>({
     <div className="relative">
       <button
         type="button"
-        className="focus-ring flex h-8 w-[124px] items-center justify-between gap-1.5 rounded-full border border-line bg-white px-3 text-[11px] font-semibold text-slate-600 shadow-subtle"
+        className="focus-ring flex h-8 w-[124px] items-center justify-between gap-1.5 rounded-full bg-surface px-3 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
         aria-expanded={open}
         onClick={onToggle}
       >
@@ -328,7 +326,7 @@ function UsageDropdown<T extends string>({
         <ChevronDown size={13} className="text-ink" />
       </button>
       {open && (
-        <div className="absolute right-0 top-9 z-20 w-[124px] space-y-1 rounded-[14px] border border-line bg-white p-1 shadow-xl">
+        <div className="absolute right-0 top-9 z-20 w-[124px] space-y-1 rounded-panel bg-surface p-1 shadow-floating">
           {options.map((option) => {
             const selected = value === option.value;
             return (
@@ -337,8 +335,8 @@ function UsageDropdown<T extends string>({
                 type="button"
                 className={
                   selected
-                    ? "flex h-7 w-full items-center justify-between rounded-[10px] bg-panel px-2.5 text-left text-[11px] font-semibold text-ink"
-                    : "flex h-7 w-full items-center justify-between rounded-[10px] px-2.5 text-left text-[11px] font-semibold text-ink hover:bg-panel"
+                    ? "flex h-7 w-full items-center justify-between rounded-control bg-panel px-2.5 text-left text-[11px] font-semibold text-ink"
+                    : "flex h-7 w-full items-center justify-between rounded-control px-2.5 text-left text-[11px] font-semibold text-ink hover:bg-panel"
                 }
                 onClick={() => onSelect(option.value)}
               >
@@ -366,7 +364,7 @@ function CalendarRangePopover({
 }) {
   const nextMonth = addMonths(month, 1);
   return (
-    <div className="absolute right-0 top-10 z-30 w-[400px] rounded-[16px] border border-line bg-white p-3 shadow-2xl">
+    <div className="absolute right-0 top-10 z-30 w-[400px] rounded-overlay bg-surface p-3 shadow-overlay">
       <div className="mb-2 flex items-center justify-between">
         <button
           type="button"
@@ -427,7 +425,7 @@ function MonthGrid({
               type="button"
               className={
                 inRange
-                  ? "mx-0 grid h-6 place-items-center rounded-full bg-slate-100 text-ink"
+                  ? "mx-0 grid h-6 place-items-center rounded-full bg-action/15 text-ink"
                   : "mx-0 grid h-6 place-items-center rounded-full text-slate-500 hover:bg-panel hover:text-ink"
               }
               onClick={() => onSelect(day)}
@@ -546,7 +544,7 @@ function StackedUsageChart({
 
   return (
     <div className="grid h-full min-h-[300px] p-4">
-      <div className="relative h-full min-h-[250px] overflow-hidden rounded-md border border-dashed border-line bg-white/70">
+      <div className="relative h-full min-h-[250px] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
         <div className="absolute bottom-14 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
           <span title={formatNumber(maxTotal)}>{formatAxisNumber(maxTotal)}</span>
           <span className="self-center" title={formatNumber(Math.round(maxTotal / 2))}>
@@ -684,7 +682,7 @@ function StackedUsageChart({
         {hasData && hover && activeBucket && (
           <div
             ref={tooltipRef}
-            className="pointer-events-none absolute z-20 rounded-md border border-line bg-white p-3 text-xs shadow-xl"
+            className="pointer-events-none absolute z-20 rounded-inner bg-surface p-3 text-xs shadow-floating"
             style={{
               left: boundedTooltipLeft,
               top: tooltipTop,
@@ -735,7 +733,7 @@ function NoTokenChart({
   const columns = chartColumns(axis.length);
   return (
     <div className="grid h-full min-h-[300px] p-4">
-      <div className="grid h-full min-h-[258px] grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-md border border-dashed border-line bg-white/70">
+      <div className="grid h-full min-h-[258px] grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
         <div className="relative overflow-hidden">
           <div className="absolute inset-x-8 bottom-0 top-4 grid grid-rows-4">
             {Array.from({ length: 4 }).map((_, index) => (
@@ -749,7 +747,7 @@ function NoTokenChart({
             {axis.map((label) => (
               <span
                 key={label}
-                className="h-2 min-w-0 rounded-t-sm border border-line bg-panel"
+                className="h-2 min-w-0 rounded-t-sm bg-panel shadow-hairline"
               />
             ))}
           </div>
@@ -1052,7 +1050,7 @@ function rangeToSpan(range: UsageRange, customRange: DateSpan): DateSpan {
 
 function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="rounded-md border border-line bg-panel p-3" title={title}>
+    <div className="rounded-inner bg-panel p-3 shadow-control" title={title}>
       <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
         {label}
       </div>
@@ -1158,10 +1156,7 @@ function formatCompactAxisValue(value: number) {
   return value.toFixed(1).replace(/\.0$/, "");
 }
 
-function usageTelemetryMessage(status?: TelemetryStatus | null, error?: string | null) {
-  if (error) {
-    return `Usage telemetry delayed: ${error}`;
-  }
+function usageTelemetryMessage(status?: TelemetryStatus | null) {
   if (!status || (!status.backfill_pending && status.lag_bytes <= 0)) {
     return null;
   }

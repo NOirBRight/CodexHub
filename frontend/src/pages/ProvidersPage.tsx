@@ -17,7 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PageToast } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
-import { api, messageFromError } from "../lib/tauri";
+import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   AppStatus,
   GatewayStatus,
@@ -59,14 +59,17 @@ type CodexAuthState = "authorized" | "missing" | "unknown";
 export function ProvidersPage({
   gatewayStatus: gatewayStatusSnapshot,
   onGatewayChanged,
+  onStartProxy,
 }: {
   gatewayStatus?: GatewayStatus | null;
   onGatewayChanged?: () => Promise<void>;
+  onStartProxy?: () => Promise<void>;
 }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(null);
+  const [connectionPreview, setConnectionPreview] = useState<boolean | null>(null);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>("unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>([]);
@@ -139,6 +142,8 @@ export function ProvidersPage({
   }, [providers]);
   const canAdd = form.name.trim() && form.base_url.trim();
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
+  const realCodexConnected = codexStatus?.mode === "custom";
+  const codexConnected = connectionPreview ?? realCodexConnected;
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
@@ -153,8 +158,8 @@ export function ProvidersPage({
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  function showToast(text: string, tone: PageToastTone = "info") {
-    setToastState({ text, tone });
+  function showToast(text: string, tone: PageToastTone = "info", action?: PageToastState["action"]) {
+    setToastState({ action, text, tone });
   }
 
   function dismissToast() {
@@ -171,10 +176,40 @@ export function ProvidersPage({
 
   function setError(value: string | null) {
     if (value) {
+      if (isBackendDisconnectedMessage(value)) {
+        showBackendDisconnectedToast();
+        return;
+      }
       showToast(value, "error");
       return;
     }
     setToastState((current) => (current?.tone === "error" ? null : current));
+  }
+
+  function showBackendDisconnectedToast() {
+    showToast("Backend is not connected", "error", {
+      label: "Start",
+      onClick: () => void startBackendFromToast(),
+    });
+  }
+
+  async function startBackendFromToast() {
+    setBusy("start");
+    showToast("Starting backend...", "loading");
+    try {
+      if (onStartProxy) {
+        await onStartProxy();
+      } else {
+        await api.startProxy();
+      }
+      await load();
+      await refreshGatewayState();
+      setMessage("Backend started");
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function refreshGatewayState() {
@@ -232,6 +267,7 @@ export function ProvidersPage({
       setSettings(normalizedSettings);
       setSettingsDraft(normalizedSettings);
       setCodexStatus(nextCodexStatus);
+      setConnectionPreview(null);
       setLoadedGatewayStatus(gatewayStatus);
       setCodexAuthState(codexAuthStateFromGatewayStatus(gatewayStatus));
       setProviders(nextProviders);
@@ -376,22 +412,32 @@ export function ProvidersPage({
   }
 
   async function toggleCodexHubConnection() {
-    if (!settingsDraft) {
-      return;
-    }
-    const nextMode = codexStatus?.mode === "custom" ? "official" : "custom";
+    const nextMode = codexConnected ? "official" : "custom";
     const actionLabel = nextMode === "custom" ? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";
+    setConnectionPreview(nextMode === "custom");
     setBusy("route");
     showToast(`${actionLabel}...`, "loading");
     try {
       const status = await api.switchMode(nextMode, false);
       setCodexStatus(status);
+      setConnectionPreview(null);
       setMessage(codexHubConnectionSuccessMessage(nextMode));
       setError(null);
       const targetProvider =
-        nextMode === "custom" || settingsDraft.unified_codex_history ? "custom" : "openai";
+        nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
       void repairUnifiedHistoryInBackground(targetProvider);
     } catch (err) {
+      const message = messageFromError(err);
+      if (isBackendDisconnectedMessage(message)) {
+        setConnectionPreview(nextMode === "custom");
+        setError(message);
+        return;
+      }
+      if (!settingsDraft) {
+        setError(message);
+        return;
+      }
+      setConnectionPreview(null);
       setError(codexHubConnectionErrorMessage(err));
     } finally {
       setBusy(null);
@@ -402,7 +448,7 @@ export function ProvidersPage({
     try {
       const message = await api.syncHistory(targetProvider);
       if (!historyRepairAlreadyUnified(message)) {
-        showToast(historyRepairSuccessMessage(message), "info");
+        showToast(historyRepairSuccessMessage(message), "success");
       }
     } catch (err) {
       showToast(`History repair failed: ${messageFromError(err)}`, "error");
@@ -595,10 +641,10 @@ export function ProvidersPage({
 
   return (
     <main className="relative grid h-full min-h-0 min-w-[980px] grid-cols-[minmax(0,4fr)_minmax(0,6fr)] gap-4">
-      <aside className="min-h-0 min-w-0 overflow-hidden rounded-md border border-line bg-white shadow-subtle">
+      <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
-          codexConnected={codexStatus?.mode === "custom"}
+          codexConnected={codexConnected}
           gatewayStatus={gatewayStatus}
           busy={busy}
           enabledProviderModels={enabledProviderModels}
@@ -614,10 +660,11 @@ export function ProvidersPage({
           onToggleProvider={toggleProviderEnabled}
           onToggleConnection={() => void toggleCodexHubConnection()}
           selectedId={selectedId}
+          toastVisible={Boolean(toast)}
         />
       </aside>
 
-      <section className="min-h-0 min-w-0 overflow-hidden rounded-md border border-line bg-white shadow-subtle">
+      <section className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto]">
           <div className="min-h-0 overflow-hidden">
             {selectedId === ADD_ID ? (
@@ -695,6 +742,7 @@ function ProviderSourceSidebar({
   onToggleProvider,
   onToggleConnection,
   selectedId,
+  toastVisible,
 }: {
   busy: string | null;
   codexAuthState: CodexAuthState;
@@ -713,12 +761,14 @@ function ProviderSourceSidebar({
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   onToggleConnection: () => void;
   selectedId: string;
+  toastVisible: boolean;
 }) {
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 p-3">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 p-3">
       <OfficialOpenAICard
         authState={codexAuthState}
         active={selectedId === OFFICIAL_ID}
+        connected={codexConnected}
         enabledModelCount={officialEnabledCount}
         included={officialIncluded}
         modelCount={officialCount}
@@ -743,7 +793,39 @@ function ProviderSourceSidebar({
         onReorder={onReorder}
         onSelect={onSelect}
         onToggleProvider={onToggleProvider}
+        toastVisible={toastVisible}
       />
+    </div>
+  );
+}
+
+function ConnectionLink({ connected }: { connected: boolean }) {
+  return (
+    <div
+      className="pointer-events-none relative flex h-full min-h-[52px] items-center justify-center"
+      aria-hidden="true"
+    >
+      {connected ? (
+        <span className="absolute left-1/2 top-[-14px] bottom-[-14px] w-[3px] -translate-x-1/2 overflow-hidden rounded-full bg-gradient-to-t from-emerald-400/60 via-emerald-500/75 to-emerald-400/60">
+          <span className="codexhub-flow-beam absolute left-1/2 top-0 h-12 w-[7px] [--flow-distance:92px]" />
+          <span className="codexhub-flow-beam codexhub-flow-beam-delay absolute left-1/2 top-0 h-12 w-[7px] [--flow-distance:92px]" />
+        </span>
+      ) : (
+        <>
+          <span className="absolute left-1/2 top-[-14px] h-[calc(50%-8px)] w-[3px] -translate-x-1/2 rounded-full bg-slate-300/80" />
+          <span className="absolute left-1/2 bottom-[-14px] h-[calc(50%-8px)] w-[3px] -translate-x-1/2 rounded-full bg-slate-300/80" />
+        </>
+      )}
+      <span
+        className={cx(
+          "relative z-10 grid h-4 w-4 place-items-center rounded-full border transition-[background-color,border-color,box-shadow] duration-200 ease-out",
+          connected
+            ? "border-emerald-500 bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.16)]"
+            : "border-slate-300 bg-surface",
+        )}
+      >
+        <span className={cx("h-1.5 w-1.5 rounded-full", connected ? "bg-white" : "bg-slate-300")} />
+      </span>
     </div>
   );
 }
@@ -751,6 +833,7 @@ function ProviderSourceSidebar({
 function OfficialOpenAICard({
   active,
   authState,
+  connected,
   enabledModelCount,
   included,
   modelCount,
@@ -759,6 +842,7 @@ function OfficialOpenAICard({
 }: {
   active: boolean;
   authState: CodexAuthState;
+  connected: boolean;
   enabledModelCount: number;
   included: boolean;
   modelCount: number;
@@ -768,8 +852,13 @@ function OfficialOpenAICard({
   const authChip = codexAuthChip(authState);
 
   return (
-    <section className="grid gap-3 rounded-md border border-line bg-panel p-3">
-      <button type="button" className="focus-ring rounded text-left" onClick={onSelect}>
+    <section
+      className={cx(
+        "grid gap-3 rounded-panel p-3 shadow-card transition-[background-color,box-shadow] duration-150 ease-out",
+        connected ? "bg-emerald-50/55" : "bg-surface",
+      )}
+    >
+      <button type="button" className="focus-ring rounded-inner text-left" onClick={onSelect}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold">Codex Desktop</h2>
@@ -779,7 +868,7 @@ function OfficialOpenAICard({
         </div>
       </button>
 
-      <div className="rounded-md border border-line bg-white">
+      <div className="rounded-inner bg-surface shadow-control">
         <ProviderNavButton
           active={active}
           enabled={included}
@@ -808,46 +897,26 @@ function HubConnectionBridge({
   const label = connecting
     ? "Connecting"
     : connected
-      ? "Connected Codex Hub"
+      ? "Connected to Codex Hub"
       : "Connect to Codex Hub";
 
   return (
-    <div className="grid grid-cols-[34px_minmax(0,1fr)] items-center gap-3 rounded-md border border-action/20 bg-blue-50/60 px-2.5 py-2">
-      <span className="relative grid h-14 w-8 place-items-center">
-        <span
-          className={cx(
-            "absolute -inset-y-2 left-1/2 border-l border-dashed",
-            connected ? "border-emerald-300" : "border-action/35",
-          )}
-          aria-hidden="true"
-        />
-        <span
-          className={cx(
-            "relative z-10 grid h-8 w-8 place-items-center rounded-full border shadow-sm",
-            connecting && "animate-pulse",
-            connected
-              ? "border-emerald-300 bg-emerald-50 text-emerald-700"
-              : "border-action/30 bg-white text-action",
-          )}
-          title={connected ? "Codex App connected to Hub" : "Codex App disconnected from Hub"}
-          aria-label={connected ? "Codex App connected to Hub" : "Codex App disconnected from Hub"}
-        >
-          {connected ? <Link2 size={14} /> : <Link2Off size={14} />}
-        </span>
-      </span>
+    <div className="relative grid grid-cols-[44px_minmax(0,1fr)] items-center gap-2.5 px-1 py-1.5">
+      <ConnectionLink connected={connected} />
       <button
         type="button"
         className={cx(
-          "focus-ring flex h-11 min-w-0 items-center justify-center rounded-full border px-4 text-sm font-semibold shadow-sm transition-colors disabled:opacity-80",
-          connecting && "bg-action text-white",
+          "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-80",
+          connecting && "animate-pulse",
           connected
-            ? "border-emerald-700 bg-emerald-600 text-white hover:bg-emerald-700"
-            : "border-action bg-action text-white hover:bg-blue-700",
+            ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
+            : "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
         )}
         disabled={disabled}
         onClick={onToggle}
         title={connected ? "Disconnect Codex App from Hub" : "Connect Codex App to Hub"}
       >
+        {connected ? <Link2 size={15} /> : <Link2Off size={15} />}
         {label}
       </button>
     </div>
@@ -866,6 +935,7 @@ function CodexHubProviderCard({
   onSelect,
   onToggleProvider,
   selectedId,
+  toastVisible,
 }: {
   activeAdd: boolean;
   connected: boolean;
@@ -878,12 +948,14 @@ function CodexHubProviderCard({
   onSelect: (id: string) => void;
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   selectedId: string;
+  toastVisible: boolean;
 }) {
   return (
     <section
       className={cx(
-        "grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 rounded-md border p-3 transition-colors",
-        connected ? "border-emerald-200 bg-emerald-50/45" : "border-line bg-slate-50",
+        "grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-panel px-3 pt-3 shadow-card transition-colors",
+        connected ? "bg-emerald-50/55" : "bg-surface",
+        toastVisible ? "pb-16" : "pb-3",
       )}
     >
       <div className="flex items-start justify-between gap-3">
@@ -920,7 +992,7 @@ function CodexHubProviderCard({
             )}
           />
         ) : (
-          <div className="grid min-h-[96px] place-items-center rounded-md border border-dashed border-line bg-white px-3 text-center text-xs text-slate-500">
+          <div className="grid min-h-[96px] place-items-center rounded-inner bg-panel-soft px-3 text-center text-xs text-slate-500 shadow-hairline">
             Add a Hub provider to expose external models.
           </div>
         )}
@@ -929,8 +1001,8 @@ function CodexHubProviderCard({
       <button
         type="button"
         className={cx(
-          "focus-ring flex h-10 w-full items-center justify-center gap-2 rounded-md border border-dashed border-line text-sm font-medium",
-          activeAdd ? "bg-blue-50 text-action" : "bg-white text-slate-600 hover:bg-slate-50",
+          "focus-ring flex h-10 w-full items-center justify-center gap-2 rounded-control text-sm font-medium shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out active:scale-[0.96]",
+          activeAdd ? "bg-action/10 text-action" : "bg-panel-soft text-slate-600 hover:bg-white hover:shadow-raised",
         )}
         onClick={onAdd}
       >
@@ -943,11 +1015,11 @@ function CodexHubProviderCard({
 
 function gatewayStatusChip(status: GatewayStatus | null): { label: string; tone: "ok" | "muted" | "pending" } {
   if (!status) {
-    return { label: "Gateway unknown", tone: "pending" };
+    return { label: "Unknown", tone: "pending" };
   }
   return status.proxy_running
-    ? { label: "Gateway running", tone: "ok" }
-    : { label: "Gateway stopped", tone: "muted" };
+    ? { label: "Running", tone: "ok" }
+    : { label: "Stopped", tone: "muted" };
 }
 
 function codexAuthChip(authState: CodexAuthState): { label: string; tone: "ok" | "muted" | "pending" } {
@@ -977,7 +1049,7 @@ function SourceStatusChip({ label, tone }: { label: string; tone: "ok" | "muted"
 
 function SourceMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-line bg-white px-2 py-1.5">
+    <div className="min-w-0 rounded-inner bg-surface px-2 py-1.5 shadow-control">
       <div className="truncate text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
       <div className="mt-0.5 truncate font-semibold text-ink">{value}</div>
     </div>
@@ -1004,8 +1076,8 @@ function ProviderNavButton({
   return (
     <div
       className={cx(
-        "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md px-3 py-2 text-sm",
-        active ? "bg-blue-50 text-action" : "hover:bg-panel",
+        "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-inner px-3 py-2 text-sm transition-[box-shadow,background-color] duration-150 ease-out",
+        active ? "bg-blue-50 text-action shadow-raised" : "hover:bg-panel hover:shadow-control",
       )}
     >
       <button type="button" className="focus-ring min-w-0 text-left" onClick={onClick}>
@@ -1398,7 +1470,7 @@ function ModelSection({
       </div>
       <div className="min-h-0 overflow-auto -mr-3 pr-3">
         {models.length === 0 ? (
-          <div className="rounded-md border border-line bg-panel p-4 text-sm text-slate-500">
+          <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
             No models
           </div>
         ) : reorderable ? (

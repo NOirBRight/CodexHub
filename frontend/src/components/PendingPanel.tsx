@@ -19,7 +19,7 @@ export function PendingPanel({
   return (
     <div
       className={cx(
-        "rounded-md border border-dashed border-line bg-slate-50 text-slate-600",
+        "rounded-inner bg-panel-soft text-slate-600 shadow-hairline",
         compact ? "px-3 py-2" : "p-4",
         className,
       )}
@@ -29,7 +29,7 @@ export function PendingPanel({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-semibold text-ink">{title}</span>
-            <span className="rounded-sm border border-line bg-white px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
+            <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500 shadow-control">
               {label}
             </span>
           </div>

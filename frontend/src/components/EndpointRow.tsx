@@ -14,7 +14,7 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
   return (
     <div
       className={cx(
-        "grid gap-2 rounded-md border border-line bg-white text-sm lg:items-center",
+        "grid gap-2 rounded-inner bg-surface text-sm shadow-control lg:items-center",
         compact
           ? "min-h-9 px-2 py-0.5 lg:grid-cols-[122px_minmax(0,1fr)_auto]"
           : "px-3 py-2 lg:grid-cols-[130px_minmax(0,1fr)_auto]",
@@ -30,7 +30,7 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
       <button
         type="button"
         className={cx(
-          "focus-ring inline-flex w-[76px] items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100",
+          "focus-ring inline-flex w-[76px] items-center justify-center gap-1 rounded-control bg-panel px-2 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]",
           compact ? "h-7" : "h-8",
         )}
         title={copied ? "Copied" : "Copy"}

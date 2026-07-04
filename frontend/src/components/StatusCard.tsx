@@ -16,7 +16,7 @@ export function StatusCard({ compact, detail, label, tone = "idle", value }: Sta
   return (
     <div
       className={cx(
-        "grid min-w-0 content-between rounded-md border border-line bg-panel",
+        "grid min-w-0 content-between rounded-inner bg-panel-soft shadow-control",
         compact ? "min-h-11 gap-0.5 p-1.5" : "min-h-[104px] gap-3 p-4",
       )}
     >

@@ -15,6 +15,7 @@ const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", impor
 const sortableListPath = new URL("../src/components/SortableList.tsx", import.meta.url);
 const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
 const tauriSourcePath = new URL("../src/lib/tauri.ts", import.meta.url);
+const tailwindConfigPath = new URL("../tailwind.config.js", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
@@ -64,6 +65,37 @@ test("global cursor contract marks interactive controls as pointer and disabled 
   assert.match(css, /label:has\(input\[type="checkbox"\]:not\(:disabled\)\) \*,\s*label:has\(input\[type="radio"\]:not\(:disabled\)\) \*\s*\{\s*cursor:\s*inherit;\s*\}/s);
   assert.match(css, /button:disabled,\s*select:disabled,\s*input:disabled,\s*\[aria-disabled="true"\]\s*\{\s*cursor:\s*not-allowed;\s*opacity:\s*0\.55;\s*\}/s);
   assert.match(css, /label:has\(input\[type="checkbox"\]:disabled\),\s*label:has\(input\[type="radio"\]:disabled\)\s*\{\s*cursor:\s*not-allowed;\s*\}/s);
+});
+
+test("visual system defines warm surfaces, concentric radii, and layered shadows", async () => {
+  const [tailwindConfig, designDoc] = await Promise.all([
+    readFile(tailwindConfigPath, "utf8"),
+    readFile(new URL("../../DESIGN.md", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(tailwindConfig, /canvas:\s*"#f8f8f7"/);
+  assert.match(tailwindConfig, /surface:\s*"#ffffff"/);
+  assert.match(tailwindConfig, /panel:\s*"#f4f3f0"/);
+  assert.match(tailwindConfig, /line:\s*"#dedbd6"/);
+  assert.match(tailwindConfig, /control:\s*"10px"/);
+  assert.match(tailwindConfig, /inner:\s*"12px"/);
+  assert.match(tailwindConfig, /panel:\s*"16px"/);
+  assert.match(tailwindConfig, /overlay:\s*"20px"/);
+  assert.match(tailwindConfig, /card:\s*"0 0 0 1px rgba\(31, 41, 51, 0\.07\), 0 10px 28px -22px rgba\(31, 41, 51, 0\.35\)"/);
+  assert.match(tailwindConfig, /floating:\s*"0 0 0 1px rgba\(31, 41, 51, 0\.08\), 0 18px 46px -28px rgba\(31, 41, 51, 0\.45\)"/);
+
+  assert.match(designDoc, /## Visual System/);
+  assert.match(designDoc, /Outer radius = inner radius \+ padding/);
+  assert.match(designDoc, /Use layered shadows for element depth/);
+});
+
+test("global controls use polished radius, shadow, and exact transitions", async () => {
+  const css = await readFile(indexCssPath, "utf8");
+
+  assert.match(css, /\.focus-ring\s*\{[\s\S]*ring-action\/20/);
+  assert.match(css, /\.field\s*\{[\s\S]*rounded-control[\s\S]*shadow-field[\s\S]*transition-\[box-shadow,border-color,background-color\]/);
+  assert.match(css, /\.mini-button\s*\{[\s\S]*rounded-control[\s\S]*shadow-control[\s\S]*active:scale-\[0\.96\]/);
+  assert.doesNotMatch(css, /\.field\s*\{[\s\S]*rounded-md[\s\S]*shadow-subtle/);
 });
 
 test("copy buttons keep a fixed width when copied feedback appears", async () => {
@@ -165,6 +197,27 @@ test("web bridge calls use simple POST requests that avoid CORS preflight", asyn
   assert.doesNotMatch(bridgeInvoke, /application\/json/);
 });
 
+test("backend unavailable errors stay short and can render toast actions", async () => {
+  const [tauriSource, pageToastSource, providersSource, gatewaySource] = await Promise.all([
+    readFile(tauriSourcePath, "utf8"),
+    readFile(pageToastPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+  ]);
+
+  assert.match(tauriSource, /throw new Error\("Backend is not connected"\)/);
+  assert.match(tauriSource, /function isBackendDisconnectedMessage\(message: string\)/);
+  assert.doesNotMatch(tauriSource, /Start it with: cargo run -- web-bridge --port 1421/);
+  assert.match(pageToastSource, /action\?:/);
+  assert.match(pageToastSource, /toast\.action/);
+  assert.match(pageToastSource, /\{toast\.action\.label\}/);
+  assert.match(providersSource, /showBackendDisconnectedToast/);
+  assert.match(providersSource, /label: "Start"/);
+  assert.match(providersSource, /onStartProxy\?: \(\) => Promise<void>;/);
+  assert.match(gatewaySource, /showBackendDisconnectedToast/);
+  assert.match(gatewaySource, /label: "Start"/);
+});
+
 test("usage summary and chart use the same global time window", async () => {
   const [appSource, gatewaySource, usageSource, tauriSource] = await Promise.all([
     readFile(appPath, "utf8"),
@@ -187,8 +240,9 @@ test("usage summary and chart use the same global time window", async () => {
 });
 
 test("usage telemetry uses a single snapshot call and keeps usage errors out of runtime banner", async () => {
-  const [appSource, tauriSource, usageSource] = await Promise.all([
+  const [appSource, gatewaySource, tauriSource, usageSource] = await Promise.all([
     readFile(appPath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
     readFile(stackedUsagePath, "utf8"),
   ]);
@@ -204,6 +258,12 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
   );
   assert.match(usageSource, /telemetryStatus/);
   assert.match(usageSource, /Indexing usage/);
+  assert.match(gatewaySource, /lastUsageErrorToast/);
+  assert.match(gatewaySource, /const text = isBackendDisconnectedMessage\(usageError\)[\s\S]*`Usage telemetry delayed: \$\{usageError\}`;/);
+  assert.match(gatewaySource, /if \(isBackendDisconnectedMessage\(usageError\)\) \{\s*showBackendDisconnectedToast\(\);\s*return;\s*\}/);
+  assert.match(gatewaySource, /showToast\(text, "error"\)/);
+  assert.doesNotMatch(usageSource, /Usage telemetry delayed/);
+  assert.doesNotMatch(usageSource, /usageError/);
 });
 
 test("usage custom date popover closes on outside click", async () => {
@@ -214,12 +274,29 @@ test("usage custom date popover closes on outside click", async () => {
   assert.match(usageSource, /customRangeRef\.current\?\.contains\(target\)/);
   assert.match(usageSource, /document\.removeEventListener\("pointerdown", handlePointerDown\)/);
   assert.match(usageSource, /event\.key === "Escape"/);
+  assert.match(usageSource, /bg-action\/15 text-ink/);
+  assert.doesNotMatch(usageSource, /bg-slate-100 text-ink/);
 });
 
-test("gateway endpoint and copy panels use balanced 5:5 columns", async () => {
-  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+test("gateway layout reserves space for the client rail", async () => {
+  const [gatewaySource, usageSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(stackedUsagePath, "utf8"),
+  ]);
 
-  assert.match(gatewaySource, /grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
+  assert.match(gatewaySource, /min-w-0 grid-cols-1 gap-4 lg:grid-cols-\[minmax\(0,1fr\)_minmax\(320px,360px\)\]/);
+  assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
+  assert.match(gatewaySource, /grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface/);
+  assert.match(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
+  assert.match(gatewaySource, /\[-webkit-line-clamp:2\]/);
+  assert.match(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
+  assert.doesNotMatch(gatewaySource, /Clients discover models from/);
+  assert.match(gatewaySource, /grid-cols-1 items-stretch gap-3 lg:grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
+  assert.match(gatewaySource, /sm:grid-cols-2 xl:grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)_auto\]/);
+  assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
+  assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
+  assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-2">/);
+  assert.doesNotMatch(gatewaySource, /min-w-\[1200px\]/);
   assert.doesNotMatch(gatewaySource, /0\.86fr|1\.14fr/);
 });
 
@@ -404,7 +481,7 @@ test("official OpenAI source uses the same row card and toggle pattern as provid
   assert.match(officialCard, /meta=\{`\$\{enabledModelCount\}\/\$\{modelCount\} models`\}/);
   assert.match(officialCard, /enabled=\{included\}/);
   assert.match(officialCard, /onToggle=\{onToggleInclude\}/);
-  assert.match(officialCard, /"grid gap-3 rounded-md border border-line bg-panel p-3"/);
+  assert.match(officialCard, /connected \? "bg-emerald-50\/55" : "bg-surface"/);
   assert.match(officialCard, /active=\{active\}/);
   assert.doesNotMatch(officialCard, /<SourceMetric label="Official models"/);
   assert.doesNotMatch(officialCard, /active \? "border-action bg-blue-50\/70"/);
@@ -446,29 +523,97 @@ test("official model list does not expose unsupported drag sorting", async () =>
 });
 
 test("Codex Hub connection CTA is prominent and has a connecting state", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const [providersSource, css] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(indexCssPath, "utf8"),
+  ]);
   const sidebar = providersSource.match(/<HubConnectionBridge[\s\S]*?\/>/)?.[0] ?? "";
   const bridge = providersSource.match(/function HubConnectionBridge[\s\S]*?function CodexHubProviderCard/)?.[0] ?? "";
+  const link = providersSource.match(/function ConnectionLink[\s\S]*?function OfficialOpenAICard/)?.[0] ?? "";
+  const hubCard = providersSource.match(/function CodexHubProviderCard[\s\S]*?function gatewayStatusChip/)?.[0] ?? "";
 
   assert.match(sidebar, /connecting=\{busy === "route"\}/);
+  assert.doesNotMatch(providersSource, /function SourceRailStep/);
+  assert.match(providersSource, /grid-rows-\[auto_auto_minmax\(0,1fr\)\] gap-2 p-3/);
+
+  // The old circuit-board metaphor (floating nodes, protruding wires, tilted
+  // guillotine switch) is replaced by a single integrated link spine.
+  assert.doesNotMatch(providersSource, /function CircuitNode/);
+  assert.doesNotMatch(providersSource, /function CircuitWire/);
+  assert.doesNotMatch(providersSource, /<CircuitNode/);
+  assert.doesNotMatch(providersSource, /<CircuitWire/);
+  assert.doesNotMatch(providersSource, /rotate-\[26deg\]/);
+  assert.doesNotMatch(providersSource, /origin-bottom/);
+
+  // Connection link: continuous emerald spine + upward flow when connected,
+  // two capped stubs with a clear break + hollow coupler when disconnected.
+  assert.match(providersSource, /function ConnectionLink/);
+  assert.match(link, /connected \? \(/);
+  assert.match(link, /absolute left-1\/2 top-\[-14px\] bottom-\[-14px\] w-\[3px\] -translate-x-1\/2 overflow-hidden rounded-full bg-gradient-to-t/);
+  assert.match(link, /from-emerald-400\/60 via-emerald-500\/75 to-emerald-400\/60/);
+  assert.match(link, /codexhub-flow-beam absolute left-1\/2 top-0 h-12 w-\[7px\] \[--flow-distance:92px\]/);
+  assert.match(link, /codexhub-flow-beam codexhub-flow-beam-delay absolute left-1\/2 top-0 h-12 w-\[7px\] \[--flow-distance:92px\]/);
+  assert.match(link, /absolute left-1\/2 top-\[-14px\] h-\[calc\(50%-8px\)\] w-\[3px\] -translate-x-1\/2 rounded-full bg-slate-300\/80/);
+  assert.match(link, /absolute left-1\/2 bottom-\[-14px\] h-\[calc\(50%-8px\)\] w-\[3px\] -translate-x-1\/2 rounded-full bg-slate-300\/80/);
+  assert.match(link, /relative z-10 grid h-4 w-4 place-items-center rounded-full border/);
+  assert.match(link, /connected[\s\S]*\? "border-emerald-500 bg-emerald-500 shadow-\[0_0_0_4px_rgba\(16,185,129,0\.16\)\]"[\s\S]*: "border-slate-300 bg-surface"/);
+  assert.doesNotMatch(link, /border-dashed/);
+
+  // Cards no longer reserve space for protruding wires.
+  assert.match(providersSource, /rounded-panel p-3 shadow-card/);
+  assert.doesNotMatch(providersSource, /rounded-panel p-3 pb-8 shadow-card/);
+  assert.match(providersSource, /toastVisible=\{Boolean\(toast\)\}/);
+  assert.match(providersSource, /toastVisible: boolean;/);
+  assert.match(providersSource, /grid h-full min-h-0 grid-rows-\[auto_auto_minmax\(0,1fr\)_auto\] gap-3 overflow-hidden rounded-panel px-3 pt-3 shadow-card/);
+  assert.doesNotMatch(providersSource, /px-3 pt-8 shadow-card/);
+  assert.match(providersSource, /toastVisible \? "pb-16" : "pb-3"/);
+
+  // Softened upward flow animation.
+  assert.match(providersSource, /codexhub-flow-beam/);
+  assert.match(css, /\.codexhub-flow-beam/);
+  assert.match(css, /\.codexhub-flow-beam-delay/);
+  assert.match(css, /animation-delay:\s*-1\.4s/);
+  assert.match(css, /@keyframes codexhub-flow-up/);
+  assert.match(css, /transform:\s*translate\(-50%, var\(--flow-distance, 92px\)\)/);
+  assert.match(css, /transform:\s*translate\(-50%, -44px\)/);
+  assert.match(css, /filter:\s*blur\(1\.5px\)/);
+
+  // Connection band is flat (no third card), link rail beside the CTA.
   assert.match(bridge, /connecting:/);
   assert.match(bridge, /Connecting/);
   assert.match(bridge, /Connect to Codex Hub/);
-  assert.match(bridge, /Connected Codex Hub/);
+  assert.match(bridge, /Connected to Codex Hub/);
+  assert.match(bridge, /<ConnectionLink connected=\{connected\} \/>/);
+  assert.match(bridge, /grid grid-cols-\[44px_minmax\(0,1fr\)\] items-center gap-2\.5 px-1 py-1\.5/);
+  assert.doesNotMatch(bridge, /shadow-card/);
+  assert.doesNotMatch(bridge, /rounded-panel/);
+  assert.doesNotMatch(bridge, /bg-emerald-50\/55/);
   assert.match(bridge, /animate-pulse/);
+  assert.match(bridge, /\{connected \? <Link2 size=\{15\} \/> : <Link2Off size=\{15\} \/>\}/);
   assert.match(bridge, /h-11/);
-  assert.match(bridge, /bg-action/);
-  assert.match(bridge, /bg-emerald-600/);
+  assert.match(bridge, /connected[\s\S]*\? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"[\s\S]*: "bg-ink text-white hover:bg-slate-800 hover:shadow-raised"/);
+  assert.match(hubCard, /connected \? "bg-emerald-50\/55" : "bg-surface"/);
+  assert.match(providersSource, /return \{ label: "Unknown", tone: "pending" \};/);
+  assert.doesNotMatch(providersSource, /Gateway unknown/);
+  assert.match(providersSource, /rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline/);
 });
 
 test("Codex Hub connection action reports progress immediately", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
+  assert.match(providersSource, /const \[connectionPreview, setConnectionPreview\] = useState<boolean \| null>\(null\);/);
+  assert.match(providersSource, /const realCodexConnected = codexStatus\?\.mode === "custom";/);
+  assert.match(providersSource, /const codexConnected = connectionPreview \?\? realCodexConnected;/);
+  assert.doesNotMatch(action, /if \(!settingsDraft\) \{\s*return;\s*\}/);
   assert.match(action, /const actionLabel = nextMode === "custom" \? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";/);
+  assert.match(action, /const nextMode = codexConnected \? "official" : "custom";/);
+  assert.match(action, /setConnectionPreview\(nextMode === "custom"\);[\s\S]*setBusy\("route"\);/);
   assert.match(action, /showToast\(`\$\{actionLabel\}\.\.\.`, "loading"\);/);
   assert.ok(action.indexOf("showToast(`${actionLabel}...`, \"loading\");") < action.indexOf("api.switchMode("));
   assert.match(action, /api\.switchMode\(nextMode, false\)/);
+  assert.match(action, /setConnectionPreview\(null\);/);
+  assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPreview\(nextMode === "custom"\);[\s\S]*setError\(message\);[\s\S]*return;[\s\S]*\}/);
   assert.doesNotMatch(action, /historyHint/);
   assert.match(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
@@ -485,7 +630,7 @@ test("Codex Hub connection failures no longer mention history sync", async () =>
   assert.doesNotMatch(providersSource, /Connection failed while syncing history/);
   assert.doesNotMatch(providersSource, /Turn off Auto-sync history/);
   assert.match(providersSource, /Codex Hub connection failed/);
-  assert.match(pageToastSource, /toast\.tone === "error" \? "max-h-32 overflow-auto whitespace-pre-wrap break-words" : "truncate"/);
+  assert.match(pageToastSource, /toast\.action \? "truncate" : toast\.tone === "error" \? "max-h-32 overflow-auto whitespace-pre-wrap break-words" : "truncate"/);
 });
 
 test("Codex Hub connection ignores structured history sync fields from switch status", async () => {
@@ -595,11 +740,11 @@ test("settings drawer reports the backend sync result", async () => {
   assert.match(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
   assert.match(appSource, /return message/);
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
-  assert.match(drawerSource, /const result = await onSyncHistory\(targetProvider\)/);
+  assert.match(drawerSource, /setMessage\(await onSyncHistory\(targetProvider\)\)/);
   assert.doesNotMatch(drawerSource, /onMigrateOfficialHistory/);
   assert.doesNotMatch(drawerSource, /onRestoreOfficialHistory/);
-  assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) =>\s*call<string>\("migrate_official_history_to_unified"\)/);
-  assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) =>\s*call<string>\("restore_official_history_from_unified"\)/);
+  assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);
+  assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) => call<string>\("restore_official_history_from_unified"\)/);
   assert.doesNotMatch(drawerSource, /History sync requested/);
 });
 

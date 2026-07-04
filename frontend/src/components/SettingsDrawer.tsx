@@ -1,4 +1,4 @@
-import { Eye, EyeOff, RefreshCw, Save, X } from "lucide-react";
+import { Eye, EyeOff, History, Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
 import type { Settings } from "../lib/types";
@@ -43,19 +43,18 @@ export function SettingsDrawer({
       return;
     }
     const targetProvider = draft.unified_codex_history ? "custom" : "openai";
-    const result = await onSyncHistory(targetProvider);
-    setMessage(result);
+    setMessage(await onSyncHistory(targetProvider));
   }
 
   return (
     <aside
       className={cx(
-        "fixed inset-y-0 right-0 z-50 grid w-full max-w-[420px] grid-rows-[auto_minmax(0,1fr)_auto] border-l border-line bg-white shadow-2xl transition-transform",
+        "fixed inset-y-0 right-0 z-50 grid w-full max-w-[420px] grid-rows-[auto_minmax(0,1fr)_auto] rounded-l-overlay bg-surface shadow-overlay transition-transform",
         open ? "translate-x-0" : "translate-x-full",
       )}
       aria-hidden={!open}
     >
-      <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
+      <div className="flex items-center justify-between gap-3 px-5 py-4 shadow-hairline">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
             Settings
@@ -64,7 +63,7 @@ export function SettingsDrawer({
         </div>
         <button
           type="button"
-          className="focus-ring grid h-8 w-8 place-items-center rounded-md border border-line bg-panel text-slate-600 hover:bg-slate-100"
+          className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           onClick={onClose}
           title="Close settings"
         >
@@ -74,14 +73,14 @@ export function SettingsDrawer({
 
       <div className="min-h-0 overflow-auto p-5">
         {!draft ? (
-          <div className="rounded-md border border-line bg-panel p-4 text-sm text-slate-500">
+          <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
             Loading settings
           </div>
         ) : (
           <div className="grid gap-5">
             <section className="grid gap-3">
               <h3 className="text-sm font-semibold text-ink">CodexHub</h3>
-              <div className="grid gap-3 rounded-md border border-line bg-panel p-3">
+              <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
                 <Toggle
                   checked={draft.include_official_models}
                   label="Include official models"
@@ -97,21 +96,27 @@ export function SettingsDrawer({
                   label="Auto-sync bound clients"
                   onChange={(value) => setDraft({ ...draft, auto_sync_clients: value })}
                 />
+              </div>
+            </section>
+
+            <section className="grid gap-3">
+              <h3 className="text-sm font-semibold text-ink">Maintenance</h3>
+              <div className="grid gap-2 rounded-panel bg-panel p-3 shadow-card">
                 <button
                   type="button"
-                  className="focus-ring flex min-h-9 items-center justify-between gap-4 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
+                  className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                   disabled={Boolean(busy)}
                   onClick={() => void repairHistory()}
                 >
-                  <span className="min-w-0 truncate">Repair history bucket</span>
-                  <RefreshCw size={15} />
+                  <History size={15} />
+                  Repair history bucket
                 </button>
               </div>
             </section>
 
             <section className="grid gap-3">
               <h3 className="text-sm font-semibold text-ink">Gateway</h3>
-              <div className="grid gap-3 rounded-md border border-line bg-panel p-3">
+              <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
                 <label className="grid gap-1 text-sm font-medium text-slate-700">
                   Bind address
                   <input
@@ -148,7 +153,7 @@ export function SettingsDrawer({
                     />
                     <button
                       type="button"
-                      className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-slate-500 hover:bg-panel hover:text-ink"
+                      className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
                       aria-label={showClientKey ? "Hide local client key" : "Show local client key"}
                       title={showClientKey ? "Hide local client key" : "Show local client key"}
                       onClick={() => setShowClientKey((value) => !value)}
@@ -171,12 +176,12 @@ export function SettingsDrawer({
         )}
       </div>
 
-      <div className="border-t border-line px-5 py-4">
+      <div className="px-5 py-4 shadow-[0_-1px_0_rgba(31,41,51,0.06)]">
         {message && <div className="mb-3 text-sm text-slate-600">{message}</div>}
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
             disabled={Boolean(busy) || !draft}
             onClick={() => void saveDraft()}
           >
@@ -199,7 +204,7 @@ function Toggle({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-9 cursor-pointer items-center justify-between gap-4 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-slate-700">
+    <label className="flex min-h-9 cursor-pointer items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
       <span className="min-w-0 truncate">{label}</span>
       <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
         <input
@@ -208,7 +213,7 @@ function Toggle({
           checked={checked}
           onChange={(event) => onChange(event.target.checked)}
         />
-        <span className="absolute inset-0 rounded-full border border-line bg-slate-200 transition-colors peer-checked:border-action peer-checked:bg-action" />
+        <span className="absolute inset-0 rounded-full bg-slate-200 shadow-control transition-colors peer-checked:bg-action" />
         <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
       </span>
     </label>

@@ -7,7 +7,7 @@ import { PendingPanel } from "../components/PendingPanel";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { StatusCard } from "../components/StatusCard";
 import { cx } from "../lib/format";
-import { api, messageFromError } from "../lib/tauri";
+import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   GatewayClientContract,
   GatewayClientInfo,
@@ -74,6 +74,7 @@ export function GatewayPage({
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const copyResetTimer = useRef<number | null>(null);
+  const lastUsageErrorToast = useRef<string | null>(null);
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
@@ -91,12 +92,31 @@ export function GatewayPage({
   );
 
   useEffect(() => {
-    if (!toast || toast.tone === "loading") {
+    if (!toast || toast.tone === "loading" || toast.action) {
       return;
     }
     const timer = window.setTimeout(() => dismissToast(), 3000);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (!usageError) {
+      lastUsageErrorToast.current = null;
+      return;
+    }
+    const text = isBackendDisconnectedMessage(usageError)
+      ? "Backend is not connected"
+      : `Usage telemetry delayed: ${usageError}`;
+    if (lastUsageErrorToast.current === text) {
+      return;
+    }
+    lastUsageErrorToast.current = text;
+    if (isBackendDisconnectedMessage(usageError)) {
+      showBackendDisconnectedToast();
+      return;
+    }
+    showToast(text, "error");
+  }, [usageError]);
 
   const endpoints = useMemo(
     () =>
@@ -126,8 +146,8 @@ export function GatewayPage({
     }, 1200);
   }
 
-  function showToast(text: string, tone: PageToastTone = "info") {
-    setToastState({ text, tone });
+  function showToast(text: string, tone: PageToastTone = "info", action?: PageToastState["action"]) {
+    setToastState({ action, text, tone });
   }
 
   function dismissToast() {
@@ -144,10 +164,35 @@ export function GatewayPage({
 
   function setError(value: string | null) {
     if (value) {
+      if (isBackendDisconnectedMessage(value)) {
+        showBackendDisconnectedToast();
+        return;
+      }
       showToast(value, "error");
       return;
     }
     setToastState((current) => (current?.tone === "error" ? null : current));
+  }
+
+  function showBackendDisconnectedToast() {
+    showToast("Backend is not connected", "error", {
+      label: "Start",
+      onClick: () => void startBackendFromToast(),
+    });
+  }
+
+  async function startBackendFromToast() {
+    setClientRefreshBusy(true);
+    showToast("Starting backend...", "loading");
+    try {
+      await api.startProxy();
+      await onRefreshClients();
+      setMessage("Backend started");
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setClientRefreshBusy(false);
+    }
   }
 
   async function copyText(target: string, value: string) {
@@ -257,25 +302,25 @@ export function GatewayPage({
   }
 
   return (
-    <main className="relative grid h-full min-h-0 min-w-[1200px] grid-cols-[minmax(0,1fr)_390px] gap-4">
-      <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
-        <section className="grid gap-3 rounded-md border border-line bg-white p-3 shadow-subtle">
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-stretch gap-3">
-            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3 rounded-md border border-line bg-panel p-3">
+    <main className="relative grid h-full min-h-0 min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]">
+      <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
+        <section className="grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
+          <div className="grid min-w-0 grid-cols-1 items-stretch gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3 rounded-panel bg-panel p-3 shadow-card">
               <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h2 className="text-base font-semibold text-ink">Local OpenAI-compatible endpoint</h2>
-                  <p className="mt-1 max-w-xl text-xs leading-4 text-slate-600">
-                    Set the local API key, port, and timeout. Clients discover models from <code className="font-mono">GET /v1/models</code> on the Base URL.
+                  <p className="mt-1 max-h-8 max-w-xl overflow-hidden text-xs leading-4 text-slate-600 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
+                    Local API key, port, and timeout for OpenAI-compatible clients.
                   </p>
                 </div>
                 <button
                   type="button"
                   className={cx(
-                    "focus-ring inline-flex h-7 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold",
+                    "focus-ring inline-flex h-7 shrink-0 items-center justify-center gap-2 rounded-control px-3 text-xs font-semibold shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out active:scale-[0.96]",
                     running
-                      ? "border border-line bg-white text-slate-700 hover:bg-slate-100"
-                      : "bg-ink text-white hover:bg-slate-800",
+                      ? "bg-surface text-slate-700 hover:bg-white hover:shadow-raised"
+                      : "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
                   )}
                   disabled={runtimeActionBusy || busy === "load"}
                   onClick={() => void toggleRuntime()}
@@ -285,13 +330,13 @@ export function GatewayPage({
                 </button>
               </div>
 
-              <div className="grid h-full content-start gap-2 rounded-md border border-line bg-white p-3">
+              <div className="grid h-full min-w-0 content-start gap-2 rounded-inner bg-surface p-3 shadow-control">
                 <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
                   <span>API Key</span>
-                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+                  <div className="grid min-w-0 grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
                     <div className="relative min-w-0">
                       <input
-                        className="focus-ring h-8 w-full rounded-md border border-line bg-white px-2.5 pr-9 text-sm font-normal text-ink shadow-subtle"
+                        className="field h-8 pr-9"
                         type={showDraftKey ? "text" : "password"}
                         autoComplete="off"
                         value={draftKey}
@@ -300,7 +345,7 @@ export function GatewayPage({
                       />
                       <button
                         type="button"
-                        className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-slate-500 hover:bg-panel hover:text-ink"
+                        className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
                         aria-label={showDraftKey ? "Hide API key" : "Show API key"}
                         onClick={() => setShowDraftKey((show) => !show)}
                       >
@@ -309,7 +354,7 @@ export function GatewayPage({
                     </div>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 w-[76px] items-center justify-center gap-1 rounded-md border border-line bg-panel px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                      className="focus-ring inline-flex h-8 w-[76px] items-center justify-center gap-1 rounded-control bg-panel px-2 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       disabled={!draftKey}
                       onClick={() => void copyText("gateway-api-key", draftKey)}
                     >
@@ -318,7 +363,7 @@ export function GatewayPage({
                     </button>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                      className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-panel px-3 text-xs font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       onClick={regenerateClientKey}
                     >
                       <RefreshCcw size={14} />
@@ -326,11 +371,11 @@ export function GatewayPage({
                     </button>
                   </div>
                 </label>
-                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
-                  <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                <div className="grid min-w-0 grid-cols-1 items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                  <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
                     <span>Listen Port</span>
                     <input
-                      className="focus-ring h-8 w-full rounded-md border border-line bg-white px-2.5 text-sm font-normal text-ink shadow-subtle"
+                      className="field h-8"
                       type="number"
                       min={1024}
                       max={65535}
@@ -338,10 +383,10 @@ export function GatewayPage({
                       onChange={(event) => setDraftPort(Number(event.target.value))}
                     />
                   </label>
-                  <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+                  <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
                     <span>Request Timeout</span>
                     <input
-                      className="focus-ring h-8 w-full rounded-md border border-line bg-white px-2.5 text-sm font-normal text-ink shadow-subtle"
+                      className="field h-8"
                       type="number"
                       min={5}
                       max={600}
@@ -351,7 +396,7 @@ export function GatewayPage({
                   </label>
                   <button
                     type="button"
-                    className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-md bg-ink px-3 text-xs font-semibold text-white disabled:bg-slate-300"
+                    className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300 sm:col-span-2 xl:col-span-1"
                     disabled={Boolean(busy) || !settings}
                     onClick={() => void applyGatewaySettings()}
                   >
@@ -362,7 +407,7 @@ export function GatewayPage({
               </div>
             </div>
 
-            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-md border border-line bg-panel p-3">
+            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-panel bg-panel p-3 shadow-card">
               <div className="grid gap-2 sm:grid-cols-3">
                 <StatusCard
                   compact
@@ -423,7 +468,7 @@ export function GatewayPage({
                 <div
                   key={`${item.category}-${item.message}`}
                   className={cx(
-                    "rounded-md px-2 py-1 text-xs",
+                    "rounded-inner px-2 py-1 text-xs shadow-control",
                     item.level === "error"
                       ? "bg-red-50 text-danger"
                       : item.level === "warning"
@@ -445,20 +490,19 @@ export function GatewayPage({
           providers={providers}
           summary={usageSummary}
           telemetryStatus={usageStatus}
-          usageError={usageError}
         />
 
       </section>
 
-      <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md border border-line bg-white shadow-subtle">
-        <div className="border-b border-line p-3">
+      <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
+        <div className="p-3 shadow-hairline">
           <div className="flex items-center justify-between gap-2">
             <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-500">
               Gateway clients
             </div>
             <button
               type="button"
-              className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-panel text-slate-600 hover:bg-slate-100 disabled:text-slate-300"
+              className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-300"
               disabled={clientRefreshBusy}
               aria-label="Refresh gateway clients"
               title="Refresh installed clients and version checks"

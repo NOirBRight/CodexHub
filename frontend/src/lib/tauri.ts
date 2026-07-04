@@ -58,10 +58,8 @@ async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>):
     method: "POST",
     body: JSON.stringify({ command, args: args ?? {} }),
   }).catch((error: unknown) => {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `CodexHub web bridge is not running at ${bridgeUrl()}. Start it with: cargo run -- web-bridge --port 1421. ${detail}`,
-    );
+    console.debug("CodexHub web bridge unavailable", error);
+    throw new Error("Backend is not connected");
   });
 
   const payload = (await response.json().catch(() => null)) as BridgeResponse<T> | null;
@@ -179,10 +177,8 @@ export const api = {
     call<Model>("save_model_metadata_override", { model }),
   syncHistory: (targetProvider?: string) =>
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
-  migrateOfficialHistoryToUnified: () =>
-    call<string>("migrate_official_history_to_unified"),
-  restoreOfficialHistoryFromUnified: () =>
-    call<string>("restore_official_history_from_unified"),
+  migrateOfficialHistoryToUnified: () => call<string>("migrate_official_history_to_unified"),
+  restoreOfficialHistoryFromUnified: () => call<string>("restore_official_history_from_unified"),
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),
@@ -192,11 +188,27 @@ export const api = {
 };
 
 export function messageFromError(error: unknown): string {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Unexpected error";
+  return isBackendDisconnectedMessage(message) ? "Backend is not connected" : message;
+}
+
+export function isBackendDisconnectedMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("backend is not connected") ||
+    lower.includes("web bridge is not running") ||
+    lower.includes("failed to fetch")
+  );
+}
+
+export function isBackendDisconnectedError(error: unknown): boolean {
   if (error instanceof Error) {
-    return error.message;
+    return isBackendDisconnectedMessage(error.message);
   }
-  if (typeof error === "string") {
-    return error;
-  }
-  return "Unexpected error";
+  return typeof error === "string" ? isBackendDisconnectedMessage(error) : false;
 }

@@ -69,7 +69,7 @@ export function GatewayClientCard({
         ? `Current ${currentVersion ?? "unknown"} · Latest ${latestVersion ?? "unknown"}`
         : "Version unknown";
   return (
-    <section className="grid h-full min-h-0 content-between gap-1.5 rounded-md border border-line bg-white p-2 shadow-subtle">
+    <section className="grid h-full min-h-0 content-between gap-1.5 rounded-panel bg-surface p-2 shadow-card">
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <ClientLogo id={client.id} name={info?.name ?? client.name} />
         <div className="min-w-0">
@@ -78,7 +78,7 @@ export function GatewayClientCard({
         </div>
         <span
           className={cx(
-            "rounded-sm border px-1.5 py-0.5 text-[11px] font-semibold",
+            "rounded-full px-2 py-0.5 text-[11px] font-semibold shadow-control",
             statusClass,
           )}
         >
@@ -111,8 +111,8 @@ export function GatewayClientCard({
             className={cx(
               "inline-flex h-6 items-center justify-center rounded-md border px-2 text-[11px] font-semibold",
               hasUpdate
-                ? "border-amber-200 bg-amber-50 text-amber-700"
-                : "border-line bg-panel text-slate-400",
+                ? "bg-amber-50 text-amber-700"
+                : "bg-panel text-slate-400",
             )}
             title={hasUpdate ? "Install the client update manually." : "No client update action is available."}
           >
@@ -141,7 +141,7 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
   if (icon) {
     return (
       <div
-        className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-md border border-line bg-white shadow-subtle"
+        className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-control bg-surface shadow-control"
         title={`${name} logo`}
         aria-hidden="true"
       >
@@ -156,7 +156,7 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
 
   return (
     <div
-      className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-[9px] font-black tracking-normal text-slate-600 shadow-subtle"
+      className="grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-[9px] font-black tracking-normal text-slate-600 shadow-control"
       title={`${name} official logo asset pending`}
       aria-hidden="true"
     >
