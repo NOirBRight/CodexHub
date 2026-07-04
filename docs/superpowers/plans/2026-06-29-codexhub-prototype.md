@@ -2,11 +2,20 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
-**Goal:** Build a working CodexHub prototype that lets users configure third-party providers via providers.toml, switch Codex App between official and custom providers, and manage the proxy lifecycle.
+**Goal:** Build a working CodexHub prototype that lets users configure third-party providers via providers.toml, switch Codex App between official and custom providers, export Codex subscription models through a local OpenAI-compatible gateway, and manage the proxy lifecycle.
 
 **Architecture:** Python proxy (existing codebase, refactored to read providers.toml) runs as an independent background HTTP server. Tauri 2 app (Rust backend + React frontend) manages configuration, proxy process lifecycle, and model discovery. App and proxy have independent lifecycles.
 
 **Tech Stack:** Python 3.12+ (proxy), Rust/Tauri 2 (desktop), React 18 + Vite + TypeScript + TailwindCSS (frontend)
+
+## Status Snapshot (2026-06-30)
+
+- Proxy and subagent compatibility are ready for frontend handoff. Verified proxy build: `2026-06-30-subagent-single-loop-completion-gate`.
+- Codex subscription model export is a separate product surface from external provider import. It exposes official Codex/OpenAI models such as `openai/gpt-5.5` through local OpenAI-compatible endpoints for clients such as ZCode.
+- Real Codex CLI + JSONL validator subagent matrix passed for: `glm-5.2`, `kimi-k2.6`, `kimi-k2.7-code`, `minimax-m3`, `deepseek-v4-pro`, `deepseek-v4-flash`.
+- Gemini 3 Flash is intentionally excluded from this subagent matrix.
+- The next frontend scope is: Codex Model Gateway page, provider upstream format selector/probe, and subagent diagnostics.
+- Separate investigation remains open for remote Codex App custom-mode new-conversation behavior.
 
 ---
 
@@ -43,6 +52,9 @@
 - src/components/ProxyStatusBar.tsx - indicator + start/stop/restart
 - src/components/ProviderCard.tsx
 - src/components/SortableList.tsx - drag-and-drop
+- src/pages/GatewayPage.tsx - Codex subscription model export, OpenAI-compatible client config, gateway diagnostics
+- src/components/ProviderUpstreamFormatControl.tsx - provider upstream format selector + probe action
+- src/components/SubagentDiagnosticsPanel.tsx - subagent readiness matrix and recent proxy events
 - src/lib/tauri.ts - invoke wrappers
 - src/lib/types.ts - TypeScript types
 
@@ -204,22 +216,22 @@ Files:
 - Create: src/main.tsx, src/App.tsx, src/index.css
 - Create: src/lib/types.ts, src/lib/tauri.ts
 
-- [ ] Step 1: Initialize Vite React TS project in CodexHub root
-- [ ] Step 2: Install TailwindCSS, configure tailwind.config.js and postcss.config.js
-- [ ] Step 3: Create src/lib/types.ts with Provider, Model, AppStatus, Settings interfaces matching Rust structs
-- [ ] Step 4: Create src/lib/tauri.ts with invoke wrappers for all Tauri commands
-- [ ] Step 5: Create App.tsx with tab navigation (Providers, Models, Settings) + ProxyStatusBar at bottom
-- [ ] Step 6: Verify npm run dev shows blank page with tabs
-- [ ] Step 7: Commit
+- [x] Step 1: Initialize Vite React TS project in CodexHub root
+- [x] Step 2: Install TailwindCSS, configure tailwind.config.js and postcss.config.js
+- [x] Step 3: Create src/lib/types.ts with Provider, Model, AppStatus, Settings interfaces matching Rust structs
+- [x] Step 4: Create src/lib/tauri.ts with invoke wrappers for all Tauri commands
+- [x] Step 5: Create App.tsx with tab navigation (Providers, Models, Settings) + ProxyStatusBar at bottom
+- [x] Step 6: Verify npm run dev shows blank page with tabs
+- [x] Step 7: Commit
 
 ### Task 13: ProxyStatusBar component
 
 Files:
 - Create: src/components/ProxyStatusBar.tsx
 
-- [ ] Step 1: Implement component: green/red dot, build version, Start/Stop/Restart buttons, calls cmd_get_status on mount and every 5s
-- [ ] Step 2: Wire to tauri.ts invoke wrappers
-- [ ] Step 3: Commit
+- [x] Step 1: Implement component: green/red dot, build version, Start/Stop/Restart buttons, calls cmd_get_status on mount and every 5s
+- [x] Step 2: Wire to tauri.ts invoke wrappers
+- [x] Step 3: Commit
 
 ### Task 14: ProvidersPage with CRUD + model discovery
 
@@ -228,40 +240,62 @@ Files:
 - Create: src/components/ProviderCard.tsx
 - Create: src/components/SortableList.tsx
 
-- [ ] Step 1: Implement SortableList: generic drag-and-drop list component using HTML5 drag events, calls onReorder with new order
-- [ ] Step 2: Implement ProviderCard: shows provider name, base_url, model count, Edit/Delete buttons, expandable model list with toggles
-- [ ] Step 3: Implement ProvidersPage: loads providers via cmd_get_providers, shows add-provider form (name, base_url, api_key, Test and Discover button), renders SortableList of ProviderCards, saves via cmd_save_providers on change
-- [ ] Step 4: Add-provider flow: fill form, click Test and Discover, cmd_discover_provider_models returns models, user selects which to include, provider added to list
-- [ ] Step 5: Commit
+- [x] Step 1: Implement SortableList: generic drag-and-drop list component using HTML5 drag events, calls onReorder with new order
+- [x] Step 2: Implement ProviderCard: shows provider name, base_url, model count, Edit/Delete buttons, expandable model list with toggles
+- [x] Step 3: Implement ProvidersPage: loads providers via cmd_get_providers, shows add-provider form (name, base_url, api_key, Test and Discover button), renders SortableList of ProviderCards, saves via cmd_save_providers on change
+- [x] Step 4: Add-provider flow: fill form, click Test and Discover, cmd_discover_provider_models returns models, user selects which to include, provider added to list
+- [ ] Step 4.1: Add provider upstream format selector and probe UI per `docs/debug/provider-upstream-format-ui.md`
+- [x] Step 5: Commit
 
 ### Task 15: ModelsPage with official model refresh
 
 Files:
 - Create: src/pages/ModelsPage.tsx
 
-- [ ] Step 1: Implement official models section: toggle Include official models, Refresh button calls cmd_refresh_official_models, checkbox list of available models with display names
-- [ ] Step 2: Implement third-party models section: for each provider, show model list with individual toggles and per-provider Refresh button
-- [ ] Step 3: Changes trigger cmd_save_providers and catalog regeneration
-- [ ] Step 4: Commit
+- [x] Step 1: Implement official models section: toggle Include official models, Refresh button calls cmd_refresh_official_models, checkbox list of available models with display names
+- [x] Step 2: Implement third-party models section: for each provider, show model list with individual toggles and per-provider Refresh button
+- [x] Step 3: Changes trigger cmd_save_providers and catalog regeneration
+- [x] Step 4: Commit
 
 ### Task 16: SettingsPage
 
 Files:
 - Create: src/pages/SettingsPage.tsx
 
-- [ ] Step 1: Implement: auto-sync history toggle, auto-start proxy toggle, include official models toggle, proxy port input, all wired to cmd_get_settings/cmd_save_settings
-- [ ] Step 2: Add Sync Now button that calls cmd_sync_history
-- [ ] Step 3: Commit
+- [x] Step 1: Implement: auto-sync history toggle, auto-start proxy toggle, include official models toggle, proxy port input, all wired to cmd_get_settings/cmd_save_settings
+- [x] Step 2: Add Sync Now button that calls cmd_sync_history
+- [x] Step 3: Commit
 
 ### Task 17: Switch mode button + integration
 
 Files:
 - Modify: src/App.tsx
 
-- [ ] Step 1: Add mode switch button (Official/Custom) in header, calls cmd_switch_mode
-- [ ] Step 2: Show confirmation dialog before switching (warns about history sync)
-- [ ] Step 3: After switch, refresh proxy status
-- [ ] Step 4: Commit
+- [x] Step 1: Add mode switch button (Official/Custom) in header, calls cmd_switch_mode
+- [x] Step 2: Show confirmation dialog before switching (warns about history sync)
+- [x] Step 3: After switch, refresh proxy status
+- [x] Step 4: Commit
+
+### Task 17.1: Frontend handoff for Codex Model Gateway, upstream format, and subagent diagnostics
+
+Files:
+- Create: src/pages/GatewayPage.tsx
+- Create: src/components/ProviderUpstreamFormatControl.tsx
+- Create: src/components/SubagentDiagnosticsPanel.tsx
+- Modify: src/App.tsx
+- Modify: src/pages/ProvidersPage.tsx
+- Modify: src/lib/types.ts
+- Modify: src/lib/tauri.ts
+
+- [ ] Step 1: Add a `Codex Gateway` or `Model Gateway` navigation entry separate from provider/model catalog configuration.
+- [ ] Step 2: Implement Codex subscription model export: gateway status, Codex auth status, local OpenAI-compatible endpoints, ZCode/client config copy, official model list, and diagnostic test actions per `docs/codexhub-gateway-frontend-design.md`.
+- [ ] Step 3: Keep external provider import separate from Codex model export in the UI. Provider CRUD configures models that Codex App can use; Gateway configures official Codex models that other clients can use.
+- [ ] Step 4: Add provider-level `Upstream format` advanced control and probe action per `docs/debug/provider-upstream-format-ui.md`.
+- [ ] Step 5: Add subagent diagnostics showing proxy build/features, verified model readiness, and recent proxy events for tool injection, alias normalization, wait/close, and request errors.
+- [ ] Step 6: Make diagnostic copy distinguish proxy, Codex auth, external upstream, streaming, tool-call, and subagent lifecycle failures.
+- [ ] Step 7: For Gateway diagnostics, distinguish Codex auth/token failure from third-party provider API-key/upstream failure.
+- [ ] Step 8: Run frontend/Tauri smoke test and verify text does not expose provider keys or Codex auth tokens.
+- [ ] Step 9: Commit
 
 ---
 
@@ -276,7 +310,11 @@ Files:
 - [ ] Step 5: Switch back to official mode via codexhub switch official
 - [ ] Step 6: Verify Codex App shows only official models
 - [ ] Step 7: Test CLI: codexhub status, codexhub list-providers, codexhub refresh-models
-- [ ] Step 8: Commit
+- [x] Step 8: Debug custom-provider subagent behavior using docs/debug/subagent-custom-provider.md
+- [ ] Step 8.1: Verify provider upstream format detection and Chat/Responses tool stream probes using docs/debug/provider-upstream-format-ui.md
+- [x] Step 8.2: Verify Ollama Cloud subagent matrix for `glm-5.2`, `kimi-k2.6`, `kimi-k2.7-code`, `minimax-m3`, `deepseek-v4-pro`, and `deepseek-v4-flash`
+- [ ] Step 8.3: Verify Codex Model Gateway from the app UI: `/v1/models`, Chat Completions non-streaming, Chat Completions streaming, and copied ZCode config.
+- [ ] Step 9: Commit
 
 ---
 
@@ -314,8 +352,18 @@ Files:
 10. Independent proxy lifecycle - Task 8 proxy.rs (detached spawn)
 11. Embedded Python - Task 19
 12. Single binary distribution - Task 20
+13. Codex subscription model export / Model Gateway frontend - Task 17.1 GatewayPage
+14. Provider upstream format selector/probe - Task 14 Step 4.1 + Task 17.1
+15. Subagent diagnostics - Task 17.1 SubagentDiagnosticsPanel
 
-Gaps: None identified.
+Remaining gaps before prototype sign-off:
+
+- Implement the frontend Codex Model Gateway page from the handoff design.
+- Ensure Codex subscription model export is not hidden inside external provider CRUD.
+- Implement provider upstream format selector/probe UI and wire it through Tauri commands.
+- Implement subagent diagnostics UI for model readiness and recent proxy events.
+- Finish the Phase 4 end-to-end app smoke test after the new frontend surfaces exist.
+- Keep remote Codex App custom-mode new-conversation behavior as a separate investigation.
 
 ### Placeholder scan
 

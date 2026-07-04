@@ -15,6 +15,7 @@ PROXY_FEATURE_FLAGS = {
 }
 PROXY_PROVIDER_ID = "custom"
 PROXY_PROVIDER_NAME = "Codex Proxy"
+UNIFIED_OFFICIAL_PROVIDER_NAME = "OpenAI"
 STALE_PROXY_PROVIDER_SECTIONS = (
     "model_providers.openai",
     "model_providers.custom",
@@ -64,6 +65,109 @@ def strip_section(text: str, section_name: str) -> str:
             result.append(line)
 
     return "".join(result)
+
+
+def top_level_value(text: str, key: str) -> str | None:
+    in_top_level = True
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*(?:#.*)?$")
+    for line in text.splitlines():
+        if re.match(r"^\s*\[", line):
+            in_top_level = False
+        if not in_top_level:
+            continue
+        match = key_pattern.match(line)
+        if not match:
+            continue
+        raw = match.group(1).strip()
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+            return raw[1:-1]
+        return raw
+    return None
+
+
+def section_key_values(text: str, section_name: str) -> dict[str, str] | None:
+    header_pattern = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
+    key_pattern = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*(?:#.*)?$")
+    in_section = False
+    values: dict[str, str] = {}
+
+    for line in text.splitlines():
+        header = header_pattern.match(line)
+        if header:
+            if in_section:
+                break
+            in_section = header.group(1).strip() == section_name
+            continue
+        if not in_section:
+            continue
+        match = key_pattern.match(line)
+        if not match:
+            continue
+        raw = match.group(2).strip()
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+            raw = raw[1:-1]
+        values[match.group(1)] = raw
+
+    return values if in_section or values else None
+
+
+def unified_official_provider_values() -> dict[str, str]:
+    return {
+        "name": UNIFIED_OFFICIAL_PROVIDER_NAME,
+        "requires_openai_auth": "true",
+        "supports_websockets": "true",
+        "wire_api": "responses",
+    }
+
+
+def has_exact_unified_official_provider(text: str) -> bool:
+    return section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}") == unified_official_provider_values()
+
+
+def build_unified_official_provider_section() -> str:
+    return "\n".join(
+        [
+            f"[model_providers.{PROXY_PROVIDER_ID}]",
+            f'name = "{UNIFIED_OFFICIAL_PROVIDER_NAME}"',
+            "requires_openai_auth = true",
+            "supports_websockets = true",
+            'wire_api = "responses"',
+            "",
+        ]
+    )
+
+
+def inject_unified_history_config(text: str) -> tuple[str, str]:
+    provider_id = top_level_value(text, "model_provider")
+    if provider_id is not None:
+        if provider_id == PROXY_PROVIDER_ID and has_exact_unified_official_provider(text):
+            return text, "already_unified"
+        return text, "explicit_model_provider"
+
+    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    if custom_section is not None and custom_section != unified_official_provider_values():
+        return text, "conflicting_custom_provider"
+
+    updated = text
+    if custom_section is None:
+        updated = insert_provider_section(updated, build_unified_official_provider_section())
+
+    prefix = f'model_provider = "{PROXY_PROVIDER_ID}"\n'
+    if updated.strip():
+        updated = prefix + "\n" + updated.lstrip()
+    else:
+        updated = prefix
+    return updated, "injected"
+
+
+def strip_unified_history_config(text: str) -> str:
+    if top_level_value(text, "model_provider") != PROXY_PROVIDER_ID:
+        return text
+    if not has_exact_unified_official_provider(text):
+        return text
+    stripped = strip_section(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    stripped = strip_top_level_keys(stripped, {"model_provider"})
+    return stripped.lstrip() if text.startswith("model_provider") else stripped
 
 
 def set_feature_flags(text: str, flags: dict[str, str]) -> str:
@@ -160,11 +264,24 @@ def apply_overlay(config_path: Path, backup_path: Path, catalog_path: Path, base
     config_path.write_text(updated, encoding="utf-8")
 
 
-def restore_overlay(config_path: Path, backup_path: Path) -> None:
-    if not backup_path.exists():
-        return
-    config_path.write_text(backup_path.read_text(encoding="utf-8"), encoding="utf-8")
-    backup_path.unlink()
+def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
+    if backup_path.exists():
+        restored = backup_path.read_text(encoding="utf-8")
+        backup_path.unlink()
+    elif config_path.exists():
+        restored = config_path.read_text(encoding="utf-8")
+    else:
+        restored = ""
+
+    if unified_history:
+        restored, status = inject_unified_history_config(restored)
+    else:
+        restored = strip_unified_history_config(restored)
+        status = "disabled"
+
+    if restored or config_path.exists() or unified_history:
+        config_path.write_text(restored, encoding="utf-8")
+    return status
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -180,12 +297,15 @@ def main(argv: list[str] | None = None) -> int:
     restore_parser = subparsers.add_parser("restore")
     restore_parser.add_argument("--config", required=True, type=Path)
     restore_parser.add_argument("--backup", required=True, type=Path)
+    restore_parser.add_argument("--unified-history", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "apply":
         apply_overlay(args.config, args.backup, args.catalog, args.base_url)
     elif args.command == "restore":
-        restore_overlay(args.config, args.backup)
+        status = restore_overlay(args.config, args.backup, args.unified_history)
+        if args.unified_history:
+            print(f"unified_history={status}")
     return 0
 
 

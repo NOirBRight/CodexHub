@@ -2,6 +2,7 @@ import os
 import io
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import codex_proxy
@@ -14,6 +15,8 @@ from codex_proxy import (
     _responses_url,
     choose_upstream,
     compatible_request_body,
+    compatible_response_body,
+    compatible_sse_line,
     decoded_request_body,
     extract_model,
     official_upstream,
@@ -100,11 +103,14 @@ class RoutingTests(unittest.TestCase):
                 "openai/gpt-5.5",
                 "minimax-m3",
                 "glm-5.2",
+                "ollama-cloud/glm-5.2",
+                "ollama-cloud/minimax-m3",
                 "kimi-k2.7-code",
                 "gemini-3-flash-preview",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
                 "volc/glm-5.2",
+                "minimax-cn/MiniMax-M3",
                 "minimax-cn/minimax-m3",
             },
         )
@@ -119,16 +125,29 @@ class RoutingTests(unittest.TestCase):
                 "openai/gpt-5.5": {"slug": "openai/gpt-5.5"},
                 "minimax-m3": {"slug": "minimax-m3", "max_output_tokens": 524288},
                 "glm-5.2": {"slug": "glm-5.2", "max_output_tokens": 131072},
+                "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "max_output_tokens": 131072},
+                "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "max_output_tokens": 524288},
                 "kimi-k2.7-code": {"slug": "kimi-k2.7-code", "max_output_tokens": 32768},
                 "gemini-3-flash-preview": {"slug": "gemini-3-flash-preview", "max_output_tokens": 65536},
                 "deepseek-v4-pro": {"slug": "deepseek-v4-pro", "max_output_tokens": 393216},
                 "deepseek-v4-flash": {"slug": "deepseek-v4-flash", "max_output_tokens": 393216},
                 "volc/glm-5.2": {"slug": "volc/glm-5.2", "max_output_tokens": 4096},
+                "minimax-cn/MiniMax-M3": {"slug": "minimax-cn/MiniMax-M3", "max_output_tokens": 524288},
                 "minimax-cn/minimax-m3": {"slug": "minimax-cn/minimax-m3", "max_output_tokens": 524288},
             },
         )
         self.catalog_by_slug_patch.start()
         self.addCleanup(self.catalog_by_slug_patch.stop)
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        self.policy_patch = patch(
+            "codex_proxy.load_policy",
+            return_value=replace(
+                policy,
+                allowed_provider_models=policy.allowed_provider_models + ("minimax-cn/MiniMax-M3",),
+            ),
+        )
+        self.policy_patch.start()
+        self.addCleanup(self.policy_patch.stop)
         self.external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -145,7 +164,7 @@ class RoutingTests(unittest.TestCase):
             "max_output_source": "providers_toml",
         }
         self.minimax_external_model = {
-            "alias": "minimax-cn/minimax-m3",
+            "alias": "minimax-cn/MiniMax-M3",
             "provider_alias": "minimax-cn",
             "upstream_name": "minimax_cn",
             "display_prefix": "MiniMax.cn",
@@ -163,6 +182,7 @@ class RoutingTests(unittest.TestCase):
             "codex_proxy.resolve_external_model_alias",
             side_effect=lambda slug: {
                 "volc/glm-5.2": self.external_model,
+                "minimax-cn/MiniMax-M3": self.minimax_external_model,
                 "minimax-cn/minimax-m3": self.minimax_external_model,
             }.get(slug),
         )
@@ -188,11 +208,39 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body)["model"], "gpt-5.5")
 
+    def test_denied_openai_alias_is_rejected_even_when_bare_model_allowed(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"openai/gpt-5.5"},
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("openai/gpt-5.5")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
     def test_ollama_routes_to_cloud(self):
         upstream = choose_upstream("glm-5.2")
         self.assertEqual(upstream["name"], "ollama_cloud")
         self.assertEqual(upstream["auth"], "ollama_api_key")
         self.assertEqual(upstream["base_url"], "https://ollama.com/v1")
+
+    def test_ollama_provider_prefixed_model_routes_to_cloud_and_rewrites_body(self):
+        upstream = choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertEqual(upstream["name"], "ollama_cloud")
+        self.assertEqual(upstream["auth"], "ollama_api_key")
+        self.assertEqual(upstream["upstream_model"], "glm-5.2")
+
+        transformed = compatible_request_body(
+            b'{"model":"ollama-cloud/glm-5.2","input":"hi"}',
+            upstream,
+            "ollama-cloud/glm-5.2",
+        )
+
+        self.assertEqual(json.loads(transformed)["model"], "glm-5.2")
 
     def test_provider_prefixed_model_routes_to_external_provider(self):
         self.external_model["upstream_format"] = "chat_completions"
@@ -202,6 +250,115 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["base_url"], "https://ark.example.test/v1")
         self.assertEqual(upstream["upstream_model"], "glm-5.2")
         self.assertEqual(upstream["upstream_format"], "chat_completions")
+
+    def test_provider_scoped_short_model_routes_to_external_provider(self):
+        route_model = codex_proxy.provider_scoped_route_model("glm-5.2", "volc")
+
+        self.assertEqual(route_model, "volc/glm-5.2")
+        upstream = choose_upstream(route_model)
+        self.assertEqual(upstream["name"], "volcengine")
+        self.assertEqual(upstream["upstream_model"], "glm-5.2")
+
+    def test_provider_scoped_short_model_preserves_exact_case(self):
+        route_model = codex_proxy.provider_scoped_route_model("MiniMax-M3", "minimax-cn")
+
+        self.assertEqual(route_model, "minimax-cn/MiniMax-M3")
+        upstream = choose_upstream(route_model)
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+
+    def test_provider_scoped_slash_model_is_provider_relative(self):
+        route_model = codex_proxy.provider_scoped_route_model("anthropic/claude-sonnet-4", "openrouter")
+
+        self.assertEqual(route_model, "openrouter/anthropic/claude-sonnet-4")
+
+    def test_provider_scoped_canonical_model_for_same_provider_is_preserved(self):
+        route_model = codex_proxy.provider_scoped_route_model("minimax-cn/MiniMax-M3", "minimax-cn")
+
+        self.assertEqual(route_model, "minimax-cn/MiniMax-M3")
+
+    def test_provider_scoped_path_extracts_provider(self):
+        self.assertEqual(
+            codex_proxy.provider_scoped_path("/v1/providers/minimax-cn/chat/completions", "chat/completions"),
+            "minimax-cn",
+        )
+        self.assertEqual(
+            codex_proxy.provider_scoped_path("/v1/providers/volc/responses", "responses"),
+            "volc",
+        )
+        self.assertEqual(
+            codex_proxy.provider_scoped_path(
+                "/v1/providers/odd%2Fprovider%3Fx%23frag%20%25/chat/completions",
+                "chat/completions",
+            ),
+            "odd/provider?x#frag %",
+        )
+        self.assertIsNone(codex_proxy.provider_scoped_path("/v1/chat/completions", "chat/completions"))
+
+    def test_external_provider_model_routes_with_exact_case(self):
+        upstream = choose_upstream("minimax-cn/MiniMax-M3")
+
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["auth"], "api_key")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+
+    def test_external_provider_explicit_alias_routes_without_lowercasing(self):
+        upstream = choose_upstream("minimax-cn/minimax-m3")
+
+        self.assertEqual(upstream["name"], "minimax_cn")
+        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+
+    def test_denied_provider_qualified_ollama_alias_is_rejected(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"ollama-cloud/glm-5.2"},
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
+    def test_denied_bare_ollama_target_rejects_provider_qualified_alias(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"glm-5.2"},
+            allowed_ollama_cloud_models=policy.allowed_ollama_cloud_models + ("ollama-cloud/glm-5.2",),
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
+    def test_denied_external_compatibility_alias_is_rejected(self):
+        self.minimax_external_model["matched_alias"] = "minimax-cn/minimax-m3"
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(
+            policy,
+            denied_models=set(policy.denied_models) | {"minimax-cn/minimax-m3"},
+        )
+
+        with patch("codex_proxy.load_policy", return_value=policy):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("minimax-cn/minimax-m3")
+
+        self.assertIn("model is not allowed", str(context.exception))
+
+    def test_provider_qualified_ollama_alias_requires_generated_catalog_entry(self):
+        with patch("codex_proxy.generated_catalog_slugs", return_value=set()):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("generated cloud catalog", str(context.exception))
+
+    def test_external_provider_unknown_case_is_rejected(self):
+        with self.assertRaises(ValueError):
+            choose_upstream("minimax-cn/MINIMAX-M3")
 
     def test_provider_prefixed_model_does_not_fall_back_to_ollama(self):
         with patch("codex_proxy.resolve_external_model_alias", return_value=None):
@@ -340,6 +497,22 @@ class RoutingTests(unittest.TestCase):
         transformed = compatible_request_body(body, upstream)
 
         self.assertEqual(json.loads(transformed)["max_output_tokens"], 65536)
+
+    def test_ollama_body_applies_upstream_output_token_cap(self):
+        upstream = choose_upstream("deepseek-v4-pro")
+        body = b'{"model":"deepseek-v4-pro","input":"hi"}'
+
+        transformed = compatible_request_body(body, upstream)
+
+        self.assertEqual(json.loads(transformed)["max_output_tokens"], 65536)
+
+    def test_ollama_body_applies_minimax_output_token_cap(self):
+        upstream = choose_upstream("minimax-m3")
+        body = b'{"model":"minimax-m3","input":"hi"}'
+
+        transformed = compatible_request_body(body, upstream)
+
+        self.assertEqual(json.loads(transformed)["max_output_tokens"], 131072)
 
     def test_ollama_body_converts_compaction_input_to_system_message(self):
         upstream = choose_upstream("glm-5.2")
@@ -531,12 +704,12 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(transformed)
 
         self.assertEqual(payload["input"][1]["type"], "message")
-        self.assertEqual(payload["input"][1]["role"], "system")
-        self.assertIn("Invalid Codex function call transcript", payload["input"][1]["content"])
-        self.assertIn("[Codex", payload["input"][1]["content"])
+        self.assertEqual(payload["input"][1]["role"], "assistant")
+        self.assertIn("Invalid Codex function call transcript", payload["input"][1]["content"][0]["text"])
+        self.assertIn("[Codex", payload["input"][1]["content"][0]["text"])
         self.assertEqual(payload["input"][2]["type"], "message")
-        self.assertEqual(payload["input"][2]["role"], "system")
-        self.assertIn("Invalid Codex function result transcript", payload["input"][2]["content"])
+        self.assertEqual(payload["input"][2]["role"], "assistant")
+        self.assertIn("Invalid Codex function result transcript", payload["input"][2]["content"][0]["text"])
         self.assertEqual(payload["input"][3]["type"], "function_call")
         self.assertEqual(payload["input"][3]["name"], "shell_command")
 
@@ -735,10 +908,14 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b'"model":"volc/glm-5.2"', transformed)
 
     def test_default_minimax_provider_rewrites_to_live_upstream_model_case(self):
+        from providers_config import DEFAULT_PROVIDERS_PATH
         from providers_config import resolve_external_model_alias as real_resolve_external_model_alias
 
+        def bundled_resolve_external_model_alias(model_id):
+            return real_resolve_external_model_alias(model_id, providers_path=DEFAULT_PROVIDERS_PATH)
+
         with (
-            patch("codex_proxy.resolve_external_model_alias", side_effect=real_resolve_external_model_alias),
+            patch("codex_proxy.resolve_external_model_alias", side_effect=bundled_resolve_external_model_alias),
             patch.dict(os.environ, {"MINIMAX_API_KEY": "minimax-live-case-token"}, clear=False),
         ):
             upstream = choose_upstream("minimax-cn/minimax-m3")
@@ -1301,6 +1478,308 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["output"][0]["role"], "assistant")
         self.assertIn("Invalid third-party function call transcript", payload["output"][0]["content"][0]["text"])
         self.assertIn("shell_command`", payload["output"][0]["content"][0]["text"])
+
+    def test_official_request_downgrades_invalid_tool_history_without_system_role(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [
+                    {"type": "function_call", "call_id": "call_bad", "name": "[Codex", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_bad", "output": "unsupported call"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "official", "auth": "codex_auth"})
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["role"], "assistant")
+        self.assertEqual(payload["input"][1]["role"], "assistant")
+        self.assertNotIn('"role":"system"', transformed.decode("utf-8"))
+
+    def test_external_request_injects_explicit_codex_native_tools(self):
+        body = json.dumps({"model": "glm-5.2", "input": "spawn a child"}).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+
+        self.assertIn("tool_search", tools_by_name)
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__send_input", tools_by_name)
+
+    def test_external_request_hides_tool_search_after_multi_agent_discovery(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "tool_search_call", "call_id": "call_search", "arguments": {"query": "spawn_agent multi_agent subagent"}},
+                    {"type": "tool_search_output", "call_id": "call_search", "tools": codex_proxy.MULTI_AGENT_DISCOVERY_TOOLS},
+                ],
+                "tools": [{"type": "function", "name": "tool_search", "parameters": {"type": "object"}}],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        tools_by_name = {tool["name"]: tool for tool in json.loads(transformed)["tools"]}
+
+        self.assertNotIn("tool_search", tools_by_name)
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__close_agent", tools_by_name)
+
+    def test_external_request_hides_spawn_agent_while_child_is_open(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child", "nickname": "child"}),
+                    },
+                ],
+                "tools": [{"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}}],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("Codex native multi_agent_v1.spawn_agent result", transcript)
+        self.assertIn("agent_id: 019f-child", transcript)
+        self.assertIn("status: spawned_child_wait_required", transcript)
+        wait_items = tools_by_name["multi_agent_v1__wait_agent"]["parameters"]["properties"]["targets"]["items"]
+        self.assertEqual(wait_items["enum"], ["019f-child"])
+
+    def test_external_request_hides_wait_agent_after_wait_completed(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child", "nickname": "child"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"019f-child": {"completed": "child-ok"}}}),
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("status: wait_completed_close_required", transcript)
+        close_target = tools_by_name["multi_agent_v1__close_agent"]["parameters"]["properties"]["target"]
+        self.assertEqual(close_target["enum"], ["019f-child"])
+
+    def test_external_request_allows_spawn_agent_after_close_result(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close",
+                        "output": json.dumps({"previous_status": {"completed": {}}}),
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        tools_by_name = {tool["name"]: tool for tool in json.loads(transformed)["tools"]}
+
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+
+    def test_external_request_hides_multi_agent_tools_after_single_loop_close(self):
+        body = json.dumps(
+            {
+                "model": "kimi-k2.6",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "只执行一次 spawn -> wait -> close 闭环。close_agent 返回后不要再 spawn 第二个子代理，不要重复验证。",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"019f-child": {"completed": "child-ok"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close",
+                        "output": json.dumps({"previous_status": {"completed": "child-ok"}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "tool_search", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("tool_search", tools_by_name)
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertNotIn(f"multi_agent_v1__{tool_name}", tools_by_name)
+        self.assertIn("status: lifecycle_complete", transcript)
+        self.assertIn("required_next_action: write the final concise report now", transcript)
+
+    def test_external_response_normalizes_multi_agent_wait_alias_and_arguments(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "name": "multi_agent_v1__wait_agent",
+                        "arguments": json.dumps({"targets": "019f-child", "timeout_ms": "1000"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "wait_agent")
+        self.assertEqual(call["namespace"], "multi_agent_v1")
+        self.assertEqual(json.loads(call["arguments"])["targets"], ["019f-child"])
+        self.assertEqual(json.loads(call["arguments"])["timeout_ms"], 1000)
+
+    def test_external_sse_normalizes_tool_search_function_call(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_search",
+                "name": "tool_search",
+                "arguments": json.dumps({"query": "spawn_agent", "limit": "8"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call["type"], "tool_search_call")
+        self.assertEqual(call["arguments"], {"query": "spawn_agent", "limit": 8})
+
+    def test_kimi_k2_6_external_request_removes_unsupported_reasoning(self):
+        body = json.dumps(
+            {
+                "model": "volc/kimi-k2.6",
+                "input": "hi",
+                "reasoning": {"effort": "medium"},
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {"name": "volcengine", "upstream_model": "kimi-k2.6-code"},
+            event_context={"request_id": "req"},
+        )
+
+        self.assertNotIn("reasoning", json.loads(transformed))
 
     def test_response_header_filter_omits_hop_by_hop(self):
         headers = {

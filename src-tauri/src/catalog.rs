@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     models::generate_catalog()
@@ -135,6 +135,7 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
 mod tests {
     use super::{
         sync_catalog_with_paths, CatalogCommandOutcome, CatalogPaths, CatalogSyncCommandRunner,
+        GENERATED_CATALOG_FILE,
     };
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -151,7 +152,7 @@ mod tests {
         write_fake_catalog_script(&repo_root);
         let catalog_path = codex_home
             .join("model-catalogs")
-            .join("codex-proxy-official-ollama.json");
+            .join(GENERATED_CATALOG_FILE);
         let runner = RecordingCatalogRunner::successful("catalog written\n", catalog_path.clone());
 
         let result = sync_catalog_with_paths(&paths, Path::new("python-test"), &runner)

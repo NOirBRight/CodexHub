@@ -14,12 +14,16 @@ official_models = [
 allowed_ollama_cloud_models = [
   "minimax-m3",
   "glm-5.2",
+  "kimi-k2.6",
   "kimi-k2.7-code",
   "gemini-3-flash-preview",
   "deepseek-v4-pro",
   "deepseek-v4-flash",
 ]
 allowed_provider_models = [
+  "ollama-cloud/minimax-m3",
+  "ollama-cloud/glm-5.2",
+  "ollama-cloud/kimi-k2.6",
   "volc/ark-code-latest",
   "volc/doubao-seed-2.0-code",
   "volc/doubao-seed-2.0-pro",
@@ -27,9 +31,24 @@ allowed_provider_models = [
   "volc/glm-5.2",
   "volc/deepseek-v4-pro",
   "volc/deepseek-v4-flash",
-  "volc/minimax-m3",
   "volc/kimi-k2.6",
-  "minimax-cn/minimax-m3",
+  "minimax-cn/MiniMax-M3",
+  "xunfei/xsparkx2",
+  "xunfei/xopglm5",
+  "xunfei/xopglm52",
+  "xunfei/xopdeepseekv4pro",
+  "xunfei/xopdeepseekv4flash",
+  "xunfei/xopkimik26",
+  "xunfei/xopglm51",
+  "xunfei/xminimaxm25",
+  "xunfei/xopkimik25",
+  "xunfei/xopdeepseekv32",
+  "xunfei/xsparkx2flash",
+  "xunfei/xopqwen36v35b",
+  "xunfei/xopglmv47flash",
+  "xunfei/xopqwen35v35b",
+  "xunfei/xop3qwencodernext",
+  "xunfei/xopqwen35397b",
 ]
 denied_models = [
   "glm-5.1",
@@ -41,16 +60,21 @@ denied_substrings = ["embedding"]
 
 [display_names]
 "gpt-5.5" = "GPT-5.5"
+"gpt-5.5-fast" = "GPT-5.5 Fast"
 "gpt-5.4" = "GPT-5.4"
+"gpt-5.4-fast" = "GPT-5.4 Fast"
 "gpt-5.4-mini" = "GPT-5.4-Mini"
 "gpt-5.3-codex-spark" = "GPT-5.3-Codex-Spark"
 "glm-5.2" = "Ollama GLM-5.2"
 "minimax-m3" = "Ollama MiniMax-M3"
+"kimi-k2.6" = "Ollama Kimi K2.6"
+"ollama-cloud/glm-5.2" = "Ollama GLM-5.2"
+"ollama-cloud/minimax-m3" = "Ollama MiniMax-M3"
+"ollama-cloud/kimi-k2.6" = "Ollama Kimi K2.6"
 "kimi-k2.7-code" = "Ollama Kimi K2.7 Code"
 "deepseek-v4-pro" = "Ollama DeepSeek V4 Pro"
 "deepseek-v4-flash" = "Ollama DeepSeek V4 Flash"
 "gemini-3-flash-preview" = "Ollama Gemini 3 Flash Preview"
-"kimi-k2.6" = "Kimi K2.6"
 "volc/ark-code-latest" = "Volc Ark Code Latest"
 "volc/doubao-seed-2.0-code" = "Volc Doubao Seed 2.0 Code"
 "volc/doubao-seed-2.0-pro" = "Volc Doubao Seed 2.0 Pro"
@@ -60,4 +84,20 @@ denied_substrings = ["embedding"]
 "volc/deepseek-v4-flash" = "Volc DeepSeek V4 Flash"
 "volc/minimax-m3" = "Volc MiniMax-M3"
 "volc/kimi-k2.6" = "Volc Kimi K2.6"
-"minimax-cn/minimax-m3" = "MiniMax.cn MiniMax-M3"
+"minimax-cn/MiniMax-M3" = "MiniMax.cn MiniMax-M3"
+"xunfei/xsparkx2" = "Xunfei Spark X2"
+"xunfei/xopglm5" = "Xunfei GLM-5"
+"xunfei/xopglm52" = "Xunfei GLM-5.2"
+"xunfei/xopdeepseekv4pro" = "Xunfei DeepSeek-V4-Pro"
+"xunfei/xopdeepseekv4flash" = "Xunfei DeepSeek-V4-Flash"
+"xunfei/xopkimik26" = "Xunfei Kimi-K2.6"
+"xunfei/xopglm51" = "Xunfei GLM-5.1"
+"xunfei/xminimaxm25" = "Xunfei MiniMax-M2.5"
+"xunfei/xopkimik25" = "Xunfei KIMI-K2.5"
+"xunfei/xopdeepseekv32" = "Xunfei DeepSeek-V3.2"
+"xunfei/xsparkx2flash" = "Xunfei Spark-X2-Flash"
+"xunfei/xopqwen36v35b" = "Xunfei Qwen3.6-35B-A3B"
+"xunfei/xopglmv47flash" = "Xunfei GLM-4.7-Flash"
+"xunfei/xopqwen35v35b" = "Xunfei Qwen3.5-35B-A3B"
+"xunfei/xop3qwencodernext" = "Xunfei Qwen3-Coder-Next-FP8"
+"xunfei/xopqwen35397b" = "Xunfei Qwen3.5-397B-A17B"

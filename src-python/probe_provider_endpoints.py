@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from catalog import canonical_model_id, load_catalog_models
-from catalog_sync import GENERATED_CATALOG_PATH
+from catalog_sync import GENERATED_CATALOG_PATH, existing_generated_catalog_path
 from codex_proxy import (
     _responses_url,
     choose_upstream,
@@ -35,7 +35,7 @@ FORBIDDEN_EXTERNAL_TYPES = (
 
 def visible_catalog_models(include_official: bool = False) -> list[str]:
     result: list[str] = []
-    for model in load_catalog_models(GENERATED_CATALOG_PATH):
+    for model in load_catalog_models(existing_generated_catalog_path(GENERATED_CATALOG_PATH)):
         slug = canonical_model_id(str(model.get("slug", "")))
         if not slug:
             continue

@@ -11,8 +11,11 @@
     "windows": [
       {
         "title": "CodexHub",
-        "width": 900,
-        "height": 600,
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 768,
+        "decorations": false,
         "resizable": true
       }
     ],
@@ -22,6 +25,12 @@
   },
   "bundle": {
     "active": false,
-    "icon": []
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
   }
 }

@@ -1,6 +1,6 @@
-use crate::Model;
+use crate::{MetadataProvenance, Model, ModelPricing};
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, AUTHORIZATION};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -10,7 +10,8 @@ use std::time::Duration;
 
 const OFFICIAL_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
-const GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 
 pub fn refresh_official_models() -> Result<Vec<Model>, String> {
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -27,6 +28,49 @@ pub fn discover_provider_models(base_url: &str, api_key: &str) -> Result<Vec<Mod
     discover_provider_models_with_timeout(base_url, api_key, DISCOVERY_TIMEOUT)
 }
 
+pub fn probe_upstream_format(
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+) -> Result<Value, String> {
+    let api_key = resolve_api_key(api_key)?.unwrap_or_default();
+    let paths = ModelPaths::runtime()?;
+    let python = find_python();
+    let script = paths.upstream_format_probe_script();
+    if !script.exists() {
+        return Err(format!(
+            "upstream format probe script not found: {}",
+            script.display()
+        ));
+    }
+
+    let mut command = Command::new(&python);
+    command
+        .arg(&script)
+        .arg("--base-url")
+        .arg(base_url)
+        .env("CODEXHUB_PROBE_API_KEY", api_key);
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        command.arg("--model").arg(model);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start upstream format probe: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        return Err(format!(
+            "upstream format probe failed with {}\nstdout:\n{}\nstderr:\n{}",
+            format_exit_code(output.status.code()),
+            stdout.trim_end(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        ));
+    }
+
+    serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("upstream format probe returned invalid JSON: {error}"))
+}
+
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
     let python = find_python();
@@ -37,12 +81,39 @@ pub fn generate_catalog() -> Result<Vec<Model>, String> {
 
 pub fn list_models() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
-    let catalog_path = paths.generated_catalog_path();
+    let catalog_path = paths.existing_generated_catalog_path();
     if !catalog_path.exists() {
         return Ok(Vec::new());
     }
 
     read_catalog_models(&catalog_path)
+}
+
+pub fn list_model_metadata() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    let cached = read_metadata_cache(&paths).unwrap_or_default();
+    let cached = merge_metadata_with_overrides(builtin_model_metadata(), cached);
+    let overrides = read_metadata_overrides(&paths).unwrap_or_default();
+    Ok(merge_metadata_with_overrides(cached, overrides))
+}
+
+pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    let metadata = builtin_model_metadata();
+    write_models_json(&paths.metadata_cache_path(), &metadata)?;
+    list_model_metadata()
+}
+
+pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
+    let paths = ModelPaths::runtime()?;
+    let mut overrides = read_metadata_overrides(&paths).unwrap_or_default();
+    if let Some(existing) = overrides.iter_mut().find(|item| item.id == model.id) {
+        *existing = model.clone();
+    } else {
+        overrides.push(model.clone());
+    }
+    write_models_json(&paths.metadata_overrides_path(), &overrides)?;
+    Ok(model)
 }
 
 fn refresh_official_models_from_endpoint(
@@ -65,13 +136,23 @@ fn discover_provider_models_with_timeout(
     timeout: Duration,
 ) -> Result<Vec<Model>, String> {
     let endpoint = provider_models_endpoint(base_url)?;
-    discover_models_http(
+    let mut models = discover_models_http(
         &endpoint,
         api_key,
         timeout,
         DiscoveryKind::Provider,
         "provider models",
-    )
+    )?;
+    if let Some(show_endpoint) = ollama_show_endpoint(base_url) {
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|error| {
+                format!("failed to build HTTP client for Ollama model metadata: {error}")
+            })?;
+        enrich_models_with_ollama_show(&client, &show_endpoint, api_key, &mut models);
+    }
+    Ok(models)
 }
 
 fn discover_models_http(
@@ -86,8 +167,7 @@ fn discover_models_http(
         .build()
         .map_err(|error| format!("failed to build HTTP client for {label}: {error}"))?;
     let mut request = client.get(endpoint).header(ACCEPT, "application/json");
-    let api_key = api_key.trim();
-    if !api_key.is_empty() {
+    if let Some(api_key) = resolve_api_key(api_key)? {
         request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
 
@@ -126,6 +206,159 @@ fn provider_models_endpoint(base_url: &str) -> Result<String, String> {
     } else {
         Ok(format!("{base_url}/v1/models"))
     }
+}
+
+fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Ok(None);
+    }
+    let Some(env_name) = env_placeholder_name(api_key)? else {
+        return Ok(Some(api_key.to_string()));
+    };
+    let value = std::env::var(&env_name)
+        .map_err(|_| format!("{env_name} is not set"))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return Err(format!("{env_name} is empty"));
+    }
+    Ok(Some(value))
+}
+
+fn env_placeholder_name(value: &str) -> Result<Option<String>, String> {
+    if !value.starts_with("{env:") && !value.ends_with('}') {
+        return Ok(None);
+    }
+    if !value.starts_with("{env:") || !value.ends_with('}') {
+        return Err("invalid API key environment placeholder".to_string());
+    }
+    let name = &value[5..value.len() - 1];
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err("invalid API key environment placeholder".to_string());
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(format!("invalid API key environment placeholder: {name}"));
+    }
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        return Err(format!("invalid API key environment placeholder: {name}"));
+    }
+    Ok(Some(name.to_string()))
+}
+
+fn ollama_show_endpoint(base_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(base_url.trim()).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let is_ollama_cloud = host == "ollama.com";
+    let is_local_ollama =
+        matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") && url.port() == Some(11434);
+    if !is_ollama_cloud && !is_local_ollama {
+        return None;
+    }
+
+    let path = url.path().trim_end_matches('/');
+    let api_path = if let Some(prefix) = path.strip_suffix("/v1") {
+        format!("{prefix}/api/show")
+    } else if let Some(prefix) = path.strip_suffix("/api") {
+        format!("{prefix}/api/show")
+    } else {
+        "/api/show".to_string()
+    };
+    url.set_path(&api_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn enrich_models_with_ollama_show(
+    client: &Client,
+    show_endpoint: &str,
+    api_key: &str,
+    models: &mut [Model],
+) {
+    let api_key = resolve_api_key(api_key).ok().flatten();
+    for model in models {
+        let mut request = client
+            .post(show_endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({ "model": model.id }));
+        if let Some(api_key) = api_key.as_deref() {
+            request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+        }
+        let Ok(response) = request.send() else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(payload) = response.json::<Value>() else {
+            continue;
+        };
+        apply_ollama_show_metadata(model, &payload);
+    }
+}
+
+fn apply_ollama_show_metadata(model: &mut Model, payload: &Value) {
+    if let Some(context_window) = ollama_show_context_window(payload) {
+        model.context_window = Some(context_window);
+    }
+
+    let capabilities = string_array(payload.get("capabilities").unwrap_or(&Value::Null))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    if capabilities.contains("vision") {
+        model.input_modalities = Some(vec!["text".to_string(), "image".to_string()]);
+    }
+
+    if capabilities.contains("thinking") || known_ollama_thinking_model(&model.id) {
+        let levels = ollama_reasoning_levels(&model.id);
+        model.default_reasoning_level = levels
+            .iter()
+            .find(|level| level.as_str() == "medium")
+            .cloned()
+            .or_else(|| levels.first().cloned());
+        model.supported_reasoning_levels = Some(levels);
+    }
+}
+
+fn ollama_show_context_window(payload: &Value) -> Option<u32> {
+    let model_info = payload.get("model_info")?.as_object()?;
+    model_info
+        .iter()
+        .filter_map(|(key, value)| {
+            if key.ends_with(".context_length") || key == "context_length" {
+                optional_u32(value)
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+fn known_ollama_thinking_model(model_id: &str) -> bool {
+    let model_id = model_id.to_ascii_lowercase();
+    model_id.starts_with("qwen3")
+        || model_id.contains("/qwen3")
+        || model_id.starts_with("gpt-oss")
+        || model_id.contains("/gpt-oss")
+        || model_id.starts_with("deepseek-r1")
+        || model_id.contains("/deepseek-r1")
+        || model_id.starts_with("deepseek-v3.1")
+        || model_id.contains("/deepseek-v3.1")
+}
+
+fn ollama_reasoning_levels(model_id: &str) -> Vec<String> {
+    let model_id = model_id.to_ascii_lowercase();
+    let levels = if model_id.starts_with("gpt-oss") || model_id.contains("/gpt-oss") {
+        ["low", "medium", "high"].as_slice()
+    } else {
+        ["low", "medium", "high", "max"].as_slice()
+    };
+    levels.iter().map(|level| (*level).to_string()).collect()
 }
 
 fn safe_http_error(error: reqwest::Error) -> String {
@@ -208,8 +441,7 @@ fn model_from_discovered_item(id: String, item: &Value) -> Model {
             "context",
         ),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
-        sort_order: None,
-        enabled: true,
+        ..Model::default()
     }
 }
 
@@ -284,10 +516,46 @@ impl ModelPaths {
         self.repo_root.join("src-python").join("catalog_sync.py")
     }
 
+    fn upstream_format_probe_script(&self) -> PathBuf {
+        self.repo_root
+            .join("src-python")
+            .join("probe_upstream_format.py")
+    }
+
     fn generated_catalog_path(&self) -> PathBuf {
         self.codex_dir
             .join("model-catalogs")
             .join(GENERATED_CATALOG_FILE)
+    }
+
+    fn legacy_generated_catalog_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join(LEGACY_GENERATED_CATALOG_FILE)
+    }
+
+    fn existing_generated_catalog_path(&self) -> PathBuf {
+        let catalog_path = self.generated_catalog_path();
+        if catalog_path.exists() {
+            return catalog_path;
+        }
+        let legacy_path = self.legacy_generated_catalog_path();
+        if legacy_path.exists() {
+            return legacy_path;
+        }
+        catalog_path
+    }
+
+    fn metadata_cache_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("proxy")
+            .join("model-metadata-cache.json")
+    }
+
+    fn metadata_overrides_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("proxy")
+            .join("model-metadata-overrides.json")
     }
 }
 
@@ -396,6 +664,262 @@ fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
     Ok(models)
 }
 
+fn read_metadata_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    read_models_json(&paths.metadata_cache_path())
+}
+
+fn read_metadata_overrides(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    read_models_json(&paths.metadata_overrides_path())
+}
+
+fn read_models_json(path: &Path) -> Result<Vec<Model>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read model metadata {}: {error}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|error| format!("failed to parse model metadata {}: {error}", path.display()))
+}
+
+fn write_models_json(path: &Path, models: &[Model]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create model metadata directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let text = serde_json::to_string_pretty(models)
+        .map_err(|error| format!("failed to serialize model metadata: {error}"))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| format!("failed to write model metadata {}: {error}", path.display()))
+}
+
+fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) -> Vec<Model> {
+    for mut override_model in overrides {
+        override_model.metadata_provenance = Some(MetadataProvenance {
+            source: "user_override".to_string(),
+            source_url: None,
+            fetched_at: None,
+            confidence: "user".to_string(),
+        });
+        if let Some(existing) = base.iter_mut().find(|model| model.id == override_model.id) {
+            merge_model_override(existing, override_model);
+        } else {
+            base.push(override_model);
+        }
+    }
+    base.sort_by(|left, right| left.id.cmp(&right.id));
+    base
+}
+
+fn merge_model_override(base: &mut Model, override_model: Model) {
+    let original_enabled = base.enabled;
+    let original_codex_enabled = base.codex_enabled;
+    let original_gateway_exported = base.gateway_exported;
+    let aliases = merge_model_aliases(base.aliases.clone(), override_model.aliases);
+    *base = Model {
+        id: override_model.id,
+        display_name: override_model.display_name.or(base.display_name.take()),
+        upstream_model: override_model.upstream_model.or(base.upstream_model.take()),
+        aliases,
+        source_kind: override_model.source_kind.or(base.source_kind.take()),
+        locked: base.locked || override_model.locked,
+        codex_enabled: override_model.codex_enabled && original_codex_enabled,
+        gateway_exported: override_model.gateway_exported && original_gateway_exported,
+        context_window: override_model.context_window.or(base.context_window),
+        max_output_tokens: override_model.max_output_tokens.or(base.max_output_tokens),
+        input_modalities: override_model
+            .input_modalities
+            .or(base.input_modalities.take()),
+        supported_reasoning_levels: override_model
+            .supported_reasoning_levels
+            .or(base.supported_reasoning_levels.take()),
+        default_reasoning_level: override_model
+            .default_reasoning_level
+            .or(base.default_reasoning_level.take()),
+        pricing: override_model.pricing.or(base.pricing.take()),
+        metadata_provenance: override_model.metadata_provenance,
+        sort_order: override_model.sort_order.or(base.sort_order),
+        enabled: override_model.enabled && original_enabled,
+    };
+}
+
+fn merge_model_aliases(mut base: Vec<String>, overrides: Vec<String>) -> Vec<String> {
+    for alias in overrides {
+        let alias = alias.trim().to_string();
+        if !alias.is_empty() && !base.iter().any(|existing| existing == &alias) {
+            base.push(alias);
+        }
+    }
+    base
+}
+
+fn builtin_model_metadata() -> Vec<Model> {
+    vec![
+        official_priced_metadata(
+            "openai/gpt-5.5",
+            "GPT-5.5",
+            272_000,
+            "https://developers.openai.com/api/docs/pricing",
+            5.00,
+            Some(0.50),
+            22.50,
+        ),
+        official_priced_metadata(
+            "openai/gpt-5.4",
+            "GPT-5.4",
+            272_000,
+            "https://developers.openai.com/api/docs/pricing",
+            2.50,
+            Some(0.25),
+            11.25,
+        ),
+        official_priced_metadata(
+            "openai/gpt-5.4-mini",
+            "GPT-5.4 mini",
+            272_000,
+            "https://developers.openai.com/api/docs/pricing",
+            0.375,
+            Some(0.0375),
+            2.25,
+        ),
+        official_metadata("openai/gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
+        priced_metadata(
+            "zai/glm-5.2",
+            "GLM 5.2",
+            "external",
+            1_000_000,
+            "https://docs.z.ai/guides/llm/glm-5.2",
+            Some((0.30, 0.03, 1.20)),
+        ),
+        priced_metadata(
+            "moonshot/kimi-k2.7-code",
+            "Kimi K2.7 Code",
+            "external",
+            256_000,
+            "https://platform.kimi.ai/docs/guide/kimi-k2-7-code-quickstart",
+            None,
+        ),
+        priced_metadata(
+            "minimax/minimax-m3",
+            "MiniMax M3",
+            "external",
+            1_000_000,
+            "https://platform.minimax.io/docs/guides/text-generation",
+            None,
+        ),
+        priced_metadata(
+            "deepseek/deepseek-chat",
+            "DeepSeek Chat",
+            "external",
+            128_000,
+            "https://api-docs.deepseek.com/quick_start/pricing",
+            Some((0.27, 0.07, 1.10)),
+        ),
+        Model {
+            id: "ollama/glm-5.2".to_string(),
+            display_name: Some("GLM 5.2 via Ollama".to_string()),
+            source_kind: Some("external".to_string()),
+            context_window: Some(128_000),
+            pricing: None,
+            metadata_provenance: Some(MetadataProvenance {
+                source: "official".to_string(),
+                source_url: Some("https://docs.ollama.com/api/openai-compatibility".to_string()),
+                fetched_at: None,
+                confidence: "medium".to_string(),
+            }),
+            ..Model::default()
+        },
+    ]
+}
+
+fn official_priced_metadata(
+    id: &str,
+    display_name: &str,
+    context_window: u32,
+    source_url: &str,
+    input_per_million: f64,
+    cached_input_per_million: Option<f64>,
+    output_per_million: f64,
+) -> Model {
+    let mut model = official_metadata(id, display_name, context_window);
+    model.pricing = Some(ModelPricing {
+        input_per_million: Some(input_per_million),
+        cached_input_per_million,
+        output_per_million: Some(output_per_million),
+        currency: "USD".to_string(),
+        source: "official".to_string(),
+        estimate: true,
+    });
+    model.metadata_provenance = Some(MetadataProvenance {
+        source: "official".to_string(),
+        source_url: Some(source_url.to_string()),
+        fetched_at: None,
+        confidence: "medium".to_string(),
+    });
+    model
+}
+
+fn official_metadata(id: &str, display_name: &str, context_window: u32) -> Model {
+    Model {
+        id: id.to_string(),
+        display_name: Some(display_name.to_string()),
+        source_kind: Some("official".to_string()),
+        locked: true,
+        context_window: Some(context_window),
+        input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+        supported_reasoning_levels: Some(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ]),
+        default_reasoning_level: Some("medium".to_string()),
+        metadata_provenance: Some(MetadataProvenance {
+            source: "official".to_string(),
+            source_url: Some("https://developers.openai.com/api/docs/models".to_string()),
+            fetched_at: None,
+            confidence: "high".to_string(),
+        }),
+        ..Model::default()
+    }
+}
+
+fn priced_metadata(
+    id: &str,
+    display_name: &str,
+    source_kind: &str,
+    context_window: u32,
+    source_url: &str,
+    pricing: Option<(f64, f64, f64)>,
+) -> Model {
+    Model {
+        id: id.to_string(),
+        display_name: Some(display_name.to_string()),
+        source_kind: Some(source_kind.to_string()),
+        context_window: Some(context_window),
+        pricing: pricing.map(|(input, cached, output)| ModelPricing {
+            input_per_million: Some(input),
+            cached_input_per_million: Some(cached),
+            output_per_million: Some(output),
+            currency: "USD".to_string(),
+            source: "official".to_string(),
+            estimate: true,
+        }),
+        metadata_provenance: Some(MetadataProvenance {
+            source: "official".to_string(),
+            source_url: Some(source_url.to_string()),
+            fetched_at: None,
+            confidence: "medium".to_string(),
+        }),
+        ..Model::default()
+    }
+}
+
 fn catalog_model_from_item(item: &Value) -> Option<Model> {
     let object = item.as_object()?;
     let id = object
@@ -424,15 +948,77 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
                     .and_then(Value::as_str)
                     .and_then(nonblank)
             }),
+        aliases: object
+            .get("aliases")
+            .and_then(string_array)
+            .unwrap_or_default(),
         context_window: numeric_limit(
             item,
             &["context_window", "max_context_window", "context_length"],
             "context",
         ),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
+        input_modalities: object.get("input_modalities").and_then(string_array),
+        supported_reasoning_levels: object
+            .get("supported_reasoning_levels")
+            .and_then(reasoning_efforts),
+        default_reasoning_level: object
+            .get("default_reasoning_level")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
         sort_order: object.get("priority").and_then(optional_i32),
-        enabled: true,
+        enabled: object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        source_kind: object
+            .get("source_kind")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        locked: object
+            .get("locked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        codex_enabled: object
+            .get("codex_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        gateway_exported: object
+            .get("gateway_exported")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        pricing: None,
+        metadata_provenance: None,
     })
+}
+
+fn string_array(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(nonblank)
+            .collect(),
+    )
+}
+
+fn reasoning_efforts(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(|item| {
+                if let Some(text) = item.as_str() {
+                    return nonblank(text);
+                }
+                item.as_object()
+                    .and_then(|object| object.get("effort"))
+                    .and_then(Value::as_str)
+                    .and_then(nonblank)
+            })
+            .collect(),
+    )
 }
 
 fn format_exit_code(code: Option<i32>) -> String {
@@ -451,11 +1037,13 @@ fn find_python() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout, generate_catalog_with_runner, list_models,
-        refresh_official_models_from_endpoint, CatalogCommandOutcome, CatalogSyncRunner,
-        ModelPaths,
+        discover_provider_models_with_timeout, enrich_models_with_ollama_show,
+        generate_catalog_with_runner, list_model_metadata, list_models,
+        merge_metadata_with_overrides, ollama_show_endpoint, refresh_official_models_from_endpoint,
+        CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
-    use crate::Model;
+    use crate::{MetadataProvenance, Model};
+    use reqwest::blocking::Client;
     use std::cell::RefCell;
     use std::fs;
     use std::io::{Read, Write};
@@ -580,6 +1168,36 @@ mod tests {
     }
 
     #[test]
+    fn metadata_overrides_win_over_registry_values() {
+        let base = vec![Model {
+            id: "minimax/minimax-m3".to_string(),
+            context_window: Some(1_000_000),
+            metadata_provenance: Some(MetadataProvenance {
+                source: "official".to_string(),
+                source_url: Some("https://platform.minimax.io/docs".to_string()),
+                fetched_at: None,
+                confidence: "high".to_string(),
+            }),
+            ..Model::default()
+        }];
+        let overrides = vec![Model {
+            id: "minimax/minimax-m3".to_string(),
+            context_window: Some(245_000),
+            display_name: Some("MiniMax M3 Custom".to_string()),
+            ..Model::default()
+        }];
+
+        let merged = merge_metadata_with_overrides(base, overrides);
+
+        assert_eq!(merged[0].context_window, Some(245_000));
+        assert_eq!(merged[0].display_name.as_deref(), Some("MiniMax M3 Custom"));
+        assert_eq!(
+            merged[0].metadata_provenance.as_ref().unwrap().source,
+            "user_override"
+        );
+    }
+
+    #[test]
     fn provider_discovery_accepts_blank_api_key_without_authorization_header() {
         let server = MockServer::json(r#"{"models":["public-model"]}"#, Duration::ZERO);
 
@@ -606,6 +1224,102 @@ mod tests {
         assert_eq!(model_ids(&models), ["v1-model"]);
         let request = server.request();
         assert!(request.starts_with("GET /v1/models "));
+        server.join();
+    }
+
+    #[test]
+    fn provider_discovery_resolves_env_api_key_placeholders() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("MINIMAX_API_KEY");
+        std::env::set_var("MINIMAX_API_KEY", "resolved-minimax-secret");
+        let server = MockServer::json(r#"{"models":["minimax-m3"]}"#, Duration::ZERO);
+
+        let models = discover_provider_models_with_timeout(
+            &server.base_url(),
+            "{env:MINIMAX_API_KEY}",
+            Duration::from_secs(2),
+        )
+        .expect("provider discovery");
+
+        assert_eq!(model_ids(&models), ["minimax-m3"]);
+        let request = server.request();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer resolved-minimax-secret"));
+        assert!(!request.contains("{env:MINIMAX_API_KEY}"));
+        restore_env("MINIMAX_API_KEY", previous);
+        server.join();
+    }
+
+    #[test]
+    fn provider_discovery_reports_missing_env_api_key_placeholders() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("MINIMAX_API_KEY");
+        std::env::remove_var("MINIMAX_API_KEY");
+
+        let error = discover_provider_models_with_timeout(
+            "http://127.0.0.1:9/v1",
+            "{env:MINIMAX_API_KEY}",
+            Duration::from_millis(50),
+        )
+        .expect_err("missing env placeholder should fail before HTTP");
+
+        restore_env("MINIMAX_API_KEY", previous);
+        assert!(error.contains("MINIMAX_API_KEY"));
+        assert!(error.contains("not set"));
+    }
+
+    #[test]
+    fn ollama_show_endpoint_is_derived_only_for_ollama_hosts() {
+        assert_eq!(
+            ollama_show_endpoint("https://ollama.com/v1").as_deref(),
+            Some("https://ollama.com/api/show")
+        );
+        assert_eq!(
+            ollama_show_endpoint("http://127.0.0.1:11434/v1/").as_deref(),
+            Some("http://127.0.0.1:11434/api/show")
+        );
+        assert_eq!(ollama_show_endpoint("https://example.test/v1"), None);
+    }
+
+    #[test]
+    fn ollama_show_metadata_enriches_context_vision_and_thinking() {
+        let server = MockServer::json(
+            r#"{"capabilities":["completion","vision","thinking"],"model_info":{"gptoss.context_length":131072}}"#,
+            Duration::ZERO,
+        );
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut models = vec![Model {
+            id: "gpt-oss:120b".to_string(),
+            ..Model::default()
+        }];
+
+        enrich_models_with_ollama_show(
+            &client,
+            &format!("{}/api/show", server.base_url()),
+            "ollama-secret",
+            &mut models,
+        );
+
+        assert_eq!(models[0].context_window, Some(131_072));
+        assert_eq!(
+            models[0].input_modalities.as_deref(),
+            Some(["text".to_string(), "image".to_string()].as_slice())
+        );
+        assert_eq!(
+            models[0].supported_reasoning_levels.as_deref(),
+            Some(["low".to_string(), "medium".to_string(), "high".to_string()].as_slice())
+        );
+        assert_eq!(models[0].default_reasoning_level.as_deref(), Some("medium"));
+        let request = server.request();
+        assert!(request.starts_with("POST /api/show "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer ollama-secret"));
+        assert!(request.contains(r#""model":"gpt-oss:120b""#));
         server.join();
     }
 
@@ -742,6 +1456,79 @@ mod tests {
         assert_eq!(
             model_ids(&models.expect("list models")),
             ["codex-home-list-model"]
+        );
+    }
+
+    #[test]
+    fn list_models_falls_back_to_legacy_generated_catalog_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-models-legacy-catalog");
+        let codex_home = root.join("codex-home");
+        let catalog_path = codex_home
+            .join("model-catalogs")
+            .join(super::LEGACY_GENERATED_CATALOG_FILE);
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"models":[{"slug":"legacy-list-model","display_name":"Legacy List Model"}]}"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let models = list_models();
+
+        restore_env("CODEX_HOME", previous);
+        assert_eq!(
+            model_ids(&models.expect("list models")),
+            ["legacy-list-model"]
+        );
+    }
+
+    #[test]
+    fn list_model_metadata_merges_builtin_pricing_into_stale_cache() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("metadata-stale-cache");
+        let codex_home = root.join("codex-home");
+        let paths = ModelPaths::new(&codex_home, root.join("repo-root"));
+        fs::create_dir_all(paths.metadata_cache_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.metadata_cache_path(),
+            r#"[{"id":"openai/gpt-5.5","display_name":"Cached GPT-5.5","context_window":120000}]"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let models = list_model_metadata().expect("metadata");
+
+        restore_env("CODEX_HOME", previous);
+        let gpt55 = models
+            .iter()
+            .find(|model| model.id == "openai/gpt-5.5")
+            .expect("gpt-5.5 metadata");
+        assert_eq!(gpt55.display_name.as_deref(), Some("Cached GPT-5.5"));
+        assert_eq!(gpt55.context_window, Some(120_000));
+        assert_eq!(
+            gpt55
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.input_per_million),
+            Some(5.0)
+        );
+        assert_eq!(
+            gpt55
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.cached_input_per_million),
+            Some(0.5)
+        );
+        assert_eq!(
+            gpt55
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.output_per_million),
+            Some(22.5)
         );
     }
 

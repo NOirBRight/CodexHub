@@ -124,14 +124,15 @@ $GlobalStateRepair = Join-Path $ProxyDir 'global_state_repair.py'
 $HistoryOverlay = Join-Path $ProxyDir 'history_overlay.py'
 $ProxyRunner = Join-Path $ScriptDir 'run-codex-proxy.ps1'
 $HealthUrl = "$ProxyBaseUrl/health"
-$CatalogPath = Join-Path $env:USERPROFILE '.codex\model-catalogs\codex-proxy-official-ollama.json'
+$CatalogPath = Join-Path $env:USERPROFILE '.codex\model-catalogs\codexhub-model-catalog.json'
 $CodexDir = Join-Path $env:USERPROFILE '.codex'
 $ConfigPath = Join-Path $env:USERPROFILE '.codex\config.toml'
 $GlobalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 $SessionId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
 $ConfigBackupPath = Join-Path $ScriptDir "config.toml.session-$SessionId.bak"
 $GlobalStateBackupPath = Join-Path $ScriptDir "global-state.session-$SessionId.bak"
-$HistoryRepairBackupRoot = Join-Path $ScriptDir "history-promote-custom-openai-$SessionId"
+$HistoryRepairBackupRoot = Join-Path $ScriptDir "history-bucket-repair-openai-$SessionId"
+$HistoryLedgerRoot = Join-Path $CodexDir 'proxy'
 $CodexAppStartTimeoutSeconds = 120
 
 function Get-CodexAppProcesses {
@@ -221,12 +222,34 @@ function Convert-CimDateTime {
 }
 
 function Get-ProxyProcesses {
+    $self = $PID
     $pythonPattern = [Regex]::Escape((Join-Path $ProxyDir 'codex_proxy.py'))
     $runnerPattern = [Regex]::Escape($ProxyRunner)
+    $portPattern = [Regex]::Escape([string]$ProxyPort)
+    $runnerInvokePattern = "(?i)(?:^|\s)(?:-|/)File\s+`"?$runnerPattern`"?(?:\s|$)"
     @(Get-CimInstance Win32_Process | Where-Object {
-        $commandLine = [string]$_.CommandLine
-        ($_.Name -ieq 'python.exe' -and $commandLine -match $pythonPattern) -or
-        ($_.Name -ieq 'powershell.exe' -and $commandLine -match $runnerPattern)
+        if ($_.ProcessId -eq $self) {
+            $false
+        }
+        else {
+            $name = [string]$_.Name
+            $commandLine = [string]$_.CommandLine
+            $isProxyPythonFile = (
+                $name -match '(?i)^python(?:w)?\.exe$' -and
+                $commandLine -match $pythonPattern -and
+                $commandLine -match "(?i)(?:^|\s)--port\s+$portPattern(?:\s|$)"
+            )
+            $isProxyPythonInline = (
+                $name -match '(?i)^python(?:w)?\.exe$' -and
+                $commandLine -match '(?i)\bcodex_proxy\.run_server\(' -and
+                $commandLine -match "(?i)(?:^|[,\s])$portPattern(?:[,\s\)]|$)"
+            )
+            $isProxyRunner = (
+                $name -ieq 'powershell.exe' -and
+                $commandLine -match $runnerInvokePattern
+            )
+            $isProxyPythonFile -or $isProxyPythonInline -or $isProxyRunner
+        }
     })
 }
 
@@ -331,15 +354,19 @@ function Test-OldCustomProxyOverlay {
 }
 
 function Repair-CustomHistory {
-    Write-Host 'Repairing old custom-bucket proxy history into the openai bucket...'
+    Write-Host 'Repairing ledger-confirmed custom-bucket history into the openai bucket...'
     Invoke-Timed -Label 'Custom history repair' -ScriptBlock {
         Invoke-Checked -FilePath 'python' -Arguments @(
             $HistoryOverlay,
-            'promote-custom-to-openai',
+            'repair-history',
             '--codex-dir',
             $CodexDir,
             '--backup-root',
-            $HistoryRepairBackupRoot
+            $HistoryRepairBackupRoot,
+            '--target',
+            'openai',
+            '--ledger-root',
+            $HistoryLedgerRoot
         )
     }
 }
