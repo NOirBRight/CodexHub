@@ -57,6 +57,19 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
+test("default locale resolution treats Chinese system variants as Chinese and otherwise falls back to English", async () => {
+  const indexSource = await readFile(i18nIndexPath, "utf8");
+
+  assert.match(indexSource, /function isChineseLocale/);
+  assert.match(indexSource, /normalizedLocale === "zh"/);
+  assert.match(indexSource, /normalizedLocale\?\.startsWith\("zh-"\) === true/);
+  assert.match(indexSource, /replace\(\/_\/g, "-"\)/);
+  assert.match(indexSource, /return DEFAULT_LOCALE/);
+  assert.match(indexSource, /const primaryLanguage = globalThis\.navigator\?\.language\?\.trim\(\)/);
+  assert.match(indexSource, /const primaryLanguageFromList = globalThis\.navigator\?\.languages\?\.find/);
+  assert.match(indexSource, /return resolveLocale\(primaryLanguage \|\| primaryLanguageFromList\)/);
+});
+
 test("main navigation exposes only CodexHub and Gateway", async () => {
   const contract = await readContract();
   const appSource = await readFile(appPath, "utf8");

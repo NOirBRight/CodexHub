@@ -13,23 +13,26 @@ export const localeResources = {
   "zh-CN": zhCN,
 } satisfies Record<AppLocale, typeof enUS>;
 
+export function isChineseLocale(value?: string | null) {
+  const normalizedLocale = value?.trim().toLowerCase().replace(/_/g, "-");
+  return normalizedLocale === "zh" || normalizedLocale?.startsWith("zh-") === true;
+}
+
 export function resolveLocale(value?: string | null): AppLocale {
   const normalized = value?.trim();
   if (normalized === "zh-CN" || normalized === "en-US") {
     return normalized;
   }
-  if (normalized?.toLowerCase().startsWith("zh")) {
+  if (isChineseLocale(normalized)) {
     return "zh-CN";
   }
   return DEFAULT_LOCALE;
 }
 
 export function browserLocale(): AppLocale {
-  const candidates = [
-    globalThis.navigator?.language,
-    ...(globalThis.navigator?.languages ?? []),
-  ];
-  return resolveLocale(candidates.find(Boolean));
+  const primaryLanguage = globalThis.navigator?.language?.trim();
+  const primaryLanguageFromList = globalThis.navigator?.languages?.find((value) => value?.trim());
+  return resolveLocale(primaryLanguage || primaryLanguageFromList);
 }
 
 export async function changeAppLocale(locale: string | null | undefined) {
