@@ -3030,6 +3030,88 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(call["namespace"], "mcp__node_repl")
         self.assertEqual(json.loads(call["arguments"])["code"], "1+1")
 
+    def test_external_response_flattens_codex_apps_namespace_call(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_read",
+                        "namespace": "mcp__codex_apps__local_tool_gateway_",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "docs/plan.md"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
+    def test_external_response_keeps_codex_apps_flat_alias(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_read",
+                        "name": "mcp__codex_apps__local_tool_gateway___read_file",
+                        "arguments": json.dumps({"path": "docs/plan.md"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
+    def test_external_sse_flattens_codex_apps_namespace_call(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_read",
+                "namespace": "mcp__codex_apps__local_tool_gateway_",
+                "name": "read_file",
+                "arguments": json.dumps({"path": "docs/plan.md"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
+    def test_external_sse_keeps_codex_apps_flat_alias(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "mcp__codex_apps__local_tool_gateway___read_file",
+                "arguments": json.dumps({"path": "docs/plan.md"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
     def test_external_sse_normalizes_tool_search_function_call(self):
         payload = {
             "type": "response.output_item.done",

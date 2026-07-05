@@ -2488,8 +2488,27 @@ def _infer_multi_agent_tool_name(arguments: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _codex_apps_flat_alias_name(name: Any) -> str | None:
+    if not isinstance(name, str) or not name.startswith("mcp__codex_apps__"):
+        return None
+    namespace_stem, found, tool_name = name.rpartition("___")
+    if not found:
+        return None
+    namespace = f"{namespace_stem}_"
+    if (
+        namespace.startswith("mcp__codex_apps__")
+        and namespace.endswith("_")
+        and _valid_tool_name(namespace)
+        and _valid_tool_name(tool_name)
+    ):
+        return name
+    return None
+
+
 def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
     if not isinstance(name, str):
+        return None
+    if _codex_apps_flat_alias_name(name) is not None:
         return None
     for separator in ("__", "."):
         namespace, found, tool_name = name.rpartition(separator)
@@ -2502,6 +2521,20 @@ def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
         ):
             return namespace, tool_name
     return None
+
+
+def _codex_apps_namespace_flat_alias(namespace: Any, name: Any) -> str | None:
+    if not (
+        isinstance(namespace, str)
+        and isinstance(name, str)
+        and namespace.startswith("mcp__codex_apps__")
+        and namespace.endswith("_")
+        and _valid_tool_name(namespace)
+        and _valid_tool_name(name)
+    ):
+        return None
+    alias = f"{namespace}__{name}"
+    return alias if _valid_tool_name(alias) else None
 
 
 def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
@@ -2628,34 +2661,40 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
         rewritten.setdefault("status", "completed")
         changed = True
     elif _is_tool_call_item(value):
-        original_name = value.get("name")
-        tool_name = THIRD_PARTY_TOOL_NAME_ALIASES.get(original_name) if isinstance(original_name, str) else None
-        namespace_alias = None
-        if tool_name is None and isinstance(original_name, str) and original_name in MULTI_AGENT_TOOL_NAMES:
-            tool_name = original_name
-        if tool_name is None:
-            namespace_alias = _split_namespace_tool_alias(original_name)
-        argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
-        if original_name in MULTI_AGENT_NAMESPACE_ALIASES and argument_key is not None:
-            normalized, tool_name, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), None)
-            if args_changed:
-                rewritten[argument_key] = normalized
-                changed = True
-        elif tool_name is not None and argument_key is not None:
-            normalized, _, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), tool_name)
-            if args_changed:
-                rewritten[argument_key] = normalized
-                changed = True
+        flat_namespace_alias = _codex_apps_namespace_flat_alias(value.get("namespace"), value.get("name"))
+        if flat_namespace_alias is not None:
+            rewritten["name"] = flat_namespace_alias
+            rewritten.pop("namespace", None)
+            changed = True
+        else:
+            original_name = value.get("name")
+            tool_name = THIRD_PARTY_TOOL_NAME_ALIASES.get(original_name) if isinstance(original_name, str) else None
+            namespace_alias = None
+            if tool_name is None and isinstance(original_name, str) and original_name in MULTI_AGENT_TOOL_NAMES:
+                tool_name = original_name
+            if tool_name is None:
+                namespace_alias = _split_namespace_tool_alias(original_name)
+            argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
+            if original_name in MULTI_AGENT_NAMESPACE_ALIASES and argument_key is not None:
+                normalized, tool_name, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), None)
+                if args_changed:
+                    rewritten[argument_key] = normalized
+                    changed = True
+            elif tool_name is not None and argument_key is not None:
+                normalized, _, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), tool_name)
+                if args_changed:
+                    rewritten[argument_key] = normalized
+                    changed = True
 
-        if tool_name is not None:
-            rewritten["name"] = tool_name
-            rewritten["namespace"] = "multi_agent_v1"
-            changed = True
-        elif namespace_alias is not None:
-            namespace_name, namespaced_tool_name = namespace_alias
-            rewritten["name"] = namespaced_tool_name
-            rewritten["namespace"] = namespace_name
-            changed = True
+            if tool_name is not None:
+                rewritten["name"] = tool_name
+                rewritten["namespace"] = "multi_agent_v1"
+                changed = True
+            elif namespace_alias is not None:
+                namespace_name, namespaced_tool_name = namespace_alias
+                rewritten["name"] = namespaced_tool_name
+                rewritten["namespace"] = namespace_name
+                changed = True
 
     for key, item in list(rewritten.items()):
         replacement, item_changed = _normalize_third_party_tool_call(item)
