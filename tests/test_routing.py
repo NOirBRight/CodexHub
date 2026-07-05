@@ -2808,6 +2808,36 @@ class RoutingTests(unittest.TestCase):
 
         self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
 
+    def test_external_request_keeps_spawn_agent_when_source_text_mentions_closed_lifecycle(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Plan complete. Subagent-Driven recommended. Ensure exactly one terminal marker.",
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": (
+                            'source snippet: if "Codex native multi_agent_v1.close_agent result" '
+                            'in text and "status: closed" in text: pass'
+                        ),
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("status: lifecycle_complete", transcript)
+
     def test_external_request_hides_multi_agent_tools_after_single_loop_close(self):
         body = json.dumps(
             {

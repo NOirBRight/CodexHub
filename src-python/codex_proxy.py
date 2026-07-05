@@ -2748,20 +2748,32 @@ def _line_value(text: str, prefix: str) -> str | None:
     return None
 
 
+def _multi_agent_result_text(item: Mapping[str, Any], tool_name: str) -> str | None:
+    if item.get("type") != "message":
+        return None
+    text = _joined_text(item.get("content"))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    header = f"Codex native multi_agent_v1.{tool_name} result"
+    if not lines or lines[0] != header:
+        return None
+    return "\n".join(lines)
+
+
 def _open_multi_agent_ids(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     open_agent_ids: set[str] = set()
     for item in value:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
+        if not isinstance(item, Mapping):
             continue
-        text = _joined_text(item.get("content"))
-        if "Codex native multi_agent_v1.spawn_agent result" in text and "status: succeeded" in text:
-            agent_id = _line_value(text, "agent_id:")
+        spawn_text = _multi_agent_result_text(item, "spawn_agent")
+        if spawn_text is not None and "status: succeeded" in spawn_text:
+            agent_id = _line_value(spawn_text, "agent_id:")
             if agent_id:
                 open_agent_ids.add(agent_id)
-        if "Codex native multi_agent_v1.close_agent result" in text and "status: closed" in text:
-            closed_agent_id = _line_value(text, "closed_agent_id:")
+        close_text = _multi_agent_result_text(item, "close_agent")
+        if close_text is not None and "status: closed" in close_text:
+            closed_agent_id = _line_value(close_text, "closed_agent_id:")
             if closed_agent_id:
                 open_agent_ids.discard(closed_agent_id)
             else:
@@ -2780,10 +2792,10 @@ def _completed_multi_agent_wait_ids(value: Any) -> list[str]:
         return []
     completed_agent_ids: set[str] = set()
     for item in value:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
+        if not isinstance(item, Mapping):
             continue
-        text = _joined_text(item.get("content"))
-        if "Codex native multi_agent_v1.wait_agent result" not in text or "status: completed" not in text:
+        text = _multi_agent_result_text(item, "wait_agent")
+        if text is None or "status: completed" not in text:
             continue
         for agent_id in _split_agent_id_list(_line_value(text, "completed_agent_ids:")):
             completed_agent_ids.add(agent_id)
@@ -2796,10 +2808,10 @@ def _closed_multi_agent_ids(value: Any) -> list[str]:
     closed_agent_ids: set[str] = set()
     closed_unknown = False
     for item in value:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
+        if not isinstance(item, Mapping):
             continue
-        text = _joined_text(item.get("content"))
-        if "Codex native multi_agent_v1.close_agent result" not in text or "status: closed" not in text:
+        text = _multi_agent_result_text(item, "close_agent")
+        if text is None or "status: closed" not in text:
             continue
         closed_agent_id = _line_value(text, "closed_agent_id:")
         if closed_agent_id:
@@ -2890,14 +2902,15 @@ def _has_open_multi_agent_context(value: Any) -> bool:
         return True
     unknown_open_agent = False
     for item in value:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
+        if not isinstance(item, Mapping):
             continue
-        text = _joined_text(item.get("content"))
-        if "Codex native multi_agent_v1.spawn_agent result" in text and "status: succeeded" in text:
-            if not _line_value(text, "agent_id:"):
+        spawn_text = _multi_agent_result_text(item, "spawn_agent")
+        if spawn_text is not None and "status: succeeded" in spawn_text:
+            if not _line_value(spawn_text, "agent_id:"):
                 unknown_open_agent = True
-        if "Codex native multi_agent_v1.close_agent result" in text and "status: closed" in text:
-            if not _line_value(text, "closed_agent_id:"):
+        close_text = _multi_agent_result_text(item, "close_agent")
+        if close_text is not None and "status: closed" in close_text:
+            if not _line_value(close_text, "closed_agent_id:"):
                 unknown_open_agent = False
     return unknown_open_agent
 
