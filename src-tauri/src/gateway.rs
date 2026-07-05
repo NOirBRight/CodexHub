@@ -161,6 +161,14 @@ impl GatewayClientEndpointSelection {
         }
     }
 
+    fn zcode_kind(self) -> &'static str {
+        match self.openai_compatible_selection() {
+            GatewayClientEndpointSelection::Responses => "openai",
+            GatewayClientEndpointSelection::ChatCompletions => "openai-compatible",
+            GatewayClientEndpointSelection::AnthropicMessages => "openai-compatible",
+        }
+    }
+
     fn openai_compatible_selection(self) -> Self {
         match self {
             GatewayClientEndpointSelection::AnthropicMessages => {
@@ -3364,8 +3372,18 @@ fn zcode_targets_match_expected(
     let groups = gateway_client_provider_groups(settings, providers, model)?;
     Ok(
         zcode_v2_config_matches_expected(&targets.v2_config_path, &groups)
-            && zcode_catalog_matches_expected(&targets.catalog_path, settings, &groups)
-            && zcode_catalog_matches_expected(&targets.v2_cache_path, settings, &groups),
+            && zcode_catalog_matches_expected(
+                &targets.catalog_path,
+                settings,
+                &groups,
+                ZcodeProviderFileKind::Catalog,
+            )
+            && zcode_catalog_matches_expected(
+                &targets.v2_cache_path,
+                settings,
+                &groups,
+                ZcodeProviderFileKind::V2Cache,
+            ),
     )
 }
 
@@ -3390,29 +3408,27 @@ fn zcode_v2_provider_matches_expected(
     provider: &Value,
     group: &GatewayClientProviderGroup,
 ) -> bool {
-    let expected_path = match group.endpoint_selection.openai_compatible_selection() {
-        GatewayClientEndpointSelection::Responses => "/responses",
-        GatewayClientEndpointSelection::ChatCompletions
-        | GatewayClientEndpointSelection::AnthropicMessages => "/chat/completions",
-    };
     provider
-        .get("apiFormat")
+        .get("kind")
         .and_then(Value::as_str)
-        .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
+        .is_some_and(|value| value == group.endpoint_selection.zcode_kind())
         && provider
-            .pointer("/endpoints/baseURL")
+            .pointer("/options/baseURL")
             .and_then(Value::as_str)
             .is_some_and(|value| value == group.base_url.as_str())
-        && provider
-            .pointer("/endpoints/paths/openai-compatible")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_path)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ZcodeProviderFileKind {
+    Catalog,
+    V2Cache,
 }
 
 fn zcode_catalog_matches_expected(
     path: &Path,
     settings: &Settings,
     groups: &GatewayClientProviderGroups,
+    file_kind: ZcodeProviderFileKind,
 ) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -3433,7 +3449,7 @@ fn zcode_catalog_matches_expected(
                     .is_some_and(|id| id == group.client_provider_id)
             })
             .is_some_and(|provider| {
-                zcode_catalog_provider_matches_expected(provider, settings, group)
+                zcode_catalog_provider_matches_expected(provider, settings, group, file_kind)
             })
     })
 }
@@ -3442,23 +3458,25 @@ fn zcode_catalog_provider_matches_expected(
     provider: &Value,
     settings: &Settings,
     group: &GatewayClientProviderGroup,
+    file_kind: ZcodeProviderFileKind,
 ) -> bool {
-    let expected_base_url = gateway_base_without_v1(settings);
-    let expected_path = match group.endpoint_selection.openai_compatible_selection() {
-        GatewayClientEndpointSelection::Responses => group.responses_path.as_str(),
-        GatewayClientEndpointSelection::ChatCompletions
-        | GatewayClientEndpointSelection::AnthropicMessages => group.chat_completions_path.as_str(),
-    };
+    let (expected_base_url, expected_path) = zcode_provider_endpoint(settings, group, file_kind);
+    let kind = group.endpoint_selection.zcode_kind();
+    let path_pointer = format!("/endpoints/paths/{kind}");
     provider
         .get("apiFormat")
         .and_then(Value::as_str)
         .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
         && provider
+            .get("defaultKind")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == kind)
+        && provider
             .pointer("/endpoints/baseURL")
             .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_base_url.as_str())
+            .is_some_and(|value| value == expected_base_url)
         && provider
-            .pointer("/endpoints/paths/openai-compatible")
+            .pointer(&path_pointer)
             .and_then(Value::as_str)
             .is_some_and(|value| value == expected_path)
 }
@@ -3975,6 +3993,7 @@ fn preview_zcode_config_with_targets(
     .map(|text| sanitize_text(&text));
     let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
     let next_catalog = zcode_catalog_text(settings, providers, &model)?;
+    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "zcode".to_string(),
         can_apply: true,
@@ -3984,7 +4003,7 @@ fn preview_zcode_config_with_targets(
         next_redacted: sanitize_text(&combined_named_text(&[
             ("config.json", &next_config),
             ("codexhub.json", &next_catalog),
-            ("bots-model-cache.v2.json", &next_catalog),
+            ("bots-model-cache.v2.json", &next_cache),
         ])),
         backup_required: targets.v2_config_path.exists()
             || targets.catalog_path.exists()
@@ -4127,10 +4146,11 @@ fn apply_zcode_config_with_targets(
         zcode_targets_current_is_managed(targets),
     )?;
     let next_catalog = zcode_catalog_text(settings, providers, &model)?;
+    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
     let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
     write_text_replace(&targets.catalog_path, &next_catalog)?;
     write_text_replace(&targets.v2_config_path, &next_config)?;
-    write_text_replace(&targets.v2_cache_path, &next_catalog)?;
+    write_text_replace(&targets.v2_cache_path, &next_cache)?;
     Ok(GatewayClientApplyResult {
         client_id: "zcode".to_string(),
         applied: true,
@@ -4582,12 +4602,29 @@ fn zcode_catalog_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    zcode_provider_collection_text(settings, providers, model, ZcodeProviderFileKind::Catalog)
+}
+
+fn zcode_v2_cache_text(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
+    zcode_provider_collection_text(settings, providers, model, ZcodeProviderFileKind::V2Cache)
+}
+
+fn zcode_provider_collection_text(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+    file_kind: ZcodeProviderFileKind,
+) -> Result<String, String> {
     let groups = gateway_client_provider_groups(settings, providers, model)?;
     let now = timestamp_millis() as u64;
     let catalog_providers = groups
         .providers
         .iter()
-        .map(|group| zcode_catalog_provider_value(settings, group, now))
+        .map(|group| zcode_catalog_provider_value(settings, group, now, file_kind))
         .collect::<Vec<_>>();
     let body = json!({
         "schemaVersion": "zcode.model-providers.v2",
@@ -4602,17 +4639,17 @@ fn zcode_catalog_provider_value(
     settings: &Settings,
     group: &GatewayClientProviderGroup,
     now: u64,
+    file_kind: ZcodeProviderFileKind,
 ) -> Value {
+    let kind = group.endpoint_selection.zcode_kind();
     let models = group
         .models
         .iter()
-        .map(zcode_model_value)
+        .map(|model| zcode_model_value(model, kind))
         .collect::<Vec<_>>();
-    let openai_compatible_path = match group.endpoint_selection.openai_compatible_selection() {
-        GatewayClientEndpointSelection::Responses => group.responses_path.clone(),
-        GatewayClientEndpointSelection::ChatCompletions
-        | GatewayClientEndpointSelection::AnthropicMessages => group.chat_completions_path.clone(),
-    };
+    let (base_url, endpoint_path) = zcode_provider_endpoint(settings, group, file_kind);
+    let mut paths = Map::new();
+    paths.insert(kind.to_string(), Value::String(endpoint_path.to_string()));
     json!({
         "id": group.client_provider_id.clone(),
         "name": group.display_name.clone(),
@@ -4620,26 +4657,53 @@ fn zcode_catalog_provider_value(
         "source": "custom",
         "apiFormat": group.endpoint_selection.zcode_api_format(),
         "endpoints": {
-            "baseURL": gateway_base_without_v1(settings),
-            "paths": {
-                "openai-compatible": openai_compatible_path,
-            },
+            "baseURL": base_url,
+            "paths": Value::Object(paths),
         },
         "apiKeyRequired": true,
         "apiKey": settings.gateway_client_key,
-        "defaultKind": "openai-compatible",
+        "defaultKind": kind,
         "models": models,
         "createdAt": now,
         "updatedAt": now,
     })
 }
 
-fn zcode_model_value(model: &GatewayClientProviderModel) -> Value {
+fn zcode_provider_endpoint(
+    settings: &Settings,
+    group: &GatewayClientProviderGroup,
+    file_kind: ZcodeProviderFileKind,
+) -> (String, String) {
+    match file_kind {
+        ZcodeProviderFileKind::Catalog => {
+            let endpoint_path = match group.endpoint_selection.openai_compatible_selection() {
+                GatewayClientEndpointSelection::Responses => group.responses_path.clone(),
+                GatewayClientEndpointSelection::ChatCompletions
+                | GatewayClientEndpointSelection::AnthropicMessages => {
+                    group.chat_completions_path.clone()
+                }
+            };
+            (gateway_base_without_v1(settings), endpoint_path)
+        }
+        ZcodeProviderFileKind::V2Cache => {
+            let endpoint_path = match group.endpoint_selection.openai_compatible_selection() {
+                GatewayClientEndpointSelection::Responses => "/responses".to_string(),
+                GatewayClientEndpointSelection::ChatCompletions
+                | GatewayClientEndpointSelection::AnthropicMessages => {
+                    "/chat/completions".to_string()
+                }
+            };
+            (group.base_url.clone(), endpoint_path)
+        }
+    }
+}
+
+fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
     json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
-        "kinds": ["openai-compatible"],
-        "defaultKind": "openai-compatible",
+        "kinds": [kind],
+        "defaultKind": kind,
         "modalities": {
             "input": ["text", "image"],
             "output": ["text"],
@@ -4675,11 +4739,7 @@ fn zcode_v2_config_text(
 }
 
 fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGroup) -> Value {
-    let openai_compatible_path = match group.endpoint_selection.openai_compatible_selection() {
-        GatewayClientEndpointSelection::Responses => "/responses",
-        GatewayClientEndpointSelection::ChatCompletions
-        | GatewayClientEndpointSelection::AnthropicMessages => "/chat/completions",
-    };
+    let kind = group.endpoint_selection.zcode_kind();
     let models = group
         .models
         .iter()
@@ -4702,16 +4762,9 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
         .collect::<Map<_, _>>();
     json!({
         "name": group.display_name.clone(),
-        "kind": "openai-compatible",
+        "kind": kind,
         "enabled": true,
         "source": "custom",
-        "apiFormat": group.endpoint_selection.zcode_api_format(),
-        "endpoints": {
-            "baseURL": group.base_url.clone(),
-            "paths": {
-                "openai-compatible": openai_compatible_path,
-            },
-        },
         "options": {
             "baseURL": group.base_url.clone(),
             "apiKey": settings.gateway_client_key,
@@ -5597,7 +5650,7 @@ mod tests {
         assert!(omp_text.contains("api: openai-responses"));
         assert_eq!(
             zcode_provider
-                .pointer("/endpoints/paths/openai-compatible")
+                .pointer("/endpoints/paths/openai")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/minimax/responses")
         );
@@ -5620,16 +5673,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             zcode_v2_provider
-                .get("apiFormat")
+                .get("kind")
                 .and_then(serde_json::Value::as_str),
-            Some("openai-responses")
+            Some("openai")
         );
-        assert_eq!(
-            zcode_v2_provider
-                .pointer("/endpoints/paths/openai-compatible")
-                .and_then(serde_json::Value::as_str),
-            Some("/responses")
-        );
+        assert!(zcode_v2_provider.get("apiFormat").is_none());
+        assert!(zcode_v2_provider.get("endpoints").is_none());
     }
 
     #[test]
@@ -5700,16 +5749,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             zcode_v2_provider
-                .get("apiFormat")
+                .get("kind")
                 .and_then(serde_json::Value::as_str),
-            Some("openai-chat-completions")
+            Some("openai-compatible")
         );
-        assert_eq!(
-            zcode_v2_provider
-                .pointer("/endpoints/paths/openai-compatible")
-                .and_then(serde_json::Value::as_str),
-            Some("/chat/completions")
-        );
+        assert!(zcode_v2_provider.get("apiFormat").is_none());
+        assert!(zcode_v2_provider.get("endpoints").is_none());
     }
 
     #[test]
@@ -5988,7 +6033,7 @@ mod tests {
         );
         assert_eq!(
             openai
-                .pointer("/endpoints/paths/openai-compatible")
+                .pointer("/endpoints/paths/openai")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/openai/responses")
         );
@@ -6940,7 +6985,7 @@ mod tests {
         );
         assert_eq!(
             provider
-                .pointer("/endpoints/paths/openai-compatible")
+                .pointer("/endpoints/paths/openai")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/openai/responses")
         );
@@ -6954,7 +6999,7 @@ mod tests {
             provider
                 .pointer("/models/0/defaultKind")
                 .and_then(serde_json::Value::as_str),
-            Some("openai-compatible")
+            Some("openai")
         );
         assert!(!fs::read_to_string(&catalog_path)
             .unwrap()
@@ -6969,22 +7014,33 @@ mod tests {
         );
         assert_eq!(
             v2_config
-                .pointer("/provider/codexhub-openai/apiFormat")
+                .pointer("/provider/codexhub-openai/kind")
                 .and_then(serde_json::Value::as_str),
-            Some("openai-responses")
+            Some("openai")
         );
-        assert_eq!(
-            v2_config
-                .pointer("/provider/codexhub-openai/endpoints/paths/openai-compatible")
-                .and_then(serde_json::Value::as_str),
-            Some("/responses")
-        );
+        assert!(v2_config
+            .pointer("/provider/codexhub-openai/apiFormat")
+            .is_none());
+        assert!(v2_config
+            .pointer("/provider/codexhub-openai/endpoints")
+            .is_none());
         assert!(v2_config
             .pointer("/provider/codexhub-openai/models/gpt-5.5")
             .is_some());
+        let v2_cache: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_cache_path).unwrap()).unwrap();
+        let cache_provider = v2_cache.pointer("/providers/0").unwrap();
         assert_eq!(
-            fs::read_to_string(&v2_cache_path).unwrap(),
-            fs::read_to_string(&catalog_path).unwrap()
+            cache_provider
+                .pointer("/endpoints/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/openai")
+        );
+        assert_eq!(
+            cache_provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
         );
     }
 
@@ -7019,7 +7075,7 @@ mod tests {
         );
         assert_eq!(
             provider.get("kind").and_then(serde_json::Value::as_str),
-            Some("openai-compatible")
+            Some("openai")
         );
         assert_eq!(
             provider
@@ -7027,24 +7083,8 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
         );
-        assert_eq!(
-            provider
-                .get("apiFormat")
-                .and_then(serde_json::Value::as_str),
-            Some("openai-responses")
-        );
-        assert_eq!(
-            provider
-                .pointer("/endpoints/baseURL")
-                .and_then(serde_json::Value::as_str),
-            Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
-        );
-        assert_eq!(
-            provider
-                .pointer("/endpoints/paths/openai-compatible")
-                .and_then(serde_json::Value::as_str),
-            Some("/responses")
-        );
+        assert!(provider.get("apiFormat").is_none());
+        assert!(provider.get("endpoints").is_none());
         assert_eq!(
             provider
                 .pointer("/models/glm-5.2/limit/context")
@@ -7128,10 +7168,11 @@ mod tests {
         let expected_config =
             super::zcode_v2_config_text(&v2_config_path, &settings, &providers, model).unwrap();
         let expected_catalog = super::zcode_catalog_text(&settings, &providers, model).unwrap();
+        let expected_cache = super::zcode_v2_cache_text(&settings, &providers, model).unwrap();
 
         fs::write(&catalog_path, &expected_catalog).unwrap();
         fs::write(&v2_config_path, &expected_config).unwrap();
-        fs::write(&v2_cache_path, &expected_catalog).unwrap();
+        fs::write(&v2_cache_path, &expected_cache).unwrap();
         assert_eq!(
             super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
             "hub"
@@ -7139,11 +7180,7 @@ mod tests {
 
         fs::write(
             &v2_config_path,
-            expected_config.replacen(
-                "\"apiFormat\": \"openai-responses\"",
-                "\"apiFormat\": \"openai-chat-completions\"",
-                1,
-            ),
+            expected_config.replacen("\"kind\": \"openai\"", "\"kind\": \"openai-compatible\"", 1),
         )
         .unwrap();
         assert_eq!(
@@ -7154,7 +7191,7 @@ mod tests {
         fs::write(&v2_config_path, &expected_config).unwrap();
         fs::write(
             &v2_cache_path,
-            expected_catalog.replacen(
+            expected_cache.replacen(
                 "\"apiFormat\": \"openai-responses\"",
                 "\"apiFormat\": \"openai-chat-completions\"",
                 1,
