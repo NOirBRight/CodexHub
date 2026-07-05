@@ -217,7 +217,7 @@ export function ProvidersPage({
   }, [providers]);
   const canAdd = Boolean(form.name.trim());
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
-  const realCodexConnected = codexStatus?.mode === "custom";
+  const realCodexConnected = codexStatus?.mode === "custom" && codexStatus.proxy_running === true;
   const codexConnected = realCodexConnected;
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
@@ -325,6 +325,14 @@ export function ProvidersPage({
       text,
       tone: "error",
     });
+  }
+
+  async function startProxyForHubConnection(): Promise<AppStatus | null> {
+    if (onStartProxy) {
+      await onStartProxy();
+      return api.getStatus().catch(() => null);
+    }
+    return api.startProxy();
   }
 
   async function startBackendFromToast(toastId?: string) {
@@ -633,7 +641,16 @@ export function ProvidersPage({
     setBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
-      const status = await api.switchMode(nextMode, false);
+      let status = await api.switchMode(nextMode, false);
+      if (nextMode === "custom" && !status.proxy_running) {
+        updateToast(toastId, {
+          action: null,
+          text: t("gateway.startingBackend"),
+          tone: "loading",
+        });
+        const refreshedStatus = await startProxyForHubConnection();
+        status = refreshedStatus ?? status;
+      }
       setCodexStatus(status);
       setConnectionPendingMode(null);
       setError(null);

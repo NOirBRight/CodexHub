@@ -1049,9 +1049,6 @@ fn toml_config_uses_proxy(text: &str) -> Option<bool> {
         .get("model_provider")
         .and_then(toml::Value::as_str)
         .unwrap_or_default();
-    if provider == "custom" || provider == "codex_proxy" {
-        return Some(true);
-    }
 
     if document
         .get("model_catalog_json")
@@ -1070,7 +1067,7 @@ fn toml_config_uses_proxy(text: &str) -> Option<bool> {
         .and_then(|value| value.get("base_url"))
         .and_then(toml::Value::as_str)
         .unwrap_or_default();
-    Some(base_url.starts_with("http://127.0.0.1:") || base_url.starts_with("http://localhost:"))
+    Some(config_value_uses_local_proxy_base_url(base_url))
 }
 
 fn fallback_config_uses_proxy(text: &str) -> bool {
@@ -1086,13 +1083,19 @@ fn fallback_config_uses_proxy(text: &str) -> bool {
         .collect::<String>();
 
     [
-        "model_provider=\"custom\"",
-        "model_provider=\"codex_proxy\"",
         "codexhub-model-catalog.json",
         "codex-proxy-official-ollama.json",
+        "base_url=\"http://127.0.0.1:",
+        "base_url='http://127.0.0.1:",
+        "base_url=\"http://localhost:",
+        "base_url='http://localhost:",
     ]
     .iter()
     .any(|marker| compact.contains(marker))
+}
+
+fn config_value_uses_local_proxy_base_url(value: &str) -> bool {
+    value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:")
 }
 
 fn config_value_uses_managed_catalog(value: &str) -> bool {
@@ -1466,6 +1469,29 @@ model_provider = "custom"
 "#
             ),
             "custom"
+        );
+        assert_eq!(
+            detect_mode(
+                r#"
+model_provider = "custom"
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+supports_websockets = true
+wire_api = "responses"
+"#
+            ),
+            "official"
+        );
+        assert_eq!(
+            detect_mode(
+                r#"
+model_provider = "codex_proxy"
+[model_providers.codex_proxy]
+name = "Codex Proxy"
+"#
+            ),
+            "official"
         );
         assert_eq!(
             detect_mode(

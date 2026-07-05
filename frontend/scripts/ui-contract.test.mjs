@@ -1005,7 +1005,7 @@ test("Codex Hub connection action reports progress immediately", async () => {
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
   assert.match(providersSource, /const \[connectionPendingMode, setConnectionPendingMode\] = useState<ConnectionMode \| null>\(null\);/);
-  assert.match(providersSource, /const realCodexConnected = codexStatus\?\.mode === "custom";/);
+  assert.match(providersSource, /const realCodexConnected = codexStatus\?\.mode === "custom" && codexStatus\.proxy_running === true;/);
   assert.match(providersSource, /const codexConnected = realCodexConnected;/);
   assert.doesNotMatch(providersSource, /connectionPreview/);
   assert.doesNotMatch(action, /if \(!settingsDraft\) \{\s*return;\s*\}/);
@@ -1015,6 +1015,9 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.match(action, /showToast\(`\$\{actionLabel\}\.\.\.`, "loading"\);/);
   assert.ok(action.indexOf("showToast(`${actionLabel}...`, \"loading\");") < action.indexOf("api.switchMode("));
   assert.match(action, /api\.switchMode\(nextMode, false\)/);
+  assert.match(action, /if \(nextMode === "custom" && !status\.proxy_running\) \{/);
+  assert.match(action, /await startProxyForHubConnection\(\);/);
+  assert.match(action, /status = refreshedStatus \?\? status;/);
   assert.match(action, /setConnectionPendingMode\(null\);/);
   assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPendingMode\(null\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /function updateToastWithError\(toastId: string, err: unknown\)[\s\S]*label: t\("gateway\.startBackend"\)[\s\S]*startBackendFromToast\(toastId\)/);
