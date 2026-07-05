@@ -1,9 +1,11 @@
 import { RefreshCw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api, messageFromError } from "../lib/tauri";
 import type { Settings } from "../lib/types";
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +32,7 @@ export function SettingsPage() {
     try {
       const saved = await api.saveSettings(next);
       setSettings(saved);
-      setMessage("Settings saved");
+      setMessage(t("settings.settingsSaved"));
       setError(null);
     } catch (err) {
       setError(messageFromError(err));
@@ -96,7 +98,7 @@ export function SettingsPage() {
   if (!settings) {
     return (
       <main className="rounded-md border border-line bg-white p-6 text-sm text-slate-500">
-        Loading settings
+        {t("common.loadingSettings")}
       </main>
     );
   }
@@ -106,27 +108,27 @@ export function SettingsPage() {
       <section className="rounded-md border border-line bg-white p-4 shadow-subtle">
         <div className="grid gap-4 md:grid-cols-2">
           <Toggle
-            label="Auto-start proxy"
+            label={t("settings.autoStartProxy")}
             checked={settings.auto_start_proxy}
             onChange={(value) => void toggleAutostart(value)}
           />
           <Toggle
-            label="Include official models"
+            label={t("settings.includeOfficialModels")}
             checked={settings.include_official_models}
             onChange={(value) => void save({ ...settings, include_official_models: value })}
           />
           <Toggle
-            label="Unified Codex history"
+            label={t("settings.unifiedCodexHistory")}
             checked={settings.unified_codex_history}
             onChange={(value) => void toggleUnifiedHistory(value)}
           />
           <Toggle
-            label="Auto-sync bound clients"
+            label={t("settings.autoSyncBoundClients")}
             checked={settings.auto_sync_clients}
             onChange={(value) => void save({ ...settings, auto_sync_clients: value })}
           />
           <label className="grid gap-1 text-sm font-medium text-slate-700">
-            Proxy port
+            {t("settings.proxyPort")}
             <input
               className="field max-w-[180px]"
               type="number"
@@ -139,7 +141,7 @@ export function SettingsPage() {
             />
           </label>
           <label className="grid gap-1 text-sm font-medium text-slate-700">
-            Bind address
+            {t("settings.bindAddress")}
             <input
               className="field max-w-[220px]"
               value={settings.gateway_bind_address}
@@ -147,10 +149,10 @@ export function SettingsPage() {
                 setSettings({ ...settings, gateway_bind_address: event.target.value })
               }
             />
-            <span className="text-xs font-normal text-slate-500">Only 127.0.0.1 is accepted in this release.</span>
+            <span className="text-xs font-normal text-slate-500">{t("settings.bindAddressLocalOnly")}</span>
           </label>
           <label className="grid gap-1 text-sm font-medium text-slate-700">
-            Local client key
+            {t("settings.localClientKey")}
             <input
               className="field max-w-[260px]"
               value={settings.gateway_client_key}
@@ -158,7 +160,7 @@ export function SettingsPage() {
                 setSettings({ ...settings, gateway_client_key: event.target.value })
               }
             />
-            <span className="text-xs font-normal text-slate-500">Compatibility key for local clients, not an upstream secret.</span>
+            <span className="text-xs font-normal text-slate-500">{t("settings.localClientKeyHelp")}</span>
           </label>
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -169,7 +171,7 @@ export function SettingsPage() {
             onClick={() => void save(settings)}
           >
             <Save size={16} />
-            Save
+            {t("common.save")}
           </button>
           <button
             type="button"
@@ -178,7 +180,7 @@ export function SettingsPage() {
             onClick={() => void repairHistory()}
           >
             <RefreshCw size={16} />
-            Repair history bucket
+            {t("settings.repairHistoryBucket")}
           </button>
         </div>
       </section>

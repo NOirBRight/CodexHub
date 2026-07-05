@@ -152,6 +152,8 @@ impl AppStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub locale: String,
     pub auto_sync_history: bool,
     #[serde(default = "default_enabled")]
     pub unified_codex_history: bool,
@@ -191,6 +193,7 @@ fn default_fast_model_variants() -> Vec<String> {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            locale: String::new(),
             auto_sync_history: false,
             unified_codex_history: true,
             auto_start_proxy: true,

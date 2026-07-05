@@ -1,5 +1,6 @@
 import { Play, Power, RefreshCcw, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { cx } from "../lib/format";
 import { api, messageFromError } from "../lib/tauri";
 import type { AppStatus } from "../lib/types";
@@ -10,6 +11,7 @@ interface ProxyStatusBarProps {
 }
 
 export function ProxyStatusBar({ refreshSignal, onStatusChange }: ProxyStatusBarProps) {
+  const { t } = useTranslation();
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,9 +60,9 @@ export function ProxyStatusBar({ refreshSignal, onStatusChange }: ProxyStatusBar
             running ? "bg-ok" : "bg-danger",
           )}
         />
-        <span className="font-semibold">{running ? "Proxy running" : "Proxy stopped"}</span>
-        <span className="text-slate-500">Port {status?.proxy_port ?? 9099}</span>
-        <span className="text-slate-500">{status?.mode ?? "unknown"}</span>
+        <span className="font-semibold">{running ? t("runtime.proxyRunning") : t("runtime.proxyStopped")}</span>
+        <span className="text-slate-500">{t("common.port")} {status?.proxy_port ?? 9099}</span>
+        <span className="text-slate-500">{status?.mode ?? t("common.unknown")}</span>
         {status?.proxy_build && <span className="text-slate-500">{status.proxy_build}</span>}
         {error ? (
           <span className="min-w-0 truncate text-danger">{error}</span>
@@ -71,29 +73,29 @@ export function ProxyStatusBar({ refreshSignal, onStatusChange }: ProxyStatusBar
       <div className="flex flex-wrap items-center gap-2">
         <ActionButton
           icon={<Play size={16} />}
-          label="Start"
-          title="Start proxy"
+          label={t("common.start")}
+          title={t("runtime.startRuntime")}
           disabled={Boolean(busy) || running}
           onClick={() => run("start", api.startProxy)}
         />
         <ActionButton
           icon={<Power size={16} />}
-          label="Stop"
-          title="Stop proxy"
+          label={t("common.stop")}
+          title={t("runtime.stopRuntime")}
           disabled={Boolean(busy) || !running}
           onClick={() => run("stop", api.stopProxy)}
         />
         <ActionButton
           icon={<RotateCw size={16} />}
-          label="Restart"
-          title="Restart proxy"
+          label={t("common.restart")}
+          title={t("runtime.restartProxy")}
           disabled={Boolean(busy)}
           onClick={() => run("restart", api.restartProxy)}
         />
         <ActionButton
           icon={<RefreshCcw size={16} />}
-          label="Refresh"
-          title="Refresh status"
+          label={t("common.refresh")}
+          title={t("runtime.refreshStatus")}
           disabled={Boolean(busy)}
           onClick={load}
         />

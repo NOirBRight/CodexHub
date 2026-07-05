@@ -1,5 +1,6 @@
 import { RefreshCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { displayModel, mergeDiscoveredModels } from "../lib/format";
 import { api, messageFromError } from "../lib/tauri";
 import type { Model, Provider, Settings } from "../lib/types";
@@ -263,8 +264,10 @@ function ModelGrid({
   onPatch?: (modelId: string, patch: Partial<Model>) => void;
   metadataFor?: (modelId: string) => Model | undefined;
 }) {
+  const { t } = useTranslation();
+
   if (models.length === 0) {
-    return <div className="p-4 text-sm text-slate-500">No models</div>;
+    return <div className="p-4 text-sm text-slate-500">{t("common.noModels")}</div>;
   }
 
   return (

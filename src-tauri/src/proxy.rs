@@ -95,6 +95,7 @@ impl ProxyPaths {
 
 #[derive(Debug, Deserialize)]
 struct SettingsDocument {
+    locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
     auto_start_proxy: Option<bool>,
@@ -123,6 +124,7 @@ impl SettingsDocument {
     fn into_settings(self) -> Settings {
         let defaults = Settings::default();
         Settings {
+            locale: self.locale.unwrap_or_default(),
             auto_sync_history: self.auto_sync_history.unwrap_or(defaults.auto_sync_history),
             unified_codex_history: self
                 .unified_codex_history

@@ -137,6 +137,7 @@ struct ProvidersDocument {
 
 #[derive(Debug, Deserialize)]
 struct SettingsDocument {
+    locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
     auto_start_proxy: Option<bool>,
@@ -165,6 +166,7 @@ impl SettingsDocument {
     fn into_settings(self) -> Settings {
         let defaults = Settings::default();
         Settings {
+            locale: self.locale.unwrap_or_default(),
             auto_sync_history: self.auto_sync_history.unwrap_or(defaults.auto_sync_history),
             unified_codex_history: self
                 .unified_codex_history
@@ -263,6 +265,19 @@ fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
     output
 }
 
+fn sanitize_locale(value: String) -> String {
+    match value.trim() {
+        "zh-CN" => "zh-CN".to_string(),
+        "en-US" => "en-US".to_string(),
+        _ => "en-US".to_string(),
+    }
+}
+
+fn sanitize_settings_for_save(mut settings: Settings) -> Settings {
+    settings.locale = sanitize_locale(settings.locale);
+    settings
+}
+
 fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
     let path = if paths.runtime_providers_path().exists() {
         paths.runtime_providers_path()
@@ -318,6 +333,7 @@ fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, String> {
 }
 
 fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<Settings, String> {
+    let settings = sanitize_settings_for_save(settings);
     let path = paths.settings_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -665,6 +681,7 @@ sort_order = 7
         assert_settings_eq(&defaults, &Settings::default());
 
         let custom = Settings {
+            locale: "zh-CN".to_string(),
             auto_sync_history: false,
             unified_codex_history: false,
             auto_start_proxy: false,
@@ -709,6 +726,7 @@ sort_order = 7
         assert!(written.contains("\"official_provider_sort_order\": 3"));
         assert!(written.contains("\"auto_sync_clients\": false"));
         assert!(written.contains("\"unified_codex_history\": false"));
+        assert!(written.contains("\"locale\": \"zh-CN\""));
     }
 
     #[test]
@@ -752,6 +770,44 @@ sort_order = 7
         let loaded = get_settings_with_paths(&paths).expect("settings load");
 
         assert_eq!(loaded.gateway_auto_retry_max_attempts, 1);
+    }
+
+    #[test]
+    fn missing_locale_loads_as_frontend_resolved_default_marker() {
+        let root = temp_root("settings-missing-locale");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert_eq!(loaded.locale, "");
+        assert_eq!(loaded.proxy_port, 4555);
+    }
+
+    #[test]
+    fn invalid_locale_saves_as_english_default() {
+        let root = temp_root("settings-invalid-locale");
+        let paths = test_paths(&root);
+
+        let saved = save_settings_with_paths(
+            Settings {
+                locale: "fr-FR".to_string(),
+                ..Settings::default()
+            },
+            &paths,
+        )
+        .expect("settings save");
+        let written = fs::read_to_string(paths.settings_path()).expect("settings text");
+
+        assert_eq!(saved.locale, "en-US");
+        assert!(written.contains("\"locale\": \"en-US\""));
     }
 
     #[test]
@@ -1058,6 +1114,7 @@ sort_order = 7
     }
 
     fn assert_settings_eq(left: &Settings, right: &Settings) {
+        assert_eq!(left.locale, right.locale);
         assert_eq!(left.auto_sync_history, right.auto_sync_history);
         assert_eq!(left.unified_codex_history, right.unified_codex_history);
         assert_eq!(left.auto_start_proxy, right.auto_start_proxy);

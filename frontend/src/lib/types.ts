@@ -283,6 +283,7 @@ export interface SubagentMatrixRow {
 }
 
 export interface Settings {
+  locale: "zh-CN" | "en-US";
   auto_sync_history: boolean;
   unified_codex_history: boolean;
   auto_start_proxy: boolean;
@@ -314,8 +315,8 @@ export type GatewayClientId = "opencode" | "zcode" | "pi" | "omp";
 export interface GatewayClientContract {
   id: GatewayClientId;
   name: string;
-  kind: string;
-  description: string;
+  kind?: string;
+  description?: string;
   config_path: string;
 }
 

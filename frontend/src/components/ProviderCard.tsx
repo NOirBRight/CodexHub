@@ -8,6 +8,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { displayModel, formatLimit, renumberModels } from "../lib/format";
 import type { Model, Provider } from "../lib/types";
 
@@ -26,6 +27,7 @@ export function ProviderCard({
   onDelete,
   onRefreshModels,
 }: ProviderCardProps) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(provider);
@@ -66,7 +68,7 @@ export function ProviderCard({
               type="button"
               className="focus-ring grid h-8 w-8 place-items-center rounded-md border border-line bg-panel"
               onClick={() => setExpanded((value) => !value)}
-              title={expanded ? "Collapse" : "Expand"}
+              title={expanded ? t("common.collapse") : t("common.expand")}
             >
               {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             </button>
@@ -80,19 +82,19 @@ export function ProviderCard({
                 checked={provider.enabled}
                 onChange={(event) => onChange({ ...provider, enabled: event.target.checked })}
               />
-              Enabled
+              {t("common.enabled")}
             </label>
           </div>
           <p className="mt-2 truncate text-sm text-slate-500">{provider.base_url}</p>
           <p className="mt-1 text-sm text-slate-500">
-            {enabledModels}/{provider.models.length} models enabled
+            {t("providers.modelsEnabled", { enabled: enabledModels, total: provider.models.length })}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
             className="focus-ring grid h-9 w-9 place-items-center rounded-md border border-line bg-panel"
-            title="Refresh models"
+            title={t("providers.refreshModels")}
             disabled={busy}
             onClick={() => onRefreshModels(provider)}
           >
@@ -101,7 +103,7 @@ export function ProviderCard({
           <button
             type="button"
             className="focus-ring grid h-9 w-9 place-items-center rounded-md border border-line bg-panel"
-            title="Edit provider"
+            title={t("providers.editProvider")}
             onClick={() => setEditing((value) => !value)}
           >
             <Save size={16} />
@@ -109,7 +111,7 @@ export function ProviderCard({
           <button
             type="button"
             className="focus-ring grid h-9 w-9 place-items-center rounded-md border border-danger/40 bg-red-50 text-danger"
-            title="Delete provider"
+            title={t("providers.deleteProvider")}
             onClick={() => onDelete(provider.id)}
           >
             <Trash2 size={16} />
@@ -119,28 +121,28 @@ export function ProviderCard({
 
       {editing && (
         <div className="grid gap-3 border-t border-line bg-slate-50 p-4 md:grid-cols-2">
-          <Field label="Name">
+          <Field label={t("common.name")}>
             <input
               className="field"
               value={draft.name}
               onChange={(event) => setDraft({ ...draft, name: event.target.value })}
             />
           </Field>
-          <Field label="Display prefix">
+          <Field label={t("providers.displayPrefix")}>
             <input
               className="field"
               value={draft.display_prefix ?? ""}
               onChange={(event) => setDraft({ ...draft, display_prefix: event.target.value })}
             />
           </Field>
-          <Field label="Base URL">
+          <Field label={t("common.baseUrl")}>
             <input
               className="field"
               value={draft.base_url}
               onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}
             />
           </Field>
-          <Field label="API key">
+          <Field label={t("common.apiKey")}>
             <input
               className="field"
               value={draft.api_key ?? ""}
@@ -156,7 +158,7 @@ export function ProviderCard({
                 setEditing(false);
               }}
             >
-              Save
+              {t("common.save")}
             </button>
           </div>
         </div>
@@ -165,7 +167,7 @@ export function ProviderCard({
       {expanded && (
         <div className="border-t border-line">
           {provider.models.length === 0 ? (
-            <div className="px-4 py-5 text-sm text-slate-500">No models</div>
+            <div className="px-4 py-5 text-sm text-slate-500">{t("common.noModels")}</div>
           ) : (
             <div className="divide-y divide-line">
               {provider.models.map((model, index) => (
@@ -190,8 +192,8 @@ export function ProviderCard({
                     </span>
                   </label>
                   <div className="text-xs text-slate-500 md:text-right">
-                    <div>Context {formatLimit(model.context_window)}</div>
-                    <div>Output {formatLimit(model.max_output_tokens)}</div>
+                    <div>{t("providers.context")} {formatLimit(model.context_window)}</div>
+                    <div>{t("common.output")} {formatLimit(model.max_output_tokens)}</div>
                   </div>
                   <div className="flex items-center gap-1">
                     <button
@@ -199,7 +201,7 @@ export function ProviderCard({
                       className="mini-button grid w-8 place-items-center px-0"
                       disabled={index === 0}
                       onClick={() => reorderModel(model.id, -1)}
-                      title="Move up"
+                      title={t("common.moveUp")}
                     >
                       <ArrowUp size={14} />
                     </button>
@@ -208,7 +210,7 @@ export function ProviderCard({
                       className="mini-button grid w-8 place-items-center px-0"
                       disabled={index === provider.models.length - 1}
                       onClick={() => reorderModel(model.id, 1)}
-                      title="Move down"
+                      title={t("common.moveDown")}
                     >
                       <ArrowDown size={14} />
                     </button>

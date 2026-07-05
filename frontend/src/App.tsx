@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
+import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
@@ -100,6 +102,7 @@ function visionModelOptions(models: Model[]) {
 }
 
 export default function App() {
+  const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
@@ -225,6 +228,12 @@ export default function App() {
 
   const visionModels = visionModelOptions(runtime.catalogModels);
 
+  useEffect(() => {
+    if (runtime.settings?.locale) {
+      void changeAppLocale(runtime.settings.locale);
+    }
+  }, [runtime.settings?.locale]);
+
   async function runRuntimeAction(
     label: string,
     action: () => Promise<AppStatus>,
@@ -234,7 +243,7 @@ export default function App() {
     const toastId =
       options?.toast === false
         ? null
-        : showToast(runtimeActionLoadingMessage(label), "loading");
+        : showToast(runtimeActionLoadingMessage(label, t), "loading");
     try {
       const status = await action();
       setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
@@ -242,7 +251,7 @@ export default function App() {
       if (toastId) {
         updateToast(toastId, {
           action: null,
-          text: runtimeActionSuccessMessage(label),
+          text: runtimeActionSuccessMessage(label, t),
           tone: "success",
         });
       }
@@ -295,11 +304,11 @@ export default function App() {
           historyMessage = await api.restoreOfficialHistoryFromUnified();
         }
       }
-      let saveMessage = historyMessage ?? "Settings saved";
+      let saveMessage = historyMessage ?? t("settings.settingsSaved");
       if (shouldRestartGateway) {
         const status = await api.restartProxy();
         setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
-        saveMessage = "Gateway settings saved and runtime restarted";
+        saveMessage = t("gateway.gatewaySettingsSavedRestarted");
       }
       setBanner(null);
       await loadRuntime();
@@ -350,14 +359,14 @@ export default function App() {
             )}
             onClick={() => setActiveTab(tab.id as TabId)}
           >
-            {tab.label}
+            {t(`common.${tab.id === "codexhub" ? "codexHub" : "gateway"}`)}
             {activeTab === tab.id && (
               <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-ink" />
             )}
           </button>
         ))}
         <span className="ml-auto hidden truncate text-xs text-slate-400 lg:block">
-          Gateway is the local OpenAI-compatible server in front of Hub
+          {t("runtime.gatewayHint")}
         </span>
       </nav>
 
@@ -382,7 +391,6 @@ export default function App() {
             usageError={runtime.usageError}
             clientInfos={runtime.gatewayClients}
             busy={busy}
-            pending={contract.pendingBackend}
             clients={contract.gatewayClients as GatewayClientContract[]}
             onApplySettings={async (settings) => {
               await saveSettings(settings);
@@ -406,40 +414,32 @@ export default function App() {
         onSave={saveSettings}
         onSyncHistory={syncHistory}
       />
-      {settingsOpen && (
-        <button
-          type="button"
-          className="fixed inset-0 z-40 cursor-default bg-black/10 backdrop-blur-[1px]"
-          aria-label="Close settings"
-          onClick={() => setSettingsOpen(false)}
-        />
-      )}
     </div>
   );
 }
 
-function runtimeActionLoadingMessage(label: string) {
+function runtimeActionLoadingMessage(label: string, t: (key: string) => string) {
   if (label === "start") {
-    return "Starting Gateway runtime...";
+    return t("runtime.startingRuntime");
   }
   if (label === "stop") {
-    return "Stopping Gateway runtime...";
+    return t("runtime.stoppingRuntime");
   }
   if (label === "restart") {
-    return "Restarting Gateway runtime...";
+    return t("runtime.restartingRuntime");
   }
-  return "Updating Gateway runtime...";
+  return t("runtime.updatingRuntime");
 }
 
-function runtimeActionSuccessMessage(label: string) {
+function runtimeActionSuccessMessage(label: string, t: (key: string) => string) {
   if (label === "start") {
-    return "Gateway runtime started";
+    return t("runtime.runtimeStarted");
   }
   if (label === "stop") {
-    return "Gateway runtime stopped";
+    return t("runtime.runtimeStopped");
   }
   if (label === "restart") {
-    return "Gateway runtime restarted";
+    return t("runtime.runtimeRestarted");
   }
-  return "Gateway runtime updated";
+  return t("runtime.runtimeUpdated");
 }

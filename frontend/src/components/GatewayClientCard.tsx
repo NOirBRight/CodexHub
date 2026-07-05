@@ -1,4 +1,5 @@
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
+import { useTranslation } from "react-i18next";
 import ompIcon from "../assets/omp-icon.png";
 import opencodeIcon from "../assets/opencode-icon.png";
 import piIcon from "../assets/pi-icon.png";
@@ -24,6 +25,7 @@ export function GatewayClientCard({
   info,
   onSwitchMode,
 }: GatewayClientCardProps) {
+  const { t } = useTranslation();
   const routeMode = routeModeFromInfo(info);
   const routeValue = routeMode === "unknown" ? null : routeMode;
   const pendingRouteValue = busy ? busyMode ?? null : null;
@@ -34,25 +36,30 @@ export function GatewayClientCard({
   const currentVersion = info?.current_version?.trim() || null;
   const latestVersion = info?.latest_version?.trim() || null;
   const hasUpdate = Boolean(currentVersion && latestVersion && currentVersion !== latestVersion);
-  const updateLabel = hasUpdate ? "Manual update available" : "No update action";
+  const kindLabel = info?.kind ?? t(`gateway.clientKind.${client.id}`);
+  const routeOptions: Array<SegmentedOption<RouteMode>> = [
+    { value: "official", label: t("common.official") },
+    { value: "hub", label: t("common.codexHub") },
+  ];
+  const updateLabel = hasUpdate ? t("gateway.manualUpdateAvailable") : t("gateway.noUpdateAction");
   const routeDisabledReason = !installed
-    ? `${info?.name ?? client.name} is not installed.`
+    ? t("gateway.notInstalled")
     : !autoApplySupported
-      ? "Managed config switching is not available for this client."
+      ? t("gateway.configUnavailable")
       : undefined;
   const routeTitle = busy
-    ? `Switching ${info?.name ?? client.name} route...`
+    ? t("gateway.switchingRoute", { name: info?.name ?? client.name })
     : routeDisabledReason ??
-      (routeMode === "unknown" ? "Current route could not be detected from the config file." : undefined);
+      (routeMode === "unknown" ? t("gateway.routeUnknownTitle") : undefined);
   const statusLabel = busy
-    ? "Switching"
+    ? t("gateway.switching")
     : !hasInfo
-    ? "Checking"
+    ? t("gateway.checking")
     : !installed
-      ? "Not installed"
+      ? t("gateway.notInstalled")
       : routeMode === "unknown"
-        ? "Route unknown"
-        : "Installed";
+        ? t("gateway.routeUnknown")
+        : t("gateway.installed");
   const statusClass = busy
     ? "border-amber-200 bg-amber-50 text-amber-700"
     : !hasInfo
@@ -63,19 +70,22 @@ export function GatewayClientCard({
           ? "border-amber-200 bg-amber-50 text-amber-700"
           : "border-blue-200 bg-blue-50 text-blue-700";
   const versionLabel = !hasInfo
-    ? "Checking version"
+    ? t("gateway.checkingVersion")
     : !installed
-      ? "Not installed"
+      ? t("gateway.notInstalled")
       : currentVersion || latestVersion
-        ? `Current ${currentVersion ?? "unknown"} · Latest ${latestVersion ?? "unknown"}`
-        : "Version unknown";
+        ? t("gateway.currentLatest", {
+            current: currentVersion ?? t("common.unknown").toLowerCase(),
+            latest: latestVersion ?? t("common.unknown").toLowerCase(),
+          })
+        : t("gateway.versionUnknown");
   return (
     <section className="grid h-full min-h-[136px] content-between gap-1.5 rounded-panel bg-surface p-2 shadow-card">
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <ClientLogo id={client.id} name={info?.name ?? client.name} />
         <div className="min-w-0">
           <h3 className="truncate text-sm font-semibold text-ink">{info?.name ?? client.name}</h3>
-          <p className="truncate text-xs text-slate-500">{info?.kind ?? client.kind}</p>
+          <p className="truncate text-xs text-slate-500">{kindLabel}</p>
         </div>
         <span
           className={cx(
@@ -89,7 +99,7 @@ export function GatewayClientCard({
 
       <div title={routeTitle}>
         <SegmentedSwitch
-          ariaLabel={`${client.name} route mode`}
+          ariaLabel={t("gateway.routeMode", { name: client.name })}
           className="grid-cols-2 [&_button]:min-h-7 [&_button]:py-1 [&_button]:text-xs"
           disabled={busy || Boolean(routeDisabledReason)}
           pendingValue={pendingRouteValue}
@@ -101,11 +111,11 @@ export function GatewayClientCard({
 
       <div className="grid min-w-0 gap-1 text-xs text-slate-600">
         <div className="flex min-w-0 items-center justify-between gap-2">
-          <span className="shrink-0 font-semibold text-slate-500">Config</span>
-          <code className="truncate font-mono">{configPath || "copy-only"}</code>
+          <span className="shrink-0 font-semibold text-slate-500">{t("common.config")}</span>
+          <code className="truncate font-mono">{configPath || t("common.copyOnly")}</code>
         </div>
         <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
-          <span className="font-semibold text-slate-500">Version</span>
+          <span className="font-semibold text-slate-500">{t("common.version")}</span>
           <span className="truncate" title={versionLabel}>
             {versionLabel}
           </span>
@@ -116,7 +126,7 @@ export function GatewayClientCard({
                 ? "bg-amber-50 text-amber-700"
                 : "bg-panel text-slate-400",
             )}
-            title={hasUpdate ? "Install the client update manually." : "No client update action is available."}
+            title={hasUpdate ? t("gateway.installUpdateManually") : t("gateway.noClientUpdateAction")}
           >
             {updateLabel}
           </span>
@@ -125,11 +135,6 @@ export function GatewayClientCard({
     </section>
   );
 }
-
-const routeOptions: Array<SegmentedOption<RouteMode>> = [
-  { value: "official", label: "Official" },
-  { value: "hub", label: "CodexHub" },
-];
 
 function routeModeFromInfo(info?: GatewayClientInfo): DisplayRouteMode {
   if (info?.route_mode === "official" || info?.route_mode === "hub") {

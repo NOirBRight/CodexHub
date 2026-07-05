@@ -1,4 +1,5 @@
 import { Clock3 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cx } from "../lib/format";
 
 interface PendingPanelProps {
@@ -16,6 +17,8 @@ export function PendingPanel({
   message,
   title,
 }: PendingPanelProps) {
+  const { t } = useTranslation();
+  const resolvedLabel = label === "pending backend" ? t("usage.pendingData") : label;
   return (
     <div
       className={cx(
@@ -30,7 +33,7 @@ export function PendingPanel({
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-semibold text-ink">{title}</span>
             <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500 shadow-control">
-              {label}
+              {resolvedLabel}
             </span>
           </div>
           <p className={cx("text-xs leading-5 text-slate-500", compact ? "mt-0.5" : "mt-1")}>

@@ -1,5 +1,6 @@
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type SetStateAction } from "react";
+import { useTranslation } from "react-i18next";
 import { PendingPanel } from "./PendingPanel";
 import { cx } from "../lib/format";
 import type { GatewayUsageEvent, GatewayUsageSummary, Provider, TelemetryStatus, UsageQueryWindow } from "../lib/types";
@@ -17,6 +18,7 @@ type UsageRange = "7d" | "1m" | "custom";
 type UsageGroup = "day" | "week";
 type UsageMetric = "token" | "request";
 type UsageBreakdown = "provider" | "model";
+type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 interface DateSpan {
   start: Date;
@@ -82,6 +84,9 @@ export function StackedUsageChartShell({
   summary,
   telemetryStatus,
 }: StackedUsageChartShellProps) {
+  const { i18n, t } = useTranslation();
+  const locale = i18n.language || "en-US";
+  const tr = t as Translate;
   const initialCustomRange = useMemo(() => defaultCustomRange(), []);
   const [range, setRange] = useState<UsageRange>("7d");
   const [groupBy, setGroupBy] = useState<UsageGroup>("day");
@@ -99,8 +104,8 @@ export function StackedUsageChartShell({
   const queryWindow = useMemo(() => usageQueryWindow(range, customRange), [customRange, range]);
   const providerLabels = useMemo(() => providerLabelMap(providers), [providers]);
   const stacked = useMemo(
-    () => buildStackedBuckets(events, range, groupBy, customRange, metric, breakdown, providerLabels),
-    [breakdown, customRange, events, groupBy, metric, providerLabels, range],
+    () => buildStackedBuckets(events, range, groupBy, customRange, metric, breakdown, providerLabels, locale, tr),
+    [breakdown, customRange, events, groupBy, locale, metric, providerLabels, range, tr],
   );
   const axis = useMemo(
     () => stacked.buckets.map((bucket) => bucket.label),
@@ -117,8 +122,9 @@ export function StackedUsageChartShell({
         range,
         series: stacked.series,
         summary,
+        tr,
       }),
-    [breakdown, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary],
+    [breakdown, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary, tr],
   );
 
   useEffect(() => {
@@ -186,18 +192,18 @@ export function StackedUsageChartShell({
     <section className="grid h-full min-h-[320px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <h2 className="shrink-0 text-sm font-semibold text-ink">Usage &amp; Cost</h2>
+          <h2 className="shrink-0 text-sm font-semibold text-ink">{t("usage.usageCost")}</h2>
         </div>
         <div className="flex shrink-0 items-center justify-end gap-1.5">
           <UsageDropdown
-            label="Metric"
+            label={t("usage.metric")}
             open={metricOpen}
             options={[
-              { value: "token", label: "Token" },
-              { value: "request", label: "Request" },
+              { value: "token", label: t("usage.token") },
+              { value: "request", label: t("usage.request") },
             ]}
             value={metric}
-            valueLabel={metric === "token" ? "Token" : "Request"}
+            valueLabel={metric === "token" ? t("usage.token") : t("usage.request")}
             onToggle={() => {
               setMetricOpen((open) => !open);
               setBreakdownOpen(false);
@@ -211,14 +217,14 @@ export function StackedUsageChartShell({
           />
 
           <UsageDropdown
-            label="By"
+            label={t("usage.by")}
             open={breakdownOpen}
             options={[
-              { value: "provider", label: "Provider" },
-              { value: "model", label: "Model" },
+              { value: "provider", label: t("usage.provider") },
+              { value: "model", label: t("usage.model") },
             ]}
             value={breakdown}
-            valueLabel={breakdown === "model" ? "Model" : "Provider"}
+            valueLabel={breakdown === "model" ? t("usage.model") : t("usage.provider")}
             onToggle={() => {
               setBreakdownOpen((open) => !open);
               setMetricOpen(false);
@@ -232,14 +238,14 @@ export function StackedUsageChartShell({
           />
 
           <UsageDropdown
-            label="Group"
+            label={t("usage.group")}
             open={groupOpen}
             options={[
-              { value: "day", label: "Day" },
-              { value: "week", label: "Week" },
+              { value: "day", label: t("usage.day") },
+              { value: "week", label: t("usage.week") },
             ]}
             value={groupBy}
-            valueLabel={groupBy === "week" ? "Week" : "Day"}
+            valueLabel={groupBy === "week" ? t("usage.week") : t("usage.day")}
             onToggle={() => {
               setGroupOpen((open) => !open);
               setBreakdownOpen(false);
@@ -255,9 +261,9 @@ export function StackedUsageChartShell({
           <div ref={customRangeRef} className="relative">
             <div className="grid grid-cols-[44px_44px_64px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
               {[
-                { value: "7d", label: "7D" },
-                { value: "1m", label: "1M" },
-                { value: "custom", label: "Custom" },
+                { value: "7d", label: t("usage.week") },
+                { value: "1m", label: t("usage.month") },
+                { value: "custom", label: t("usage.custom") },
               ].map((option) => (
                 <button
                   key={option.value}
@@ -278,6 +284,8 @@ export function StackedUsageChartShell({
               <CalendarRangePopover
                 month={calendarMonth}
                 range={customRange}
+                locale={locale}
+                t={tr}
                 onMonthChange={setCalendarMonth}
                 onSelect={selectCustomDay}
               />
@@ -287,15 +295,15 @@ export function StackedUsageChartShell({
       </div>
 
       <div className="grid grid-cols-4 gap-2">
-        <Metric label="Tokens" value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens) : "Unknown"} />
-        <Metric label="Requests" value={visibleSummary ? formatNumber(visibleSummary.requests) : "Unknown"} />
-        <Metric label="Est. cost" value={costLabel(visibleSummary)} title={visibleSummary?.cost_label ?? undefined} />
-        <Metric label="Cached input" value={cachedInputLabel(visibleSummary)} title={cachedInputTitle(visibleSummary)} />
+        <Metric label={t("gateway.tokens")} value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens, locale) : t("common.unknown")} />
+        <Metric label={t("usage.requests")} value={visibleSummary ? formatNumber(visibleSummary.requests, locale) : t("common.unknown")} />
+        <Metric label={t("gateway.estCost")} value={costLabel(visibleSummary, t("common.unknown"))} title={visibleSummary?.cost_label ?? undefined} />
+        <Metric label={t("gateway.cachedInput")} value={cachedInputLabel(visibleSummary, t("common.unknown"))} title={cachedInputTitle(visibleSummary, tr)} />
       </div>
 
       <div className="relative min-h-0 overflow-hidden rounded-panel bg-panel shadow-inner">
         {metric === "token" && !stacked.hasData ? (
-          <NoTokenChart axis={axis} pendingMessage={pendingMessage} summary={summary} />
+          <NoTokenChart axis={axis} pendingMessage={pendingMessage} summary={summary} locale={locale} t={tr} />
         ) : (
           <StackedUsageChart
             breakdown={breakdown}
@@ -306,6 +314,8 @@ export function StackedUsageChartShell({
             pendingMessage={pendingMessage}
             series={stacked.series}
             summary={visibleSummary}
+            locale={locale}
+            t={tr}
           />
         )}
       </div>
@@ -369,15 +379,19 @@ function UsageDropdown<T extends string>({
 }
 
 function CalendarRangePopover({
+  locale,
   month,
   onMonthChange,
   onSelect,
   range,
+  t,
 }: {
+  locale: string;
   month: Date;
   onMonthChange: (month: Date) => void;
   onSelect: (day: Date) => void;
   range: DateSpan;
+  t: Translate;
 }) {
   const nextMonth = addMonths(month, 1);
   return (
@@ -387,45 +401,48 @@ function CalendarRangePopover({
           type="button"
           className="focus-ring grid h-7 w-7 place-items-center rounded-full text-ink hover:bg-panel"
           onClick={() => onMonthChange(addMonths(month, -1))}
-          aria-label="Previous month"
+          aria-label={t("usage.previousMonth")}
         >
           <ChevronLeft size={16} />
         </button>
         <div className="text-[10px] font-semibold text-slate-500">
-          {formatDate(range.start)} - {formatDate(range.end)}
+          {formatDate(range.start, locale)} - {formatDate(range.end, locale)}
         </div>
         <button
           type="button"
           className="focus-ring grid h-7 w-7 place-items-center rounded-full text-ink hover:bg-panel"
           onClick={() => onMonthChange(addMonths(month, 1))}
-          aria-label="Next month"
+          aria-label={t("usage.nextMonth")}
         >
           <ChevronRight size={16} />
         </button>
       </div>
       <div className="grid grid-cols-2 gap-3">
-        <MonthGrid month={month} range={range} onSelect={onSelect} />
-        <MonthGrid month={nextMonth} range={range} onSelect={onSelect} />
+        <MonthGrid month={month} range={range} locale={locale} onSelect={onSelect} />
+        <MonthGrid month={nextMonth} range={range} locale={locale} onSelect={onSelect} />
       </div>
     </div>
   );
 }
 
 function MonthGrid({
+  locale,
   month,
   onSelect,
   range,
 }: {
+  locale: string;
   month: Date;
   onSelect: (day: Date) => void;
   range: DateSpan;
 }) {
   const cells = monthCells(month);
+  const weekdayLabels = weekDayLabels(locale);
   return (
     <div className="min-w-0">
-      <h3 className="mb-2 text-center text-sm font-semibold text-ink">{formatMonthTitle(month)}</h3>
+      <h3 className="mb-2 text-center text-sm font-semibold text-ink">{formatMonthTitle(month, locale)}</h3>
       <div className="mb-1 grid grid-cols-7 text-center text-[10px] font-semibold text-slate-400">
-        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => (
+        {weekdayLabels.map((day) => (
           <span key={day}>{day}</span>
         ))}
       </div>
@@ -468,20 +485,24 @@ function StackedUsageChart({
   breakdown,
   buckets,
   hiddenSeriesKeys,
+  locale,
   metric,
   onHiddenSeriesKeysChange,
   pendingMessage,
   series,
   summary,
+  t,
 }: {
   breakdown: UsageBreakdown;
   buckets: StackBucket[];
   hiddenSeriesKeys: Set<string>;
+  locale: string;
   metric: UsageMetric;
   onHiddenSeriesKeysChange: Dispatch<SetStateAction<Set<string>>>;
   pendingMessage: string;
   series: StackSeries[];
   summary: GatewayUsageSummary | null;
+  t: Translate;
 }) {
   const [hover, setHover] = useState<ChartHover | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
@@ -499,7 +520,7 @@ function StackedUsageChart({
   const hasData = visibleBuckets.some((bucket) => bucket.total > 0);
   const allSeriesHidden = series.length > 0 && visibleSeries.length === 0;
   const columns = chartColumns(buckets.length);
-  const valueLabel = metric === "request" ? "requests" : "tokens";
+  const valueLabel = metric === "request" ? t("usage.requests") : t("gateway.tokens");
   const layers = buildChartLayers(visibleBuckets, visibleSeries, maxTotal);
   const isModelBreakdown = breakdown === "model";
   const tooltipWidth = isModelBreakdown ? 300 : TOOLTIP_WIDTH;
@@ -536,7 +557,7 @@ function StackedUsageChart({
         Math.max(TOOLTIP_EDGE_MARGIN, hover.hostWidth - tooltipWidth - TOOLTIP_EDGE_MARGIN),
       )
     : TOOLTIP_EDGE_MARGIN;
-  const activeBucketDateLabel = activeBucket ? formatBucketTooltipDate(activeBucket) : "";
+  const activeBucketDateLabel = activeBucket ? formatBucketTooltipDate(activeBucket, locale) : "";
 
   useEffect(() => {
     setHover(null);
@@ -591,18 +612,18 @@ function StackedUsageChart({
       <div className="grid h-full min-h-[220px] grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
         <div className="relative min-h-0">
           <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
-            <span title={formatNumber(maxTotal)}>{formatAxisNumber(maxTotal)}</span>
-            <span className="self-center" title={formatNumber(Math.round(maxTotal / 2))}>
-              {formatAxisNumber(Math.round(maxTotal / 2))}
+            <span title={formatNumber(maxTotal, locale)}>{formatAxisNumber(maxTotal, locale)}</span>
+            <span className="self-center" title={formatNumber(Math.round(maxTotal / 2), locale)}>
+              {formatAxisNumber(Math.round(maxTotal / 2), locale)}
             </span>
             <span>0</span>
           </div>
           <div
-            className="absolute inset-x-14 bottom-8 top-6"
+            className="absolute bottom-8 left-14 right-4 top-6"
             onMouseMove={handleHover}
             onMouseLeave={() => setHover(null)}
           >
-            <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${breakdown} ${valueLabel} usage`}>
+            <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={t("usage.chartAria", { breakdown: t(`usage.${breakdown}`), metric: valueLabel })}>
               {[0, 25, 50, 75, 100].map((y) => (
                 <line
                   key={y}
@@ -667,7 +688,7 @@ function StackedUsageChart({
                 {buckets.map((bucket, index) => (
                   <span
                     key={`${bucket.label}-${bucket.start.toISOString()}`}
-                    title={`${bucket.label} - ${formatNumber(visibleBuckets[index]?.total ?? 0)} ${valueLabel}`}
+                    title={`${bucket.label} - ${formatNumber(visibleBuckets[index]?.total ?? 0, locale)} ${valueLabel}`}
                   />
                 ))}
               </div>
@@ -678,30 +699,30 @@ function StackedUsageChart({
                   className="w-full max-w-[480px] py-3"
                   label={
                     allSeriesHidden
-                      ? "series hidden"
+                      ? t("usage.seriesHidden")
                       : summary && summary.requests > 0
-                        ? "event window empty"
-                        : "pending data"
+                        ? t("usage.eventWindowEmpty")
+                        : t("usage.pendingData")
                   }
                   title={
                     allSeriesHidden
-                      ? "Usage series hidden"
+                      ? t("usage.usageSeriesHidden")
                       : metric === "request"
-                        ? "Request usage"
-                        : "Token usage"
+                        ? t("usage.requestUsage")
+                        : t("usage.tokenUsage")
                   }
                   message={
                     allSeriesHidden
-                      ? "Use the legend to restore a series."
+                      ? t("usage.allSeriesHidden")
                       : summary && summary.requests > 0
-                        ? `No ${valueLabel} in the selected range for this ${breakdown} breakdown.`
+                        ? t("usage.noValueForBreakdown", { metric: valueLabel, breakdown: t(`usage.${breakdown}`) })
                         : pendingMessage
                   }
                 />
               </div>
             )}
           </div>
-          <div className="absolute inset-x-14 bottom-2 h-5 text-center text-[10px] font-semibold text-slate-400">
+          <div className="absolute bottom-2 left-14 right-4 h-5 text-center text-[10px] font-semibold text-slate-400">
             {buckets.map((bucket, index) => (
               <span
                 key={`${bucket.label}-${bucket.start.toISOString()}`}
@@ -733,7 +754,7 @@ function StackedUsageChart({
                     <span className="min-w-0 whitespace-normal break-words leading-4 text-slate-600">
                       {segment.label}
                     </span>
-                    <span className="font-mono font-semibold leading-4 text-ink">{formatNumber(segment.value)}</span>
+                    <span className="font-mono font-semibold leading-4 text-ink">{formatNumber(segment.value, locale)}</span>
                   </div>
                 ))}
               </div>
@@ -754,7 +775,7 @@ function StackedUsageChart({
                     "leading-4",
                   )}
                   aria-pressed={!hidden}
-                  title={`${hidden ? "Show" : "Hide"} ${item.label}`}
+                  title={hidden ? t("usage.showSeries", { label: item.label }) : t("usage.hideSeries", { label: item.label })}
                   onClick={() => toggleSeries(item.key)}
                 >
                   <i
@@ -782,12 +803,16 @@ function StackedUsageChart({
 
 function NoTokenChart({
   axis,
+  locale,
   pendingMessage,
   summary,
+  t,
 }: {
   axis: string[];
+  locale: string;
   pendingMessage: string;
   summary: GatewayUsageSummary | null;
+  t: Translate;
 }) {
   const columns = chartColumns(axis.length);
   return (
@@ -814,11 +839,14 @@ function NoTokenChart({
             <PendingPanel
               compact
               className="w-full max-w-[480px] py-3"
-              label={summary && summary.requests > 0 ? "no token usage" : "pending data"}
-              title={summary && summary.requests > 0 ? "Usage tokens unavailable" : "Usage telemetry"}
+              label={summary && summary.requests > 0 ? t("usage.noTokenUsage") : t("usage.pendingData")}
+              title={summary && summary.requests > 0 ? t("usage.tokensUnavailable") : t("usage.usageTelemetry")}
               message={
                 summary && summary.requests > 0
-                  ? `${summary.requests} requests are recorded, with ${summary.missing_usage_requests} missing usage records. Tokens and cost stay unknown until upstream usage exists.`
+                  ? t("usage.usageUnavailableMessage", {
+                      requests: formatNumber(summary.requests, locale),
+                      missing: formatNumber(summary.missing_usage_requests, locale),
+                    })
                   : pendingMessage
               }
             />
@@ -855,8 +883,10 @@ function buildStackedBuckets(
   metric: UsageMetric,
   breakdown: UsageBreakdown,
   providerLabels: Map<string, string>,
+  locale: string,
+  t: Translate,
 ): { buckets: StackBucket[]; hasData: boolean; series: StackSeries[] } {
-  const rawBuckets = bucketSpecs(range, groupBy, customRange).map((bucket) => ({
+  const rawBuckets = bucketSpecs(range, groupBy, customRange, locale).map((bucket) => ({
     ...bucket,
     totals: new Map<string, number>(),
   }));
@@ -879,7 +909,7 @@ function buildStackedBuckets(
       (candidate) => time >= candidate.start.getTime() && time < candidate.endExclusive.getTime(),
     );
     if (bucket) {
-      const segment = breakdownSegment(event, breakdown, providerLabels);
+      const segment = breakdownSegment(event, breakdown, providerLabels, t);
       labels.set(segment.key, segment.label);
       bucket.totals.set(segment.key, (bucket.totals.get(segment.key) ?? 0) + value);
       seriesTotals.set(segment.key, (seriesTotals.get(segment.key) ?? 0) + value);
@@ -903,7 +933,7 @@ function buildStackedBuckets(
     return {
       color: STACK_COLORS[index % STACK_COLORS.length],
       key,
-      label: key === OTHER_SERIES_KEY ? "Other" : labels.get(key) ?? key,
+      label: key === OTHER_SERIES_KEY ? t("usage.other") : labels.get(key) ?? key,
       total,
     };
   });
@@ -943,6 +973,7 @@ function visibleUsageSummary({
   range,
   series,
   summary,
+  tr,
 }: {
   breakdown: UsageBreakdown;
   customRange: DateSpan;
@@ -952,6 +983,7 @@ function visibleUsageSummary({
   range: UsageRange;
   series: StackSeries[];
   summary: GatewayUsageSummary | null;
+  tr: Translate;
 }) {
   if (hiddenSeriesKeys.size === 0) {
     return summary;
@@ -979,7 +1011,7 @@ function visibleUsageSummary({
     if (Number.isNaN(time) || time < startTime || time > endTime) {
       continue;
     }
-    const segment = breakdownSegment(event, breakdown, providerLabels);
+    const segment = breakdownSegment(event, breakdown, providerLabels, tr);
     if (hiddenSeriesKeys.has(segment.key) || (hideOther && !visibleTopKeys.has(segment.key))) {
       continue;
     }
@@ -1022,14 +1054,14 @@ function visibleUsageSummary({
     cached_input_tokens: hasCachedInput ? cachedInputTokens : null,
     cache_hit_rate: hasCachedInput && inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null,
     estimated_cost_usd: estimatedCost,
-    cost_label: estimatedCost !== null ? "Filtered estimate based on visible token share." : summary?.cost_label ?? "Unknown",
+    cost_label: estimatedCost !== null ? tr("gateway.filteredEstimate") : summary?.cost_label ?? tr("common.unknown"),
   };
 }
 
-function bucketSpecs(range: UsageRange, groupBy: UsageGroup, customRange: DateSpan): BucketSpec[] {
+function bucketSpecs(range: UsageRange, groupBy: UsageGroup, customRange: DateSpan, locale: string): BucketSpec[] {
   const span = rangeToSpan(range, customRange);
   const dayCount = Math.max(1, differenceInDays(span.start, span.end) + 1);
-  const formatter = new Intl.DateTimeFormat("en-US", { month: "numeric", day: "numeric" });
+  const formatter = new Intl.DateTimeFormat(locale, { month: "numeric", day: "numeric" });
   const buckets: BucketSpec[] = [];
 
   if (groupBy === "day") {
@@ -1217,12 +1249,12 @@ function metricValue(event: GatewayUsageEvent, metric: UsageMetric) {
   return tokenTotal(event) ?? 0;
 }
 
-function breakdownSegment(event: GatewayUsageEvent, breakdown: UsageBreakdown, providerLabels: Map<string, string>) {
-  const provider = event.upstream?.trim() || "Unknown provider";
-  const providerName = providerLabel(provider, providerLabels);
+function breakdownSegment(event: GatewayUsageEvent, breakdown: UsageBreakdown, providerLabels: Map<string, string>, t: Translate) {
+  const provider = event.upstream?.trim() || t("usage.unknownProvider");
+  const providerName = providerLabel(provider, providerLabels, t);
 
   if (breakdown === "model") {
-    const model = event.model?.trim() || "Unknown model";
+    const model = event.model?.trim() || t("usage.unknownModel");
     const modelId = displayModelId(model);
     return {
       key: `model:${provider.toLowerCase()}:${modelId.toLowerCase()}`,
@@ -1247,14 +1279,14 @@ function providerLabelMap(providers: Provider[]) {
   return labels;
 }
 
-function providerLabel(provider: string, providerLabels: Map<string, string>) {
+function providerLabel(provider: string, providerLabels: Map<string, string>, t: Translate) {
   const normalized = provider.toLowerCase();
   const mapped = providerLabels.get(normalized);
   if (mapped) {
     return mapped;
   }
   if (normalized.startsWith("unknown")) {
-    return "Unknown";
+    return t("common.unknown");
   }
   return titleizeProviderId(provider);
 }
@@ -1292,11 +1324,11 @@ function tokenTotal(event: GatewayUsageEvent) {
   return total > 0 ? total : null;
 }
 
-function formatNumber(value: number) {
-  return new Intl.NumberFormat("en-US").format(value);
+function formatNumber(value: number, locale: string) {
+  return new Intl.NumberFormat(locale).format(value);
 }
 
-function formatAxisNumber(value: number) {
+function formatAxisNumber(value: number, locale: string) {
   const abs = Math.abs(value);
   if (abs >= 1_000_000) {
     return `${formatCompactAxisValue(value / 1_000_000)}M`;
@@ -1304,7 +1336,7 @@ function formatAxisNumber(value: number) {
   if (abs >= 1_000) {
     return `${formatCompactAxisValue(value / 1_000)}K`;
   }
-  return formatNumber(value);
+  return formatNumber(value, locale);
 }
 
 function formatCompactAxisValue(value: number) {
@@ -1314,31 +1346,31 @@ function formatCompactAxisValue(value: number) {
   return value.toFixed(1).replace(/\.0$/, "");
 }
 
-function costLabel(summary: GatewayUsageSummary | null) {
+function costLabel(summary: GatewayUsageSummary | null, unknownLabel: string) {
   if (!summary) {
-    return "Unknown";
+    return unknownLabel;
   }
   if (summary.estimated_cost_usd !== null && summary.estimated_cost_usd !== undefined) {
     return `$${summary.estimated_cost_usd.toFixed(2)}`;
   }
-  return "Unknown";
+  return unknownLabel;
 }
 
-function cachedInputLabel(summary: GatewayUsageSummary | null) {
+function cachedInputLabel(summary: GatewayUsageSummary | null, unknownLabel: string) {
   if (!summary) {
-    return "Unknown";
+    return unknownLabel;
   }
   if (summary.cache_hit_rate !== null && summary.cache_hit_rate !== undefined) {
     return `${summary.cache_hit_rate.toFixed(1)}%`;
   }
-  return summary.requests > 0 ? "N/A" : "Unknown";
+  return summary.requests > 0 ? "N/A" : unknownLabel;
 }
 
-function cachedInputTitle(summary: GatewayUsageSummary | null) {
+function cachedInputTitle(summary: GatewayUsageSummary | null, t: Translate) {
   if (!summary || summary.cache_hit_rate === null || summary.cache_hit_rate === undefined) {
     return undefined;
   }
-  return "Cached input tokens divided by input tokens for requests that reported cache usage.";
+  return t("gateway.cachedInputTitle");
 }
 
 function defaultCustomRange(): DateSpan {
@@ -1359,28 +1391,38 @@ function monthCells(month: Date): Array<Date | null> {
   ];
 }
 
-function formatMonthTitle(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+function formatMonthTitle(date: Date, locale: string) {
+  return new Intl.DateTimeFormat(locale, { month: "long", year: "numeric" }).format(date);
 }
 
-function formatDate(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+function formatDate(date: Date, locale: string) {
+  return new Intl.DateTimeFormat(locale, {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
 }
 
-function formatBucketTooltipDate(bucket: StackBucket) {
+function formatBucketTooltipDate(bucket: StackBucket, locale: string) {
   const endInclusive = addDays(bucket.endExclusive, -1);
   if (isSameDay(bucket.start, endInclusive)) {
-    return formatLongDate(bucket.start);
+    return formatLongDate(bucket.start, locale);
   }
-  return `${formatLongDate(bucket.start)} - ${formatLongDate(endInclusive)}`;
+  return `${formatLongDate(bucket.start, locale)} - ${formatLongDate(endInclusive, locale)}`;
 }
 
-function formatLongDate(date: Date) {
-  return new Intl.DateTimeFormat("en-US", {
+function formatLongDate(date: Date, locale: string) {
+  return new Intl.DateTimeFormat(locale, {
     day: "numeric",
     month: "short",
     year: "numeric",
   }).format(date);
+}
+
+function weekDayLabels(locale: string) {
+  const monday = new Date(2024, 0, 1);
+  const formatter = new Intl.DateTimeFormat(locale, { weekday: "short" });
+  return Array.from({ length: 7 }, (_, index) => formatter.format(addDays(monday, index)));
 }
 
 function startOfDay(date: Date) {

@@ -16,8 +16,10 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
+import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
@@ -82,10 +84,10 @@ const emptyProvider = {
 };
 
 const reasoningLevelOptions = ["low", "medium", "high", "xhigh", "max"];
-const endpointSelectionOptions: Array<{ value: UpstreamFormat; label: string }> = [
-  { value: "responses", label: "Responses" },
-  { value: "chat_completions", label: "Chat Completions" },
-  { value: "anthropic_messages", label: "Anthropic Messages" },
+const endpointSelectionOptions: Array<{ value: UpstreamFormat; labelKey: string }> = [
+  { value: "responses", labelKey: "providers.upstreamFormats.responses" },
+  { value: "chat_completions", labelKey: "providers.upstreamFormats.chatCompletions" },
+  { value: "anthropic_messages", labelKey: "providers.upstreamFormats.anthropicMessages" },
 ];
 
 type ProviderNavItem =
@@ -110,6 +112,7 @@ type PendingProviderNavigation =
       form: AddProviderForm;
     };
 type InlineTestState = "idle" | "testing" | "success" | "error";
+type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 export function ProvidersPage({
   gatewayStatus: gatewayStatusSnapshot,
@@ -120,6 +123,8 @@ export function ProvidersPage({
   onGatewayChanged?: () => Promise<void>;
   onStartProxy?: () => Promise<void>;
 }) {
+  const { t } = useTranslation();
+  const tr = t as Translate;
   const { showToast, updateToast } = useToasts();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -244,7 +249,7 @@ export function ProvidersPage({
     }
     try {
       if (pending.kind === "existing") {
-        await updateProvider(pending.draft, `${pending.draft.name} saved`);
+        await updateProvider(pending.draft, t("providers.providerSaved", { name: pending.draft.name }));
         dirtyProviderDraftRef.current = null;
       } else if (pending.kind === "add") {
         const addedId = await saveAddProviderForm(pending.form, pending.targetId);
@@ -291,10 +296,10 @@ export function ProvidersPage({
   function showBackendDisconnectedToast() {
     let toastId = "";
     toastId = showToast({
-      text: "Backend is not connected",
+      text: t("gateway.backendNotConnected"),
       tone: "error",
       action: {
-        label: "Start",
+        label: t("gateway.startBackend"),
         onClick: () => void startBackendFromToast(toastId),
       },
     });
@@ -305,10 +310,10 @@ export function ProvidersPage({
     if (isBackendDisconnectedMessage(text)) {
       updateToast(toastId, {
         action: {
-          label: "Start",
+          label: t("gateway.startBackend"),
           onClick: () => void startBackendFromToast(toastId),
         },
-        text: "Backend is not connected",
+        text: t("gateway.backendNotConnected"),
         tone: "error",
       });
       return;
@@ -322,10 +327,10 @@ export function ProvidersPage({
 
   async function startBackendFromToast(toastId?: string) {
     setBusy("start");
-    const activeToastId = toastId ?? showToast("Starting backend...", "loading");
+    const activeToastId = toastId ?? showToast(t("gateway.startingBackend"), "loading");
     updateToast(activeToastId, {
       action: null,
-      text: "Starting backend...",
+      text: t("gateway.startingBackend"),
       tone: "loading",
     });
     try {
@@ -338,7 +343,7 @@ export function ProvidersPage({
       await refreshGatewayState();
       updateToast(activeToastId, {
         action: null,
-        text: "Backend started",
+        text: t("gateway.backendStarted"),
         tone: "success",
       });
     } catch (err) {
@@ -360,7 +365,7 @@ export function ProvidersPage({
     if (toastId) {
       updateToast(toastId, {
         action: null,
-        text: "Generating model catalog...",
+        text: t("providers.generatingCatalog"),
         tone: "loading",
       });
     }
@@ -371,7 +376,7 @@ export function ProvidersPage({
       if (toastId) {
         updateToast(toastId, {
           action: null,
-          text: "Syncing bound clients...",
+          text: t("providers.syncBoundClients"),
           tone: "loading",
         });
       }
@@ -380,7 +385,7 @@ export function ProvidersPage({
         skipped: 0,
         failed: 1,
         results: [],
-        message: `Client sync failed: ${messageFromError(err)}`,
+        message: t("providers.clientSyncFailed", { message: messageFromError(err) }),
       }));
     }
     await refreshGatewayState();
@@ -392,11 +397,11 @@ export function ProvidersPage({
     syncResult: GatewayClientSyncSummary | null,
   ) {
     if (syncResult?.failed) {
-      const syncMessage = `${syncResult.failed} bound client sync failed`;
+      const syncMessage = tr("providers.syncClientsFailed", { count: syncResult.failed });
       return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
     }
     if (syncResult?.applied) {
-      const syncMessage = `${syncResult.applied} bound client${syncResult.applied === 1 ? "" : "s"} synced`;
+      const syncMessage = tr("providers.syncedClients", { count: syncResult.applied, plural: syncResult.applied === 1 ? "" : "s" });
       return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
     }
     return baseMessage ?? null;
@@ -446,7 +451,7 @@ export function ProvidersPage({
     toastId?: string,
   ) {
     setBusy("save");
-    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : "Updating provider catalog...", "loading");
+    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : t("providers.updateProviderCatalog"), "loading");
     try {
       const saved = await api.saveProviders(next);
       setProviders(saved);
@@ -454,17 +459,17 @@ export function ProvidersPage({
       if (regenerateCatalog) {
         syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
       }
-      const toastMessage = catalogSyncToastMessage(successMessage ?? "Provider catalog updated", syncResult);
+      const toastMessage = catalogSyncToastMessage(successMessage ?? t("providers.providerCatalogUpdated"), syncResult);
       if (syncResult?.failed) {
         updateToast(activeToastId, {
           action: null,
-          text: toastMessage ?? "Provider catalog update failed",
+          text: toastMessage ?? t("providers.providerCatalogUpdateFailed"),
           tone: "error",
         });
       } else {
         updateToast(activeToastId, {
           action: null,
-          text: toastMessage ?? "Provider catalog updated",
+          text: toastMessage ?? t("providers.providerCatalogUpdated"),
           tone: "success",
         });
         setError(null);
@@ -480,7 +485,7 @@ export function ProvidersPage({
 
   async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string, toastId?: string) {
     setBusy("settings");
-    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : "Saving settings...", "loading");
+    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : t("settings.savingSettings"), "loading");
     try {
       const saved = await api.saveSettings(next);
       setSettings(saved);
@@ -489,17 +494,17 @@ export function ProvidersPage({
       if (regenerateCatalog) {
         syncResult = await updateGatewayAfterCatalog(saved, activeToastId);
       }
-      const toastMessage = catalogSyncToastMessage(successMessage ?? "Settings saved", syncResult);
+      const toastMessage = catalogSyncToastMessage(successMessage ?? t("settings.settingsSaved"), syncResult);
       if (syncResult?.failed) {
         updateToast(activeToastId, {
           action: null,
-          text: toastMessage ?? "Settings saved; bound client sync failed",
+          text: toastMessage ?? t("providers.settingsSavedSyncFailed"),
           tone: "error",
         });
       } else {
         updateToast(activeToastId, {
           action: null,
-          text: toastMessage ?? "Settings saved",
+          text: toastMessage ?? t("settings.settingsSaved"),
           tone: "success",
         });
         setError(null);
@@ -516,7 +521,7 @@ export function ProvidersPage({
       return;
     }
     setBusy("autostart");
-    const toastId = showToast(enabled ? "Enabling auto-start..." : "Disabling auto-start...", "loading");
+    const toastId = showToast(enabled ? t("providers.enablingAutoStart") : t("providers.disablingAutoStart"), "loading");
     try {
       if (enabled) {
         await api.setAutostart(true);
@@ -526,7 +531,7 @@ export function ProvidersPage({
       await saveSettings(
         { ...settingsDraft, auto_start_proxy: enabled },
         false,
-        enabled ? "Auto-start enabled" : "Auto-start disabled",
+        enabled ? t("providers.autoStartEnabled") : t("providers.autoStartDisabled"),
         toastId,
       );
     } catch (err) {
@@ -545,7 +550,12 @@ export function ProvidersPage({
 
   function toggleProviderEnabled(providerId: string, enabled: boolean) {
     const providerName = providers.find((provider) => provider.id === providerId)?.name ?? providerId;
-    const toastId = showToast(`${enabled ? "Enabling" : "Disabling"} ${providerName}...`, "loading");
+    const toastId = showToast(
+      enabled
+        ? t("providers.enablingProvider", { name: providerName })
+        : t("providers.disablingProvider", { name: providerName }),
+      "loading",
+    );
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? { ...provider, enabled } : provider,
     );
@@ -553,7 +563,9 @@ export function ProvidersPage({
     void saveProviders(
       nextProviders,
       true,
-      `${providerName} ${enabled ? "enabled" : "disabled"}`,
+      enabled
+        ? t("providers.providerEnabledNamed", { name: providerName })
+        : t("providers.providerDisabledNamed", { name: providerName }),
       toastId,
     );
   }
@@ -570,18 +582,18 @@ export function ProvidersPage({
     });
 
     setProviders(nextProviders);
-    await saveProviders(nextProviders, true, "Provider order saved");
+    await saveProviders(nextProviders, true, t("providers.providerOrderSaved"));
   }
 
   function toggleOfficialInclude(value: boolean) {
     if (!settingsDraft) {
       return;
     }
-    const toastId = showToast(value ? "Including official models..." : "Excluding official models...", "loading");
+    const toastId = showToast(value ? t("providers.includingOfficialModels") : t("providers.excludingOfficialModels"), "loading");
     void saveSettings(
       { ...settingsDraft, include_official_models: value },
       true,
-      value ? "Official models included" : "Official models excluded",
+      value ? t("providers.officialModelsIncluded") : t("providers.officialModelsExcluded"),
       toastId,
     );
   }
@@ -600,18 +612,21 @@ export function ProvidersPage({
     setOfficialModels((currentModels) =>
       currentModels.map((model) => (modelIdMatches(model.id, modelId) ? { ...model, enabled } : model)),
     );
-    const toastId = showToast(`${enabled ? "Enabling" : "Disabling"} ${modelId}...`, "loading");
+    const toastId = showToast(
+      enabled ? t("providers.enablingModel", { modelId }) : t("providers.disablingModel", { modelId }),
+      "loading",
+    );
     void saveSettings(
       nextSettings,
       true,
-      `${modelId} ${enabled ? "enabled" : "disabled"}`,
+      enabled ? t("providers.modelEnabledNamed", { modelId }) : t("providers.modelDisabledNamed", { modelId }),
       toastId,
     );
   }
 
   async function toggleCodexHubConnection() {
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
-    const actionLabel = nextMode === "custom" ? "Connecting Codex App to Codex Hub" : "Disconnecting Codex App from Codex Hub";
+    const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
     setBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
@@ -622,7 +637,7 @@ export function ProvidersPage({
       setError(null);
       const targetProvider =
         nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
-      void repairUnifiedHistoryInBackground(targetProvider, toastId, codexHubConnectionSuccessMessage(nextMode));
+      void repairUnifiedHistoryInBackground(targetProvider, toastId, codexHubConnectionSuccessMessage(nextMode, tr));
     } catch (err) {
       const message = messageFromError(err);
       if (isBackendDisconnectedMessage(message)) {
@@ -636,7 +651,7 @@ export function ProvidersPage({
         return;
       }
       setConnectionPendingMode(null);
-      const errorMessage = codexHubConnectionErrorMessage(err);
+      const errorMessage = codexHubConnectionErrorMessage(err, tr);
       setError(errorMessage);
       updateToast(toastId, {
         action: null,
@@ -653,10 +668,10 @@ export function ProvidersPage({
     toastId?: string,
     prefix?: string,
   ) {
-    const activeToastId = toastId ?? showToast("Repairing history bucket...", "loading");
+    const activeToastId = toastId ?? showToast(t("settings.repairingHistoryBucket"), "loading");
     updateToast(activeToastId, {
       action: null,
-      text: prefix ? `${prefix}; repairing history bucket...` : "Repairing history bucket...",
+      text: prefix ? `${prefix}; ${t("settings.repairingHistoryBucket")}` : t("settings.repairingHistoryBucket"),
       tone: "loading",
     });
     try {
@@ -670,8 +685,8 @@ export function ProvidersPage({
       updateToast(activeToastId, {
         action: null,
         text: prefix
-          ? `${prefix}; history repair failed: ${messageFromError(err)}`
-          : `History repair failed: ${messageFromError(err)}`,
+          ? `${prefix}; ${t("providers.historyRepairFailed", { message: messageFromError(err) })}`
+          : t("providers.historyRepairFailed", { message: messageFromError(err) }),
         tone: "error",
       });
     }
@@ -689,13 +704,13 @@ export function ProvidersPage({
         official_model_sort_order: nextModels.map((model) => model.id),
       },
       true,
-      "Official model order saved",
+      t("providers.officialModelOrderSaved"),
     );
   }
 
   async function refreshProviderModels(provider: Provider) {
     setBusy(provider.id);
-    const toastId = showToast(`Discovering ${provider.name} models...`, "loading");
+    const toastId = showToast(t("providers.discoveringProviderModels", { name: provider.name }), "loading");
     try {
       const models = await api.discoverProviderModels(provider.base_url, provider.api_key ?? "");
       const previousModelIds = new Set(provider.models.map((model) => model.id));
@@ -711,12 +726,17 @@ export function ProvidersPage({
       await saveProviders(
         nextProviders,
         true,
-        `${provider.name}: discovered ${models.length} model${models.length === 1 ? "" : "s"}, ${addedCount} new`,
+        t("providers.discoveredProviderModels", {
+          name: provider.name,
+          count: models.length,
+          plural: models.length === 1 ? "" : "s",
+          addedCount,
+        }),
         toastId,
       );
       setModelDiscoveryError(null);
     } catch (err) {
-      const discoveryError = shortProviderDiscoveryError(err);
+      const discoveryError = shortProviderDiscoveryError(err, tr);
       setModelDiscoveryError(discoveryError);
       updateToast(toastId, {
         action: null,
@@ -730,22 +750,22 @@ export function ProvidersPage({
 
   async function refreshOfficialModels() {
     setBusy("official-refresh");
-    const toastId = showToast("Refreshing official models...", "loading");
+    const toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
       setOfficialModels(sortOfficialModels(refreshed, settingsDraft?.official_model_sort_order ?? []));
       const syncResult = await updateGatewayAfterCatalog(undefined, toastId);
-      const toastMessage = catalogSyncToastMessage("Official models refreshed", syncResult);
+      const toastMessage = catalogSyncToastMessage(t("providers.officialModelsRefreshed"), syncResult);
       if (syncResult?.failed) {
         updateToast(toastId, {
           action: null,
-          text: toastMessage ?? "Official models refreshed; bound client sync failed",
+          text: toastMessage ?? t("providers.officialModelsRefreshedSyncFailed"),
           tone: "error",
         });
       } else {
         updateToast(toastId, {
           action: null,
-          text: toastMessage ?? "Official models refreshed",
+          text: toastMessage ?? t("providers.officialModelsRefreshed"),
           tone: "success",
         });
         setError(null);
@@ -760,10 +780,10 @@ export function ProvidersPage({
   async function deleteProvider(providerId: string) {
     const target = providers.find((provider) => provider.id === providerId);
     if (!target) {
-      setError(`Provider not found: ${providerId}`);
+      setError(t("providers.providerNotFound", { providerId }));
       return;
     }
-    if (!window.confirm(`Delete provider ${target.name}?`)) {
+    if (!window.confirm(t("providers.deleteProviderConfirm", { name: target.name }))) {
       return;
     }
     const previousProviders = providers;
@@ -772,11 +792,11 @@ export function ProvidersPage({
     setSelectedId(next[0]?.id ?? OFFICIAL_ID);
     setProviders(next);
     try {
-      const saved = await saveProviders(next, true, `${target.name} deleted`);
+      const saved = await saveProviders(next, true, t("providers.providerDeleted", { name: target.name }));
       if (saved.some((provider) => provider.id === providerId)) {
         setProviders(saved);
         setSelectedId(providerId);
-        setError(`Provider delete did not persist: ${target.name}`);
+        setError(t("providers.providerDeleteDidNotPersist", { name: target.name }));
         return;
       }
     } catch {
@@ -791,7 +811,7 @@ export function ProvidersPage({
 
   async function discoverForForm() {
     setBusy("discover");
-    const toastId = showToast("Discovering models...", "loading");
+    const toastId = showToast(t("providers.discoveringModels"), "loading");
     try {
       const models = await api.discoverProviderModels(form.base_url, form.api_key);
       setForm((current) => ({
@@ -800,12 +820,12 @@ export function ProvidersPage({
       }));
       updateToast(toastId, {
         action: null,
-        text: `Discovered ${models.length} model${models.length === 1 ? "" : "s"}`,
+        text: t("providers.discoveredModels", { count: models.length, plural: models.length === 1 ? "" : "s" }),
         tone: "success",
       });
       setModelDiscoveryError(null);
     } catch (err) {
-      const discoveryError = shortProviderDiscoveryError(err);
+      const discoveryError = shortProviderDiscoveryError(err, tr);
       setModelDiscoveryError(discoveryError);
       updateToast(toastId, {
         action: null,
@@ -820,13 +840,15 @@ export function ProvidersPage({
   async function probeUpstreamFormat(baseUrl: string, apiKey: string, model?: string | null) {
     setBusy("probe");
     setProbeResult(null);
-    const toastId = showToast("Testing endpoint selection...", "loading");
+    const toastId = showToast(t("providers.endpointSelectionTest"), "loading");
     try {
       const result = await api.probeUpstreamFormat(baseUrl, apiKey, model);
       setProbeResult(result);
       updateToast(toastId, {
         action: null,
-        text: `Probe completed: ${upstreamFormatLabel(result.recommended_format)}`,
+        text: t("providers.probeCompleted", {
+          format: upstreamFormatLabel(result.recommended_format, tr),
+        }),
         tone: "success",
       });
       setError(null);
@@ -873,11 +895,11 @@ export function ProvidersPage({
   async function saveAddProviderForm(nextForm: AddProviderForm, targetId?: string) {
     const id = nextForm.id.trim() || slugify(nextForm.name);
     if (!id) {
-      setError("Provider name is required");
+      setError(t("providers.providerNameRequired"));
       return null;
     }
     if (providers.some((provider) => provider.id === id)) {
-      setError(`Provider already exists: ${nextForm.name.trim()}`);
+      setError(t("providers.providerAlreadyExists", { name: nextForm.name.trim() }));
       return null;
     }
 
@@ -905,7 +927,7 @@ export function ProvidersPage({
         },
       ],
       true,
-      `${providerName} added`,
+      t("providers.providerAdded", { name: providerName }),
     );
     setSelectedId(targetId ?? id);
     setForm(emptyProvider);
@@ -918,7 +940,7 @@ export function ProvidersPage({
 
   return (
     <>
-    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[minmax(0,4fr)_minmax(0,6fr)] gap-4">
+    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[430px_minmax(0,1fr)] gap-4">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
@@ -1000,7 +1022,7 @@ export function ProvidersPage({
                 onRefresh={(provider) => void refreshProviderModels(provider)}
               />
             ) : (
-              <div className="p-6 text-sm text-slate-500">Select a provider</div>
+              <div className="p-6 text-sm text-slate-500">{t("providers.selectProvider")}</div>
             )}
           </div>
 
@@ -1010,7 +1032,7 @@ export function ProvidersPage({
     {pendingProviderNavigation && (
       <UnsavedProviderChangesDialog
         busy={busy === "save"}
-        providerName={pendingProviderName(pendingProviderNavigation)}
+        providerName={pendingProviderName(pendingProviderNavigation, tr)}
         onCancel={() => setPendingProviderNavigation(null)}
         onDiscard={discardPendingProviderNavigation}
         onSave={() => void savePendingProviderNavigation()}
@@ -1033,13 +1055,15 @@ function UnsavedProviderChangesDialog({
   onSave: () => void;
   providerName: string;
 }) {
+  const { t } = useTranslation();
+  const fallbackName = providerName || t("providers.thisProvider");
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
       <div className="grid w-full max-w-[420px] gap-4 rounded-md border border-line bg-white p-5 shadow-xl">
         <div className="min-w-0">
-          <h3 className="truncate text-base font-semibold">Save provider changes?</h3>
+          <h3 className="truncate text-base font-semibold">{t("providers.saveProviderChanges")}</h3>
           <p className="mt-1 text-sm leading-5 text-slate-600">
-            {providerName || "This provider"} has unsaved changes.
+            {t("providers.unsavedChanges", { name: fallbackName })}
           </p>
         </div>
         <div className="flex items-center justify-end gap-2">
@@ -1049,7 +1073,7 @@ function UnsavedProviderChangesDialog({
             disabled={busy}
             onClick={onCancel}
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -1057,7 +1081,7 @@ function UnsavedProviderChangesDialog({
             disabled={busy}
             onClick={onDiscard}
           >
-            Discard
+            {t("common.discard")}
           </button>
           <button
             type="button"
@@ -1066,7 +1090,7 @@ function UnsavedProviderChangesDialog({
             onClick={onSave}
           >
             <Save size={16} />
-            Save
+            {t("common.save")}
           </button>
         </div>
       </div>
@@ -1113,6 +1137,7 @@ function ProviderSourceSidebar({
   onToggleConnection: () => void;
   selectedId: string;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 p-3">
       <OfficialOpenAICard
@@ -1204,15 +1229,16 @@ function OfficialOpenAICard({
   onSelect: () => void;
   onToggleInclude: (included: boolean) => void;
 }) {
-  const authChip = codexAuthChip(authState);
+  const { t } = useTranslation();
+  const authChip = codexAuthChip(authState, t as Translate);
 
   return (
     <section className="relative grid gap-3 overflow-hidden rounded-panel border border-line bg-surface p-3 shadow-card transition-[background-color,border-color,box-shadow] duration-150 ease-out">
       <button type="button" className="focus-ring rounded-inner text-left" onClick={onSelect}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold">Codex Desktop</h2>
-            <p className="mt-1 text-xs text-slate-500">Codex app auth and official models</p>
+            <h2 className="truncate text-sm font-semibold">{t("providers.codexDesktop")}</h2>
+            <p className="mt-1 text-xs text-slate-500">{t("providers.codexAppAuth")}</p>
           </div>
           <SourceStatusChip {...authChip} />
         </div>
@@ -1224,10 +1250,10 @@ function OfficialOpenAICard({
           activeTone="neutral"
           enabled={included}
           label="OpenAI"
-          meta={`${enabledModelCount}/${modelCount} models`}
+          meta={t("providers.modelCount", { enabled: enabledModelCount, total: modelCount })}
           onClick={onSelect}
           onToggle={onToggleInclude}
-          toggleLabel={included ? "OpenAI source included" : "OpenAI source excluded"}
+          toggleLabel={included ? t("providers.openaiSourceIncluded") : t("providers.openaiSourceExcluded")}
         />
       </div>
     </section>
@@ -1245,13 +1271,14 @@ function HubConnectionBridge({
   onToggle: () => void;
   pendingMode: ConnectionMode | null;
 }) {
+  const { t } = useTranslation();
   const label = pendingMode === "custom"
-    ? "Connecting"
+    ? t("providers.connecting")
     : pendingMode === "official"
-      ? "Disconnecting"
+      ? t("providers.disconnecting")
     : connected
-      ? "Connected to Codex Hub"
-      : "Connect to Codex Hub";
+      ? t("providers.connectedToHub")
+      : t("providers.connectToHub");
   const icon = pendingMode === "official" || (!pendingMode && !connected)
     ? <Link2Off size={15} className={pendingMode ? "opacity-70" : undefined} />
     : <Link2 size={15} className={pendingMode ? "opacity-70" : undefined} />;
@@ -1272,12 +1299,12 @@ function HubConnectionBridge({
         onClick={onToggle}
         title={
           pendingMode === "custom"
-            ? "Connecting Codex App to Hub"
+            ? t("providers.connectingToHub")
             : pendingMode === "official"
-              ? "Disconnecting Codex App from Hub"
+              ? t("providers.disconnectingFromHub")
               : connected
-                ? "Disconnect Codex App from Hub"
-                : "Connect Codex App to Hub"
+                ? t("providers.disconnectFromHubTitle")
+                : t("providers.connectToHubTitle")
         }
       >
         {icon}
@@ -1318,7 +1345,7 @@ function CodexHubProviderCard({
     items.length,
     selectedId,
   ]);
-
+  const { t } = useTranslation();
   return (
     <section
       className={cx(
@@ -1332,19 +1359,19 @@ function CodexHubProviderCard({
       {connected && <ConnectedSurfaceFlow />}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold">Codex Hub</h2>
-          <p className="mt-1 truncate text-xs text-slate-500">External provider catalog</p>
+          <h2 className="truncate text-sm font-semibold">{t("common.codexHub")}</h2>
+          <p className="mt-1 truncate text-xs text-slate-500">{t("providers.externalProviderCatalog")}</p>
           <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
-            Apps may sort alphabetically.
+            {t("providers.appsMaySortModels")}
           </p>
         </div>
-        <SourceStatusChip {...gatewayStatusChip(gatewayStatus)} />
+        <SourceStatusChip {...gatewayStatusChip(gatewayStatus, t as Translate)} />
       </div>
 
       <div className="grid gap-2">
         <div className="grid grid-cols-2 gap-2 px-px text-xs">
-          <SourceMetric label="Models" value={String(modelCount)} />
-          <SourceMetric label="Enabled" value={String(enabledModelCount)} />
+          <SourceMetric label={t("common.models")} value={String(modelCount)} />
+          <SourceMetric label={t("common.enabled")} value={String(enabledModelCount)} />
         </div>
       </div>
 
@@ -1363,7 +1390,10 @@ function CodexHubProviderCard({
                 active={selectedId === item.provider.id}
                 enabled={item.provider.enabled}
                 label={item.provider.name}
-                meta={`${item.provider.models.filter((model) => model.enabled).length}/${item.provider.models.length} models`}
+                meta={t("providers.modelCount", {
+                  enabled: item.provider.models.filter((model) => model.enabled).length,
+                  total: item.provider.models.length,
+                })}
                 onClick={() => onSelect(item.provider.id)}
                 onToggle={(enabled) => onToggleProvider(item.provider.id, enabled)}
                 highlightShape="right"
@@ -1372,7 +1402,7 @@ function CodexHubProviderCard({
           />
         ) : (
           <div className="grid min-h-[96px] place-items-center rounded-inner bg-panel-soft px-3 text-center text-xs text-slate-500 shadow-hairline">
-            Add a Hub provider to expose external models.
+            {t("providers.addHubProviderEmpty")}
           </div>
         )}
       </div>
@@ -1386,29 +1416,29 @@ function CodexHubProviderCard({
         onClick={onAdd}
       >
         <Plus size={15} />
-        Add provider
+        {t("providers.addProvider")}
       </button>
     </section>
   );
 }
 
-function gatewayStatusChip(status: GatewayStatus | null): { label: string; tone: "ok" | "muted" | "pending" } {
+function gatewayStatusChip(status: GatewayStatus | null, t: Translate): { label: string; tone: "ok" | "muted" | "pending" } {
   if (!status) {
-    return { label: "Unknown", tone: "pending" };
+    return { label: t("common.unknown"), tone: "pending" };
   }
   return status.proxy_running
-    ? { label: "Running", tone: "ok" }
-    : { label: "Stopped", tone: "muted" };
+    ? { label: t("runtime.running"), tone: "ok" }
+    : { label: t("runtime.stopped"), tone: "muted" };
 }
 
-function codexAuthChip(authState: CodexAuthState): { label: string; tone: "ok" | "muted" | "pending" } {
+function codexAuthChip(authState: CodexAuthState, t: Translate): { label: string; tone: "ok" | "muted" | "pending" } {
   if (authState === "authorized") {
-    return { label: "Authorized", tone: "ok" };
+    return { label: t("providers.authorized"), tone: "ok" };
   }
   if (authState === "missing") {
-    return { label: "Auth missing", tone: "pending" };
+    return { label: t("providers.authMissing"), tone: "pending" };
   }
-  return { label: "Auth unknown", tone: "muted" };
+  return { label: t("providers.authUnknown"), tone: "muted" };
 }
 
 function SourceStatusChip({ label, tone }: { label: string; tone: "ok" | "muted" | "pending" }) {
@@ -1456,6 +1486,7 @@ function ProviderNavButton({
   onToggle: (enabled: boolean) => void;
   toggleLabel?: string;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className={cx(
@@ -1474,7 +1505,7 @@ function ProviderNavButton({
       </button>
       <SwitchControl
         checked={enabled}
-        label={toggleLabel ?? (enabled ? "Provider enabled" : "Provider disabled")}
+        label={toggleLabel ?? (enabled ? t("providers.providerEnabled") : t("providers.providerDisabled"))}
         showLabel={false}
         onChange={onToggle}
       />
@@ -1501,12 +1532,13 @@ function OfficialDetail({
   onReorder: (models: Model[]) => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
 
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
-    const endpointLabel = upstreamFormatLabel("responses");
-    const toastId = showToast(`Testing ${label} on ${endpointLabel}...`, "loading");
+    const endpointLabel = upstreamFormatLabel("responses", t as Translate);
+    const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
     try {
       const result = await api.testModelEndpoint(
         "https://api.openai.com/v1",
@@ -1516,14 +1548,14 @@ function OfficialDetail({
       );
       updateToast(toastId, {
         action: null,
-        text: `${label}: ${endpointLabel} connected (HTTP ${result.status})`,
+        text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
         tone: "success",
       });
       return true;
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: `${label}: ${endpointLabel} connection failed - ${messageFromError(err)}`,
+        text: t("gateway.connectionFailed", { label, endpoint: endpointLabel, message: messageFromError(err) }),
         tone: "error",
       });
       return false;
@@ -1534,11 +1566,11 @@ function OfficialDetail({
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
       <div className="grid gap-4 border-b border-line p-5">
         <HeaderRow
-          title="Codex"
-          subtitle="OpenAI subscription catalog"
+          title={t("common.codex")}
+          subtitle={t("providers.openaiSubscriptionCatalog")}
           actions={
             <>
-              <SourceStatusChip {...codexAuthChip(authState)} />
+              <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
             </>
           }
         />
@@ -1581,6 +1613,7 @@ function ProviderDetail({
   probeResult: UpstreamFormatProbeResult | null;
   provider: Provider;
 }) {
+  const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const normalizedProvider = useMemo(() => normalizeProviderEndpointSelection(provider), [provider]);
   const [draft, setDraft] = useState(() => normalizedProvider);
@@ -1644,7 +1677,7 @@ function ProviderDetail({
       models: renumberModels(draft.models.filter((model) => model.id !== modelId)),
     };
     setDraft(next);
-    onChange(next, "Model removed");
+    onChange(next, t("providers.modelRemoved"));
   }
 
   async function runProbe() {
@@ -1668,8 +1701,8 @@ function ProviderDetail({
   async function testModel(model: Model) {
     const label = displayModel(model);
     const upstreamFormat = normalizedEndpointFormat(draft.upstream_format);
-    const endpointLabel = upstreamFormatLabel(upstreamFormat);
-    const toastId = showToast(`Testing ${label} on ${endpointLabel}...`, "loading");
+    const endpointLabel = upstreamFormatLabel(upstreamFormat, t as Translate);
+    const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
     try {
       const result = await api.testModelEndpoint(
         draft.base_url,
@@ -1679,14 +1712,14 @@ function ProviderDetail({
       );
       updateToast(toastId, {
         action: null,
-        text: `${label}: ${endpointLabel} connected (HTTP ${result.status})`,
+        text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
         tone: "success",
       });
       return true;
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: `${label}: ${endpointLabel} connection failed - ${messageFromError(err)}`,
+        text: t("gateway.connectionFailed", { label, endpoint: endpointLabel, message: messageFromError(err) }),
         tone: "error",
       });
       return false;
@@ -1700,7 +1733,7 @@ function ProviderDetail({
           title={provider.name}
           actions={
             <IconButton
-              title="Delete provider"
+              title={t("providers.deleteProvider")}
               danger
               disabled={busy === "save"}
               onClick={onDelete}
@@ -1711,20 +1744,20 @@ function ProviderDetail({
         />
 
         <div className="grid grid-cols-2 gap-2">
-          <Field label="Name">
+          <Field label={t("common.name")}>
             <input
               className="field field-compact"
               value={draft.name}
               onChange={(event) => setDraft({ ...draft, name: event.target.value })}
             />
           </Field>
-          <Field label="API key">
+          <Field label={t("common.apiKey")}>
             <ApiKeyInput
               value={draft.api_key ?? ""}
               onChange={(apiKey) => setDraft({ ...draft, api_key: apiKey || null })}
             />
           </Field>
-          <Field label="Base URL" className="col-span-2">
+          <Field label={t("common.baseUrl")} className="col-span-2">
             <input
               className="field field-compact"
               value={draft.base_url}
@@ -1765,10 +1798,10 @@ function ProviderDetail({
           type="button"
           className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
           disabled={!dirty || busy === "save"}
-          onClick={() => onChange(draft, `${draft.name} saved`)}
+          onClick={() => onChange(draft, t("providers.providerSaved", { name: draft.name }))}
         >
           <Save size={16} />
-          Save
+          {t("common.save")}
         </button>
       </div>
     </div>
@@ -1818,6 +1851,7 @@ function ModelSection({
   onToggle?: (modelId: string, enabled: boolean) => void;
   onUpdate?: (modelId: string, patch: Partial<Model>) => void;
 }) {
+  const { t } = useTranslation();
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [modelTestStates, setModelTestStates] = useState<Record<string, InlineTestState>>({});
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
@@ -1875,7 +1909,7 @@ function ModelSection({
         {disabled && onToggleOfficialModel && (
           <SwitchControl
             checked={modelEnabled}
-            label={modelEnabled ? "Model enabled" : "Model disabled"}
+            label={modelEnabled ? t("providers.modelEnabled") : t("providers.modelDisabled")}
             showLabel={false}
             onChange={(checked) => onToggleOfficialModel(model.id, checked)}
           />
@@ -1883,7 +1917,7 @@ function ModelSection({
         {!disabled && onToggle && (
           <SwitchControl
             checked={modelEnabled}
-            label={modelEnabled ? "Model enabled" : "Model disabled"}
+            label={modelEnabled ? t("providers.modelEnabled") : t("providers.modelDisabled")}
             showLabel={false}
             onChange={(checked) => onToggle(model.id, checked)}
           />
@@ -1935,10 +1969,10 @@ function ModelSection({
     <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 p-5">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold">Models</h3>
-          <p className="mt-1 text-xs text-slate-500">{models.length} configured</p>
+          <h3 className="text-sm font-semibold">{t("common.models")}</h3>
+          <p className="mt-1 text-xs text-slate-500">{t("providers.configured", { count: models.length })}</p>
           <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
-            Apps may sort models alphabetically.
+            {t("providers.appsMaySortModels")}
           </p>
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
@@ -1955,7 +1989,7 @@ function ModelSection({
               onClick={onRefresh}
             >
               <RefreshCcw size={16} />
-              Refresh
+              {t("common.refresh")}
             </button>
           )}
           {onDiscover && (
@@ -1966,7 +2000,7 @@ function ModelSection({
               onClick={onDiscover}
             >
               <RefreshCcw size={16} />
-              Discover
+              {t("providers.discoverModels")}
             </button>
           )}
           {!disabled && (
@@ -1976,7 +2010,7 @@ function ModelSection({
               onClick={addAndEdit}
             >
               <Plus size={16} />
-              Add model
+              {t("providers.addModel")}
             </button>
           )}
         </div>
@@ -1987,7 +2021,7 @@ function ModelSection({
       >
         {models.length === 0 ? (
           <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
-            No models
+            {t("common.noModels")}
           </div>
         ) : reorderable ? (
           <SortableList
@@ -2044,6 +2078,7 @@ function ModelIdentity({
   testDisabled?: boolean;
   testState?: InlineTestState;
 }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const copyValue = providerId ? providerQualifiedModelId(providerId, model.id) : model.id;
 
@@ -2072,8 +2107,8 @@ function ModelIdentity({
           type="button"
           className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-slate-500 transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
           onClick={copyModelId}
-          title={copied ? "Copied" : `Copy model ID: ${copyValue}`}
-          aria-label={copied ? `Copied model ID ${copyValue}` : `Copy model ID ${copyValue}`}
+          title={copied ? t("common.copied") : t("providers.copyModelIdTitle", { id: copyValue })}
+          aria-label={copied ? t("providers.copiedModelId", { id: copyValue }) : t("providers.copyModelId", { id: copyValue })}
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
         </button>
@@ -2090,8 +2125,8 @@ function ModelIdentity({
             )}
             disabled={testDisabled || testState === "testing"}
             onClick={testCurrentModel}
-            title={`Test model ${copyValue}`}
-            aria-label={`Test model ${copyValue}`}
+            title={t("providers.testModelTitle", { id: copyValue })}
+            aria-label={t("providers.testModelTitle", { id: copyValue })}
           >
             <ModelTestStateIcon state={testState} size={13} />
           </button>
@@ -2112,6 +2147,7 @@ function ModelEditorOverlay({
   onClose: () => void;
   onRemove?: () => void;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<Model>(() => normalizeModel(model));
   const reasoningEnabled = (draft.supported_reasoning_levels ?? []).length > 0;
 
@@ -2157,14 +2193,14 @@ function ModelEditorOverlay({
       <div className="grid w-full max-w-[760px] overflow-hidden rounded-md border border-line bg-white shadow-xl">
         <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold">Model settings</h3>
+            <h3 className="truncate text-base font-semibold">{t("providers.modelSettings")}</h3>
             <p className="mt-1 truncate text-xs text-slate-500">{model.id}</p>
           </div>
           <button
             type="button"
             className="focus-ring grid h-8 w-8 place-items-center rounded-md border border-line bg-panel hover:bg-slate-100"
             onClick={onClose}
-            aria-label="Close model settings"
+            aria-label={t("providers.closeModelSettings")}
           >
             <X size={16} />
           </button>
@@ -2173,24 +2209,24 @@ function ModelEditorOverlay({
         <div className="grid gap-4 p-5">
           <section className="grid gap-3 rounded-md border border-line bg-panel p-3">
             <div>
-              <h4 className="text-sm font-semibold">Identity</h4>
-              <p className="mt-0.5 text-xs text-slate-500">Gateway-facing model name and limits</p>
+              <h4 className="text-sm font-semibold">{t("providers.identity")}</h4>
+              <p className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingModelName")}</p>
             </div>
-            <Field label="Model ID">
+            <Field label={t("common.modelId")}>
               <input
                 className="field h-9"
                 value={draft.id}
                 onChange={(event) => setDraft({ ...draft, id: event.target.value })}
               />
             </Field>
-            <Field label="Display name">
+            <Field label={t("common.displayName")}>
               <input
                 className="field h-9"
                 value={draft.display_name ?? ""}
                 onChange={(event) => setDraft({ ...draft, display_name: event.target.value || null })}
               />
             </Field>
-            <Field label="Context window">
+            <Field label={t("providers.context")}>
               <input
                 className="field h-9"
                 min={0}
@@ -2205,14 +2241,14 @@ function ModelEditorOverlay({
 
           <section className="grid gap-3 rounded-md border border-line bg-panel p-3">
             <div>
-              <div className="text-sm font-semibold">Capabilities</div>
-              <div className="mt-0.5 text-xs text-slate-500">Gateway-facing model metadata</div>
+              <div className="text-sm font-semibold">{t("providers.capabilities")}</div>
+              <div className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingMetadata")}</div>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               <label className="flex h-9 items-center justify-between rounded-md border border-line bg-white px-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2">
                   <Eye size={15} />
-                  Vision
+                  {t("providers.vision")}
                 </span>
                 <input
                   type="checkbox"
@@ -2228,7 +2264,7 @@ function ModelEditorOverlay({
               <label className="flex h-9 items-center justify-between rounded-md border border-line bg-white px-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2">
                   <Brain size={15} />
-                  Thinking
+                  {t("providers.thinking")}
                 </span>
                 <input
                   type="checkbox"
@@ -2240,7 +2276,7 @@ function ModelEditorOverlay({
             {reasoningEnabled && (
               <div className="grid gap-3 rounded-md border border-line bg-white p-3 lg:grid-cols-[minmax(0,1fr)_190px]">
                 <div className="grid gap-2">
-                  <span className="text-xs font-semibold uppercase text-slate-500">Reasoning levels</span>
+                  <span className="text-xs font-semibold uppercase text-slate-500">{t("providers.reasoningLevels")}</span>
                   <div className="flex flex-wrap gap-2">
                     {reasoningLevelOptions.map((level) => (
                       <label
@@ -2257,7 +2293,7 @@ function ModelEditorOverlay({
                     ))}
                   </div>
                 </div>
-                <Field label="Default reasoning">
+                <Field label={t("common.defaultReasoning")}>
                   <select
                     className="field h-9"
                     value={draft.default_reasoning_level ?? ""}
@@ -2285,7 +2321,7 @@ function ModelEditorOverlay({
               onClick={onRemove}
             >
               <Trash2 size={15} />
-              Remove
+              {t("providers.removeModel")}
             </button>
           ) : (
             <span />
@@ -2296,14 +2332,14 @@ function ModelEditorOverlay({
               className="focus-ring inline-flex h-9 items-center justify-center rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
               onClick={onClose}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
               className="focus-ring inline-flex h-9 items-center justify-center rounded-md bg-action px-3 text-sm font-semibold text-white"
               onClick={() => onApply(normalizeModel(draft))}
             >
-              Apply
+              {t("common.apply")}
             </button>
           </div>
         </div>
@@ -2330,10 +2366,11 @@ function CapabilityChip({ icon, label }: { icon?: React.ReactNode; label: string
 }
 
 function ModelCapabilityChip({ tag }: { tag: "vision" | "thinking" }) {
+  const { t } = useTranslation();
   if (tag === "vision") {
-    return <CapabilityChip icon={<Eye size={13} />} label="Vision" />;
+    return <CapabilityChip icon={<Eye size={13} />} label={t("providers.vision")} />;
   }
-  return <CapabilityChip icon={<Brain size={13} />} label="Thinking" />;
+  return <CapabilityChip icon={<Brain size={13} />} label={t("providers.thinking")} />;
 }
 
 function SwitchControl({
@@ -2405,16 +2442,16 @@ function withDefaultFastVariants(settings: Settings): Settings {
 
 function formatContextWindow(value?: number | null) {
   if (!value) {
-    return "Unknown";
+    return i18n.t("common.unknown");
   }
   if (value >= 1_000_000) {
     return `${(value / 1_000_000).toFixed(1)}M`;
   }
   if (value >= 1000) {
     const rounded = Math.round(value / 1000);
-    return `${new Intl.NumberFormat("en-US").format(rounded)}K`;
+    return `${new Intl.NumberFormat(i18n.language || "en-US").format(rounded)}K`;
   }
-  return new Intl.NumberFormat("en-US").format(value);
+  return new Intl.NumberFormat(i18n.language || "en-US").format(value);
 }
 
 function hasVision(model: Model) {
@@ -2475,11 +2512,11 @@ function isAddProviderFormDirty(form: AddProviderForm) {
   return Boolean(form.name.trim());
 }
 
-function pendingProviderName(pending: PendingProviderNavigation) {
+function pendingProviderName(pending: PendingProviderNavigation, t: Translate) {
   if (pending.kind === "existing") {
     return pending.draft.name;
   }
-  return pending.form.name.trim() || "New provider";
+  return pending.form.name.trim() || t("providers.newProvider");
 }
 
 function sortOfficialModels(models: Model[], sortOrder: string[]) {
@@ -2599,6 +2636,7 @@ function AddProviderPanel({
   onProbe: () => Promise<UpstreamFormatProbeResult | null>;
   probeResult: UpstreamFormatProbeResult | null;
 }) {
+  const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
 
@@ -2642,8 +2680,8 @@ function AddProviderPanel({
   async function testModel(model: Model) {
     const label = displayModel(model);
     const upstreamFormat = normalizedEndpointFormat(form.upstream_format);
-    const endpointLabel = upstreamFormatLabel(upstreamFormat);
-    const toastId = showToast(`Testing ${label} on ${endpointLabel}...`, "loading");
+    const endpointLabel = upstreamFormatLabel(upstreamFormat, t as Translate);
+    const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
     try {
       const result = await api.testModelEndpoint(
         form.base_url,
@@ -2653,14 +2691,14 @@ function AddProviderPanel({
       );
       updateToast(toastId, {
         action: null,
-        text: `${label}: ${endpointLabel} connected (HTTP ${result.status})`,
+        text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
         tone: "success",
       });
       return true;
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: `${label}: ${endpointLabel} connection failed - ${messageFromError(err)}`,
+        text: t("gateway.connectionFailed", { label, endpoint: endpointLabel, message: messageFromError(err) }),
         tone: "error",
       });
       return false;
@@ -2670,22 +2708,22 @@ function AddProviderPanel({
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-2 border-b border-line p-4">
-        <HeaderRow title="Add provider" />
+        <HeaderRow title={t("providers.addProvider")} />
         <div className="grid grid-cols-2 gap-2">
-          <Field label="Name">
+          <Field label={t("common.name")}>
             <input
               className="field field-compact"
               value={form.name}
               onChange={(event) => onFormChange({ ...form, name: event.target.value })}
             />
           </Field>
-          <Field label="API key">
+          <Field label={t("common.apiKey")}>
             <ApiKeyInput
               value={form.api_key}
               onChange={(apiKey) => onFormChange({ ...form, api_key: apiKey })}
             />
           </Field>
-          <Field label="Base URL" className="col-span-2">
+          <Field label={t("common.baseUrl")} className="col-span-2">
             <input
               className="field field-compact"
               value={form.base_url}
@@ -2731,7 +2769,7 @@ function AddProviderPanel({
           onClick={onAdd}
         >
           <Plus size={16} />
-          Add provider
+          {t("providers.addProvider")}
         </button>
       </div>
     </div>
@@ -2755,12 +2793,13 @@ function EndpointSelectionPanel({
   testState: InlineTestState;
   value?: UpstreamFormat | null;
 }) {
+  const { t } = useTranslation();
   const selected = normalizedEndpointFormat(value);
   const mergedAvailableFormats = mergeEndpointFormats(availableFormats, probeAvailableFormats(result));
 
   return (
     <div className="grid min-w-0 gap-1 text-sm font-medium text-slate-700">
-      <span>Endpoint Selection</span>
+      <span>{t("common.endpointSelection")}</span>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
         <EndpointFormatSelect availableFormats={mergedAvailableFormats} value={selected} onChange={onChange} />
         <button
@@ -2774,7 +2813,7 @@ function EndpointSelectionPanel({
           onClick={onProbe}
         >
           <TestStateIcon state={testState} size={16} />
-          Test
+          {t("common.test")}
         </button>
       </div>
     </div>
@@ -2793,6 +2832,8 @@ function EndpointFormatSelect({
   const [open, setOpen] = useState(false);
   const selected = endpointSelectionOptions.find((option) => option.value === value) ?? endpointSelectionOptions[0];
   const available = new Set(availableFormats);
+  const { t } = useTranslation();
+  const tr = t as Translate;
 
   return (
     <div
@@ -2811,7 +2852,7 @@ function EndpointFormatSelect({
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="truncate">{selected.label}</span>
+        <span className="truncate">{upstreamFormatLabel(selected.value, tr)}</span>
         <ChevronDown size={15} className="shrink-0 text-slate-500" />
       </button>
       {open && (
@@ -2832,7 +2873,7 @@ function EndpointFormatSelect({
                   setOpen(false);
                 }}
               >
-                <span className="truncate">{option.label}</span>
+                <span className="truncate">{upstreamFormatLabel(option.value, tr)}</span>
                 <span className="flex shrink-0 items-center gap-2">
                   {optionAvailable && <EndpointAvailableChip />}
                 </span>
@@ -2846,9 +2887,10 @@ function EndpointFormatSelect({
 }
 
 function EndpointAvailableChip() {
+  const { t } = useTranslation();
   return (
     <span className="shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold leading-4 text-emerald-700">
-      available
+      {t("common.available")}
     </span>
   );
 }
@@ -2886,17 +2928,17 @@ function normalizedEndpointFormat(value?: UpstreamFormat | null): UpstreamFormat
   return "responses";
 }
 
-function upstreamFormatLabel(value?: UpstreamFormat | null) {
+function upstreamFormatLabel(value?: UpstreamFormat | null, t?: Translate) {
   if (value === "responses") {
-    return "Responses";
+    return t?.("providers.upstreamFormats.responses") ?? i18n.t("providers.upstreamFormats.responses");
   }
   if (value === "chat_completions") {
-    return "Chat Completions";
+    return t?.("providers.upstreamFormats.chatCompletions") ?? i18n.t("providers.upstreamFormats.chatCompletions");
   }
   if (value === "anthropic_messages") {
-    return "Anthropic Messages";
+    return t?.("providers.upstreamFormats.anthropicMessages") ?? i18n.t("providers.upstreamFormats.anthropicMessages");
   }
-  return "Responses";
+  return t?.("providers.upstreamFormats.responses") ?? i18n.t("providers.upstreamFormats.responses");
 }
 
 function probeAvailableFormats(result?: UpstreamFormatProbeResult | null): UpstreamFormat[] {
@@ -2920,11 +2962,11 @@ function probeAvailableFormats(result?: UpstreamFormatProbeResult | null): Upstr
 }
 
 function probeResultSummary(result: UpstreamFormatProbeResult) {
-  const availableFormats = probeAvailableFormats(result).map(upstreamFormatLabel);
+  const availableFormats = probeAvailableFormats(result).map((format) => upstreamFormatLabel(format));
   if (availableFormats.length) {
-    return `${availableFormats.join(", ")} available`;
+    return i18n.t("providers.availableFormats", { formats: availableFormats.join(", ") });
   }
-  return `recommended ${upstreamFormatLabel(result.recommended_format)}`;
+  return i18n.t("providers.recommendedFormat", { format: upstreamFormatLabel(result.recommended_format) });
 }
 
 function modelProbeId(model: Model) {
@@ -2936,35 +2978,35 @@ function officialModelProbeId(model: Model) {
   return modelId.startsWith("openai/") ? modelId.slice("openai/".length) : modelId;
 }
 
-function shortProviderDiscoveryError(err: unknown) {
+function shortProviderDiscoveryError(err: unknown, t: Translate) {
   const message = messageFromError(err);
   const missingEnv = message.match(/\b([A-Z_][A-Z0-9_]*_API_KEY)\b[^.]*\bis not set\b/i);
   if (missingEnv) {
-    return `Discovery failed: ${missingEnv[1]} is not set`;
+    return t("providers.discoveryFailedNotSet", { env: missingEnv[1] });
   }
   if (/unauthorized|401/i.test(message)) {
-    return "Discovery failed: unauthorized";
+    return t("providers.discoveryFailedUnauthorized");
   }
   if (/timeout|timed out/i.test(message)) {
-    return "Discovery timed out";
+    return t("providers.discoveryTimedOut");
   }
   if (/not found|404/i.test(message)) {
-    return "Discovery failed: models endpoint missing";
+    return t("providers.discoveryFailedMissingEndpoint");
   }
   if (/builder error|invalid/i.test(message)) {
-    return "Discovery failed: invalid request";
+    return t("providers.discoveryFailedInvalid");
   }
-  return "Discovery failed";
+  return t("providers.discoveryFailed");
 }
 
-function codexHubConnectionErrorMessage(err: unknown) {
+function codexHubConnectionErrorMessage(err: unknown, t: Translate) {
   const message = messageFromError(err);
 
-  return `Codex Hub connection failed.\n\n${message}`;
+  return t("providers.codexHubConnectionFailed", { message });
 }
 
-function codexHubConnectionSuccessMessage(mode: string) {
-  return mode === "custom" ? "Connected to Codex Hub" : "Disconnected from Codex Hub";
+function codexHubConnectionSuccessMessage(mode: string, t: Translate) {
+  return mode === "custom" ? t("providers.connectedToHub") : t("providers.disconnectedFromHub");
 }
 
 function codexAuthStateFromGatewayStatus(status: GatewayStatus | null): CodexAuthState {
@@ -3039,6 +3081,7 @@ function ApiKeyInput({
   onChange: (value: string) => void;
   value: string;
 }) {
+  const { t } = useTranslation();
   const [visible, setVisible] = useState(false);
 
   return (
@@ -3055,8 +3098,8 @@ function ApiKeyInput({
         type="button"
         className="focus-ring absolute right-1 top-1 grid h-7 w-7 place-items-center rounded-md text-slate-500 hover:bg-panel hover:text-ink"
         onClick={() => setVisible((current) => !current)}
-        title={visible ? "Hide API key" : "Show API key"}
-        aria-label={visible ? "Hide API key" : "Show API key"}
+        title={visible ? t("common.hideApiKey") : t("common.showApiKey")}
+        aria-label={visible ? t("common.hideApiKey") : t("common.showApiKey")}
       >
         {visible ? <EyeOff size={15} /> : <Eye size={15} />}
       </button>

@@ -1,5 +1,6 @@
 import { Check, Copy, Eye, EyeOff, Play, RefreshCcw, Save, Square } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
 import { useToasts } from "../components/PageToast";
@@ -23,11 +24,11 @@ import type {
 interface GatewayPageProps {
   busy?: string | null;
   clients: GatewayClientContract[];
-  pending: {
-    label: string;
-    usage: string;
-    clients: string;
-    models: string;
+  pending?: {
+    label?: string;
+    usage?: string;
+    clients?: string;
+    models?: string;
   };
   providers: Provider[];
   settings: Settings | null;
@@ -64,6 +65,7 @@ export function GatewayPage({
   usageStatus,
   clientInfos,
 }: GatewayPageProps) {
+  const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const [draftPort, setDraftPort] = useState(settings?.proxy_port ?? status?.port ?? 9099);
   const [draftKey, setDraftKey] = useState(settings?.gateway_client_key ?? "");
@@ -96,8 +98,8 @@ export function GatewayPage({
       return;
     }
     const text = isBackendDisconnectedMessage(usageError)
-      ? "Backend is not connected"
-      : `Usage telemetry delayed: ${usageError}`;
+      ? t("gateway.backendNotConnected")
+      : t("gateway.usageTelemetryDelayed", { message: usageError });
     if (lastUsageErrorToast.current === text) {
       return;
     }
@@ -107,18 +109,18 @@ export function GatewayPage({
       return;
     }
     showToast(text, "error");
-  }, [usageError]);
+  }, [usageError, showToast, t]);
 
   const endpoints = useMemo(
     () =>
       status
         ? [
-            { label: "Models", meta: "GET /v1/models", value: status.endpoints.models },
-            { label: "Completions", meta: "POST /v1/chat/completions", value: status.endpoints.chat_completions },
-            { label: "Responses", meta: "POST /v1/responses", value: status.endpoints.responses },
+            { label: t("gateway.modelsEndpoint"), meta: "GET /v1/models", value: status.endpoints.models },
+            { label: t("gateway.completions"), meta: "POST /v1/chat/completions", value: status.endpoints.chat_completions },
+            { label: t("gateway.responses"), meta: "POST /v1/responses", value: status.endpoints.responses },
           ]
         : [],
-    [status],
+    [status, t],
   );
   const defaultModel = status?.official_models[0]?.id ?? null;
   const clientInfoById = useMemo(
@@ -156,10 +158,10 @@ export function GatewayPage({
   function showBackendDisconnectedToast() {
     let toastId = "";
     toastId = showToast({
-      text: "Backend is not connected",
+      text: t("gateway.backendNotConnected"),
       tone: "error",
       action: {
-        label: "Start",
+        label: t("gateway.startBackend"),
         onClick: () => void startBackendFromToast(toastId),
       },
     });
@@ -170,10 +172,10 @@ export function GatewayPage({
     if (isBackendDisconnectedMessage(text)) {
       updateToast(toastId, {
         action: {
-          label: "Start",
+          label: t("gateway.startBackend"),
           onClick: () => void startBackendFromToast(toastId),
         },
-        text: "Backend is not connected",
+        text: t("gateway.backendNotConnected"),
         tone: "error",
       });
       return;
@@ -187,10 +189,10 @@ export function GatewayPage({
 
   async function startBackendFromToast(toastId?: string) {
     setClientRefreshBusy(true);
-    const activeToastId = toastId ?? showToast("Starting backend...", "loading");
+    const activeToastId = toastId ?? showToast(t("gateway.startingBackend"), "loading");
     updateToast(activeToastId, {
       action: null,
-      text: "Starting backend...",
+      text: t("gateway.startingBackend"),
       tone: "loading",
     });
     try {
@@ -198,7 +200,7 @@ export function GatewayPage({
       await onRefreshClients();
       updateToast(activeToastId, {
         action: null,
-        text: "Backend started",
+        text: t("gateway.backendStarted"),
         tone: "success",
       });
     } catch (err) {
@@ -215,13 +217,13 @@ export function GatewayPage({
       setMessage(null);
       setError(null);
     } catch (err) {
-      setError(`Copy failed: ${messageFromError(err)}`);
+      setError(t("gateway.copyFailed", { message: messageFromError(err) }));
     }
   }
 
   async function applyGatewaySettings() {
     if (!settings) {
-      setError("Settings are still loading");
+      setError(t("common.loadingSettings"));
       return;
     }
     const cleanPort = Number.isFinite(draftPort) ? draftPort : settings.proxy_port;
@@ -239,7 +241,7 @@ export function GatewayPage({
     const keyChanged = next.gateway_client_key !== settings.gateway_client_key;
     const restartRequired = running && (portChanged || timeoutChanged);
     const toastId = showToast(
-      restartRequired ? "Saving gateway settings and restarting runtime..." : "Saving gateway settings...",
+      restartRequired ? t("gateway.saveRestarting") : t("gateway.savingSettings"),
       "loading",
     );
 
@@ -249,10 +251,10 @@ export function GatewayPage({
         await onRestartProxy();
       }
       const message = restartRequired
-        ? "Gateway settings saved and runtime restarted"
+        ? t("gateway.gatewaySettingsSavedRestarted")
         : keyChanged && !portChanged && !timeoutChanged
-          ? "API key saved; Gateway restart not required"
-          : "Gateway settings saved";
+          ? t("gateway.apiKeySavedNoRestart")
+          : t("gateway.gatewaySettingsSaved");
       updateToast(toastId, {
         action: null,
         text: message,
@@ -270,7 +272,7 @@ export function GatewayPage({
     const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
     setDraftKey(`codexhub-${token}`);
     setShowDraftKey(false);
-    setMessage("New API key generated; apply settings to save. Gateway restart is not required.");
+    setMessage(t("gateway.newApiKeyGenerated"));
     setError(null);
   }
 
@@ -279,13 +281,13 @@ export function GatewayPage({
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const routeName = mode === "hub" ? "CodexHub" : "Official";
-    const toastId = showToast(`Switching ${clientName} to ${routeName}...`, "loading");
+    const toastId = showToast(t("gateway.switchClient", { clientName, routeName }), "loading");
     try {
       await api.switchGatewayClientRoute(clientId, mode, defaultModel);
       await onRefreshClients();
       updateToast(toastId, {
         action: null,
-        text: `${clientName} switched to ${routeName}`,
+        text: t("gateway.switchClientDone", { clientName, routeName }),
         tone: "success",
       });
       setError(null);
@@ -298,12 +300,12 @@ export function GatewayPage({
 
   async function refreshGatewayClients() {
     setClientRefreshBusy(true);
-    const toastId = showToast("Refreshing gateway clients and checking versions...", "loading");
+    const toastId = showToast(t("gateway.refreshingClients"), "loading");
     try {
       await onRefreshClients({ includeClientVersions: true });
       updateToast(toastId, {
         action: null,
-        text: "Gateway clients refreshed",
+        text: t("gateway.clientsRefreshed"),
         tone: "success",
       });
       setError(null);
@@ -323,7 +325,7 @@ export function GatewayPage({
 
   async function toggleRuntime() {
     const toastId = showToast(
-      running ? "Stopping Gateway runtime..." : "Starting Gateway runtime...",
+      running ? t("runtime.stoppingRuntime") : t("runtime.startingRuntime"),
       "loading",
     );
     if (running) {
@@ -331,7 +333,7 @@ export function GatewayPage({
         await onStopProxy();
         updateToast(toastId, {
           action: null,
-          text: "Gateway runtime stopped",
+          text: t("runtime.runtimeStopped"),
           tone: "success",
         });
       } catch (err) {
@@ -343,7 +345,7 @@ export function GatewayPage({
       await onStartProxy();
       updateToast(toastId, {
         action: null,
-        text: "Gateway runtime started",
+        text: t("runtime.runtimeStarted"),
         tone: "success",
       });
     } catch (err) {
@@ -354,12 +356,12 @@ export function GatewayPage({
   return (
     <main className="relative grid h-full min-h-[704px] min-w-[972px] grid-cols-[minmax(636px,1fr)_minmax(320px,340px)] gap-4">
       <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(320px,1fr)] gap-3">
-        <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
-          <div className="grid min-w-0 grid-cols-[minmax(300px,1fr)_minmax(270px,0.95fr)] items-stretch gap-2.5">
-            <div className="grid min-w-0 content-start gap-2 rounded-panel bg-panel p-2.5 shadow-card">
+        <section className="grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
+          <div className="grid min-w-0 grid-cols-[minmax(300px,1fr)_minmax(270px,0.95fr)] items-stretch gap-3">
+            <div className="grid h-full min-w-0 grid-rows-[auto_1fr] gap-3 rounded-panel bg-panel p-3 shadow-card">
               <div className="flex min-w-0 items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <h2 className="truncate text-base font-semibold text-ink">Local endpoint</h2>
+                  <h2 className="truncate text-base font-semibold text-ink">{t("gateway.localEndpoint")}</h2>
                 </div>
                 <button
                   type="button"
@@ -373,13 +375,13 @@ export function GatewayPage({
                   onClick={() => void toggleRuntime()}
                 >
                   {running ? <Square size={13} /> : <Play size={14} />}
-                  {running ? "Stop" : "Start"}
+                  {running ? t("common.stop") : t("common.start")}
                 </button>
               </div>
 
-              <div className="grid min-w-0 content-start gap-2 rounded-inner bg-surface p-3 shadow-control">
+              <div className="grid min-w-0 self-end content-start gap-3 rounded-inner bg-surface p-3 shadow-control">
                 <label className="grid gap-1 text-xs font-semibold text-slate-600">
-                  <span>API Key</span>
+                  <span>{t("common.apiKey")}</span>
                   <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
                     <div className="relative min-w-0">
                       <input
@@ -387,13 +389,13 @@ export function GatewayPage({
                         type={showDraftKey ? "text" : "password"}
                         autoComplete="off"
                         value={draftKey}
-                        placeholder="empty"
+                        placeholder={t("gateway.empty")}
                         onChange={(event) => setDraftKey(event.target.value)}
                       />
                       <button
                         type="button"
                         className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
-                        aria-label={showDraftKey ? "Hide API key" : "Show API key"}
+                        aria-label={showDraftKey ? t("common.hideApiKey") : t("common.showApiKey")}
                         onClick={() => setShowDraftKey((show) => !show)}
                       >
                         {showDraftKey ? <EyeOff size={15} /> : <Eye size={15} />}
@@ -403,8 +405,8 @@ export function GatewayPage({
                       type="button"
                       className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       disabled={!draftKey}
-                      aria-label={apiKeyCopied ? "API key copied" : "Copy API key"}
-                      title={apiKeyCopied ? "Copied" : "Copy API key"}
+                      aria-label={apiKeyCopied ? t("gateway.apiKeyCopied") : t("gateway.copyApiKey")}
+                      title={apiKeyCopied ? t("common.copied") : t("gateway.copyApiKey")}
                       onClick={() => void copyText("gateway-api-key", draftKey)}
                     >
                       {apiKeyCopied ? <Check size={14} /> : <Copy size={14} />}
@@ -412,8 +414,8 @@ export function GatewayPage({
                     <button
                       type="button"
                       className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-                      aria-label="Regenerate API key"
-                      title="Regenerate API key"
+                      aria-label={t("gateway.regenerateApiKey")}
+                      title={t("gateway.regenerateApiKey")}
                       onClick={regenerateClientKey}
                     >
                       <RefreshCcw size={14} />
@@ -422,7 +424,7 @@ export function GatewayPage({
                 </label>
                 <div className="grid min-w-0 grid-cols-[minmax(64px,0.75fr)_minmax(64px,0.75fr)_minmax(112px,0.9fr)] items-end gap-2">
                   <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
-                    <span>Port</span>
+                    <span>{t("common.port")}</span>
                     <input
                       className="field field-compact"
                       type="number"
@@ -433,7 +435,7 @@ export function GatewayPage({
                     />
                   </label>
                   <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
-                    <span>Timeout</span>
+                    <span>{t("common.timeout")}</span>
                     <input
                       className="field field-compact"
                       type="number"
@@ -450,37 +452,37 @@ export function GatewayPage({
                     onClick={() => void applyGatewaySettings()}
                   >
                     <Save size={14} />
-                    Apply Settings
+                    {t("common.applySettings")}
                   </button>
                 </div>
               </div>
             </div>
 
-            <div className="grid min-w-0 content-start gap-2 rounded-panel bg-panel p-2.5 shadow-card">
+            <div className="grid h-full min-w-0 content-start gap-3 rounded-panel bg-panel p-3 shadow-card">
               <div className="grid grid-cols-3 gap-1.5">
                 <StatusCard
                   compact
-                  label="Gateway"
-                  value={running ? "Running" : "Stopped"}
+                  label={t("gateway.gateway")}
+                  value={running ? t("runtime.running") : t("runtime.stopped")}
                   tone={running ? "ok" : "danger"}
                 />
                 <StatusCard
                   compact
-                  label="Bind"
+                  label={t("gateway.bind")}
                   value={bindAddress}
                   tone={running ? "ok" : "idle"}
                 />
                 <StatusCard
                   compact
-                  label="OpenAI Auth"
-                  value={authPresent ? "Signed in" : "Not signed in"}
+                  label={t("gateway.openaiAuth")}
+                  value={authPresent ? t("gateway.signedIn") : t("gateway.notSignedIn")}
                   tone={authPresent ? "ok" : "warn"}
                 />
               </div>
 
               <div className="grid min-h-0 gap-1.5">
                 <div className="flex items-center justify-between gap-3 whitespace-nowrap">
-                  <h3 className="shrink-0 text-sm font-semibold text-ink">Copy connection</h3>
+                  <h3 className="shrink-0 text-sm font-semibold text-ink">{t("gateway.copyConnection")}</h3>
                 </div>
                 {endpoints.length > 0 ? (
                   <div className="grid grid-rows-3 gap-1.5">
@@ -502,8 +504,8 @@ export function GatewayPage({
                 ) : (
                   <PendingPanel
                     compact
-                    title="Gateway status"
-                    message="Runtime status is still loading; endpoints will appear from gatewayStatus once available."
+                    title={t("gateway.gatewayStatus")}
+                    message={t("gateway.runtimeStatusLoading")}
                   />
                 )}
               </div>
@@ -534,7 +536,7 @@ export function GatewayPage({
         <StackedUsageChartShell
           events={usageEvents}
           onWindowChange={onUsageWindowChange}
-          pendingMessage={pending.usage}
+          pendingMessage={pending?.usage ?? t("gateway.pendingUsage")}
           providers={providers}
           summary={usageSummary}
           telemetryStatus={usageStatus}
@@ -545,23 +547,17 @@ export function GatewayPage({
       <aside className="grid h-full min-h-[704px] grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
         <div className="p-3 shadow-hairline">
           <div className="flex items-center justify-between gap-2">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-500">
-              Gateway clients
-            </div>
+            <h2 className="text-sm font-semibold text-ink">{t("gateway.clientRouting")}</h2>
             <button
               type="button"
               className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-300"
               disabled={clientRefreshBusy}
-              aria-label="Refresh gateway clients"
-              title="Refresh installed clients and version checks"
+              aria-label={t("gateway.refreshClients")}
+              title={t("gateway.refreshClientsTitle")}
               onClick={() => void refreshGatewayClients()}
             >
               <RefreshCcw size={14} className={clientRefreshBusy ? "animate-spin" : undefined} />
             </button>
-          </div>
-          <div className="mt-1 flex items-center justify-between gap-3">
-            <h2 className="text-sm font-semibold text-ink">Client routing</h2>
-            <span className="text-xs text-slate-500">Official / CodexHub</span>
           </div>
         </div>
         <div

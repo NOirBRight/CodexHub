@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { AlertCircle, CheckCircle2, Info, RefreshCcw, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cx } from "../lib/format";
 
 export type PageToastTone = "message" | "info" | "success" | "error" | "loading";
@@ -153,6 +154,7 @@ function ToastItem({ dismissToast, toast }: ToastItemProps) {
 }
 
 export function PageToast({ toast, onDismiss }: PageToastProps) {
+  const { t } = useTranslation();
   const dismissible = toast.tone !== "loading";
   return (
     <div
@@ -200,7 +202,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
         <button
           type="button"
           className="focus-ring grid h-6 w-6 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
-          aria-label="Dismiss notification"
+          aria-label={t("common.dismissNotification")}
           onClick={onDismiss}
         >
           <X size={14} />

@@ -1,9 +1,12 @@
 import { Check, ChevronDown, Save, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { changeAppLocale, type AppLocale } from "../i18n";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
 import type { Model, Provider, Settings } from "../lib/types";
 import { useToasts } from "./PageToast";
+import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
 interface SettingsDrawerProps {
   busy?: string | null;
@@ -26,14 +29,18 @@ export function SettingsDrawer({
   settings,
   visionModels,
 }: SettingsDrawerProps) {
+  const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const [closePromptOpen, setClosePromptOpen] = useState(false);
+  const hasUnsavedChanges = Boolean(settings && draft && settingsSaveComparable(settings) !== settingsSaveComparable(draft));
 
   useEffect(() => {
     if (!open) {
       setDraft(settings);
       setHistoryBusy(false);
+      setClosePromptOpen(false);
       return;
     }
     setDraft((current) => current ?? settings);
@@ -45,18 +52,22 @@ export function SettingsDrawer({
     }
   }, [open]);
 
-  async function saveDraft() {
+  async function saveDraft(options?: { closeOnSuccess?: boolean }) {
     if (!draft) {
       return;
     }
-    const toastId = showToast("Saving settings...", "loading");
+    const toastId = showToast(t("settings.savingSettings", { defaultValue: "Saving settings..." }), "loading");
     try {
       const savedMessage = await onSave(draft);
       updateToast(toastId, {
         action: null,
-        text: savedMessage ?? "Settings saved",
+        text: savedMessage ?? t("settings.settingsSaved"),
         tone: "success",
       });
+      setClosePromptOpen(false);
+      if (options?.closeOnSuccess) {
+        onClose();
+      }
     } catch (err) {
       updateToast(toastId, {
         action: null,
@@ -70,7 +81,7 @@ export function SettingsDrawer({
     if (!draft) {
       return;
     }
-    const toastId = showToast("Repairing history bucket...", "loading");
+    const toastId = showToast(t("settings.repairingHistoryBucket"), "loading");
     const targetProvider = draft.unified_codex_history ? "custom" : "openai";
     try {
       const message = await onSyncHistory(targetProvider);
@@ -95,7 +106,7 @@ export function SettingsDrawer({
     const previous = draft;
     const next = { ...draft, unified_codex_history: enabled };
     const toastId = showToast(
-      enabled ? "Enabling unified Codex history..." : "Restoring official Codex history...",
+      enabled ? t("settings.enablingUnifiedHistory") : t("settings.restoringOfficialHistory"),
       "loading",
     );
     setDraft(next);
@@ -104,7 +115,7 @@ export function SettingsDrawer({
       const savedMessage = await onSave(next);
       updateToast(toastId, {
         action: null,
-        text: savedMessage ?? (enabled ? "Unified Codex history enabled" : "Official Codex history restored"),
+        text: savedMessage ?? (enabled ? t("settings.unifiedHistoryEnabled") : t("settings.officialHistoryRestored")),
         tone: "success",
       });
     } catch (err) {
@@ -119,7 +130,62 @@ export function SettingsDrawer({
     }
   }
 
+  async function changeLanguage(locale: AppLocale) {
+    if (!draft || draft.locale === locale) {
+      return;
+    }
+    const previous = draft;
+    const next = { ...draft, locale };
+    const toastId = showToast(t("settings.languageSaving"), "loading");
+    setDraft(next);
+    await changeAppLocale(locale);
+    try {
+      const savedMessage = await onSave(next);
+      updateToast(toastId, {
+        action: null,
+        text: savedMessage ?? t("settings.languageSaved"),
+        tone: "success",
+      });
+    } catch (err) {
+      setDraft(previous);
+      await changeAppLocale(previous.locale);
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    }
+  }
+
+  function requestClose() {
+    if (!hasUnsavedChanges) {
+      onClose();
+      return;
+    }
+    setClosePromptOpen(true);
+  }
+
+  function discardAndClose() {
+    setDraft(settings);
+    setClosePromptOpen(false);
+    onClose();
+  }
+
+  const languageOptions: Array<SegmentedOption<AppLocale>> = [
+    { value: "zh-CN", label: t("settings.languageChinese") },
+    { value: "en-US", label: t("settings.languageEnglish") },
+  ];
+
   return (
+    <>
+      {open && (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 cursor-default bg-black/10 backdrop-blur-[1px]"
+          aria-label={t("common.closeSettings")}
+          onClick={requestClose}
+        />
+      )}
     <aside
       className={cx(
         "fixed inset-y-0 right-0 z-50 grid w-full max-w-[420px] grid-rows-[auto_minmax(0,1fr)_auto] rounded-l-overlay bg-surface shadow-overlay transition-transform",
@@ -130,15 +196,15 @@ export function SettingsDrawer({
       <div className="flex items-center justify-between gap-3 px-5 py-4 shadow-hairline">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
-            Settings
+            {t("common.settings")}
           </div>
-          <h2 className="text-base font-semibold text-ink">CodexHub &amp; Gateway</h2>
+          <h2 className="text-base font-semibold text-ink">{t("settings.codexHubGateway")}</h2>
         </div>
         <button
           type="button"
           className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-          onClick={onClose}
-          title="Close settings"
+          onClick={requestClose}
+          title={t("common.closeSettings")}
         >
           <X size={16} />
         </button>
@@ -147,27 +213,38 @@ export function SettingsDrawer({
       <div className="min-h-0 overflow-auto p-5">
         {!draft ? (
           <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
-            Loading settings
+            {t("common.loadingSettings")}
           </div>
         ) : (
           <div className="grid gap-5">
             <section className="grid gap-3">
               <h3 className="text-sm font-semibold text-ink">CodexHub</h3>
               <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                <div className="grid gap-1 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
+                  <span className="text-xs font-semibold text-slate-500">{t("settings.language")}</span>
+                  <SegmentedSwitch
+                    ariaLabel={t("settings.language")}
+                    className="grid-cols-2"
+                    disabled={Boolean(busy)}
+                    value={draft.locale}
+                    options={languageOptions}
+                    onChange={(value) => void changeLanguage(value)}
+                  />
+                </div>
                 <Toggle
                   checked={draft.include_official_models}
-                  label="Include official models"
+                  label={t("settings.includeOfficialModels")}
                   onChange={(value) => setDraft({ ...draft, include_official_models: value })}
                 />
                 <Toggle
                   checked={draft.unified_codex_history}
                   disabled={historyBusy || Boolean(busy)}
-                  label="Unified Codex history"
+                  label={t("settings.unifiedCodexHistory")}
                   onChange={(value) => void toggleUnifiedHistory(value)}
                 />
                 <Toggle
                   checked={draft.auto_sync_clients}
-                  label="Auto-sync bound clients"
+                  label={t("settings.autoSyncBoundClients")}
                   onChange={(value) => setDraft({ ...draft, auto_sync_clients: value })}
                 />
                 <button
@@ -176,22 +253,22 @@ export function SettingsDrawer({
                   disabled={Boolean(busy) || historyBusy}
                   onClick={() => void repairHistory()}
                 >
-                  Repair history bucket
+                  {t("settings.repairHistoryBucket")}
                 </button>
               </div>
             </section>
 
             <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">Auto retry</h3>
+              <h3 className="text-sm font-semibold text-ink">{t("settings.autoRetry")}</h3>
               <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
                 <Toggle
                   checked={draft.gateway_auto_retry_enabled}
                   disabled={Boolean(busy)}
-                  label="Enabled"
+                  label={t("common.enabled")}
                   onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
                 />
                 <label className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-3 rounded-inner bg-surface px-3 py-1.5 text-sm font-medium text-slate-700 shadow-control">
-                  <span className="min-w-0 truncate">Max attempts</span>
+                  <span className="min-w-0 truncate">{t("settings.maxAttempts")}</span>
                   <input
                     className="h-6 w-9 min-w-0 rounded-control border border-transparent bg-transparent px-0 text-center text-sm font-semibold tabular-nums text-ink shadow-none outline-none transition-[box-shadow,border-color,background-color] duration-150 ease-out [appearance:textfield] focus:border-action/40 focus:bg-surface focus:shadow-field disabled:text-slate-400 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                     type="number"
@@ -211,16 +288,16 @@ export function SettingsDrawer({
             </section>
 
             <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">Image proxy</h3>
+              <h3 className="text-sm font-semibold text-ink">{t("settings.imageProxy")}</h3>
               <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
                 <Toggle
                   checked={draft.gateway_image_proxy_enabled}
                   disabled={Boolean(busy)}
-                  label="Enabled"
+                  label={t("common.enabled")}
                   onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
                 />
                 <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
-                  <span className="min-w-0 truncate">Vision model</span>
+                  <span className="min-w-0 truncate">{t("settings.visionModel")}</span>
                   <VisionModelSelect
                     models={visionModels}
                     providers={providers}
@@ -240,16 +317,57 @@ export function SettingsDrawer({
           <button
             type="button"
             className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
-            disabled={Boolean(busy) || historyBusy || !draft}
+            disabled={Boolean(busy) || historyBusy || !draft || !hasUnsavedChanges}
             onClick={() => void saveDraft()}
           >
             <Save size={15} />
-            Save
+            {t("common.save")}
           </button>
         </div>
       </div>
     </aside>
+      {closePromptOpen && (
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-black/20 px-4">
+          <div className="grid w-full max-w-[360px] gap-4 rounded-overlay bg-surface p-4 shadow-overlay">
+            <div>
+              <h3 className="text-base font-semibold text-ink">{t("settings.unsavedChangesTitle")}</h3>
+              <p className="mt-1 text-sm leading-5 text-slate-500">{t("settings.unsavedChangesBody")}</p>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                className="mini-button"
+                onClick={() => setClosePromptOpen(false)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                className="mini-button"
+                onClick={discardAndClose}
+              >
+                {t("settings.discardUnsavedChanges")}
+              </button>
+              <button
+                type="button"
+                className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+                disabled={Boolean(busy) || historyBusy || !draft}
+                onClick={() => void saveDraft({ closeOnSuccess: true })}
+              >
+                <Save size={14} />
+                {t("common.save")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
+}
+
+function settingsSaveComparable(settings: Settings) {
+  const { locale: _locale, unified_codex_history: _unifiedHistory, ...saveManagedSettings } = settings;
+  return JSON.stringify(saveManagedSettings);
 }
 
 function clampRetryAttempts(value: string) {
@@ -409,7 +527,8 @@ function VisionModelSelect({
   const providerLabels = providerLabelMap(providers);
   const selectedModel = models.find((model) => model.id === value);
   const selectedParts = selectedModel ? visionModelParts(selectedModel, providerLabels) : null;
-  const label = models.length === 0 ? "No vision models" : selectedParts?.title ?? "Select model";
+  const { t } = useTranslation();
+  const label = models.length === 0 ? t("common.noVisionModels") : selectedParts?.title ?? t("common.selectModel");
 
   useEffect(() => {
     if (disabled) {
@@ -483,7 +602,7 @@ function VisionModelSelect({
           role="listbox"
         >
           <VisionModelOption
-            label="Select model"
+            label={t("common.selectModel")}
             selected={!value}
             onSelect={() => selectModel("")}
           />

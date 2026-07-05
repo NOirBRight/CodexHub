@@ -1,5 +1,6 @@
 import { Minus, Play, Settings as SettingsIcon, Square, X } from "lucide-react";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import codexLogo from "../assets/codex-logo.svg";
 import { cx } from "../lib/format";
 import { api } from "../lib/tauri";
@@ -24,6 +25,7 @@ export function RuntimeBar({
   settings,
   status,
 }: RuntimeBarProps) {
+  const { t } = useTranslation();
   const running = status?.proxy_running ?? false;
   const port = status?.proxy_port ?? settings?.proxy_port ?? 9099;
   const address = `${settings?.gateway_bind_address || "127.0.0.1"}:${port}`;
@@ -46,11 +48,11 @@ export function RuntimeBar({
       <div className="flex shrink-0 items-center gap-2">
         <div
           className="flex h-8 max-w-[360px] items-center gap-2 rounded-control bg-panel px-2 text-xs shadow-control"
-          title={message ?? `${address} ${running ? "running" : "stopped"}`}
+          title={message ?? `${address} ${running ? t("runtime.running") : t("runtime.stopped")}`}
         >
           <span className={cx("h-2 w-2 rounded-full", running ? "bg-ok" : "bg-danger")} />
           <code className="font-mono text-slate-700">{address}</code>
-          <span className="text-slate-500">{running ? "running" : "stopped"}</span>
+          <span className="text-slate-500">{running ? t("runtime.running") : t("runtime.stopped")}</span>
           {runtimeHint && (
             <span className="min-w-0 truncate border-l border-line pl-2 font-medium text-slate-600">
               {runtimeHint}
@@ -62,8 +64,8 @@ export function RuntimeBar({
           className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-surface text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           disabled={Boolean(busy)}
           onClick={running ? onStop : onStart}
-          aria-label={running ? "Stop the local Gateway runtime" : "Start the local Gateway runtime"}
-          title={running ? "Stop the local Gateway runtime" : "Start the local Gateway runtime"}
+          aria-label={running ? t("runtime.stopRuntime") : t("runtime.startRuntime")}
+          title={running ? t("runtime.stopRuntime") : t("runtime.startRuntime")}
         >
           {running ? <Square size={13} /> : <Play size={13} />}
         </button>
@@ -71,28 +73,28 @@ export function RuntimeBar({
           type="button"
           className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           onClick={onOpenSettings}
-          title="Settings"
+          title={t("common.settings")}
         >
           <SettingsIcon size={15} />
         </button>
         <div className="ml-1 flex h-10 items-center border-l border-line pl-1">
           <WindowControlButton
-            label="Minimize"
-            title="Minimize"
+            label={t("runtime.minimize")}
+            title={t("runtime.minimize")}
             onClick={() => void api.windowMinimize()}
           >
             <Minus size={14} />
           </WindowControlButton>
           <WindowControlButton
-            label="Maximize or restore"
-            title="Maximize or restore"
+            label={t("runtime.maximizeOrRestore")}
+            title={t("runtime.maximizeOrRestore")}
             onClick={() => void api.windowToggleMaximize()}
           >
             <Square size={12} />
           </WindowControlButton>
           <WindowControlButton
-            label="Close to tray"
-            title="Close to tray"
+            label={t("runtime.closeToTray")}
+            title={t("runtime.closeToTray")}
             danger
             onClick={() => void api.windowCloseToTray()}
           >

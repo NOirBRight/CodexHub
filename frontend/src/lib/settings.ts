@@ -1,8 +1,10 @@
 import type { Settings } from "./types";
+import { browserLocale, resolveLocale } from "../i18n";
 
 const DEFAULT_FAST_MODEL_VARIANTS = ["openai/gpt-5.5", "openai/gpt-5.4"];
 
 const DEFAULT_SETTINGS: Settings = {
+  locale: browserLocale(),
   auto_sync_history: false,
   unified_codex_history: true,
   auto_start_proxy: true,
@@ -32,6 +34,7 @@ export function normalizeSettings(settings: Partial<Settings> | null | undefined
   return {
     ...DEFAULT_SETTINGS,
     ...source,
+    locale: source.locale ? resolveLocale(source.locale) : DEFAULT_SETTINGS.locale,
     unified_codex_history: source.unified_codex_history ?? DEFAULT_SETTINGS.unified_codex_history,
     auto_sync_clients:
       source.auto_sync_clients ??

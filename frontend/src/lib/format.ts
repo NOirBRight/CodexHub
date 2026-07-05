@@ -1,3 +1,4 @@
+import i18n from "../i18n";
 import type { Model, Provider } from "./types";
 
 export function cx(...parts: Array<string | false | null | undefined>) {
@@ -6,9 +7,9 @@ export function cx(...parts: Array<string | false | null | undefined>) {
 
 export function formatLimit(value?: number | null) {
   if (!value) {
-    return "Unknown";
+    return i18n.t("common.unknown");
   }
-  return new Intl.NumberFormat("en-US").format(value);
+  return new Intl.NumberFormat(i18n.language || "en-US").format(value);
 }
 
 export function displayModel(model: Model) {
