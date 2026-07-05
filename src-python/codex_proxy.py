@@ -2154,6 +2154,8 @@ def _multi_agent_explicit_function_tools(
     include_spawn_agent: bool = True,
     include_wait_agent: bool = True,
     include_close_agent: bool = True,
+    include_resume_agent: bool = True,
+    include_send_input: bool = True,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
@@ -2175,6 +2177,10 @@ def _multi_agent_explicit_function_tools(
         if name == "wait_agent" and not include_wait_agent:
             continue
         if name == "close_agent" and not include_close_agent:
+            continue
+        if name == "resume_agent" and not include_resume_agent:
+            continue
+        if name == "send_input" and not include_send_input:
             continue
         alias = f"multi_agent_v1__{name}"
         description = str(tool.get("description") or f"Invoke Codex multi_agent_v1.{name}.")
@@ -2330,6 +2336,8 @@ def _inject_explicit_codex_tools(
     include_spawn_agent: bool = True,
     include_wait_agent: bool = True,
     include_close_agent: bool = True,
+    include_resume_agent: bool = True,
+    include_send_input: bool = True,
     include_node_repl_tools: bool = True,
     strip_namespace_tools: bool = True,
     open_agent_ids: list[str] | None = None,
@@ -2374,6 +2382,10 @@ def _inject_explicit_codex_tools(
         excluded_tool_names.add("multi_agent_v1__wait_agent")
     if not include_close_agent:
         excluded_tool_names.add("multi_agent_v1__close_agent")
+    if not include_resume_agent:
+        excluded_tool_names.add("multi_agent_v1__resume_agent")
+    if not include_send_input:
+        excluded_tool_names.add("multi_agent_v1__send_input")
     if excluded_tool_names:
         filtered_tools = [
             tool
@@ -2399,6 +2411,8 @@ def _inject_explicit_codex_tools(
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,
                 include_close_agent=include_close_agent,
+                include_resume_agent=include_resume_agent,
+                include_send_input=include_send_input,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
@@ -2872,6 +2886,10 @@ def _has_single_loop_multi_agent_request(value: Any) -> bool:
         token in text
         for token in (
             "只执行一次",
+            "执行一次真实",
+            "一次真实",
+            "一个子代理",
+            "最终回复",
             "不要再 spawn",
             "不要重复验证",
             "不要重复",
@@ -3419,15 +3437,26 @@ def compatible_request_body(
     wait_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id not in completed_wait_agent_ids]
     close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
     has_open_agent = _has_open_multi_agent_context(input_items)
-    lifecycle_complete = _has_completed_single_loop_multi_agent_context(input_items)
+    single_loop_multi_agent_request = _has_single_loop_multi_agent_request(input_items)
+    lifecycle_complete = single_loop_multi_agent_request and bool(closed_agent_ids) and not has_open_agent
     node_repl_single_step_complete = _has_completed_single_step_node_repl_context(input_items)
     include_spawn_agent = not has_open_agent
     include_wait_agent = (not has_open_agent) or not open_agent_ids or bool(wait_agent_ids)
     include_close_agent = (not has_open_agent) or not open_agent_ids or bool(close_agent_ids)
+    include_resume_agent = True
+    include_send_input = True
+    if single_loop_multi_agent_request:
+        include_resume_agent = False
+        include_send_input = False
+        if not has_open_agent and not closed_agent_ids:
+            include_wait_agent = False
+            include_close_agent = False
     if lifecycle_complete:
         include_spawn_agent = False
         include_wait_agent = False
         include_close_agent = False
+        include_resume_agent = False
+        include_send_input = False
         state_hint = _multi_agent_lifecycle_complete_message(closed_agent_ids)
     else:
         state_hint = _multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
@@ -3462,6 +3491,8 @@ def compatible_request_body(
             include_spawn_agent=include_spawn_agent,
             include_wait_agent=include_wait_agent,
             include_close_agent=include_close_agent,
+            include_resume_agent=include_resume_agent,
+            include_send_input=include_send_input,
             include_node_repl_tools=not node_repl_single_step_complete,
             open_agent_ids=open_agent_ids,
             wait_agent_ids=wait_agent_ids,

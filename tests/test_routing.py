@@ -2987,6 +2987,117 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("status: lifecycle_complete", transcript)
         self.assertIn("completed_tool_aliases: multi_agent_v1__spawn_agent", transcript)
 
+    def test_external_request_treats_real_subagent_collaboration_prompt_as_single_loop(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。先调用可见的 subagent spawn 工具创建一个子代理。最终回复只报告结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"019f-child": {"completed": "child-ok"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close",
+                        "output": json.dumps({"previous_status": {"completed": "child-ok"}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertNotIn(f"multi_agent_v1__{tool_name}", tools_by_name)
+        self.assertIn("status: lifecycle_complete", transcript)
+
+    def test_external_request_single_loop_hides_send_input_after_spawn_result(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。先调用可见的 subagent spawn 工具创建一个子代理。等待子代理完成，然后关闭该子代理。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child", "nickname": "child"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: spawned_child_wait_required", transcript)
+
     def test_external_response_normalizes_multi_agent_wait_alias_and_arguments(self):
         body = json.dumps(
             {
