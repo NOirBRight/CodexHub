@@ -4005,6 +4005,8 @@ def _upstream_endpoint_url(upstream: Mapping[str, Any], path: str) -> str:
     if _upstream_base_path_matches(base, path):
         return base
     root = _upstream_endpoint_root(base)
+    if upstream.get("auth") == "codex_auth":
+        return root + path
     if _upstream_base_has_version_suffix(root):
         return root + path
     return root + "/v1" + path
