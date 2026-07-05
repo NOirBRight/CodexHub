@@ -67,11 +67,14 @@ class FakeHandler:
     def _write_sse_event(self, event, payload):
         return CodexProxyHandler._write_sse_event(self, event, payload)
 
+    def _write_sse_error_event(self, upstream_name, exc):
+        return CodexProxyHandler._write_sse_error_event(self, upstream_name, exc)
+
     def _write_sse_keepalive(self):
         return CodexProxyHandler._write_sse_keepalive(self)
 
-    def _iter_upstream_sse_lines(self, response):
-        return CodexProxyHandler._iter_upstream_sse_lines(self, response)
+    def _iter_upstream_sse_lines(self, *args, **kwargs):
+        return CodexProxyHandler._iter_upstream_sse_lines(self, *args, **kwargs)
 
     def _write_sse_protocol_error_event(self, upstream_name, status, detail, *, error="UpstreamProtocolError"):
         return CodexProxyHandler._write_sse_protocol_error_event(
@@ -118,6 +121,24 @@ class FakeDelayedSseResponse(FakeSseResponse):
         if self.readline_calls == 1:
             time.sleep(self.first_delay_seconds)
         return super().readline()
+
+
+class FakeSequencedDelayedSseResponse(FakeSseResponse):
+    def __init__(self, items):
+        super().__init__([])
+        self.items = list(items)
+        self.closed = False
+
+    def readline(self):
+        if not self.items:
+            return b""
+        delay, line = self.items.pop(0)
+        if delay:
+            time.sleep(delay)
+        return line
+
+    def close(self):
+        self.closed = True
 
 
 class FakeResponse:
@@ -306,6 +327,21 @@ class RoutingTests(unittest.TestCase):
 
     def test_gateway_retry_delay_caps_after_third_retry(self):
         self.assertEqual([codex_proxy.gateway_retry_delay_seconds(attempt) for attempt in range(1, 6)], [2, 4, 6, 8, 8])
+
+    def test_retry_attempts_are_bounded_by_request_kind(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "30",
+                "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS": "3",
+                "CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS": "2",
+            },
+            clear=False,
+        ):
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 2)
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 1)
 
     def test_open_upstream_response_retries_http_errors_for_any_provider(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
@@ -1025,6 +1061,55 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["model"], "MiniMax-M3")
         self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+
+    def test_image_proxy_vision_request_strips_tools_even_if_adapter_adds_them(self):
+        part = {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+        vision_upstream = {
+            "name": "vision",
+            "base_url": "https://vision.example.test/v1",
+            "api_key": "vision-token",
+            "auth": "api_key",
+            "upstream_format": "responses",
+            "upstream_model": "vision-model",
+        }
+        response_body = json.dumps(
+            {
+                "id": "resp_vision",
+                "object": "response",
+                "status": "completed",
+                "model": "vision-model",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "A chart."}],
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        def add_tools(body, upstream, **kwargs):
+            payload = json.loads(body.decode("utf-8"))
+            payload["tools"] = [{"type": "function", "name": "unexpected_tool", "parameters": {"type": "object"}}]
+            payload["tool_choice"] = "auto"
+            return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+        with (
+            patch("codex_proxy.compatible_request_body", side_effect=add_tools),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+        ):
+            description = codex_proxy._call_vision_model_for_image_description(
+                part,
+                "vision-model",
+                vision_upstream,
+                event_context={"request_id": "req_img", "image_proxy": True},
+            )
+
+        self.assertEqual(description, "A chart.")
+        payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
 
     def test_image_proxy_vision_request_logs_duration_and_usage(self):
         response_body = json.dumps(
@@ -1227,12 +1312,14 @@ class RoutingTests(unittest.TestCase):
 
     def test_provider_prefixed_model_routes_to_external_provider(self):
         self.external_model["upstream_format"] = "chat_completions"
+        self.external_model["tool_protocol"] = "text_compat"
         upstream = choose_upstream("volc/glm-5.2")
         self.assertEqual(upstream["name"], "volcengine")
         self.assertEqual(upstream["auth"], "api_key")
         self.assertEqual(upstream["base_url"], "https://ark.example.test/v1")
         self.assertEqual(upstream["upstream_model"], "glm-5.2")
         self.assertEqual(upstream["upstream_format"], "chat_completions")
+        self.assertEqual(upstream["tool_protocol"], "text_compat")
 
     def test_provider_scoped_short_model_routes_to_external_provider(self):
         route_model = codex_proxy.provider_scoped_route_model("glm-5.2", "volc")
@@ -1762,7 +1849,8 @@ class RoutingTests(unittest.TestCase):
             ("minimax-cn/minimax-m3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
-                upstream = choose_upstream(model_id)
+                upstream = dict(choose_upstream(model_id))
+                upstream["tool_protocol"] = "text_compat"
                 body = json.dumps(
                     {
                         "model": model_id,
@@ -1791,7 +1879,8 @@ class RoutingTests(unittest.TestCase):
             ("minimax-cn/minimax-m3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
-                upstream = choose_upstream(model_id)
+                upstream = dict(choose_upstream(model_id))
+                upstream["tool_protocol"] = "text_compat"
                 body = json.dumps(
                     {
                         "model": model_id,
@@ -1835,7 +1924,8 @@ class RoutingTests(unittest.TestCase):
             ("minimax-cn/minimax-m3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
-                upstream = choose_upstream(model_id)
+                upstream = dict(choose_upstream(model_id))
+                upstream["tool_protocol"] = "text_compat"
                 body = json.dumps(
                     {
                         "model": model_id,
@@ -2348,6 +2438,51 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["output"][0]["call_id"], "call_spawn")
         self.assertEqual(payload["output"][0]["name"], "spawn_agent")
 
+    def test_chat_completions_non_sse_relay_guards_duplicate_spawn(self):
+        handler = FakeHandler()
+        body = json.dumps(
+            {
+                "id": "chatcmpl_1",
+                "model": "glm-5.2",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_spawn_again",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "multi_agent_v1__spawn_agent",
+                                        "arguments": "{\"message\":\"repeat\"}",
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        response = FakeResponse(body)
+
+        CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            upstream_format="chat_completions",
+            event_context={
+                "tool_protocol": "chat_tools",
+                "subagent_open_agent_ids": ["019f-child"],
+                "subagent_spawn_allowed": False,
+            },
+        )
+
+        call = json.loads(handler.wfile.writes[0])["output"][0]
+        self.assertEqual(call["namespace"], "multi_agent_v1")
+        self.assertEqual(call["name"], "wait_agent")
+        self.assertEqual(json.loads(call["arguments"])["targets"], ["019f-child"])
+
     def test_chat_completions_sse_relay_converts_tool_call_stream_to_responses_events(self):
         handler = FakeHandler()
         chunks = [
@@ -2405,6 +2540,69 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(done["item"]["arguments"], "{\"message\":\"hi\"}")
         self.assertEqual(completed["response"]["output"][0]["call_id"], "call_spawn")
 
+    def test_chat_completions_sse_relay_guards_duplicate_spawn(self):
+        handler = FakeHandler()
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_spawn_again",
+                                    "type": "function",
+                                    "function": {"name": "multi_agent_v1__spawn_agent", "arguments": ""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "{\"message\":\"repeat\"}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+        )
+
+        CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            upstream_format="chat_completions",
+            event_context={
+                "tool_protocol": "chat_tools",
+                "subagent_open_agent_ids": ["019f-child"],
+                "subagent_spawn_allowed": False,
+            },
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        done = next(payload for payload in payloads if payload["type"] == "response.output_item.done")
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+        self.assertEqual(done["item"]["namespace"], "multi_agent_v1")
+        self.assertEqual(done["item"]["name"], "wait_agent")
+        self.assertEqual(json.loads(done["item"]["arguments"])["targets"], ["019f-child"])
+        self.assertEqual(completed["response"]["output"][0]["name"], "wait_agent")
+
     def test_chat_completions_sse_relay_converts_text_stream_to_responses_message(self):
         handler = FakeHandler()
         chunks = [
@@ -2431,6 +2629,149 @@ class RoutingTests(unittest.TestCase):
         output = completed["response"]["output"][0]
         self.assertEqual(output["type"], "message")
         self.assertEqual(output["content"][0]["text"], "hello")
+
+    def test_responses_sse_passthrough_without_terminal_writes_sse_error(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "official",
+            request_id="req_incomplete_responses_passthrough",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"partial", data)
+        self.assertIn(b"upstream_stream_incomplete", data)
+        self.assertNotIn(b"response.completed", data)
+
+    def test_chat_sse_without_terminal_writes_sse_error(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_incomplete_chat_sse",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"upstream_stream_incomplete", data)
+        self.assertNotIn(b"data: [DONE]", data)
+
+    def test_responses_sse_passthrough_aborts_before_output_idle_timeout(self):
+        handler = FakeHandler()
+        response = FakeSequencedDelayedSseResponse(
+            [
+                (0, b'data: {"type":"response.created","response":{"id":"resp_pre","model":"gpt-5.5"}}\n\n'),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b'data: {"type":"response.output_text.delta","delta":"late"}\n\n'),
+                (0, b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'),
+                (0, b""),
+            ]
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_PROXY_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS": "0.02",
+                "CODEX_PROXY_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS": "10",
+            },
+            clear=False,
+        ):
+            status = CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "official",
+                request_id="req_pre_output_idle",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+            )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"upstream_stream_idle_timeout", data)
+        self.assertNotIn(b"late", data)
+        matching_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_idle_timeout"
+        ]
+        self.assertTrue(matching_events)
+        event_kwargs = matching_events[-1].kwargs
+        self.assertEqual(event_kwargs["stream_idle_timeout_seconds"], 0.02)
+        self.assertEqual(event_kwargs["stream_idle_phase"], "pre_output")
+
+    def test_responses_sse_passthrough_aborts_after_output_idle_timeout(self):
+        handler = FakeHandler()
+        response = FakeSequencedDelayedSseResponse(
+            [
+                (0, b'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}\n\n'),
+                (0, b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b": upstream keepalive\n\n"),
+                (0.005, b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'),
+                (0, b""),
+            ]
+        )
+
+        with patch.dict(os.environ, {"CODEX_PROXY_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS": "0.02"}, clear=False):
+            status = CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "official",
+                request_id="req_output_idle",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+            )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"partial", data)
+        self.assertIn(b"upstream_stream_idle_timeout", data)
+        self.assertNotIn(b"response.completed", data)
+        matching_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_idle_timeout"
+        ]
+        self.assertTrue(matching_events)
+        event_kwargs = matching_events[-1].kwargs
+        self.assertEqual(event_kwargs["stream_idle_timeout_seconds"], 0.02)
+        self.assertEqual(event_kwargs["stream_idle_phase"], "post_output")
+        self.assertTrue(event_kwargs["downstream_output_started"])
 
     def test_ollama_non_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
         handler = FakeHandler()
@@ -2623,20 +2964,19 @@ class RoutingTests(unittest.TestCase):
         ).encode("utf-8")
         response = FakeResponse(body)
 
-        status = CodexProxyHandler._relay_upstream_response(
-            handler,
-            response,
-            "ollama_cloud",
-            upstream_format="responses",
-            inbound_format="chat_completions",
-            caller_stream=False,
-            request_kind=RETRY_REQUEST_COMPACT,
-        )
+        with self.assertRaises(codex_proxy.CompactEmptyResponseError):
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "ollama_cloud",
+                upstream_format="responses",
+                inbound_format="chat_completions",
+                caller_stream=False,
+                request_kind=RETRY_REQUEST_COMPACT,
+            )
 
-        self.assertEqual(status, 502)
-        self.assertEqual(handler.status, 502)
-        payload = json.loads(handler.wfile.writes[0])
-        self.assertEqual(payload["error"]["type"], "compact_empty_response")
+        self.assertIsNone(handler.status)
+        self.assertEqual(handler.wfile.writes, [])
 
     def test_non_compact_empty_assistant_response_logs_telemetry_but_stays_successful(self):
         handler = FakeHandler()
@@ -2759,6 +3099,95 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("multi_agent_v1__close_agent", tools_by_name)
         self.assertIn("multi_agent_v1__resume_agent", tools_by_name)
         self.assertIn("multi_agent_v1__send_input", tools_by_name)
+
+    def test_responses_structured_provider_preserves_multi_agent_tool_history(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use one subagent."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child", "nickname": "child"}),
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "req"},
+        )
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertEqual(payload["input"][1]["type"], "function_call")
+        self.assertEqual(payload["input"][1]["name"], "multi_agent_v1__spawn_agent")
+        self.assertNotIn("namespace", payload["input"][1])
+        self.assertEqual(payload["input"][2]["type"], "function_call_output")
+        self.assertEqual(payload["input"][2]["call_id"], "call_spawn")
+        self.assertIn('"agent_id": "019f-child"', payload["input"][2]["output"])
+        self.assertNotIn("Codex native multi_agent_v1.spawn_agent result", transcript)
+
+    def test_chat_tools_uses_event_led_state_without_text_guidance(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use one subagent."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child", "nickname": "child"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context=event_context,
+        )
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("Codex native multi_agent_v1 current state", transcript)
+        self.assertEqual(event_context["subagent_open_agent_ids"], ["019f-child"])
+        self.assertFalse(event_context["subagent_spawn_allowed"])
 
     def test_external_request_flattens_mcp_node_repl_namespace_without_tool_search(self):
         body = json.dumps(
@@ -3098,6 +3527,36 @@ class RoutingTests(unittest.TestCase):
 
         self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
 
+    def test_external_request_keeps_spawn_agent_when_source_text_mentions_closed_lifecycle(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Plan complete. Subagent-Driven recommended. Ensure exactly one terminal marker.",
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": (
+                            'source snippet: if "Codex native multi_agent_v1.close_agent result" '
+                            'in text and "status: closed" in text: pass'
+                        ),
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("status: lifecycle_complete", transcript)
+
     def test_external_request_hides_multi_agent_tools_after_single_loop_close(self):
         body = json.dumps(
             {
@@ -3247,6 +3706,568 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("status: lifecycle_complete", transcript)
         self.assertIn("completed_tool_aliases: multi_agent_v1__spawn_agent", transcript)
 
+    def test_external_request_treats_real_subagent_collaboration_prompt_as_single_loop(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。先调用可见的 subagent spawn 工具创建一个子代理。最终回复只报告结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"019f-child": {"completed": "child-ok"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close",
+                        "output": json.dumps({"previous_status": {"completed": "child-ok"}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertNotIn(f"multi_agent_v1__{tool_name}", tools_by_name)
+        self.assertIn("status: lifecycle_complete", transcript)
+
+    def test_external_request_single_loop_hides_send_input_after_spawn_result(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。先调用可见的 subagent spawn 工具创建一个子代理。等待子代理完成，然后关闭该子代理。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-ok"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child", "nickname": "child"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: spawned_child_wait_required", transcript)
+
+    def test_external_request_bounded_multi_spawn_allows_next_spawn_before_wait(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。同步 spawn 两个子代理，等待两个子代理完成，关闭两个子代理，最终回复结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "019f-child-a", "nickname": "child-a"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: spawn_more_required", transcript)
+        self.assertIn("remaining_spawn_count: 1", transcript)
+
+    def test_external_request_bounded_multi_spawn_waits_after_requested_spawns(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。同步 spawn 两个子代理，等待两个子代理完成，关闭两个子代理，最终回复结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "019f-child-a"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_b",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-b"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_b",
+                        "output": json.dumps({"agent_id": "019f-child-b"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: spawned_child_wait_required", transcript)
+        self.assertIn("open_agent_ids_requiring_wait: 019f-child-a, 019f-child-b", transcript)
+
+    def test_external_request_bounded_multi_spawn_completes_after_all_closed(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。同步 spawn 两个子代理，等待两个子代理完成，关闭两个子代理，最终回复结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "019f-child-a"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_b",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-b"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_b",
+                        "output": json.dumps({"agent_id": "019f-child-b"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child-a", "019f-child-b"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps(
+                            {
+                                "timed_out": False,
+                                "status": {
+                                    "019f-child-a": {"completed": "child-a"},
+                                    "019f-child-b": {"completed": "child-b"},
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close_a",
+                        "output": json.dumps({"previous_status": {"completed": "child-a"}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close_b",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child-b"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close_b",
+                        "output": json.dumps({"previous_status": {"completed": "child-b"}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertNotIn(f"multi_agent_v1__{tool_name}", tools_by_name)
+        self.assertIn("status: lifecycle_complete", transcript)
+        self.assertIn("019f-child-a", transcript)
+        self.assertIn("019f-child-b", transcript)
+
+    def test_text_compat_allows_reviewer_spawn_after_implementer_done(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Use subagent-driven development for Task 1.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "message": "Implement Task 1 exactly.",
+                            "nickname": "implementer-task-1",
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl",
+                        "output": json.dumps({"agent_id": "impl-1", "nickname": "implementer-task-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["impl-1"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"impl-1": {"completed": "DONE"}}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("status: next_subagent_spawn_required", transcript)
+        self.assertIn("next_expected_role: spec_reviewer", transcript)
+
+    def test_text_compat_routes_reviewer_issue_to_existing_implementer(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Use subagent-driven development for Task 1.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "message": "Implement Task 1 exactly.",
+                            "nickname": "implementer-task-1",
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl",
+                        "output": json.dumps({"agent_id": "impl-1", "nickname": "implementer-task-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["impl-1"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"impl-1": {"completed": "DONE"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "message": "Spec compliance review for Task 1.",
+                            "nickname": "spec-reviewer-task-1",
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spec",
+                        "output": json.dumps({"agent_id": "spec-1", "nickname": "spec-reviewer-task-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["spec-1"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spec_wait",
+                        "output": json.dumps(
+                            {"timed_out": False, "status": {"spec-1": {"completed": "ISSUE: missing required test"}}}
+                        ),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: reviewer_issue_fix_required", transcript)
+        self.assertIn("send_input_target: impl-1", transcript)
+
+    def test_text_compat_routes_reviewer_issue_to_closed_implementer_for_resume(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Use subagent-driven development for Task 1.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "message": "Implement Task 1 exactly.",
+                            "nickname": "implementer-task-1",
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl",
+                        "output": json.dumps({"agent_id": "impl-1", "nickname": "implementer-task-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["impl-1"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"impl-1": {"completed": "DONE"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "impl-1"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl_close",
+                        "output": json.dumps({"previous_status": {"completed": "DONE"}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "message": "Spec compliance review for Task 1.",
+                            "nickname": "spec-reviewer-task-1",
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spec",
+                        "output": json.dumps({"agent_id": "spec-1", "nickname": "spec-reviewer-task-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["spec-1"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spec_wait",
+                        "output": json.dumps(
+                            {"timed_out": False, "status": {"spec-1": {"completed": "ISSUE: missing required test"}}}
+                        ),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: reviewer_issue_fix_required", transcript)
+        self.assertIn("send_input_target: impl-1", transcript)
+
     def test_external_response_normalizes_multi_agent_wait_alias_and_arguments(self):
         body = json.dumps(
             {
@@ -3269,6 +4290,169 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(call["arguments"])["targets"], ["019f-child"])
         self.assertEqual(json.loads(call["arguments"])["timeout_ms"], 1000)
 
+    def test_text_compat_rewrites_duplicate_spawn_call_to_wait_existing_agent(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_repeated_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "return duplicate child"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(
+            body,
+            "ollama_cloud",
+            event_context={
+                "request_id": "req",
+                "tool_protocol": "text_compat",
+                "subagent_open_agent_ids": ["019f-child"],
+                "subagent_spawn_allowed": False,
+                "subagent_lifecycle_complete": False,
+            },
+        )
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["type"], "function_call")
+        self.assertEqual(call["namespace"], "multi_agent_v1")
+        self.assertEqual(call["name"], "wait_agent")
+        self.assertEqual(json.loads(call["arguments"])["targets"], ["019f-child"])
+
+    def test_text_compat_allows_append_spawn_when_state_allows_spawn(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_append_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "return child-b"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(
+            body,
+            "ollama_cloud",
+            event_context={
+                "request_id": "req",
+                "tool_protocol": "text_compat",
+                "subagent_open_agent_ids": ["019f-child-a"],
+                "subagent_spawn_allowed": True,
+                "subagent_lifecycle_complete": False,
+            },
+        )
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "spawn_agent")
+        self.assertEqual(call["namespace"], "multi_agent_v1")
+
+    def test_chat_tools_response_guard_suppresses_duplicate_spawn_arguments(self):
+        request_body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use subagent-driven development for Task 1."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "message": "Implement Task 1 exactly.",
+                            "nickname": "implementer-task-1",
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl",
+                        "output": json.dumps({"agent_id": "impl-1", "nickname": "implementer-task-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["impl-1"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl_wait",
+                        "output": json.dumps({"timed_out": False, "status": {"impl-1": {"completed": "DONE"}}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+        compatible_request_body(
+            request_body,
+            {"name": "ollama_cloud", "upstream_format": "chat_completions", "tool_protocol": "chat_tools"},
+            event_context=event_context,
+        )
+        response_body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_duplicate_impl",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps(
+                            {"message": "Implement Task 1 exactly.", "nickname": "implementer-task-1"}
+                        ),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(response_body, "ollama_cloud", event_context=event_context)
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(payload["output"][0]["type"], "message")
+        self.assertIn("required_next_action", transcript)
+        self.assertIn("distinct role/task", transcript)
+
+    def test_text_compat_suppresses_spawn_after_lifecycle_complete(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_repeated_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "return child-again"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(
+            body,
+            "ollama_cloud",
+            event_context={
+                "request_id": "req",
+                "tool_protocol": "text_compat",
+                "subagent_open_agent_ids": [],
+                "subagent_spawn_allowed": False,
+                "subagent_lifecycle_complete": True,
+            },
+        )
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("spawn_agent", transcript)
+        self.assertIn("required_next_action", transcript)
+        self.assertIn("final", transcript.lower())
+
     def test_external_response_normalizes_mcp_node_repl_alias(self):
         body = json.dumps(
             {
@@ -3289,6 +4473,88 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(call["name"], "js")
         self.assertEqual(call["namespace"], "mcp__node_repl")
         self.assertEqual(json.loads(call["arguments"])["code"], "1+1")
+
+    def test_external_response_flattens_codex_apps_namespace_call(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_read",
+                        "namespace": "mcp__codex_apps__local_tool_gateway_",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "docs/plan.md"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
+    def test_external_response_keeps_codex_apps_flat_alias(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_read",
+                        "name": "mcp__codex_apps__local_tool_gateway___read_file",
+                        "arguments": json.dumps({"path": "docs/plan.md"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed)["output"][0]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
+    def test_external_sse_flattens_codex_apps_namespace_call(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_read",
+                "namespace": "mcp__codex_apps__local_tool_gateway_",
+                "name": "read_file",
+                "arguments": json.dumps({"path": "docs/plan.md"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
+
+    def test_external_sse_keeps_codex_apps_flat_alias(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "mcp__codex_apps__local_tool_gateway___read_file",
+                "arguments": json.dumps({"path": "docs/plan.md"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req"})
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call["name"], "mcp__codex_apps__local_tool_gateway___read_file")
+        self.assertNotIn("namespace", call)
+        self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
 
     def test_external_sse_normalizes_tool_search_function_call(self):
         payload = {

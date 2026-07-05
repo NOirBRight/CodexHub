@@ -755,8 +755,10 @@ test("provider endpoint probe persists detected formats and selects the recommen
   const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
 
   assert.match(typesSource, /available_upstream_formats\?: UpstreamFormat\[\] \| null;/);
+  assert.match(typesSource, /tool_protocol\?: ToolProtocol \| null;/);
+  assert.match(typesSource, /recommended_tool_protocol: ToolProtocol;/);
   assert.match(pageSource, /async function persistProviderProbeResult\(providerId: string, result: UpstreamFormatProbeResult\)/);
-  assert.match(pageSource, /provider\.id === providerId \? applyProviderProbeAvailability\(provider, result\) : provider/);
+  assert.match(pageSource, /provider\.id === providerId \? applyProviderProbeResult\(provider, result\) : provider/);
   assert.match(pageSource, /const detectedFormat = probeDetectedEndpointFormat\(result\);/);
   assert.match(pageSource, /detectedFormat[\s\S]*t\("providers\.probeCompleted"/);
   assert.match(pageSource, /t\("providers\.probeNoSupportedEndpoint"\)/);
@@ -770,9 +772,12 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(addProviderPanel, /onFormChange\(applyAddProviderProbeResult\(form, result\)\);/);
   assert.match(providersSource, /function probeDetectedEndpointFormat\([\s\S]*?normalizedProbeEndpointFormat\(result\.recommended_format\) \?\? probeAvailableFormats\(result\)\[0\] \?\? null/);
   assert.match(providersSource, /function normalizedProbeEndpointFormat\([\s\S]*?normalized === "responses" \|\| normalized === "response"/);
-  assert.match(providersSource, /function applyProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? provider\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),/);
-  assert.match(providersSource, /function applyProviderProbeAvailability\([\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?\};/);
-  assert.match(providersSource, /function applyAddProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? form\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),/);
+  assert.match(providersSource, /function applyProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? provider\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
+  assert.match(providersSource, /function applyProviderProbeAvailability\([\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,[\s\S]*?\};/);
+  assert.match(providersSource, /function applyAddProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? form\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
+  assert.match(providersSource, /function toolProtocolLabel\(value\?: ToolProtocol \| null\)/);
+  assert.match(providersSource, /toolProtocol=\{draft\.tool_protocol\}/);
+  assert.match(providersSource, /toolProtocol=\{form\.tool_protocol\}/);
   assert.match(
     providersSource,
     /const recommendedFormat = normalizedProbeEndpointFormat\(result\.recommended_format\);[\s\S]*if \(recommendedFormat && !formats\.includes\(recommendedFormat\)\) \{[\s\S]*formats\.push\(recommendedFormat\);/,

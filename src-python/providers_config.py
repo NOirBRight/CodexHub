@@ -44,6 +44,7 @@ EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
 }
 EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
 UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages"}
+TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 
 
 @dataclass
@@ -71,6 +72,7 @@ class ProviderConfig:
     api_key: str
     upstream_format: str = "auto"
     available_upstream_formats: tuple[str, ...] = ()
+    tool_protocol: str = "auto"
     display_prefix: str | None = None
     sort_order: int = 0
     enabled: bool = True
@@ -198,6 +200,7 @@ def build_external_model_index(
                 "base_url": base_url,
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
+                "tool_protocol": provider.tool_protocol,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -290,6 +293,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             api_key=_string_field(raw_provider.get("api_key")),
             upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
             available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
+            tool_protocol=_tool_protocol_field(raw_provider.get("tool_protocol")),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
@@ -323,6 +327,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             chunks.append(_toml_string_line("upstream_format", provider.upstream_format))
         if provider.available_upstream_formats:
             chunks.append(_toml_string_list_line("available_upstream_formats", provider.available_upstream_formats))
+        if provider.tool_protocol and provider.tool_protocol != "auto":
+            chunks.append(_toml_string_line("tool_protocol", provider.tool_protocol))
         chunks.extend(
             [
                 _toml_int_line("sort_order", provider.sort_order),
@@ -482,6 +488,11 @@ def _upstream_formats_field(value: Any) -> tuple[str, ...]:
         if upstream_format != "auto" and upstream_format not in result:
             result.append(upstream_format)
     return tuple(result)
+
+
+def _tool_protocol_field(value: Any) -> str:
+    tool_protocol = _string_field(value, "auto").strip().lower()
+    return tool_protocol if tool_protocol in TOOL_PROTOCOLS else "auto"
 
 
 def _int_field(value: Any, default: int) -> int:

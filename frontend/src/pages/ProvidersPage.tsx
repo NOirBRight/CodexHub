@@ -29,6 +29,7 @@ import type {
   Model,
   Provider,
   Settings,
+  ToolProtocol,
   UpstreamFormat,
   UpstreamFormatProbeResult,
 } from "../lib/types";
@@ -79,6 +80,7 @@ const emptyProvider = {
   api_key: "",
   upstream_format: "responses" as UpstreamFormat,
   available_upstream_formats: [] as UpstreamFormat[],
+  tool_protocol: "auto" as ToolProtocol,
   display_prefix: "",
   models: [] as Model[],
 };
@@ -870,7 +872,7 @@ export function ProvidersPage({
 
   async function persistProviderProbeResult(providerId: string, result: UpstreamFormatProbeResult) {
     const nextProviders = providers.map((provider) =>
-      provider.id === providerId ? applyProviderProbeAvailability(provider, result) : provider,
+      provider.id === providerId ? applyProviderProbeResult(provider, result) : provider,
     );
     setProviders(nextProviders);
     try {
@@ -920,6 +922,7 @@ export function ProvidersPage({
           api_key: nextForm.api_key.trim() || null,
           upstream_format: nextForm.upstream_format,
           available_upstream_formats: normalizeEndpointFormats(nextForm.available_upstream_formats),
+          tool_protocol: nextForm.tool_protocol,
           display_prefix: nextForm.display_prefix.trim() || null,
           sort_order: nextSortOrder,
           enabled: true,
@@ -1752,6 +1755,7 @@ function ProviderDetail({
               value={draft.upstream_format ?? "auto"}
               result={probeResult}
               availableFormats={draft.available_upstream_formats}
+              toolProtocol={draft.tool_protocol}
               probeDisabled={busy === "probe" || !draft.base_url.trim()}
               testState={endpointTestState}
               onChange={(upstreamFormat) => setDraft({ ...draft, upstream_format: upstreamFormat })}
@@ -2468,6 +2472,7 @@ function normalizeProviderEndpointSelection(provider: Provider): Provider {
         ? "responses"
         : provider.upstream_format,
     available_upstream_formats: normalizeEndpointFormats(provider.available_upstream_formats),
+    tool_protocol: provider.tool_protocol ?? "auto",
   };
 }
 
@@ -2518,6 +2523,7 @@ function applyProviderProbeResult(provider: Provider, result: UpstreamFormatProb
     ...provider,
     upstream_format: detectedFormat ?? provider.upstream_format,
     available_upstream_formats: probeAvailableFormats(result),
+    tool_protocol: result.recommended_tool_protocol,
   };
 }
 
@@ -2525,6 +2531,7 @@ function applyProviderProbeAvailability(provider: Provider, result: UpstreamForm
   return {
     ...provider,
     available_upstream_formats: probeAvailableFormats(result),
+    tool_protocol: result.recommended_tool_protocol,
   };
 }
 
@@ -2534,6 +2541,7 @@ function applyAddProviderProbeResult(form: AddProviderForm, result: UpstreamForm
     ...form,
     upstream_format: detectedFormat ?? form.upstream_format,
     available_upstream_formats: probeAvailableFormats(result),
+    tool_protocol: result.recommended_tool_protocol,
   };
 }
 
@@ -2760,6 +2768,7 @@ function AddProviderPanel({
               value={form.upstream_format}
               result={probeResult}
               availableFormats={form.available_upstream_formats}
+              toolProtocol={form.tool_protocol}
               probeDisabled={busy === "probe" || !form.base_url.trim()}
               testState={endpointTestState}
               onChange={(upstreamFormat) => onFormChange({ ...form, upstream_format: upstreamFormat })}
@@ -2808,6 +2817,7 @@ function EndpointSelectionPanel({
   probeDisabled,
   result,
   testState,
+  toolProtocol,
   value,
 }: {
   availableFormats?: UpstreamFormat[] | null;
@@ -2816,6 +2826,7 @@ function EndpointSelectionPanel({
   probeDisabled: boolean;
   result?: UpstreamFormatProbeResult | null;
   testState: InlineTestState;
+  toolProtocol?: ToolProtocol | null;
   value?: UpstreamFormat | null;
 }) {
   const { t } = useTranslation();
@@ -2824,7 +2835,10 @@ function EndpointSelectionPanel({
 
   return (
     <div className="grid min-w-0 gap-1 text-sm font-medium text-slate-700">
-      <span>{t("common.endpointSelection")}</span>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span>{t("common.endpointSelection")}</span>
+        <span className="truncate text-xs font-medium text-slate-500">{toolProtocolLabel(toolProtocol)}</span>
+      </div>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
         <EndpointFormatSelect availableFormats={mergedAvailableFormats} value={selected} onChange={onChange} />
         <button
@@ -2968,6 +2982,22 @@ function upstreamFormatLabel(value?: UpstreamFormat | null, t?: Translate) {
     return t?.("providers.upstreamFormats.anthropicMessages") ?? i18n.t("providers.upstreamFormats.anthropicMessages");
   }
   return t?.("providers.upstreamFormats.responses") ?? i18n.t("providers.upstreamFormats.responses");
+}
+
+function toolProtocolLabel(value?: ToolProtocol | null) {
+  if (value === "responses_structured") {
+    return "Structured Responses tools";
+  }
+  if (value === "chat_tools") {
+    return "Chat tool calls";
+  }
+  if (value === "text_compat") {
+    return "Gateway compatibility";
+  }
+  if (value === "none") {
+    return "Tools unavailable";
+  }
+  return "Auto tools";
 }
 
 function probeAvailableFormats(result?: UpstreamFormatProbeResult | null): UpstreamFormat[] {

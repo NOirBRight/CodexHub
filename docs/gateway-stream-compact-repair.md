@@ -1,12 +1,14 @@
-# Gateway Stream and Compact Repair Note
+# Gateway Stream / Compact / Client Protocol Repair
+
+日期：2026-07-05
 
 ## 背景
 
-2026-07-05 的故障排查覆盖了三类现象：
+本轮排查覆盖三类现象：
 
-- Codex App 内部会话频繁重连，集中出现在 large Responses SSE 请求。
-- ZCode 使用 `codexhub-openai/gpt-5.5` 做 compact 时反复出现 Bad Gateway、Headers Timeout、Invalid JSON response。
-- ZCode 切到 `codexhub-ollama-cloud/glm-5.2` 后 compact 仍失败，但这次上游 HTTP 200，返回空文本。
+- Codex App 会话在长 Responses SSE 请求中频繁重连，典型错误为 `stream closed before response.completed`。
+- ZCode 使用 `codexhub-openai/gpt-5.5` 做 compact 时出现 Bad Gateway、Headers Timeout、Invalid JSON response。
+- ZCode 切到 `codexhub-ollama-cloud/glm-5.2` 后 compact 仍失败，上游 HTTP 200 但返回空文本。
 
 相关证据来自：
 
@@ -16,21 +18,22 @@
 
 ## 结论
 
-这里有两个独立根因，gateway 都可以改善。
-
-第一类是模型无关的长 SSE/stream 完整性问题。GPT-5.5 最明显，是因为流量最大、上下文最大；但日志显示 `gpt-5.4-mini`、历史 `gpt-5.4`、`ollama_cloud`、`volcengine` 也出现过 timeout、reset、remote disconnect、502。修复应落在 gateway 的通用 SSE 完整性层，而不是只对 `openai/gpt-5.5` 做特殊处理。
-
-第二类是 compact 语义没有被 gateway 识别。ZCode 的 GLM-5.2 compact 请求明确要求 text-only 且禁止工具，但请求仍带 `57` 个 tools 和 `tool_choice:auto`，gateway 又额外注入了 5 个 multi-agent tools。上游返回 HTTP 200、`finishReason: stop`、`text: ""`，ZCode 最终报 `Failed to generate compact summary`。这次直接命中的是 ZCode，但机制风险不是 ZCode 专属：任何客户端发 summary/compact/text-only 请求时仍带工具，都可能触发同类空输出或工具误选。
+- SSE 完整性是 gateway 通用问题，不应按模型名特殊处理。GPT-5.5 最明显，是因为长流式请求更大更久；日志中其他 OpenAI、Ollama Cloud、Volcengine 模型也出现过 timeout、reset、remote disconnect、502。
+- compact 是 gateway 的通用 request kind，不是 ZCode 专用逻辑。它沿用同一次路由选出的 provider 和 `upstream_format`，只额外做工具剥离、空响应识别和 compact 专用重试。
+- ZCode、OpenCode、Pi、OMP 等第三方客户端导出不应把某个 provider 固定成某个端点协议。客户端配置必须读取每个 provider 的 `upstream_format`：
+  - `responses` 导出为 OpenAI Responses 路径。
+  - `chat_completions` 导出为 Chat Completions 路径。
+  - `anthropic_messages` 对 OpenAI-compatible 客户端仍走 Chat Completions 兼容路径。
 
 ## 关键证据
 
-### 长 SSE/stream
+### 长 SSE / Stream
 
 2026-07-05 UTC 当天：
 
 - `Codex App + openai/gpt-5.5`: 576 个 stream starts，535 成功，40 个明确失败，约 6.9%。
 - 主要失败类型：`TimeoutError`、`ConnectionResetError`、`ConnectionAbortedError`、`request_complete status=502`。
-- `Codex App + openai/gpt-5.4-mini`: 同日也出现 `upstream_stream_interrupted TimeoutError` 和 `ConnectionAbortedError`。
+- `Codex App + openai/gpt-5.4-mini` 同日也出现 `upstream_stream_interrupted TimeoutError` 和 `ConnectionAbortedError`。
 
 历史日志还显示：
 
@@ -51,37 +54,53 @@ ZCode compact 请求 `d01229de-0a11-491b-9236-3d35c7afc317`：
 - 上游结果：HTTP 200，`finishReason: stop`，`textLength: 0`，`toolCallCount: 0`。
 - ZCode 之后记录 `compact.failed`，用户可见错误为 `Failed to generate compact summary`。
 
-## 当前代码风险点
+### ZCode 协议配置 Gap
 
-`src-python/codex_proxy.py` 的几个路径会把不完整流伪装成成功：
+CodexHub provider 设置中 `ollama-cloud` 可以配置为 `upstream_format = "responses"`，catalog 也能导出 Responses endpoint。但 ZCode v2 的 `D:\zcode\.zcode\v2\config.json` 曾只写入 `options.baseURL`，没有写入 `apiFormat` 和 `endpoints.paths`。
 
-- `_events_to_responses_body(events)` 会无条件合成 `"status":"completed"`。
-- `_response_events_to_chat_stream_chunks(events)` 在没有 finish 时默认 `finish_reason = "stop"`。
-- Chat Completions SSE 收集后会无条件写出 `data: [DONE]`。
-- Responses SSE passthrough 遇到 EOF 时目前没有统一校验是否看到了 `response.completed`、`response.failed` 或等价 terminal event。
+结果是 ZCode 重新生成 `bots-model-cache.v2.json` 时回退成 `openai-chat-completions`，造成 ZCode 使用 Chat，而 CodexHub/Gateway 中同一个 provider 已设置为 Responses。
 
-这些行为会让客户端看到半截流、坏 JSON、或看起来成功但内容为空的响应。
+## 已实现修复
 
-## 修复原则
+### SSE Framing
 
-1. Stream 完整性按 wire format 修，不按模型名修。
-2. Compact 是 request kind，不是 ZCode 私有逻辑。
-3. 对已经开始下发的 SSE，不能改 HTTP status；必须发送合法 downstream SSE error，并关闭连接。
-4. 对还没下发的 buffered/non-stream 响应，可以返回结构化 502。
-5. Compact 可做 gateway 内部幂等重试，因为它不应包含工具调用副作用。
-6. 非 compact 的空文本先做 telemetry，不直接全局改成 502，避免误伤正常工具调用或特殊模型协议。
+- Buffered Responses SSE 必须看到 terminal event 才能合成 non-stream JSON。
+- Responses SSE 转 Chat Completions SSE 必须看到 terminal event 才能写 finish chunk 和 `[DONE]`。
+- Chat Completions SSE 必须看到 `[DONE]` 或 finish chunk 才能写 `[DONE]`。
+- Responses SSE passthrough 会跟踪 `response.completed`、`response.failed`、`response.incomplete`、`error`；EOF 前没 terminal 时写 downstream SSE error。
+- terminal event 之后会补齐事件分隔，避免客户端继续等待。
 
-## Gateway 修复范围
+### Compact
 
 - 支持显式请求类型 header：`x-query-source: compact`、`x-request-kind: compact`。
 - 保留 prompt heuristic：检测 `Respond with TEXT ONLY`、`Do NOT call any tools`、`summary/compact`、`<summary>`。
 - compact 请求进入 upstream 前删除 `tools`、`tool_choice`，并禁止 gateway 注入 Codex/multi-agent tools。
-- compact 响应为空时返回 `compact_empty_response`，并记录 request id、query id、session id、trace id。
-- buffered Responses SSE 必须看到 `response.completed` 才能合成 non-stream JSON。
-- Responses SSE 转 Chat Completions SSE 必须看到 `response.completed` 才能写 finish chunk 和 `[DONE]`。
-- Chat Completions SSE 必须看到 `[DONE]` 或 finish chunk 才能写 `[DONE]`。
-- Responses SSE passthrough 必须跟踪 terminal event；EOF 前没 terminal 时写 downstream SSE error。
-- GPT-5.5 catalog/context 从 `272000` 统一到 `258400`，避免客户端贴着错误上限发请求。
+- compact 响应为空时返回 `compact_empty_response`。
+- compact 空响应默认最多重试 3 次。
+
+### Client Protocol Export
+
+ZCode v2 config 导出现在写入：
+
+- `apiFormat`
+- `endpoints.baseURL`
+- `endpoints.paths.openai-compatible`
+- 保留 `options.baseURL` 作为旧版本兼容字段
+
+### Vision Proxy
+
+- vision 子请求保持 text-only。
+- `inject_codex_tools=False`
+- adapter 转换后再次剥离 `tools` 和 `tool_choice`。
+- vision 子请求默认只尝试 1 次，不继承普通生成或 compact 的重试预算。
+
+## 错误时限与重试预算
+
+- 已开始输出后，上游静默默认 `60` 秒返回 `upstream_stream_idle_timeout`。
+- 未开始输出但 SSE 已建立后，上游静默默认 `90` 秒返回 `upstream_stream_idle_timeout`，event log 字段 `stream_idle_phase=pre_output`。
+- compact 空响应最多重试 `3` 次，可通过 `gateway_compact_retry_max_attempts` 或 `CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS` 调整。
+- main generation 的可见输出前重试最多 `3` 次，可通过 `gateway_main_generation_retry_max_attempts` 或 `CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS` 调整。
+- image proxy vision 请求保持 `1` 次，不继承全局 retry budget。
 
 ## Client 配合建议
 
@@ -94,14 +113,11 @@ ZCode compact 请求 `d01229de-0a11-491b-9236-3d35c7afc317`：
 
 ### 其他客户端
 
-- 如果有 summary、memory compaction、session compression、handoff summary 等 text-only 请求，也应发送显式 request kind。
+- summary、memory compaction、session compression、handoff summary 等 text-only 请求也应发送显式 request kind。
 - 不应在 text-only summary 请求中携带工具 schema。
-- 遇到 gateway 的 `compact_empty_response`、`upstream_stream_incomplete` 时可安全重试同一个 compact 请求。
+- 遇到 `compact_empty_response`、`upstream_stream_incomplete` 时可安全重试同一个 compact 请求。
 
-## 验收标准
+## 不做的事
 
-- ZCode GLM-5.2 compact 请求不再带工具进入上游，也不会把 HTTP 200 空文本当作成功。
-- GPT-5.5 compact 的 Bad Gateway/Invalid JSON 类故障减少；仍发生上游断流时，客户端收到结构化 SSE error 或 JSON error。
-- Codex App 重连不再由 gateway 合成假成功或半截 `[DONE]` 放大。
-- gateway event log 可按 `request_kind=compact`、`upstream_stream_incomplete`、`compact_empty_response` 检索。
-- `python -m unittest discover -s tests -q` 和 `cargo test -q` 通过。
+- 不在 gateway 中自动续写已开始输出后的 agent turn。原因是工具调用和文件编辑可能已经发生，gateway 无法安全重放上下文并保证副作用幂等。
+- 不把某个 provider 永久固定成 Responses 或 Chat。协议必须来自 provider 配置项。
