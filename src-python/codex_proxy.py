@@ -27,6 +27,7 @@ from catalog import canonical_model_id, deny_match_model_id, load_catalog_models
 from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias
+from subagent_state import build_subagent_state, state_guidance_message
 import proxy_telemetry
 
 try:
@@ -181,6 +182,8 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
         ],
     }
 ]
+TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
+STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -1141,12 +1144,44 @@ def _responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
 
     messages: list[dict[str, Any]] = []
     for item in value:
-        if not isinstance(item, dict) or item.get("type") != "message":
+        if not isinstance(item, dict):
             continue
-        role = item.get("role")
-        role = role if role in {"system", "user", "assistant"} else "user"
-        content = _responses_content_to_chat_content(item.get("content"))
-        messages.append({"role": role, "content": content})
+        item_type = item.get("type")
+        if item_type == "message":
+            role = item.get("role")
+            role = role if role in {"system", "user", "assistant"} else "user"
+            content = _responses_content_to_chat_content(item.get("content"))
+            messages.append({"role": role, "content": content})
+            continue
+        if item_type == "function_call":
+            call_id = item.get("call_id")
+            name = item.get("name")
+            if not isinstance(call_id, str) or not isinstance(name, str):
+                continue
+            arguments = item.get("arguments")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=True, separators=(",", ":"))
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": arguments},
+                        }
+                    ],
+                }
+            )
+            continue
+        if item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str):
+                continue
+            output = item.get("output")
+            content = output if isinstance(output, str) else json.dumps(output, ensure_ascii=True, separators=(",", ":"))
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
     return messages
 
 
@@ -2329,6 +2364,79 @@ def _node_repl_function_call_name(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
+    configured = str(upstream.get("tool_protocol") or "auto").strip().lower()
+    if configured in TOOL_PROTOCOLS and configured != "auto":
+        return configured
+    upstream_format = str(upstream.get("upstream_format") or "").strip().lower()
+    if upstream_format == "responses":
+        return "responses_structured"
+    if upstream_format == "chat_completions":
+        return "chat_tools"
+    return "text_compat"
+
+
+def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    if item.get("type") != "function_call":
+        return None
+    tool_name = _multi_agent_function_call_name(item)
+    if tool_name is not None:
+        rewritten = dict(item)
+        rewritten.pop("namespace", None)
+        rewritten["name"] = f"multi_agent_v1__{tool_name}"
+        normalized, _, args_changed = _normalize_multi_agent_arguments(rewritten.get("arguments"), tool_name)
+        if args_changed:
+            rewritten["arguments"] = normalized
+        return rewritten
+    node_name = _node_repl_function_call_name(item)
+    if node_name is not None:
+        rewritten = dict(item)
+        rewritten.pop("namespace", None)
+        rewritten["name"] = f"{NODE_REPL_NAMESPACE}__{node_name}"
+        return rewritten
+    return dict(item)
+
+
+def _rewrite_structured_tool_input_items(
+    payload: dict[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+    upstream_name: str | None = None,
+) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    changed = False
+    rewritten_items: list[Any] = []
+    for item in input_items:
+        if not isinstance(item, dict):
+            rewritten_items.append(item)
+            continue
+        if item.get("type") == "function_call":
+            rewritten = _structured_tool_function_call_item(item)
+            rewritten_items.append(rewritten if rewritten is not None else item)
+            changed = changed or rewritten != item
+            continue
+        if item.get("type") == "function_call_output":
+            rewritten_items.append(dict(item))
+            continue
+        replacement = _compatible_internal_message(item)
+        if replacement is not None:
+            rewritten_items.append(replacement)
+            changed = True
+        else:
+            rewritten_items.append(item)
+
+    if changed:
+        payload["input"] = rewritten_items
+        _write_adapter_event(
+            event_context,
+            "structured_tool_input_items_rewritten",
+            upstream=upstream_name,
+        )
+    return changed
+
+
 def _inject_explicit_codex_tools(
     payload: dict[str, Any],
     include_tool_search: bool = True,
@@ -3438,6 +3546,100 @@ def _downgrade_invalid_third_party_tool_calls(value: Any) -> tuple[Any, bool]:
     return (rewritten if changed else value), changed
 
 
+def _guard_duplicate_multi_agent_spawn_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    tool_protocol = str((event_context or {}).get("tool_protocol") or "")
+    if tool_protocol not in {"text_compat", "chat_tools"}:
+        return value, False
+
+    spawn_allowed = bool((event_context or {}).get("subagent_spawn_allowed"))
+    if spawn_allowed:
+        return value, False
+
+    lifecycle_complete = bool((event_context or {}).get("subagent_lifecycle_complete"))
+    open_agent_ids_value = (event_context or {}).get("subagent_open_agent_ids")
+    open_agent_ids = [agent_id for agent_id in open_agent_ids_value if isinstance(agent_id, str)] if isinstance(open_agent_ids_value, list) else []
+
+    return _guard_duplicate_multi_agent_spawn_calls_inner(
+        value,
+        lifecycle_complete=lifecycle_complete,
+        open_agent_ids=open_agent_ids,
+    )
+
+
+def _guard_duplicate_multi_agent_spawn_calls_inner(
+    value: Any,
+    *,
+    lifecycle_complete: bool,
+    open_agent_ids: list[str],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _guard_duplicate_multi_agent_spawn_calls_inner(
+                item,
+                lifecycle_complete=lifecycle_complete,
+                open_agent_ids=open_agent_ids,
+            )
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    if _is_multi_agent_spawn_function_call(value):
+        if lifecycle_complete:
+            return (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": (
+                        "required_next_action: write the final concise report now. "
+                        "The requested subagent lifecycle is already complete."
+                    ),
+                },
+                True,
+            )
+        if open_agent_ids:
+            rewritten = dict(value)
+            rewritten["namespace"] = "multi_agent_v1"
+            rewritten["name"] = "wait_agent"
+            rewritten["arguments"] = json.dumps(
+                {"targets": open_agent_ids, "timeout_ms": 60000},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            return rewritten, True
+        return value, False
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _guard_duplicate_multi_agent_spawn_calls_inner(
+            item,
+            lifecycle_complete=lifecycle_complete,
+            open_agent_ids=open_agent_ids,
+        )
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
+def _is_multi_agent_spawn_function_call(value: Mapping[str, Any]) -> bool:
+    if value.get("type") != "function_call":
+        return False
+    name = value.get("name")
+    namespace = value.get("namespace")
+    if namespace == "multi_agent_v1" and name == "spawn_agent":
+        return True
+    return name == "multi_agent_v1__spawn_agent"
+
+
 def _replace_embedded_model(body: bytes, model_id: str, upstream_model: str) -> bytes:
     model_token = json.dumps(model_id).encode("utf-8")
     upstream_token = json.dumps(upstream_model).encode("utf-8")
@@ -3502,58 +3704,96 @@ def compatible_request_body(
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
-    changed = _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name)
+    tool_protocol = _external_tool_protocol(upstream)
+    if isinstance(event_context, dict):
+        event_context["tool_protocol"] = tool_protocol
+    if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
+        changed = _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name)
+    elif tool_protocol == "none":
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            filtered_tools = [tool for tool in tools if not _is_multi_agent_tool_schema(tool)]
+            if len(filtered_tools) != len(tools):
+                payload["tools"] = filtered_tools
+                changed = True
+        else:
+            changed = False
+    else:
+        changed = _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name)
     input_items = payload.get("input")
     if _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
         changed = True
         input_items = payload.get("input")
     include_tool_search = False
-    spawned_agent_ids = _spawned_multi_agent_ids(input_items)
-    open_agent_ids = _open_multi_agent_ids(input_items)
-    completed_wait_agent_ids = set(_completed_multi_agent_wait_ids(input_items))
-    closed_agent_ids = _closed_multi_agent_ids(input_items)
-    wait_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id not in completed_wait_agent_ids]
-    close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
-    has_open_agent = _has_open_multi_agent_context(input_items)
-    requested_spawn_count = _requested_multi_agent_spawn_count(input_items)
-    single_loop_multi_agent_request = _has_single_loop_multi_agent_request(input_items)
-    bounded_multi_agent_request = single_loop_multi_agent_request or requested_spawn_count is not None
-    spawn_more_required = (
-        requested_spawn_count is not None and len(spawned_agent_ids) < requested_spawn_count
-    )
-    lifecycle_complete = (
-        bounded_multi_agent_request
-        and bool(closed_agent_ids)
-        and not has_open_agent
-        and (requested_spawn_count is None or len(closed_agent_ids) >= requested_spawn_count)
+    subagent_state = build_subagent_state(input_items) if tool_protocol == "text_compat" else None
+    subagent_state_active = subagent_state is not None and (
+        bool(subagent_state.agents) or subagent_state.requested_count is not None
     )
     node_repl_single_step_complete = _has_completed_single_step_node_repl_context(input_items)
-    include_spawn_agent = not has_open_agent
-    include_wait_agent = (not has_open_agent) or not open_agent_ids or bool(wait_agent_ids)
-    include_close_agent = (not has_open_agent) or not open_agent_ids or bool(close_agent_ids)
-    include_resume_agent = True
-    include_send_input = True
-    if bounded_multi_agent_request:
-        include_resume_agent = False
-        include_send_input = False
-        if spawn_more_required:
-            include_spawn_agent = True
-            include_wait_agent = False
-            include_close_agent = False
-        elif not has_open_agent and not closed_agent_ids:
-            include_wait_agent = False
-            include_close_agent = False
-    if lifecycle_complete:
-        include_spawn_agent = False
-        include_wait_agent = False
-        include_close_agent = False
-        include_resume_agent = False
-        include_send_input = False
-        state_hint = _multi_agent_lifecycle_complete_message(closed_agent_ids)
-    elif spawn_more_required and spawned_agent_ids:
-        state_hint = _multi_agent_spawn_more_message(spawned_agent_ids, requested_spawn_count)
+
+    if subagent_state_active and subagent_state is not None:
+        spawned_agent_ids = subagent_state.spawned_agent_ids
+        open_agent_ids = subagent_state.open_agent_ids
+        wait_agent_ids = subagent_state.wait_agent_ids
+        close_agent_ids = subagent_state.close_agent_ids
+        closed_agent_ids = subagent_state.closed_agent_ids
+        lifecycle_complete = subagent_state.lifecycle_complete
+        include_spawn_agent = subagent_state.next_action == "spawn" and not lifecycle_complete
+        include_wait_agent = subagent_state.next_action == "wait" and bool(wait_agent_ids)
+        include_close_agent = subagent_state.next_action == "close" and bool(close_agent_ids)
+        include_resume_agent = subagent_state.next_action == "send_input"
+        include_send_input = subagent_state.next_action == "send_input"
+        state_hint = state_guidance_message(subagent_state)
     else:
-        state_hint = _multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
+        spawned_agent_ids = _spawned_multi_agent_ids(input_items)
+        open_agent_ids = _open_multi_agent_ids(input_items)
+        completed_wait_agent_ids = set(_completed_multi_agent_wait_ids(input_items))
+        closed_agent_ids = _closed_multi_agent_ids(input_items)
+        wait_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id not in completed_wait_agent_ids]
+        close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
+        has_open_agent = _has_open_multi_agent_context(input_items)
+        requested_spawn_count = _requested_multi_agent_spawn_count(input_items)
+        single_loop_multi_agent_request = _has_single_loop_multi_agent_request(input_items)
+        bounded_multi_agent_request = single_loop_multi_agent_request or requested_spawn_count is not None
+        spawn_more_required = (
+            requested_spawn_count is not None and len(spawned_agent_ids) < requested_spawn_count
+        )
+        lifecycle_complete = (
+            bounded_multi_agent_request
+            and bool(closed_agent_ids)
+            and not has_open_agent
+            and (requested_spawn_count is None or len(closed_agent_ids) >= requested_spawn_count)
+        )
+        include_spawn_agent = not has_open_agent
+        include_wait_agent = (not has_open_agent) or not open_agent_ids or bool(wait_agent_ids)
+        include_close_agent = (not has_open_agent) or not open_agent_ids or bool(close_agent_ids)
+        include_resume_agent = True
+        include_send_input = True
+        if bounded_multi_agent_request:
+            include_resume_agent = False
+            include_send_input = False
+            if spawn_more_required:
+                include_spawn_agent = True
+                include_wait_agent = False
+                include_close_agent = False
+            elif not has_open_agent and not closed_agent_ids:
+                include_wait_agent = False
+                include_close_agent = False
+        if lifecycle_complete:
+            include_spawn_agent = False
+            include_wait_agent = False
+            include_close_agent = False
+            include_resume_agent = False
+            include_send_input = False
+            state_hint = _multi_agent_lifecycle_complete_message(closed_agent_ids)
+        elif spawn_more_required and spawned_agent_ids:
+            state_hint = _multi_agent_spawn_more_message(spawned_agent_ids, requested_spawn_count)
+        else:
+            state_hint = _multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
+    if isinstance(event_context, dict):
+        event_context["subagent_open_agent_ids"] = list(open_agent_ids)
+        event_context["subagent_spawn_allowed"] = bool(include_spawn_agent)
+        event_context["subagent_lifecycle_complete"] = bool(lifecycle_complete)
     if state_hint is not None and isinstance(input_items, list):
         input_items.append(state_hint)
         _write_adapter_event(
@@ -3576,7 +3816,8 @@ def compatible_request_body(
             model=payload.get("model") if isinstance(payload.get("model"), str) else None,
         )
         changed = True
-    if inject_codex_tools:
+    allow_codex_tools = tool_protocol != "none"
+    if inject_codex_tools and allow_codex_tools:
         tool_names_before = _function_tool_names(payload.get("tools"))
         if _inject_explicit_codex_tools(
             payload,
@@ -3669,6 +3910,8 @@ def compatible_response_body(
     changed = changed or alias_changed
     payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
     changed = changed or invalid_tool_changed
+    payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
+    changed = changed or duplicate_spawn_changed
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -3707,6 +3950,8 @@ def compatible_sse_line(
     changed = changed or alias_changed
     payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
     changed = changed or invalid_tool_changed
+    payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
+    changed = changed or duplicate_spawn_changed
     if not changed:
         return line
     return _sse_json_line(payload, line_ending)

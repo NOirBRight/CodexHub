@@ -503,7 +503,7 @@ mod tests {
         save_settings_with_paths, switch_mode_with_paths, CommandOutcome, CommandRunner,
         ConfigPaths,
     };
-    use crate::{Model, Provider, Settings, UpstreamFormat};
+    use crate::{Model, Provider, Settings, ToolProtocol, UpstreamFormat};
     use std::cell::RefCell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -528,6 +528,7 @@ mod tests {
                 UpstreamFormat::Responses,
                 UpstreamFormat::ChatCompletions,
             ]),
+            tool_protocol: Some(ToolProtocol::ChatTools),
             display_prefix: Some("Volc".to_string()),
             sort_order: Some(2),
             enabled: true,
@@ -578,6 +579,7 @@ mod tests {
         assert!(written.contains("[[providers.models]]"));
         assert!(written.contains("upstream_format = \"chat_completions\""));
         assert!(written.contains("available_upstream_formats"));
+        assert!(written.contains("tool_protocol = \"chat_tools\""));
         assert!(written.contains("\"responses\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
         assert!(written.contains("aliases"));
@@ -605,6 +607,7 @@ mod tests {
             api_key: Some("{env:ANTHROPIC_API_KEY}".to_string()),
             upstream_format: Some(UpstreamFormat::AnthropicMessages),
             available_upstream_formats: Some(vec![UpstreamFormat::AnthropicMessages]),
+            tool_protocol: Some(ToolProtocol::None),
             display_prefix: Some("anthropic/".to_string()),
             sort_order: Some(3),
             enabled: true,
@@ -623,6 +626,7 @@ mod tests {
         assert_json_eq(&loaded, &providers);
         assert!(written.contains("upstream_format = \"anthropic_messages\""));
         assert!(written.contains("available_upstream_formats = [\"anthropic_messages\"]"));
+        assert!(written.contains("tool_protocol = \"none\""));
     }
 
     #[test]

@@ -104,6 +104,8 @@ pub struct Provider {
     pub upstream_format: Option<UpstreamFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_upstream_formats: Option<Vec<UpstreamFormat>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_protocol: Option<ToolProtocol>,
     pub display_prefix: Option<String>,
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]
@@ -121,6 +123,16 @@ pub enum UpstreamFormat {
     Responses,
     ChatCompletions,
     AnthropicMessages,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProtocol {
+    Auto,
+    ResponsesStructured,
+    ChatTools,
+    TextCompat,
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

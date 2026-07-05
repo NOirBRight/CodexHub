@@ -190,3 +190,18 @@ FAIL: GLM 5.2 did not complete the live subagent lifecycle. Observed failure: <s
 - Placeholder scan: No placeholder markers are present; all commands and prompts are concrete.
 - Type consistency: Tool names consistently use `multi_agent_v1__spawn_agent`, `multi_agent_v1__wait_agent`, and `multi_agent_v1__close_agent`, with namespace fallback explicitly described for the model prompt.
 
+## Protocol Matrix Validation
+
+Run the same native subagent prompt across these provider capability modes:
+
+- `responses_structured`: `ollama-cloud/glm-5.2` through `POST http://127.0.0.1:9099/v1/providers/ollama-cloud/responses` with `tool_protocol = "responses_structured"`.
+- `chat_tools`: the same `ollama-cloud/glm-5.2` through `POST http://127.0.0.1:9099/v1/providers/ollama-cloud/chat/completions` with `tool_protocol = "chat_tools"`.
+- `text_compat`: the same `ollama-cloud/glm-5.2` forced to `tool_protocol = "text_compat"` for compatibility stress testing.
+
+Expected observations:
+
+- Responses structured: session JSONL keeps `function_call` and `function_call_output` items, not `Codex native multi_agent...` text messages.
+- Chat tools: upstream request contains `assistant.tool_calls` followed by `role: tool` messages with matching `tool_call_id`.
+- Text compat: duplicate `spawn_agent` attempts while an agent is open are rewritten to `wait_agent` for the existing `agent_id`; after the requested lifecycle is complete, repeated spawn is suppressed and the model is guided to final.
+
+Automation implemented on 2026-07-05 covers the matrix at unit level through Python routing tests, provider config/probe tests, Rust provider TOML roundtrip tests, and the provider UI contract/build.

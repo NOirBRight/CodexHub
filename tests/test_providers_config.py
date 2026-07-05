@@ -264,6 +264,7 @@ enabled = true
                 api_key="case-secret",
                 upstream_format="chat_completions",
                 available_upstream_formats=("responses", "chat_completions"),
+                tool_protocol="chat_tools",
                 models=[
                     ModelConfig(
                         id="alias-model",
@@ -294,6 +295,7 @@ enabled = true
         self.assertEqual(loaded[0].models[0].default_reasoning_level, "high")
         self.assertEqual(loaded[0].upstream_format, "chat_completions")
         self.assertEqual(loaded[0].available_upstream_formats, ("responses", "chat_completions"))
+        self.assertEqual(loaded[0].tool_protocol, "chat_tools")
         self.assertIsNone(loaded[0].models[1].upstream_model)
         self.assertIn('upstream_model = "Live-Case-Model"', raw_toml)
         self.assertIn('aliases = ["legacy-case-model"]', raw_toml)
@@ -302,10 +304,12 @@ enabled = true
         self.assertIn('default_reasoning_level = "high"', raw_toml)
         self.assertIn('upstream_format = "chat_completions"', raw_toml)
         self.assertIn('available_upstream_formats = ["responses", "chat_completions"]', raw_toml)
+        self.assertIn('tool_protocol = "chat_tools"', raw_toml)
 
         index = build_external_model_index(loaded)
         self.assertEqual(index["case-provider/alias-model"]["upstream_model"], "Live-Case-Model")
         self.assertEqual(index["case-provider/alias-model"]["upstream_format"], "chat_completions")
+        self.assertEqual(index["case-provider/alias-model"]["tool_protocol"], "chat_tools")
         self.assertEqual(index["case-provider/alias-model"]["input_modalities"], ("text", "image"))
         self.assertEqual(index["case-provider/alias-model"]["supported_reasoning_levels"], ("low", "high", "xhigh"))
         self.assertEqual(index["case-provider/alias-model"]["default_reasoning_level"], "high")

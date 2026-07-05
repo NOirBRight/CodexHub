@@ -292,6 +292,7 @@ class CatalogSyncTests(unittest.TestCase):
                 "api_key": "secret-test-key",
                 "upstream_model": "glm-5.2",
                 "upstream_format": "chat_completions",
+                "tool_protocol": "responses_structured",
                 "priority_base": 200,
                 "context_window": 1024000,
                 "max_output_tokens": 4096,
@@ -340,6 +341,10 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(
             by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["upstream_format"],
             "chat_completions",
+        )
+        self.assertEqual(
+            by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["tool_protocol"],
+            "responses_structured",
         )
         self.assertEqual(
             by_slug["volc/glm-5.2"]["description"],

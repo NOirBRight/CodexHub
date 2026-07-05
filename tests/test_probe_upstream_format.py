@@ -14,6 +14,7 @@ from probe_upstream_format import (
     model_ids_from_payload,
     probe,
     recommended_format,
+    recommended_tool_protocol,
     responses_stream_tool_ok,
 )
 
@@ -110,6 +111,36 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
         result["anthropic_text_ok"] = False
         self.assertEqual(recommended_format(result), UPSTREAM_FORMAT_AUTO)
 
+    def test_recommends_responses_structured_when_responses_tools_work(self) -> None:
+        result = {
+            "responses_tool_ok": True,
+            "responses_tool_stream_ok": False,
+            "chat_tool_ok": True,
+            "chat_tool_stream_ok": True,
+        }
+
+        self.assertEqual(recommended_tool_protocol(result), "responses_structured")
+
+    def test_recommends_chat_tools_when_only_chat_tools_work(self) -> None:
+        result = {
+            "responses_tool_ok": False,
+            "responses_tool_stream_ok": False,
+            "chat_tool_ok": True,
+            "chat_tool_stream_ok": False,
+        }
+
+        self.assertEqual(recommended_tool_protocol(result), "chat_tools")
+
+    def test_recommends_none_without_tool_support(self) -> None:
+        result = {
+            "responses_tool_ok": False,
+            "responses_tool_stream_ok": False,
+            "chat_tool_ok": False,
+            "chat_tool_stream_ok": False,
+        }
+
+        self.assertEqual(recommended_tool_protocol(result), "none")
+
     def test_probe_collects_all_lightweight_endpoint_capabilities(self) -> None:
         def fake_request_json(
             base_url: str,
@@ -125,8 +156,12 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             if path == "/models":
                 return True, 200, {"data": [{"id": "model-a"}]}, None
             if path == "/responses":
+                if payload and payload.get("tools"):
+                    return True, 200, {"output": [{"type": "function_call", "name": "get_weather", "call_id": "call_weather"}]}, None
                 return True, 200, {"id": "resp_1"}, None
             if path == "/chat/completions":
+                if payload and payload.get("tools"):
+                    return True, 200, {"choices": [{"message": {"tool_calls": [{"id": "call_weather", "function": {"name": "get_weather"}}]}}]}, None
                 return True, 200, {"choices": [{"message": {"content": "OK"}}]}, None
             if path == "/messages":
                 return False, 404, None, "not found"
@@ -136,12 +171,15 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             result = probe("https://example.test/v1", "test-key", None, 2)
 
         self.assertTrue(result["responses_text_ok"])
+        self.assertTrue(result["responses_tool_ok"])
         self.assertTrue(result["chat_text_ok"])
+        self.assertTrue(result["chat_tool_ok"])
         self.assertFalse(result["anthropic_text_ok"])
         self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
+        self.assertEqual(result["recommended_tool_protocol"], "responses_structured")
         self.assertEqual(
             [call.args[2] for call in request_json.call_args_list],
-            ["/models", "/responses", "/chat/completions", "/messages"],
+            ["/models", "/responses", "/chat/completions", "/messages", "/responses", "/chat/completions"],
         )
 
     def test_anthropic_message_shape_detection_is_lightweight(self) -> None:

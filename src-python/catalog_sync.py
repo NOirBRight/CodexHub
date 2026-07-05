@@ -636,6 +636,7 @@ def build_external_provider_model(
             "upstream_name": external_model["upstream_name"],
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "auto"),
+            "tool_protocol": external_model.get("tool_protocol", "auto"),
         }
     )
     context_source = external_model.get("context_source")

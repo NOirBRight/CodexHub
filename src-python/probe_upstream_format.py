@@ -335,6 +335,14 @@ def recommended_format(result: dict[str, Any]) -> str:
     return UPSTREAM_FORMAT_AUTO
 
 
+def recommended_tool_protocol(result: dict[str, Any]) -> str:
+    if result.get("responses_tool_ok") or result.get("responses_tool_stream_ok"):
+        return "responses_structured"
+    if result.get("chat_tool_ok") or result.get("chat_tool_stream_ok"):
+        return "chat_tools"
+    return "none"
+
+
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))[:300]
 
@@ -363,6 +371,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         "chat_tool_stream_ok": False,
         "anthropic_text_ok": False,
         "recommended_format": UPSTREAM_FORMAT_AUTO,
+        "recommended_tool_protocol": "none",
         "notes": notes,
     }
 
@@ -403,6 +412,26 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         else:
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
 
+    tool_checks = [
+        ("responses_tool_ok", "/responses", responses_tool_payload(model, stream=False), responses_tool_ok),
+        ("chat_tool_ok", "/chat/completions", chat_tool_payload(model, stream=False), chat_tool_ok),
+    ]
+    for key, path, body, validator in tool_checks:
+        ok, status, payload, detail = request_json(
+            base_url,
+            api_key,
+            path,
+            method="POST",
+            payload=body,
+            timeout=request_timeout,
+        )
+        result[key] = bool(ok and validator(payload))
+        label = key.removesuffix("_ok").replace("_", " ")
+        if result[key]:
+            notes.append(f"{label}: OK")
+        else:
+            notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
+
     result["recommended_format"] = recommended_format(result)
     if result["recommended_format"] == UPSTREAM_FORMAT_RESPONSES:
         notes.append("Recommended: Responses")
@@ -412,6 +441,14 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         notes.append("Recommended: Anthropic Messages detected; Gateway conversion is planned")
     else:
         notes.append("Warning: no supported endpoint responded to the lightweight probe.")
+
+    result["recommended_tool_protocol"] = recommended_tool_protocol(result)
+    if result["recommended_tool_protocol"] == "responses_structured":
+        notes.append("Tool protocol: Responses structured tools")
+    elif result["recommended_tool_protocol"] == "chat_tools":
+        notes.append("Tool protocol: Chat Completions tool_calls")
+    else:
+        notes.append("Tool protocol: no reliable tool-call support detected")
 
     result["duration_ms"] = int((time.monotonic() - started) * 1000)
     return result

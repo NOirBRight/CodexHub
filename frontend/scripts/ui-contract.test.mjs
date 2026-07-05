@@ -688,24 +688,30 @@ test("provider endpoint probe persists detected formats and selects the recommen
   const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
 
   assert.match(typesSource, /available_upstream_formats\?: UpstreamFormat\[\] \| null;/);
+  assert.match(typesSource, /tool_protocol\?: ToolProtocol \| null;/);
+  assert.match(typesSource, /recommended_tool_protocol: ToolProtocol;/);
   assert.match(pageSource, /async function persistProviderProbeResult\(providerId: string, result: UpstreamFormatProbeResult\)/);
   assert.match(
     pageSource,
     /upstream_format:\s*result\.recommended_format !== "auto" \? result\.recommended_format : provider\.upstream_format/,
   );
   assert.match(pageSource, /available_upstream_formats: probeAvailableFormats\(result\)/);
+  assert.match(pageSource, /tool_protocol: result\.recommended_tool_protocol/);
   assert.match(pageSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
   assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
   assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
   assert.match(
     providerDetail,
-    /if \(result && result\.recommended_format !== "auto"\) \{[\s\S]*upstream_format: result\.recommended_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\)/,
+    /if \(result && result\.recommended_format !== "auto"\) \{[\s\S]*upstream_format: result\.recommended_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*tool_protocol: result\.recommended_tool_protocol/,
   );
   assert.match(
     addProviderPanel,
-    /upstream_format: result\.recommended_format !== "auto" \? result\.recommended_format : form\.upstream_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\)/,
+    /upstream_format: result\.recommended_format !== "auto" \? result\.recommended_format : form\.upstream_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*tool_protocol: result\.recommended_tool_protocol/,
   );
+  assert.match(providersSource, /function toolProtocolLabel\(value\?: ToolProtocol \| null\)/);
+  assert.match(providersSource, /toolProtocol=\{draft\.tool_protocol\}/);
+  assert.match(providersSource, /toolProtocol=\{form\.tool_protocol\}/);
   assert.match(
     providersSource,
     /if \(result\.recommended_format !== "auto" && !formats\.includes\(result\.recommended_format\)\) \{[\s\S]*formats\.push\(result\.recommended_format\);/,

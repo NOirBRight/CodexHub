@@ -69,6 +69,44 @@ class ChatRequestToResponsesTests(unittest.TestCase):
 
         self.assertEqual(payload["stream_options"], {"include_usage": True})
 
+    def test_responses_to_chat_preserves_function_call_history(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use a child agent."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "return child-ok"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "019f-child"}),
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        payload = json.loads(_responses_request_to_chat_completion_body(body))
+
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertEqual(payload["messages"][1]["role"], "assistant")
+        self.assertEqual(payload["messages"][1]["tool_calls"][0]["id"], "call_spawn")
+        self.assertEqual(payload["messages"][1]["tool_calls"][0]["function"]["name"], "multi_agent_v1__spawn_agent")
+        self.assertEqual(payload["messages"][2]["role"], "tool")
+        self.assertEqual(payload["messages"][2]["tool_call_id"], "call_spawn")
+        self.assertIn("019f-child", payload["messages"][2]["content"])
+
     def test_tools_convert_to_responses_format(self):
         body = json.dumps({
             "model": "gpt-5.5",
