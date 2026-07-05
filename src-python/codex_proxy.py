@@ -2834,6 +2834,21 @@ def _open_multi_agent_ids(value: Any) -> list[str]:
     return sorted(open_agent_ids)
 
 
+def _spawned_multi_agent_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    spawned_agent_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        spawn_text = _multi_agent_result_text(item, "spawn_agent")
+        if spawn_text is not None and "status: succeeded" in spawn_text:
+            agent_id = _line_value(spawn_text, "agent_id:")
+            if agent_id:
+                spawned_agent_ids.add(agent_id)
+    return sorted(spawned_agent_ids)
+
+
 def _split_agent_id_list(value: str | None) -> list[str]:
     if not value:
         return []
@@ -2904,6 +2919,53 @@ def _has_single_loop_multi_agent_request(value: Any) -> bool:
             "do not repeat",
         )
     )
+
+
+def _requested_multi_agent_spawn_count(value: Any) -> int | None:
+    if not isinstance(value, list):
+        return None
+    text = _joined_text(value).lower()
+    if not any(token in text for token in ("spawn_agent", "multi_agent", "subagent", "子代理")):
+        return None
+
+    for pattern in (
+        r"(?:spawn|spawns|创建|启动|派发|调用|开|生成)\s*(?<!第)(\d{1,2})\s*(?:个|名|位)?\s*(?:subagents?|agents?|子代理)",
+        r"(?<!第)(\d{1,2})\s*(?:个|名|位)?\s*(?:subagents?|agents?|子代理)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            count = int(match.group(1))
+            return count if 0 < count <= 20 else None
+
+    chinese_numbers = {
+        "一个": 1,
+        "一": 1,
+        "两个": 2,
+        "两": 2,
+        "二个": 2,
+        "二": 2,
+        "三个": 3,
+        "三": 3,
+        "四个": 4,
+        "四": 4,
+        "五个": 5,
+        "五": 5,
+        "六个": 6,
+        "六": 6,
+        "七个": 7,
+        "七": 7,
+        "八个": 8,
+        "八": 8,
+        "九个": 9,
+        "九": 9,
+        "十个": 10,
+        "十": 10,
+    }
+    chinese_pattern = "|".join(sorted((re.escape(key) for key in chinese_numbers), key=len, reverse=True))
+    match = re.search(rf"(?<!第)({chinese_pattern})\s*(?:subagents?|agents?|子代理)", text)
+    if match:
+        return chinese_numbers[match.group(1)]
+    return None
 
 
 def _has_single_step_node_repl_request(value: Any) -> bool:
@@ -2980,6 +3042,21 @@ def _multi_agent_lifecycle_complete_message(closed_agent_ids: list[str]) -> dict
     lines.append("completed_tool_aliases: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent")
     lines.append(
         "required_next_action: write the final concise report now. The lifecycle already completed via real Codex tool calls; do not infer hidden tools were unavailable, and do not call tool_search or any multi_agent_v1 tool again for this single-loop request."
+    )
+    return _developer_text_message("\n".join(lines))
+
+
+def _multi_agent_spawn_more_message(spawned_agent_ids: list[str], requested_count: int) -> dict[str, str]:
+    remaining_count = max(0, requested_count - len(spawned_agent_ids))
+    lines = ["Codex native multi_agent_v1 current state"]
+    lines.append("status: spawn_more_required")
+    lines.append(f"requested_spawn_count: {requested_count}")
+    lines.append(f"completed_spawn_count: {len(spawned_agent_ids)}")
+    lines.append(f"remaining_spawn_count: {remaining_count}")
+    if spawned_agent_ids:
+        lines.append(f"already_spawned_agent_ids: {', '.join(spawned_agent_ids)}")
+    lines.append(
+        "required_next_action: call multi_agent_v1__spawn_agent for the next not-yet-created child agent before waiting or closing any child agents."
     )
     return _developer_text_message("\n".join(lines))
 
@@ -3431,24 +3508,39 @@ def compatible_request_body(
         changed = True
         input_items = payload.get("input")
     include_tool_search = False
+    spawned_agent_ids = _spawned_multi_agent_ids(input_items)
     open_agent_ids = _open_multi_agent_ids(input_items)
     completed_wait_agent_ids = set(_completed_multi_agent_wait_ids(input_items))
     closed_agent_ids = _closed_multi_agent_ids(input_items)
     wait_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id not in completed_wait_agent_ids]
     close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
     has_open_agent = _has_open_multi_agent_context(input_items)
+    requested_spawn_count = _requested_multi_agent_spawn_count(input_items)
     single_loop_multi_agent_request = _has_single_loop_multi_agent_request(input_items)
-    lifecycle_complete = single_loop_multi_agent_request and bool(closed_agent_ids) and not has_open_agent
+    bounded_multi_agent_request = single_loop_multi_agent_request or requested_spawn_count is not None
+    spawn_more_required = (
+        requested_spawn_count is not None and len(spawned_agent_ids) < requested_spawn_count
+    )
+    lifecycle_complete = (
+        bounded_multi_agent_request
+        and bool(closed_agent_ids)
+        and not has_open_agent
+        and (requested_spawn_count is None or len(closed_agent_ids) >= requested_spawn_count)
+    )
     node_repl_single_step_complete = _has_completed_single_step_node_repl_context(input_items)
     include_spawn_agent = not has_open_agent
     include_wait_agent = (not has_open_agent) or not open_agent_ids or bool(wait_agent_ids)
     include_close_agent = (not has_open_agent) or not open_agent_ids or bool(close_agent_ids)
     include_resume_agent = True
     include_send_input = True
-    if single_loop_multi_agent_request:
+    if bounded_multi_agent_request:
         include_resume_agent = False
         include_send_input = False
-        if not has_open_agent and not closed_agent_ids:
+        if spawn_more_required:
+            include_spawn_agent = True
+            include_wait_agent = False
+            include_close_agent = False
+        elif not has_open_agent and not closed_agent_ids:
             include_wait_agent = False
             include_close_agent = False
     if lifecycle_complete:
@@ -3458,6 +3550,8 @@ def compatible_request_body(
         include_resume_agent = False
         include_send_input = False
         state_hint = _multi_agent_lifecycle_complete_message(closed_agent_ids)
+    elif spawn_more_required and spawned_agent_ids:
+        state_hint = _multi_agent_spawn_more_message(spawned_agent_ids, requested_spawn_count)
     else:
         state_hint = _multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
     if state_hint is not None and isinstance(input_items, list):

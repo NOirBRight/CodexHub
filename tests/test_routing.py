@@ -3098,6 +3098,210 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
         self.assertIn("status: spawned_child_wait_required", transcript)
 
+    def test_external_request_bounded_multi_spawn_allows_next_spawn_before_wait(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。同步 spawn 两个子代理，等待两个子代理完成，关闭两个子代理，最终回复结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "019f-child-a", "nickname": "child-a"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: spawn_more_required", transcript)
+        self.assertIn("remaining_spawn_count: 1", transcript)
+
+    def test_external_request_bounded_multi_spawn_waits_after_requested_spawns(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。同步 spawn 两个子代理，等待两个子代理完成，关闭两个子代理，最终回复结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "019f-child-a"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_b",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-b"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_b",
+                        "output": json.dumps({"agent_id": "019f-child-b"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__resume_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__send_input", tools_by_name)
+        self.assertIn("status: spawned_child_wait_required", transcript)
+        self.assertIn("open_agent_ids_requiring_wait: 019f-child-a, 019f-child-b", transcript)
+
+    def test_external_request_bounded_multi_spawn_completes_after_all_closed(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请执行一次真实 Codex native subagent 协作测试。同步 spawn 两个子代理，等待两个子代理完成，关闭两个子代理，最终回复结果。",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "019f-child-a"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_b",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "return child-b"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_b",
+                        "output": json.dumps({"agent_id": "019f-child-b"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": {"targets": ["019f-child-a", "019f-child-b"], "timeout_ms": 60000},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps(
+                            {
+                                "timed_out": False,
+                                "status": {
+                                    "019f-child-a": {"completed": "child-a"},
+                                    "019f-child-b": {"completed": "child-b"},
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child-a"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close_a",
+                        "output": json.dumps({"previous_status": {"completed": "child-a"}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close_b",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": {"target": "019f-child-b"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close_b",
+                        "output": json.dumps({"previous_status": {"completed": "child-b"}}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__resume_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__send_input", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req"})
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertNotIn(f"multi_agent_v1__{tool_name}", tools_by_name)
+        self.assertIn("status: lifecycle_complete", transcript)
+        self.assertIn("019f-child-a", transcript)
+        self.assertIn("019f-child-b", transcript)
+
     def test_external_response_normalizes_multi_agent_wait_alias_and_arguments(self):
         body = json.dumps(
             {
