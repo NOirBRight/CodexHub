@@ -590,6 +590,8 @@ pub fn gateway_copy_client_config(
 }
 
 pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientInfo>, String> {
+    let settings = config::get_settings()?;
+    let providers = config::get_providers()?;
     let opencode_path = detect_opencode_config_path();
     let opencode_installed = opencode_path
         .as_ref()
@@ -652,7 +654,8 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || zcode_store_path.exists()
         || zcode_executable.is_some()
         || command_exists(&["zcode", "ZCode", "ZCode.exe"]);
-    let zcode_route_mode = zcode_route_mode(&zcode_targets);
+    let zcode_route_mode =
+        zcode_route_mode_with_expected(&zcode_targets, &settings, &providers, DEFAULT_MODEL);
     clients.push(GatewayClientInfo {
         id: "zcode".to_string(),
         name: "ZCode".to_string(),
@@ -1008,7 +1011,7 @@ fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String>
     if !client.auto_apply_supported {
         return Some("Client does not support automatic config sync.".to_string());
     }
-    if client.route_mode != "hub" {
+    if client.route_mode != "hub" && client.route_mode != "stale" {
         return Some("Client is not bound to CodexHub.".to_string());
     }
     None
@@ -3336,6 +3339,130 @@ fn zcode_route_mode(targets: &ZcodeConfigTargets) -> &'static str {
     route_mode_from_text_file(&targets.catalog_path, is_zcode_codexhub_config)
 }
 
+fn zcode_route_mode_with_expected(
+    targets: &ZcodeConfigTargets,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> &'static str {
+    let route_mode = zcode_route_mode(targets);
+    if route_mode != "hub" {
+        return route_mode;
+    }
+    match zcode_targets_match_expected(targets, settings, providers, model) {
+        Ok(true) => "hub",
+        Ok(false) | Err(_) => "stale",
+    }
+}
+
+fn zcode_targets_match_expected(
+    targets: &ZcodeConfigTargets,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<bool, String> {
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
+    Ok(
+        zcode_v2_config_matches_expected(&targets.v2_config_path, &groups)
+            && zcode_catalog_matches_expected(&targets.catalog_path, settings, &groups)
+            && zcode_catalog_matches_expected(&targets.v2_cache_path, settings, &groups),
+    )
+}
+
+fn zcode_v2_config_matches_expected(path: &Path, groups: &GatewayClientProviderGroups) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let Some(providers) = value.get("provider").and_then(Value::as_object) else {
+        return false;
+    };
+    groups.providers.iter().all(|group| {
+        providers
+            .get(&group.client_provider_id)
+            .is_some_and(|provider| zcode_v2_provider_matches_expected(provider, group))
+    })
+}
+
+fn zcode_v2_provider_matches_expected(
+    provider: &Value,
+    group: &GatewayClientProviderGroup,
+) -> bool {
+    let expected_path = match group.endpoint_selection.openai_compatible_selection() {
+        GatewayClientEndpointSelection::Responses => "/responses",
+        GatewayClientEndpointSelection::ChatCompletions
+        | GatewayClientEndpointSelection::AnthropicMessages => "/chat/completions",
+    };
+    provider
+        .get("apiFormat")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
+        && provider
+            .pointer("/endpoints/baseURL")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == group.base_url.as_str())
+        && provider
+            .pointer("/endpoints/paths/openai-compatible")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_path)
+}
+
+fn zcode_catalog_matches_expected(
+    path: &Path,
+    settings: &Settings,
+    groups: &GatewayClientProviderGroups,
+) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let Some(providers) = value.get("providers").and_then(Value::as_array) else {
+        return false;
+    };
+    groups.providers.iter().all(|group| {
+        providers
+            .iter()
+            .find(|provider| {
+                provider
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == group.client_provider_id)
+            })
+            .is_some_and(|provider| {
+                zcode_catalog_provider_matches_expected(provider, settings, group)
+            })
+    })
+}
+
+fn zcode_catalog_provider_matches_expected(
+    provider: &Value,
+    settings: &Settings,
+    group: &GatewayClientProviderGroup,
+) -> bool {
+    let expected_base_url = gateway_base_without_v1(settings);
+    let expected_path = match group.endpoint_selection.openai_compatible_selection() {
+        GatewayClientEndpointSelection::Responses => group.responses_path.as_str(),
+        GatewayClientEndpointSelection::ChatCompletions
+        | GatewayClientEndpointSelection::AnthropicMessages => group.chat_completions_path.as_str(),
+    };
+    provider
+        .get("apiFormat")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
+        && provider
+            .pointer("/endpoints/baseURL")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_base_url.as_str())
+        && provider
+            .pointer("/endpoints/paths/openai-compatible")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_path)
+}
+
 fn pi_route_mode(paths: &PiConfigPaths) -> &'static str {
     let settings = fs::read_to_string(&paths.settings_path).ok();
     let models = fs::read_to_string(&paths.models_path).ok();
@@ -3397,6 +3524,9 @@ fn omp_route_mode(paths: &OmpConfigPaths) -> &'static str {
 fn gateway_client_status(installed: bool, route_mode: &str) -> String {
     if !installed {
         return "Not installed.".to_string();
+    }
+    if route_mode == "stale" {
+        return "CodexHub config is out of date; reapply the CodexHub route.".to_string();
     }
     if route_mode == "hub" {
         "Ready; routed through CodexHub Gateway.".to_string()
@@ -5203,6 +5333,7 @@ mod tests {
             sync_test_client("official", "Official Client", true, true, "official"),
             sync_test_client("missing", "Missing Client", false, true, "hub"),
             sync_test_client("hub-ok", "Hub OK", true, true, "hub"),
+            sync_test_client("hub-stale", "Hub Stale", true, true, "stale"),
             sync_test_client("hub-fail", "Hub Fail", true, true, "hub"),
         ];
         let mut attempted = Vec::new();
@@ -5229,15 +5360,17 @@ mod tests {
             attempted,
             vec![
                 ("hub-ok".to_string(), Some("openai/gpt-5.5".to_string())),
+                ("hub-stale".to_string(), Some("openai/gpt-5.5".to_string())),
                 ("hub-fail".to_string(), Some("openai/gpt-5.5".to_string())),
             ]
         );
-        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.applied, 2);
         assert_eq!(summary.skipped, 3);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.results[0].status, "skipped");
         assert_eq!(summary.results[3].status, "applied");
-        assert_eq!(summary.results[4].status, "failed");
+        assert_eq!(summary.results[4].status, "applied");
+        assert_eq!(summary.results[5].status, "failed");
         assert!(summary.message.contains("1 failed"));
     }
 
@@ -5482,7 +5615,9 @@ mod tests {
         )
         .unwrap();
         let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2_text).unwrap();
-        let zcode_v2_provider = zcode_v2_value.pointer("/provider/codexhub-minimax").unwrap();
+        let zcode_v2_provider = zcode_v2_value
+            .pointer("/provider/codexhub-minimax")
+            .unwrap();
         assert_eq!(
             zcode_v2_provider
                 .get("apiFormat")
@@ -5560,7 +5695,9 @@ mod tests {
         )
         .unwrap();
         let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2_text).unwrap();
-        let zcode_v2_provider = zcode_v2_value.pointer("/provider/codexhub-minimax").unwrap();
+        let zcode_v2_provider = zcode_v2_value
+            .pointer("/provider/codexhub-minimax")
+            .unwrap();
         assert_eq!(
             zcode_v2_provider
                 .get("apiFormat")
@@ -5846,9 +5983,7 @@ mod tests {
             .iter()
             .any(|model| model["id"] == "minimax-m3-lite"));
         assert_eq!(
-            openai
-                .get("apiFormat")
-                .and_then(serde_json::Value::as_str),
+            openai.get("apiFormat").and_then(serde_json::Value::as_str),
             Some("openai-responses")
         );
         assert_eq!(
@@ -5858,9 +5993,7 @@ mod tests {
             Some("/v1/providers/openai/responses")
         );
         assert_eq!(
-            minimax
-                .get("apiFormat")
-                .and_then(serde_json::Value::as_str),
+            minimax.get("apiFormat").and_then(serde_json::Value::as_str),
             Some("openai-chat-completions")
         );
         assert_eq!(
@@ -6895,7 +7028,9 @@ mod tests {
             Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
         );
         assert_eq!(
-            provider.get("apiFormat").and_then(serde_json::Value::as_str),
+            provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
             Some("openai-responses")
         );
         assert_eq!(
@@ -6971,6 +7106,65 @@ mod tests {
         .unwrap();
 
         assert_eq!(super::zcode_route_mode(&targets), "hub");
+    }
+
+    #[test]
+    fn zcode_route_mode_marks_protocol_mismatch_as_stale() {
+        let root = unique_temp_dir("codexhub-zcode-stale-protocol");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: v2_cache_path.clone(),
+        };
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        let settings = Settings::default();
+        let mut providers = case_sensitive_client_export_test_providers();
+        providers[0].upstream_format = Some(UpstreamFormat::Responses);
+        let model = "ollama-cloud/glm-5.2";
+        let expected_config =
+            super::zcode_v2_config_text(&v2_config_path, &settings, &providers, model).unwrap();
+        let expected_catalog = super::zcode_catalog_text(&settings, &providers, model).unwrap();
+
+        fs::write(&catalog_path, &expected_catalog).unwrap();
+        fs::write(&v2_config_path, &expected_config).unwrap();
+        fs::write(&v2_cache_path, &expected_catalog).unwrap();
+        assert_eq!(
+            super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+            "hub"
+        );
+
+        fs::write(
+            &v2_config_path,
+            expected_config.replacen(
+                "\"apiFormat\": \"openai-responses\"",
+                "\"apiFormat\": \"openai-chat-completions\"",
+                1,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+            "stale"
+        );
+
+        fs::write(&v2_config_path, &expected_config).unwrap();
+        fs::write(
+            &v2_cache_path,
+            expected_catalog.replacen(
+                "\"apiFormat\": \"openai-responses\"",
+                "\"apiFormat\": \"openai-chat-completions\"",
+                1,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+            "stale"
+        );
     }
 
     #[test]
