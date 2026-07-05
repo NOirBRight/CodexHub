@@ -328,7 +328,7 @@ export default function App() {
   }
 
   return (
-    <div className="grid h-screen min-h-[768px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+    <div className="grid h-screen min-h-[720px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
       <RuntimeBar
         busy={busy}
         message={banner}
@@ -361,7 +361,7 @@ export default function App() {
         </span>
       </nav>
 
-      <div className="min-h-0 overflow-x-auto overflow-y-hidden p-4">
+      <div className="min-h-0 overflow-x-auto overflow-y-auto p-4">
         {activeTab === "codexhub" ? (
           <ProvidersPage
             gatewayStatus={runtime.gatewayStatus}

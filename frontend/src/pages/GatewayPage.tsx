@@ -352,17 +352,14 @@ export function GatewayPage({
   }
 
   return (
-    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[minmax(636px,1fr)_minmax(320px,340px)] gap-4">
-      <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
-        <section className="grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
-          <div className="grid min-w-0 grid-cols-[minmax(300px,1fr)_minmax(270px,0.95fr)] items-stretch gap-3">
-            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3 rounded-panel bg-panel p-3 shadow-card">
-              <div className="flex min-w-0 items-start justify-between gap-3">
+    <main className="relative grid h-full min-h-[704px] min-w-[972px] grid-cols-[minmax(636px,1fr)_minmax(320px,340px)] gap-4">
+      <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(320px,1fr)] gap-3">
+        <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
+          <div className="grid min-w-0 grid-cols-[minmax(300px,1fr)_minmax(270px,0.95fr)] items-stretch gap-2.5">
+            <div className="grid min-w-0 content-start gap-2 rounded-panel bg-panel p-2.5 shadow-card">
+              <div className="flex min-w-0 items-center justify-between gap-3">
                 <div className="min-w-0">
                   <h2 className="truncate text-base font-semibold text-ink">Local endpoint</h2>
-                  <p className="mt-1 max-h-8 max-w-xl overflow-hidden text-xs leading-4 text-slate-600 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
-                    Local API key, port, and timeout for OpenAI-compatible clients.
-                  </p>
                 </div>
                 <button
                   type="button"
@@ -380,8 +377,8 @@ export function GatewayPage({
                 </button>
               </div>
 
-              <div className="grid h-full min-w-0 content-start gap-2 rounded-inner bg-surface p-3 shadow-control">
-                <label className="grid gap-1.5 text-xs font-semibold text-slate-600">
+              <div className="grid min-w-0 content-start gap-2 rounded-inner bg-surface p-3 shadow-control">
+                <label className="grid gap-1 text-xs font-semibold text-slate-600">
                   <span>API Key</span>
                   <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
                     <div className="relative min-w-0">
@@ -404,7 +401,7 @@ export function GatewayPage({
                     </div>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       disabled={!draftKey}
                       aria-label={apiKeyCopied ? "API key copied" : "Copy API key"}
                       title={apiKeyCopied ? "Copied" : "Copy API key"}
@@ -414,7 +411,7 @@ export function GatewayPage({
                     </button>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       aria-label="Regenerate API key"
                       title="Regenerate API key"
                       onClick={regenerateClientKey}
@@ -423,8 +420,8 @@ export function GatewayPage({
                     </button>
                   </div>
                 </label>
-                <div className="grid min-w-0 grid-cols-2 items-end gap-2">
-                  <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
+                <div className="grid min-w-0 grid-cols-[minmax(64px,0.75fr)_minmax(64px,0.75fr)_minmax(112px,0.9fr)] items-end gap-2">
+                  <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
                     <span>Port</span>
                     <input
                       className="field field-compact"
@@ -435,7 +432,7 @@ export function GatewayPage({
                       onChange={(event) => setDraftPort(Number(event.target.value))}
                     />
                   </label>
-                  <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-slate-600">
+                  <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
                     <span>Timeout</span>
                     <input
                       className="field field-compact"
@@ -448,7 +445,7 @@ export function GatewayPage({
                   </label>
                   <button
                     type="button"
-                    className="focus-ring col-span-2 inline-flex h-9 self-end items-center justify-center gap-2 whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+                    className="focus-ring inline-flex h-9 self-end items-center justify-center gap-1.5 whitespace-nowrap rounded-control bg-ink px-2 text-[11px] font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
                     disabled={Boolean(busy) || !settings}
                     onClick={() => void applyGatewaySettings()}
                   >
@@ -459,8 +456,8 @@ export function GatewayPage({
               </div>
             </div>
 
-            <div className="grid h-full min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-panel bg-panel p-3 shadow-card">
-              <div className="grid grid-cols-3 gap-2">
+            <div className="grid min-w-0 content-start gap-2 rounded-panel bg-panel p-2.5 shadow-card">
+              <div className="grid grid-cols-3 gap-1.5">
                 <StatusCard
                   compact
                   label="Gateway"
@@ -481,12 +478,12 @@ export function GatewayPage({
                 />
               </div>
 
-              <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
+              <div className="grid min-h-0 gap-1.5">
                 <div className="flex items-center justify-between gap-3 whitespace-nowrap">
                   <h3 className="shrink-0 text-sm font-semibold text-ink">Copy connection</h3>
                 </div>
                 {endpoints.length > 0 ? (
-                  <div className="grid h-full grid-rows-3 gap-2">
+                  <div className="grid grid-rows-3 gap-1.5">
                     {endpoints.map((endpoint) => {
                       const copyTarget = `endpoint:${endpoint.label}`;
                       return (
@@ -545,7 +542,7 @@ export function GatewayPage({
 
       </section>
 
-      <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
+      <aside className="grid h-full min-h-[704px] grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
         <div className="p-3 shadow-hairline">
           <div className="flex items-center justify-between gap-2">
             <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-500">
@@ -567,8 +564,18 @@ export function GatewayPage({
             <span className="text-xs text-slate-500">Official / CodexHub</span>
           </div>
         </div>
-        <div className="min-h-0 overflow-auto bg-panel p-3">
-          <div className="grid min-h-full auto-rows-fr gap-2">
+        <div
+          className={cx(
+            "bg-panel p-3",
+            clients.length > 4 ? "min-h-0 overflow-auto" : "overflow-visible",
+          )}
+        >
+          <div
+            className={cx(
+              "grid gap-2",
+              clients.length > 4 ? "auto-rows-[minmax(144px,auto)]" : "min-h-full auto-rows-fr",
+            )}
+          >
             {clients.map((client) => (
               <GatewayClientCard
                 key={client.id}

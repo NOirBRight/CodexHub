@@ -183,7 +183,7 @@ export function StackedUsageChartShell({
   }
 
   return (
-    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 overflow-hidden rounded-panel bg-surface p-4 shadow-card">
+    <section className="grid h-full min-h-[320px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="shrink-0 text-sm font-semibold text-ink">Usage &amp; Cost</h2>
@@ -587,8 +587,8 @@ function StackedUsageChart({
   }
 
   return (
-    <div className="grid h-full min-h-[300px] p-4">
-      <div className="grid h-full min-h-[250px] grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
+    <div className="grid h-full min-h-[260px] p-3">
+      <div className="grid h-full min-h-[220px] grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
         <div className="relative min-h-0">
           <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
             <span title={formatNumber(maxTotal)}>{formatAxisNumber(maxTotal)}</span>
@@ -672,7 +672,7 @@ function StackedUsageChart({
                 ))}
               </div>
             ) : (
-              <div className="pointer-events-none relative z-10 grid h-full min-h-[226px] place-items-center p-5">
+              <div className="pointer-events-none relative z-10 grid h-full min-h-[190px] place-items-center p-4">
                 <PendingPanel
                   compact
                   className="w-full max-w-[480px] py-3"
@@ -741,7 +741,7 @@ function StackedUsageChart({
           )}
         </div>
         {series.length > 0 && (
-          <div className="flex max-h-16 min-h-8 flex-wrap items-start justify-center gap-x-3 gap-y-1 overflow-y-auto border-t border-slate-100 px-8 py-2 text-[10px] font-semibold text-slate-500">
+          <div className="flex max-h-12 min-h-7 flex-wrap items-start justify-center gap-x-3 gap-y-1 overflow-y-auto border-t border-slate-100 px-8 py-1.5 text-[10px] font-semibold text-slate-500">
             {series.map((item) => {
               const hidden = hiddenSeriesKeys.has(item.key);
               return (
@@ -791,8 +791,8 @@ function NoTokenChart({
 }) {
   const columns = chartColumns(axis.length);
   return (
-    <div className="grid h-full min-h-[300px] p-4">
-      <div className="grid h-full min-h-[258px] grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
+    <div className="grid h-full min-h-[260px] p-3">
+      <div className="grid h-full min-h-[220px] grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
         <div className="relative overflow-hidden">
           <div className="absolute inset-x-8 bottom-0 top-4 grid grid-rows-4">
             {Array.from({ length: 4 }).map((_, index) => (
@@ -810,7 +810,7 @@ function NoTokenChart({
               />
             ))}
           </div>
-          <div className="relative z-10 grid h-full min-h-[226px] place-items-center p-5">
+          <div className="relative z-10 grid h-full min-h-[190px] place-items-center p-4">
             <PendingPanel
               compact
               className="w-full max-w-[480px] py-3"
@@ -1201,11 +1201,11 @@ function rangeToSpan(range: UsageRange, customRange: DateSpan): DateSpan {
 
 function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="rounded-inner bg-panel p-3 shadow-control" title={title}>
+    <div className="rounded-inner bg-panel p-2.5 shadow-control" title={title}>
       <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
         {label}
       </div>
-      <div className="mt-2 truncate font-mono text-base font-semibold text-ink">{value}</div>
+      <div className="mt-1.5 truncate font-mono text-base font-semibold text-ink">{value}</div>
     </div>
   );
 }

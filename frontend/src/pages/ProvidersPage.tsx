@@ -15,7 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
@@ -40,6 +40,35 @@ const DEFAULT_OFFICIAL_MODEL_ORDER = [
   "openai/gpt-5.4-mini",
   "openai/gpt-5.3-codex-spark",
 ];
+
+function useVerticalOverflow<T extends HTMLElement>(dependencies: ReadonlyArray<unknown>) {
+  const ref = useRef<T | null>(null);
+  const [hasOverflow, setHasOverflow] = useState(false);
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) {
+      setHasOverflow(false);
+      return;
+    }
+
+    const update = () => {
+      setHasOverflow(element.scrollHeight > element.clientHeight + 1);
+    };
+
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    Array.from(element.children).forEach((child) => observer.observe(child));
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, dependencies);
+
+  return [ref, hasOverflow] as const;
+}
 
 const emptyProvider = {
   id: "",
@@ -1283,6 +1312,13 @@ function CodexHubProviderCard({
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   selectedId: string;
 }) {
+  const [providerListRef, providerListHasOverflow] = useVerticalOverflow<HTMLDivElement>([
+    activeAdd,
+    connected,
+    items.length,
+    selectedId,
+  ]);
+
   return (
     <section
       className={cx(
@@ -1312,7 +1348,10 @@ function CodexHubProviderCard({
         </div>
       </div>
 
-      <div className="min-h-0 overflow-auto">
+      <div
+        ref={providerListRef}
+        className={cx("min-h-0 overflow-auto", providerListHasOverflow && "-mr-3 pr-1")}
+      >
         {items.length ? (
           <SortableList
             className="space-y-2"
@@ -1783,6 +1822,13 @@ function ModelSection({
   const [modelTestStates, setModelTestStates] = useState<Record<string, InlineTestState>>({});
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const editingModel = editingModelId ? models.find((model) => model.id === editingModelId) ?? null : null;
+  const [modelListRef, modelListHasOverflow] = useVerticalOverflow<HTMLDivElement>([
+    disabled,
+    editingModelId,
+    models.length,
+    providerId,
+    reorderable,
+  ]);
 
   function addAndEdit() {
     const modelId = onAdd?.();
@@ -1935,7 +1981,10 @@ function ModelSection({
           )}
         </div>
       </div>
-      <div className="min-h-0 overflow-auto -mr-3 pr-3">
+      <div
+        ref={modelListRef}
+        className={cx("min-h-0 overflow-auto", modelListHasOverflow && "-mr-5 pr-1")}
+      >
         {models.length === 0 ? (
           <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
             No models

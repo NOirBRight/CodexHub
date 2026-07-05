@@ -71,6 +71,19 @@ shadow depth to separate panels without looking like a web dashboard.
   fill, compact content.
 - Charts: chart container should read as a soft inset work surface; tooltips
   use floating shadow and 12px radius.
+- Scrollable regions: keep scrollbars as close to the owning pane edge as
+  possible so the central content area stays wide. For vertical lists inside a
+  padded card, first keep the normal panel padding when the content does not
+  overflow. Only when the list actually needs a scrollbar should the viewport
+  extend toward the card edge with a negative margin and a reduced inner gutter,
+  for example `overflow-auto -mr-3 pr-1` inside a `px-3` panel. The content
+  should gain width when the scrollbar moves outward; do not pair the negative
+  margin with equal padding that leaves the content width unchanged. When a
+  scrollbar is present, preserve standard padding where there is room, and
+  reduce the inset only as much as needed to keep the scrollbar near the owning
+  pane edge. Apply the same edge-scrollbar rule across sidebars, drawers, model
+  lists, client lists, and popovers; use an inset scrollbar only when it is
+  intentionally part of a framed control.
 
 ### Avoid
 

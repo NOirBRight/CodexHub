@@ -19,6 +19,7 @@ const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx",
 const tauriSourcePath = new URL("../src/lib/tauri.ts", import.meta.url);
 const tailwindConfigPath = new URL("../tailwind.config.js", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
+const designPath = new URL("../../DESIGN.md", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 
@@ -90,7 +91,7 @@ test("global cursor contract marks interactive controls as pointer and disabled 
 test("visual system defines warm surfaces, concentric radii, and layered shadows", async () => {
   const [tailwindConfig, designDoc] = await Promise.all([
     readFile(tailwindConfigPath, "utf8"),
-    readFile(new URL("../../DESIGN.md", import.meta.url), "utf8"),
+    readFile(designPath, "utf8"),
   ]);
 
   assert.match(tailwindConfig, /canvas:\s*"#f8f8f7"/);
@@ -107,6 +108,11 @@ test("visual system defines warm surfaces, concentric radii, and layered shadows
   assert.match(designDoc, /## Visual System/);
   assert.match(designDoc, /Outer radius = inner radius \+ padding/);
   assert.match(designDoc, /Use layered shadows for element depth/);
+  assert.match(designDoc, /Scrollable regions/);
+  assert.match(designDoc, /overflow-auto -mr-3 pr-1/);
+  assert.match(designDoc, /normal panel padding when the content does not\s+overflow/);
+  assert.match(designDoc, /content\s+should gain\s+width when the scrollbar moves outward/);
+  assert.match(designDoc, /sidebars,\s+drawers,\s+model\s+lists,\s+client\s+lists,\s+and\s+popovers/);
 });
 
 test("global controls use polished radius, shadow, and exact transitions", async () => {
@@ -129,9 +135,9 @@ test("copy buttons keep stable dimensions when copied feedback appears", async (
   ]);
 
   assert.match(endpointSource, /inline-flex shrink-0/);
-  assert.match(endpointSource, /compact \? "h-7 w-7" : "h-8 w-8"/);
+  assert.match(endpointSource, /compact \? "h-6 w-6" : "h-8 w-8"/);
   assert.doesNotMatch(endpointSource, /min-w-\[70px\]/);
-  assert.match(gatewaySource, /inline-flex h-9 w-9 shrink-0/);
+  assert.match(gatewaySource, /inline-flex h-8 w-8 shrink-0/);
   assert.match(providersSource, /inline-flex h-6 w-6 shrink-0/);
   assert.doesNotMatch(providersSource, /min-w-\[66px\]/);
 });
@@ -315,21 +321,25 @@ test("gateway layout reserves space for the client rail", async () => {
     readFile(stackedUsagePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /min-w-\[972px\] grid-cols-\[minmax\(636px,1fr\)_minmax\(320px,340px\)\] gap-4/);
+  assert.match(gatewaySource, /min-h-\[704px\] min-w-\[972px\] grid-cols-\[minmax\(636px,1fr\)_minmax\(320px,340px\)\] gap-4/);
   assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
-  assert.match(gatewaySource, /grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface/);
-  assert.match(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
-  assert.match(gatewaySource, /\[-webkit-line-clamp:2\]/);
-  assert.match(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
+  assert.match(gatewaySource, /grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface/);
+  assert.match(gatewaySource, /rounded-inner bg-surface p-3 shadow-control/);
+  assert.doesNotMatch(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
+  assert.doesNotMatch(gatewaySource, /\[-webkit-line-clamp:2\]/);
+  assert.doesNotMatch(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
   assert.doesNotMatch(gatewaySource, /Clients discover models from/);
-  assert.match(gatewaySource, /grid-cols-\[minmax\(300px,1fr\)_minmax\(270px,0\.95fr\)\] items-stretch gap-3/);
+  assert.match(gatewaySource, /grid-cols-\[minmax\(300px,1fr\)_minmax\(270px,0\.95fr\)\] items-stretch gap-2\.5/);
   assert.match(gatewaySource, /grid min-w-0 grid-cols-\[minmax\(0,1fr\)_auto_auto\] items-center gap-2/);
-  assert.match(gatewaySource, /grid-cols-2 items-end gap-2/);
-  assert.match(gatewaySource, /className="focus-ring col-span-2 inline-flex h-9 self-end/);
+  assert.match(gatewaySource, /grid-cols-\[minmax\(64px,0\.75fr\)_minmax\(64px,0\.75fr\)_minmax\(112px,0\.9fr\)\] items-end gap-2/);
+  assert.match(gatewaySource, /className="focus-ring inline-flex h-9 self-end/);
   assert.match(gatewaySource, /whitespace-nowrap rounded-control bg-ink/);
   assert.match(gatewaySource, /className="flex items-center justify-between gap-3 whitespace-nowrap"/);
   assert.match(gatewaySource, /<h3 className="shrink-0 text-sm font-semibold text-ink">Copy connection<\/h3>/);
-  assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
+  assert.match(gatewaySource, /<aside className="grid h-full min-h-\[704px\] grid-rows-\[auto_minmax\(0,1fr\)\]/);
+  assert.match(gatewaySource, /clients\.length > 4 \? "min-h-0 overflow-auto" : "overflow-visible"/);
+  assert.match(gatewaySource, /clients\.length > 4 \? "auto-rows-\[minmax\(144px,auto\)\]" : "min-h-full auto-rows-fr"/);
+  assert.match(usageSource, /min-h-\[320px\] min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
   assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
   assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-1\.5">/);
   assert.doesNotMatch(gatewaySource, /OpenAI-compatible routes/);
@@ -352,7 +362,7 @@ test("gateway copy actions use inline copied state instead of success toasts", a
   assert.match(gatewaySource, /title="Regenerate API key"/);
   assert.match(endpointSource, /aria-label=\{copied \? `\$\{label\} copied` : `Copy \$\{label\}`\}/);
   assert.match(endpointSource, /title=\{copied \? "Copied" : `Copy \$\{label\}`\}/);
-  assert.match(endpointSource, /compact \? "h-7 w-7" : "h-8 w-8"/);
+  assert.match(endpointSource, /compact \? "h-6 w-6" : "h-8 w-8"/);
   assert.doesNotMatch(endpointSource, /copied \? "Copied" : "Copy"/);
   assert.doesNotMatch(gatewaySource, /\{apiKeyCopied \? "Copied" : "Copy"\}/);
   assert.doesNotMatch(gatewaySource, />\s*Regenerate\s*<\/button>/);
@@ -563,6 +573,7 @@ test("settings save restarts running gateway when retry or image proxy runtime s
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
+  assert.match(cardSource, /min-h-\[136px\]/);
   assert.match(cardSource, /Manual update available/);
   assert.doesNotMatch(cardSource, /<button[\s\S]*?\{hasUpdate \? "Manual" : "Update"\}/);
   assert.doesNotMatch(cardSource, /safe updater is not exposed by the backend/);
@@ -588,14 +599,16 @@ test("providers page uses stable zero-min split columns", async () => {
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
   const appSource = await readFile(appPath, "utf8");
 
-  assert.match(appSource, /h-screen min-h-\[768px\] min-w-0/);
+  assert.match(appSource, /h-screen min-h-\[720px\] min-w-0/);
   assert.doesNotMatch(appSource, /min-w-\[1004px\]/);
-  assert.match(appSource, /className="min-h-0 overflow-x-auto overflow-y-hidden p-4"/);
+  assert.match(appSource, /className="min-h-0 overflow-x-auto overflow-y-auto p-4"/);
   assert.doesNotMatch(appSource, /className="min-h-0 overflow-hidden p-4"/);
 });
 
 test("provider detail keeps model area tall and moves the scrollbar outside cards", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
+  const codexHubProviderCard =
+    providersSource.match(/function CodexHubProviderCard[\s\S]*?function gatewayStatusChip/)?.[0] ?? "";
   const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
   const endpointSelectionPanel =
     providersSource.match(/function EndpointSelectionPanel[\s\S]*?function EndpointFormatSelect/)?.[0] ?? "";
@@ -644,7 +657,12 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.doesNotMatch(headerRow, /lg:grid-cols-\[minmax\(0,1fr\)_auto\]/);
   assert.doesNotMatch(headerRow, /flex-wrap/);
 
-  assert.match(modelSection, /className="min-h-0 overflow-auto -mr-3 pr-3"/);
+  assert.match(providersSource, /function useVerticalOverflow/);
+  assert.match(providersSource, /scrollHeight > element\.clientHeight \+ 1/);
+  assert.match(codexHubProviderCard, /ref=\{providerListRef\}/);
+  assert.match(codexHubProviderCard, /providerListHasOverflow && "-mr-3 pr-1"/);
+  assert.match(modelSection, /ref=\{modelListRef\}/);
+  assert.match(modelSection, /modelListHasOverflow && "-mr-5 pr-1"/);
   assert.match(modelSection, /flex shrink-0 flex-nowrap items-center justify-end gap-2 whitespace-nowrap/);
   assert.match(modelSection, /grid min-h-\[52px\] grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3/);
   assert.match(modelSection, /onTestModel\?: \(model: Model\) => Promise<boolean>;/);
@@ -657,6 +675,7 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.doesNotMatch(modelSection, /flex flex-wrap items-center gap-2 text-xs text-slate-500 lg:justify-end/);
   assert.doesNotMatch(modelSection, /lg:grid-cols-\[minmax\(0,1fr\)_auto\] lg:items-center/);
   assert.doesNotMatch(modelSection, /className="min-h-0 overflow-auto pr-1"/);
+  assert.doesNotMatch(providersSource, /overflow-auto -mr-[35] pr-[35]/);
 });
 
 test("provider endpoint probe persists detected formats and selects the recommendation", async () => {
@@ -702,7 +721,7 @@ test("model test buttons use the selected endpoint connectivity check", async ()
   const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
   const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
   const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
-  const modelTestBlocks = [...providersSource.matchAll(/async function testModel\(model: Model\)[\s\S]*?\n  }\n/g)].map(
+  const modelTestBlocks = [...providersSource.matchAll(/async function testModel\(model: Model\)[\s\S]*?\r?\n  }\r?\n/g)].map(
     (match) => match[0],
   );
 

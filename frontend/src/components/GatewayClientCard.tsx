@@ -70,7 +70,7 @@ export function GatewayClientCard({
         ? `Current ${currentVersion ?? "unknown"} · Latest ${latestVersion ?? "unknown"}`
         : "Version unknown";
   return (
-    <section className="grid h-full min-h-0 content-between gap-1.5 rounded-panel bg-surface p-2 shadow-card">
+    <section className="grid h-full min-h-[136px] content-between gap-1.5 rounded-panel bg-surface p-2 shadow-card">
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <ClientLogo id={client.id} name={info?.name ?? client.name} />
         <div className="min-w-0">
