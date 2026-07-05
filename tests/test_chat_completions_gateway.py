@@ -1383,7 +1383,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     exc,
                 ]
 
-                with patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)):
+                with (
+                    patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+                    patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)),
+                ):
                     CodexProxyHandler.do_POST(handler)
 
                 written = b"".join(handler.wfile.writes)
@@ -1393,6 +1396,49 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 self.assertEqual(error["status"], 502)
                 self.assertEqual(error["upstream"], "official")
                 self.assertNotIn(b"finish_reason", written)
+
+    def test_post_chat_completions_streaming_retries_read_error_before_downstream_output(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        failed_stream = _FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_fail","model":"gpt-5.5"}}\n',
+            b'\n',
+            ConnectionResetError("socket reset"),
+        ])
+        successful_stream = _FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_ok","model":"gpt-5.5"}}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.delta","delta":"ok"}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_ok","model":"gpt-5.5","output":[]}}\n',
+            b'\n',
+            b"",
+        ])
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b'"content":"ok"', written)
+        self.assertIn(b"data: [DONE]", written)
+        self.assertNotIn(b'"error"', written)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list]
+        self.assertIn("upstream_retry", event_names)
 
     def test_provider_chat_streaming_reports_chat_upstream_read_errors_as_chat_sse_error(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -1425,6 +1471,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         ]
 
         with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch("codex_proxy.load_policy", return_value=policy),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_sse_lines)),
@@ -1516,6 +1563,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }).encode("utf-8")
 
         with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch(
                 "codex_proxy.load_policy",
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
@@ -1615,6 +1663,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         ]
 
         with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch(
                 "codex_proxy.load_policy",
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),

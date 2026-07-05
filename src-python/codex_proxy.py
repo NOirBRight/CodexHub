@@ -72,6 +72,7 @@ PROXY_FEATURES = [
     "browser-context-skill-guidance",
     "compact-text-only-tool-strip",
     "compact-empty-response-guard",
+    "stream-read-error-retry-before-downstream",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
@@ -1920,6 +1921,14 @@ def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
     if isinstance(payload.get("upstream"), str):
         normalized_error.setdefault("upstream", payload.get("upstream"))
     return json.dumps({"error": normalized_error}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+class UpstreamStreamInterruptedError(RuntimeError):
+    """Raised when an upstream stream is interrupted before downstream output starts."""
+
+    def __init__(self, cause: BaseException):
+        self.cause = cause
+        super().__init__(str(cause))
 
 
 class UpstreamStreamIncompleteError(RuntimeError):
@@ -5008,11 +5017,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
+                                    defer_stream_errors=relay_attempt < relay_attempts and not downstream_sse_started,
                                 )
                             break
-                        except IncompleteRead as exc:
+                        except (IncompleteRead, UpstreamStreamInterruptedError, UpstreamStreamIncompleteError) as exc:
+                            retry_exc = exc.cause if isinstance(exc, UpstreamStreamInterruptedError) else exc
                             if relay_attempt >= relay_attempts:
-                                raise
+                                raise retry_exc
                             delay_seconds = gateway_retry_delay_seconds(relay_attempt)
                             _emit_upstream_retry_event(
                                 adapter_event_context,
@@ -5021,7 +5032,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 request_kind=request_kind,
                                 attempt=relay_attempt,
                                 max_attempts=relay_attempts,
-                                exc=exc,
+                                exc=retry_exc,
                                 delay_seconds=delay_seconds,
                             )
                             emit_downstream_retry(
@@ -5031,7 +5042,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     request_kind=request_kind,
                                     attempt=relay_attempt,
                                     max_attempts=relay_attempts,
-                                    exc=exc,
+                                    exc=retry_exc,
                                     delay_seconds=delay_seconds,
                                 )
                             )
@@ -5610,6 +5621,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         usage_capture: dict[str, Any] | None = None,
         headers_already_sent: bool = False,
         request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
+        defer_stream_errors: bool = False,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -5625,23 +5637,30 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if buffer_sse_to_json:
                 # Buffer the full SSE stream into a list of events.
                 events: list[Mapping[str, Any]] = []
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
-                    payload_bytes = _sse_payload_bytes(line)
-                    if payload_bytes is None:
-                        continue
-                    try:
-                        event = json.loads(payload_bytes.decode("utf-8-sig"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(event, dict):
-                        events.append(event)
+                try:
+                    while True:
+                        line = response.readline()
+                        if not line:
+                            break
+                        payload_bytes = _sse_payload_bytes(line)
+                        if payload_bytes is None:
+                            continue
+                        try:
+                            event = json.loads(payload_bytes.decode("utf-8-sig"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(event, dict):
+                            events.append(event)
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    if defer_stream_errors:
+                        raise UpstreamStreamInterruptedError(exc) from exc
+                    raise
                 # Reconstruct a Responses-format body from the events.
                 try:
                     body = _events_to_responses_body(events, require_completed=True)
                 except UpstreamStreamIncompleteError:
+                    if defer_stream_errors:
+                        raise
                     status = 502
                     body = _incomplete_stream_json_error_body(upstream_name)
                     write_proxy_event(
@@ -5658,11 +5677,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 buffered_json_response = True
             else:
                 body = b""
-                while True:
-                    chunk = response.read(65536)
-                    if not chunk:
-                        break
-                    body += chunk
+                try:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        body += chunk
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    if defer_stream_errors:
+                        raise UpstreamStreamInterruptedError(exc) from exc
+                    raise
             if want_chat_output:
                 if upstream_format == "chat_completions":
                     # Upstream already returned Chat Completions; pass through.
@@ -5768,6 +5792,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             events.append(event)
                             _capture_usage(usage_capture, _usage_from_response_event(event))
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    if defer_stream_errors:
+                        raise UpstreamStreamInterruptedError(exc) from exc
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_interrupted",
@@ -5788,6 +5814,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 try:
                     chunks = _response_events_to_chat_stream_chunks(events, require_completed=True)
                 except UpstreamStreamIncompleteError:
+                    if defer_stream_errors:
+                        raise
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_incomplete",
@@ -5840,6 +5868,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             chunks.append(payload)
                             _capture_usage(usage_capture, _usage_from_payload(payload))
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    if defer_stream_errors:
+                        raise UpstreamStreamInterruptedError(exc) from exc
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_interrupted",
@@ -5858,6 +5888,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 if not _chat_stream_chunks_have_terminal(chunks):
+                    if defer_stream_errors:
+                        raise UpstreamStreamIncompleteError(
+                            "Chat Completions stream ended without finish_reason or [DONE]"
+                        )
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_incomplete",
