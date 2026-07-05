@@ -16,6 +16,9 @@ UPSTREAM_FORMAT_RESPONSES = "responses"
 UPSTREAM_FORMAT_CHAT = "chat_completions"
 UPSTREAM_FORMAT_ANTHROPIC = "anthropic_messages"
 PROBE_REQUEST_TIMEOUT_SECONDS = 6
+PROBE_MAX_ATTEMPTS = 2
+PROBE_RETRY_DELAY_SECONDS = 0.35
+KNOWN_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/messages", "/models")
 
 
 def endpoint_url(base_url: str, path: str) -> str:
@@ -24,9 +27,25 @@ def endpoint_url(base_url: str, path: str) -> str:
         raise ValueError("provider base_url is required")
     if not path.startswith("/"):
         path = "/" + path
-    if base_has_version_suffix(base):
-        return base + path
-    return base + "/v1" + path
+    if base_path_matches(base, path):
+        return base
+    root = endpoint_root(base)
+    if base_has_version_suffix(root):
+        return root + path
+    return root + "/v1" + path
+
+
+def endpoint_root(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    lowered_path = urlsplit(base).path.rstrip("/").lower()
+    for suffix in KNOWN_ENDPOINT_SUFFIXES:
+        if lowered_path.endswith(suffix):
+            return base[: -len(suffix)].rstrip("/")
+    return base
+
+
+def base_path_matches(base_url: str, path: str) -> bool:
+    return urlsplit(base_url).path.rstrip("/").lower().endswith(path.lower())
 
 
 def base_has_version_suffix(base_url: str) -> bool:
@@ -179,6 +198,42 @@ def request_json(
         return False, exc.code, None, detail
     except (OSError, TimeoutError, URLError, ValueError) as exc:
         return False, None, None, safe_error_detail(exc)
+
+
+def request_json_with_retries(
+    base_url: str,
+    api_key: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: int,
+) -> tuple[bool, int | None, Any, str | None, int]:
+    attempts = 0
+    last_result: tuple[bool, int | None, Any, str | None] = (False, None, None, None)
+    for attempts in range(1, PROBE_MAX_ATTEMPTS + 1):
+        last_result = request_json(
+            base_url,
+            api_key,
+            path,
+            method=method,
+            payload=payload,
+            timeout=timeout,
+        )
+        ok, status, _payload, detail = last_result
+        if ok or not transient_probe_failure(status, detail) or attempts >= PROBE_MAX_ATTEMPTS:
+            break
+        time.sleep(PROBE_RETRY_DELAY_SECONDS)
+    ok, status, response_payload, detail = last_result
+    return ok, status, response_payload, detail, attempts
+
+
+def transient_probe_failure(status: int | None, detail: str | None) -> bool:
+    if status in {408, 409, 425, 429, 500, 502, 503, 504}:
+        return True
+    if status is not None:
+        return False
+    return bool(detail and ("timed out" in detail.lower() or "timeout" in detail.lower()))
 
 
 def request_sse_events(
@@ -397,7 +452,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         ("anthropic_text_ok", "/messages", anthropic_text_payload(model), anthropic_text_ok),
     ]
     for key, path, body, validator in checks:
-        ok, status, payload, detail = request_json(
+        ok, status, payload, detail, attempts = request_json_with_retries(
             base_url,
             api_key,
             path,
@@ -411,6 +466,8 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
             notes.append(f"{label}: OK")
         else:
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
+        if attempts > 1:
+            notes.append(f"{label}: retried after transient failure")
 
     result["recommended_format"] = recommended_format(result)
     if result["recommended_format"] == UPSTREAM_FORMAT_RESPONSES:

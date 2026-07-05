@@ -3995,6 +3995,41 @@ def _json_response_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=True).encode("utf-8")
 
 
+KNOWN_UPSTREAM_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/messages", "/models")
+
+
+def _upstream_endpoint_url(upstream: Mapping[str, Any], path: str) -> str:
+    base = str(upstream["base_url"]).strip().rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    if _upstream_base_path_matches(base, path):
+        return base
+    root = _upstream_endpoint_root(base)
+    if _upstream_base_has_version_suffix(root):
+        return root + path
+    return root + "/v1" + path
+
+
+def _upstream_endpoint_root(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    lowered_path = urlsplit(base).path.rstrip("/").lower()
+    for suffix in KNOWN_UPSTREAM_ENDPOINT_SUFFIXES:
+        if lowered_path.endswith(suffix):
+            return base[: -len(suffix)].rstrip("/")
+    return base
+
+
+def _upstream_base_path_matches(base_url: str, path: str) -> bool:
+    return urlsplit(base_url).path.rstrip("/").lower().endswith(path.lower())
+
+
+def _upstream_base_has_version_suffix(base_url: str) -> bool:
+    path = urlsplit(base_url).path.rstrip("/")
+    if not path:
+        return False
+    return bool(re.fullmatch(r"v\d+(?:\.\d+)?", path.rsplit("/", 1)[-1].lower()))
+
+
 def _responses_url(upstream: Mapping[str, Any], request_path: str) -> str:
     parsed = urlsplit(request_path)
     path = parsed.path
@@ -4002,14 +4037,14 @@ def _responses_url(upstream: Mapping[str, Any], request_path: str) -> str:
         path = path[3:]
     elif not path.startswith("/"):
         path = "/" + path
-    url = upstream["base_url"].rstrip("/") + path
+    url = _upstream_endpoint_url(upstream, path)
     if parsed.query:
         url += "?" + parsed.query
     return url
 
 
 def _chat_completions_url(upstream: Mapping[str, Any]) -> str:
-    return upstream["base_url"].rstrip("/") + "/chat/completions"
+    return _upstream_endpoint_url(upstream, "/chat/completions")
 
 
 def _modalities_include_image(value: Any) -> bool:

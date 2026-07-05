@@ -13,6 +13,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] =
+    &["/chat/completions", "/responses", "/messages", "/models"];
 
 pub fn refresh_official_models() -> Result<Vec<Model>, String> {
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -316,11 +318,13 @@ fn provider_models_endpoint(base_url: &str) -> Result<String, String> {
         return Err("provider base_url is required for model discovery".to_string());
     }
 
-    let base_url = base_url.trim_end_matches('/');
-    if base_url_has_version_suffix(base_url) {
-        Ok(format!("{base_url}/models"))
+    let root = provider_endpoint_root(base_url);
+    if base_url_path_matches(base_url, "/models") {
+        Ok(base_url.trim_end_matches('/').to_string())
+    } else if base_url_has_version_suffix(&root) {
+        Ok(format!("{root}/models"))
     } else {
-        Ok(format!("{base_url}/v1/models"))
+        Ok(format!("{root}/v1/models"))
     }
 }
 
@@ -334,12 +338,39 @@ fn provider_api_endpoint(base_url: &str, path: &str) -> Result<String, String> {
     } else {
         format!("/{path}")
     };
-    let base_url = base_url.trim_end_matches('/');
-    if base_url_has_version_suffix(base_url) {
-        Ok(format!("{base_url}{path}"))
+    if base_url_path_matches(base_url, &path) {
+        Ok(base_url.trim_end_matches('/').to_string())
     } else {
-        Ok(format!("{base_url}/v1{path}"))
+        let root = provider_endpoint_root(base_url);
+        if base_url_has_version_suffix(&root) {
+            Ok(format!("{root}{path}"))
+        } else {
+            Ok(format!("{root}/v1{path}"))
+        }
     }
+}
+
+fn provider_endpoint_root(base_url: &str) -> String {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let path = base_url_path(base_url);
+    for suffix in KNOWN_PROVIDER_ENDPOINT_SUFFIXES {
+        if path.ends_with(suffix) {
+            return base_url[..base_url.len() - suffix.len()]
+                .trim_end_matches('/')
+                .to_string();
+        }
+    }
+    base_url.to_string()
+}
+
+fn base_url_path_matches(base_url: &str, path: &str) -> bool {
+    base_url_path(base_url).ends_with(&path.to_ascii_lowercase())
+}
+
+fn base_url_path(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .map(|url| url.path().trim_end_matches('/').to_ascii_lowercase())
+        .unwrap_or_else(|_| base_url.trim_end_matches('/').to_ascii_lowercase())
 }
 
 fn base_url_has_version_suffix(base_url: &str) -> bool {
@@ -1459,6 +1490,55 @@ mod tests {
         assert_eq!(
             provider_models_endpoint("https://example.test").unwrap(),
             "https://example.test/v1/models"
+        );
+        assert_eq!(
+            provider_api_endpoint("https://example.test/v1", "/responses").unwrap(),
+            "https://example.test/v1/responses"
+        );
+        assert_eq!(
+            provider_api_endpoint("https://example.test/v2", "/chat/completions").unwrap(),
+            "https://example.test/v2/chat/completions"
+        );
+    }
+
+    #[test]
+    fn provider_endpoints_accept_complete_endpoint_urls() {
+        assert_eq!(
+            provider_api_endpoint("https://example.test/v1/responses", "/responses").unwrap(),
+            "https://example.test/v1/responses"
+        );
+        assert_eq!(
+            provider_models_endpoint("https://example.test/v1/responses").unwrap(),
+            "https://example.test/v1/models"
+        );
+        assert_eq!(
+            provider_api_endpoint(
+                "https://example.test/v2/chat/completions",
+                "/chat/completions",
+            )
+            .unwrap(),
+            "https://example.test/v2/chat/completions"
+        );
+        assert_eq!(
+            provider_api_endpoint("https://example.test/v2/chat/completions", "/responses")
+                .unwrap(),
+            "https://example.test/v2/responses"
+        );
+    }
+
+    #[test]
+    fn provider_endpoints_append_standard_suffixes_to_bare_bases() {
+        assert_eq!(
+            provider_api_endpoint("https://example.test", "/responses").unwrap(),
+            "https://example.test/v1/responses"
+        );
+        assert_eq!(
+            provider_api_endpoint(
+                "https://example.test/api/coding/v3",
+                "/chat/completions",
+            )
+            .unwrap(),
+            "https://example.test/api/coding/v3/chat/completions"
         );
     }
 

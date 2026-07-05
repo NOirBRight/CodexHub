@@ -28,6 +28,56 @@ from codex_proxy import (
 )
 
 
+class UpstreamUrlTests(unittest.TestCase):
+    def test_upstream_urls_accept_complete_responses_endpoint(self):
+        upstream = {"base_url": "https://example.test/v1/responses"}
+
+        self.assertEqual(
+            codex_proxy._responses_url(upstream, "/v1/responses"),
+            "https://example.test/v1/responses",
+        )
+        self.assertEqual(
+            codex_proxy._chat_completions_url(upstream),
+            "https://example.test/v1/chat/completions",
+        )
+
+    def test_upstream_urls_do_not_duplicate_existing_version_base(self):
+        upstream = {"base_url": "https://example.test/v1"}
+
+        self.assertEqual(
+            codex_proxy._responses_url(upstream, "/v1/responses"),
+            "https://example.test/v1/responses",
+        )
+        self.assertEqual(
+            codex_proxy._chat_completions_url({"base_url": "https://example.test/v2"}),
+            "https://example.test/v2/chat/completions",
+        )
+
+    def test_upstream_urls_accept_complete_chat_completions_endpoint(self):
+        upstream = {"base_url": "https://example.test/v2/chat/completions"}
+
+        self.assertEqual(
+            codex_proxy._chat_completions_url(upstream),
+            "https://example.test/v2/chat/completions",
+        )
+        self.assertEqual(
+            codex_proxy._responses_url(upstream, "/v1/responses"),
+            "https://example.test/v2/responses",
+        )
+
+    def test_upstream_urls_default_bare_hosts_to_v1(self):
+        upstream = {"base_url": "https://example.test"}
+
+        self.assertEqual(
+            codex_proxy._responses_url(upstream, "/v1/responses"),
+            "https://example.test/v1/responses",
+        )
+        self.assertEqual(
+            codex_proxy._chat_completions_url({"base_url": "https://example.test/api/coding/v3"}),
+            "https://example.test/api/coding/v3/chat/completions",
+        )
+
+
 class ChatRequestToResponsesTests(unittest.TestCase):
     def test_basic_messages_become_input(self):
         body = json.dumps({

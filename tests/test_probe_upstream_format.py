@@ -23,6 +23,42 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
         self.assertEqual(endpoint_url("https://example.test/v1", "/models"), "https://example.test/v1/models")
         self.assertEqual(endpoint_url("https://example.test/v2", "/models"), "https://example.test/v2/models")
         self.assertEqual(endpoint_url("https://example.test", "/models"), "https://example.test/v1/models")
+        self.assertEqual(
+            endpoint_url("https://example.test/v1", "/responses"),
+            "https://example.test/v1/responses",
+        )
+        self.assertEqual(
+            endpoint_url("https://example.test/v2", "/chat/completions"),
+            "https://example.test/v2/chat/completions",
+        )
+
+    def test_endpoint_url_accepts_complete_endpoint_urls(self) -> None:
+        self.assertEqual(
+            endpoint_url("https://example.test/v1/responses", "/responses"),
+            "https://example.test/v1/responses",
+        )
+        self.assertEqual(
+            endpoint_url("https://example.test/v1/responses", "/models"),
+            "https://example.test/v1/models",
+        )
+        self.assertEqual(
+            endpoint_url("https://example.test/v2/chat/completions", "/chat/completions"),
+            "https://example.test/v2/chat/completions",
+        )
+        self.assertEqual(
+            endpoint_url("https://example.test/v2/chat/completions", "/responses"),
+            "https://example.test/v2/responses",
+        )
+
+    def test_endpoint_url_appends_standard_suffix_to_bare_base(self) -> None:
+        self.assertEqual(
+            endpoint_url("https://example.test", "/responses"),
+            "https://example.test/v1/responses",
+        )
+        self.assertEqual(
+            endpoint_url("https://example.test/api/coding/v3", "/chat/completions"),
+            "https://example.test/api/coding/v3/chat/completions",
+        )
 
     def test_model_ids_accept_common_models_payload_shapes(self) -> None:
         self.assertEqual(model_ids_from_payload({"data": [{"id": "alpha"}, {"model": "beta"}]}), ["alpha", "beta"])
