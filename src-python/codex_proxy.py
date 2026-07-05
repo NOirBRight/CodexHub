@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import queue
 import re
 import sqlite3
 from http.client import IncompleteRead
@@ -69,10 +70,11 @@ PROXY_FEATURES = [
     "third-party-single-loop-completion-gate",
     "ollama-output-token-cap",
     "official-upstream-open-retry",
-    "browser-context-skill-guidance",
     "compact-text-only-tool-strip",
     "compact-empty-response-guard",
     "stream-read-error-retry-before-downstream",
+    "downstream-sse-keepalive",
+    "post-content-sse-idle-timeout",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
@@ -205,16 +207,6 @@ BROWSER_CONTEXT_MARKERS = (
 )
 BROWSER_CURRENT_URL_RE = re.compile(
     r"(?im)^\s*(?:current\s+url|current\s+browser\s+url|browser\s+url|url)\s*:\s*https?://\S+"
-)
-BROWSER_CONTEXT_GUIDANCE_SENTINEL = "Codex browser context detected."
-BROWSER_CONTEXT_GUIDANCE = (
-    BROWSER_CONTEXT_GUIDANCE_SENTINEL
-    + "\nRequired browser-control workflow:\n"
-    "- Load and follow the browser:control-in-app-browser skill before saying browser control is unavailable.\n"
-    '- For OpenAI/Codex native discovery, use tool_search with query "node_repl js" if mcp__node_repl.js is not already visible.\n'
-    "- Browser control is unavailable only when that search does not return mcp__node_repl.js, or when mcp__node_repl.js reports no in-app browser session.\n"
-    "- If executable alias mcp__node_repl__js is visible, use it directly to bootstrap browser-client.mjs and select the iab browser.\n"
-    '- In a CLI/no-browser environment, report "browser session unavailable"; do not report "browser tool not exposed".'
 )
 INTERNAL_INPUT_ITEM_TYPES = {
     "compaction",
@@ -356,6 +348,19 @@ def upstream_timeout_seconds() -> int:
     except ValueError:
         return DEFAULT_UPSTREAM_TIMEOUT_SECONDS
     return value if value > 0 else DEFAULT_UPSTREAM_TIMEOUT_SECONDS
+
+
+def sse_keepalive_seconds() -> float:
+    raw_value = os.environ.get("CODEX_PROXY_SSE_KEEPALIVE_SECONDS")
+    if not raw_value:
+        return 15.0
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return 15.0
+    if value <= 0:
+        return 0.0
+    return max(0.001, min(value, 60.0))
 
 
 def official_upstream_open_attempts() -> int:
@@ -5024,6 +5029,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 notice_fields.update(retry_payload)
                 write_proxy_event("sse_retry_notice", **notice_fields)
 
+            def mark_downstream_sse_started() -> None:
+                nonlocal downstream_sse_started
+                downstream_sse_started = True
+
             configured_upstream_format = upstream_format
             selected_upstream_format = upstream_format
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
@@ -5055,6 +5064,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
                                     defer_stream_errors=relay_attempt < relay_attempts and not downstream_sse_started,
+                                    mark_downstream_sse_started=mark_downstream_sse_started,
                                 )
                             break
                         except (IncompleteRead, UpstreamStreamInterruptedError, UpstreamStreamIncompleteError) as exc:
@@ -5540,6 +5550,42 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(_sse_json_line(payload, b"\n") + b"\n")
         self.wfile.flush()
 
+    def _write_sse_keepalive(self) -> None:
+        self.wfile.write(b": codexhub.keepalive\n\n")
+        self.wfile.flush()
+
+    def _iter_upstream_sse_lines(self, response: Any) -> Any:
+        interval = sse_keepalive_seconds()
+        if interval <= 0:
+            while True:
+                yield response.readline()
+            return
+
+        lines: queue.Queue[tuple[str, bytes | BaseException]] = queue.Queue()
+
+        def read_upstream_lines() -> None:
+            try:
+                while True:
+                    line = response.readline()
+                    lines.put(("line", line))
+                    if not line:
+                        return
+            except BaseException as exc:
+                lines.put(("error", exc))
+
+        threading.Thread(target=read_upstream_lines, name="codex-proxy-sse-reader", daemon=True).start()
+        while True:
+            try:
+                kind, value = lines.get(timeout=interval)
+            except queue.Empty:
+                self._write_sse_keepalive()
+                continue
+            if kind == "error":
+                raise value
+            yield value
+            if not value:
+                return
+
     def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:
         self._write_sse_event(
             "error",
@@ -5659,6 +5705,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         headers_already_sent: bool = False,
         request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
         defer_stream_errors: bool = False,
+        mark_downstream_sse_started: Callable[[], None] | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -5806,6 +5853,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
             self.send_header("Connection", "close")
             self.end_headers()
+            if mark_downstream_sse_started is not None:
+                mark_downstream_sse_started()
 
         if is_event_stream:
             if want_chat_output and upstream_format != "chat_completions":
@@ -5813,8 +5862,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 line_ending = b"\n"
                 events: list[Mapping[str, Any]] = []
                 try:
-                    while True:
-                        line = response.readline()
+                    for line in self._iter_upstream_sse_lines(response):
                         if not line:
                             break
                         line_ending = _sse_line_ending(line)
@@ -5886,8 +5934,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 line_ending = b"\n"
                 chunks: list[Mapping[str, Any] | str] = []
                 try:
-                    while True:
-                        line = response.readline()
+                    for line in self._iter_upstream_sse_lines(response):
                         if not line:
                             break
                         line_ending = _sse_line_ending(line)
@@ -5977,8 +6024,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             saw_response_event = False
             saw_terminal_event = False
             try:
-                while True:
-                    line = response.readline()
+                for line in self._iter_upstream_sse_lines(response):
                     if not line:
                         break
                     original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
@@ -5997,6 +6043,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     self.wfile.write(line)
                     self.wfile.flush()
             except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                if defer_stream_errors and not saw_response_event:
+                    raise UpstreamStreamInterruptedError(exc) from exc
                 self.close_connection = True
                 write_proxy_event(
                     "upstream_stream_interrupted",

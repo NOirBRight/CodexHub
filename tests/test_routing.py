@@ -2,6 +2,7 @@ import os
 import io
 import json
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -66,6 +67,12 @@ class FakeHandler:
     def _write_sse_event(self, event, payload):
         return CodexProxyHandler._write_sse_event(self, event, payload)
 
+    def _write_sse_keepalive(self):
+        return CodexProxyHandler._write_sse_keepalive(self)
+
+    def _iter_upstream_sse_lines(self, response):
+        return CodexProxyHandler._iter_upstream_sse_lines(self, response)
+
     def _write_sse_protocol_error_event(self, upstream_name, status, detail, *, error="UpstreamProtocolError"):
         return CodexProxyHandler._write_sse_protocol_error_event(
             self,
@@ -88,13 +95,29 @@ class FakeSseResponse:
         self.lines = list(lines)
 
     def readline(self):
-        return self.lines.pop(0)
+        line = self.lines.pop(0)
+        if isinstance(line, BaseException):
+            raise line
+        return line
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         return None
+
+
+class FakeDelayedSseResponse(FakeSseResponse):
+    def __init__(self, lines, first_delay_seconds):
+        super().__init__(lines)
+        self.first_delay_seconds = first_delay_seconds
+        self.readline_calls = 0
+
+    def readline(self):
+        self.readline_calls += 1
+        if self.readline_calls == 1:
+            time.sleep(self.first_delay_seconds)
+        return super().readline()
 
 
 class FakeResponse:
@@ -622,6 +645,67 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(notice_events[0]["status"], 503)
         self.assertEqual(notice_events[0]["attempt"], 1)
         self.assertEqual(notice_events[0]["max_attempts"], 2)
+
+    def test_post_responses_streaming_retries_read_error_before_first_upstream_event(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        failed_stream = FakeSseResponse([TimeoutError("read timed out")])
+        success = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_retry","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+                b'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(2)
+        self.assertEqual(fake.status, 200)
+        written = b"".join(fake.wfile.writes)
+        retry_index = written.index(b"event: codexhub.retry\n")
+        model_index = written.index(b"response.output_text.delta")
+        self.assertLess(retry_index, model_index)
+        self.assertNotIn(b"upstream_stream_error", written)
+        retry_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["error"], "TimeoutError")
 
     def test_post_responses_error_event_uses_proxy_request_kind(self):
         body = json.dumps(
@@ -2032,6 +2116,26 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(handler.headers_ended)
         self.assertEqual(handler.wfile.writes, [b"data: one\n", b"\n", b"data: two\n", b"\n"])
         self.assertGreaterEqual(handler.wfile.flush_count, 4)
+        self.assertTrue(handler.close_connection)
+
+    def test_sse_relay_keeps_downstream_alive_while_waiting_for_upstream_line(self):
+        handler = FakeHandler()
+        response = FakeDelayedSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_keepalive","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+                b"",
+            ],
+            first_delay_seconds=0.05,
+        )
+
+        with patch.dict(os.environ, {"CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0.01"}, clear=False):
+            CodexProxyHandler._relay_upstream_response(handler, response, "official")
+
+        written = b"".join(handler.wfile.writes)
+        keepalive_index = written.index(b": codexhub.keepalive\n\n")
+        first_event_index = written.index(b"response.created")
+        self.assertLess(keepalive_index, first_event_index)
         self.assertTrue(handler.close_connection)
 
     def test_ollama_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
