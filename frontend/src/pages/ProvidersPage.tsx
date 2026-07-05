@@ -960,7 +960,7 @@ export function ProvidersPage({
 
   return (
     <>
-    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[430px_minmax(0,1fr)] gap-4">
+    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[430px_minmax(0,1fr)] gap-4 overflow-hidden">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}

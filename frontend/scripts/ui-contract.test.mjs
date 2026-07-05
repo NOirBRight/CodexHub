@@ -658,6 +658,10 @@ test("providers page uses stable zero-min split columns", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
 
   assert.match(providersSource, /min-w-\[972px\] grid-cols-\[430px_minmax\(0,1fr\)\]/);
+  assert.match(
+    providersSource,
+    /<main className="relative grid h-full min-h-0 min-w-\[972px\] grid-cols-\[430px_minmax\(0,1fr\)\] gap-4 overflow-hidden"/,
+  );
   assert.match(providersSource, /<aside className="min-h-0 min-w-0 overflow-hidden/);
   assert.match(providersSource, /<section className="min-h-0 min-w-0 overflow-hidden/);
   assert.doesNotMatch(providersSource, /grid-cols-\[minmax\(0,4fr\)_minmax\(0,6fr\)\]/);
