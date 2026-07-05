@@ -841,7 +841,6 @@ export function ProvidersPage({
     baseUrl: string,
     apiKey: string,
     model?: string | null,
-    fallbackFormat?: UpstreamFormat | null,
   ) {
     setBusy("probe");
     setProbeResult(null);
@@ -849,12 +848,15 @@ export function ProvidersPage({
     try {
       const result = await api.probeUpstreamFormat(baseUrl, apiKey, model);
       setProbeResult(result);
+      const detectedFormat = probeDetectedEndpointFormat(result);
       updateToast(toastId, {
         action: null,
-        text: t("providers.probeCompleted", {
-          format: upstreamFormatLabel(probeRecommendedEndpointFormat(result, fallbackFormat), tr),
-        }),
-        tone: "success",
+        text: detectedFormat
+          ? t("providers.probeCompleted", {
+              format: upstreamFormatLabel(detectedFormat, tr),
+            })
+          : t("providers.probeNoSupportedEndpoint"),
+        tone: detectedFormat ? "success" : "error",
       });
       setError(null);
       return result;
@@ -976,7 +978,7 @@ export function ProvidersPage({
                 onDiscover={() => void discoverForForm()}
                 onFormChange={setForm}
                 onProbe={() =>
-                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModel(), form.upstream_format)
+                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModel())
                 }
               />
             ) : selectedId === OFFICIAL_ID ? (
@@ -1004,7 +1006,6 @@ export function ProvidersPage({
                     provider.base_url,
                     provider.api_key ?? "",
                     providerProbeModel(provider),
-                    provider.upstream_format,
                   ).then((result) => {
                     if (result) {
                       void persistProviderProbeResult(provider.id, result);
@@ -2490,20 +2491,32 @@ function hasAvailableEndpointFormats(values?: Array<UpstreamFormat | null | unde
   return normalizeEndpointFormats(values).length > 0;
 }
 
-function probeRecommendedEndpointFormat(
-  result: UpstreamFormatProbeResult,
-  fallbackFormat?: UpstreamFormat | null,
-): UpstreamFormat {
-  if (result.recommended_format !== "auto") {
-    return result.recommended_format;
+function probeDetectedEndpointFormat(result: UpstreamFormatProbeResult): UpstreamFormat | null {
+  return normalizedProbeEndpointFormat(result.recommended_format) ?? probeAvailableFormats(result)[0] ?? null;
+}
+
+function normalizedProbeEndpointFormat(value?: string | null): UpstreamFormat | null {
+  const normalized = value?.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  if (!normalized || normalized === "auto") {
+    return null;
   }
-  return probeAvailableFormats(result)[0] ?? normalizedEndpointFormat(fallbackFormat);
+  if (normalized === "responses" || normalized === "response") {
+    return "responses";
+  }
+  if (normalized === "chat_completions" || normalized === "chat_completion" || normalized === "chat") {
+    return "chat_completions";
+  }
+  if (normalized === "anthropic_messages" || normalized === "anthropic_message" || normalized === "anthropic") {
+    return "anthropic_messages";
+  }
+  return null;
 }
 
 function applyProviderProbeResult(provider: Provider, result: UpstreamFormatProbeResult): Provider {
+  const detectedFormat = probeDetectedEndpointFormat(result);
   return {
     ...provider,
-    upstream_format: probeRecommendedEndpointFormat(result, provider.upstream_format),
+    upstream_format: detectedFormat ?? provider.upstream_format,
     available_upstream_formats: probeAvailableFormats(result),
   };
 }
@@ -2516,9 +2529,10 @@ function applyProviderProbeAvailability(provider: Provider, result: UpstreamForm
 }
 
 function applyAddProviderProbeResult(form: AddProviderForm, result: UpstreamFormatProbeResult): AddProviderForm {
+  const detectedFormat = probeDetectedEndpointFormat(result);
   return {
     ...form,
-    upstream_format: probeRecommendedEndpointFormat(result, form.upstream_format),
+    upstream_format: detectedFormat ?? form.upstream_format,
     available_upstream_formats: probeAvailableFormats(result),
   };
 }
@@ -2970,8 +2984,9 @@ function probeAvailableFormats(result?: UpstreamFormatProbeResult | null): Upstr
   if (result.anthropic_text_ok) {
     formats.push("anthropic_messages");
   }
-  if (result.recommended_format !== "auto" && !formats.includes(result.recommended_format)) {
-    formats.push(result.recommended_format);
+  const recommendedFormat = normalizedProbeEndpointFormat(result.recommended_format);
+  if (recommendedFormat && !formats.includes(recommendedFormat)) {
+    formats.push(recommendedFormat);
   }
   return formats;
 }

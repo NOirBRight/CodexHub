@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from typing import Any
+from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -22,9 +24,16 @@ def endpoint_url(base_url: str, path: str) -> str:
         raise ValueError("provider base_url is required")
     if not path.startswith("/"):
         path = "/" + path
-    if base.endswith("/v1"):
+    if base_has_version_suffix(base):
         return base + path
     return base + "/v1" + path
+
+
+def base_has_version_suffix(base_url: str) -> bool:
+    path = urlsplit(base_url).path.rstrip("/")
+    if not path:
+        return False
+    return bool(re.fullmatch(r"v\d+(?:\.\d+)?", path.rsplit("/", 1)[-1].lower()))
 
 
 def headers(api_key: str, *, json_body: bool = False) -> dict[str, str]:

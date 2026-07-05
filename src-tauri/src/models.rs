@@ -317,7 +317,7 @@ fn provider_models_endpoint(base_url: &str) -> Result<String, String> {
     }
 
     let base_url = base_url.trim_end_matches('/');
-    if base_url.ends_with("/v1") {
+    if base_url_has_version_suffix(base_url) {
         Ok(format!("{base_url}/models"))
     } else {
         Ok(format!("{base_url}/v1/models"))
@@ -335,11 +335,28 @@ fn provider_api_endpoint(base_url: &str, path: &str) -> Result<String, String> {
         format!("/{path}")
     };
     let base_url = base_url.trim_end_matches('/');
-    if base_url.ends_with("/v1") {
+    if base_url_has_version_suffix(base_url) {
         Ok(format!("{base_url}{path}"))
     } else {
         Ok(format!("{base_url}/v1{path}"))
     }
+}
+
+fn base_url_has_version_suffix(base_url: &str) -> bool {
+    let path = reqwest::Url::parse(base_url)
+        .map(|url| url.path().trim_end_matches('/').to_string())
+        .unwrap_or_else(|_| base_url.trim_end_matches('/').to_string());
+    let Some(last_segment) = path.rsplit('/').next().filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let Some(version) = last_segment.to_ascii_lowercase().strip_prefix('v').map(str::to_string) else {
+        return false;
+    };
+    !version.is_empty()
+        && version.chars().any(|value| value.is_ascii_digit())
+        && version
+            .chars()
+            .all(|value| value.is_ascii_digit() || value == '.')
 }
 
 fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
@@ -1214,9 +1231,10 @@ fn find_python() -> PathBuf {
 mod tests {
     use super::{
         discover_provider_models_with_timeout, enrich_models_with_ollama_show,
-        generate_catalog_with_runner, list_model_metadata, list_models,
-        merge_metadata_with_overrides, ollama_show_endpoint, refresh_official_models_from_endpoint,
-        test_model_endpoint_with_timeout, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
+        generate_catalog_with_runner, list_model_metadata, list_models, merge_metadata_with_overrides,
+        ollama_show_endpoint, provider_api_endpoint, provider_models_endpoint,
+        refresh_official_models_from_endpoint, test_model_endpoint_with_timeout, CatalogCommandOutcome,
+        CatalogSyncRunner, ModelPaths,
     };
     use crate::{MetadataProvenance, Model, UpstreamFormat};
     use reqwest::blocking::Client;
@@ -1426,6 +1444,22 @@ mod tests {
         let request = server.request();
         assert!(request.starts_with("GET /v1/models "));
         server.join();
+    }
+
+    #[test]
+    fn provider_endpoints_do_not_duplicate_version_suffixes() {
+        assert_eq!(
+            provider_models_endpoint("https://example.test/v2/").unwrap(),
+            "https://example.test/v2/models"
+        );
+        assert_eq!(
+            provider_api_endpoint("https://example.test/v2", "/responses").unwrap(),
+            "https://example.test/v2/responses"
+        );
+        assert_eq!(
+            provider_models_endpoint("https://example.test").unwrap(),
+            "https://example.test/v1/models"
+        );
     }
 
     #[test]

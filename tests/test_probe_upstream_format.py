@@ -19,8 +19,9 @@ from probe_upstream_format import (
 
 
 class ProbeUpstreamFormatTests(unittest.TestCase):
-    def test_endpoint_url_does_not_duplicate_v1_suffix(self) -> None:
+    def test_endpoint_url_does_not_duplicate_version_suffix(self) -> None:
         self.assertEqual(endpoint_url("https://example.test/v1", "/models"), "https://example.test/v1/models")
+        self.assertEqual(endpoint_url("https://example.test/v2", "/models"), "https://example.test/v2/models")
         self.assertEqual(endpoint_url("https://example.test", "/models"), "https://example.test/v1/models")
 
     def test_model_ids_accept_common_models_payload_shapes(self) -> None:

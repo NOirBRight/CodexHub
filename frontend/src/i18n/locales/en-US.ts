@@ -282,6 +282,7 @@ const enUS = {
     providerOrderSaved: "Provider order saved",
     providerSaved: "{{name}} saved",
     probeCompleted: "Probe completed: {{format}}",
+    probeNoSupportedEndpoint: "Probe completed: no supported endpoint detected",
     reasoningLevels: "Reasoning levels",
     recommendedFormat: "recommended {{format}}",
     refreshingOfficialModels: "Refreshing official models...",
