@@ -868,7 +868,7 @@ export function ProvidersPage({
 
   async function persistProviderProbeResult(providerId: string, result: UpstreamFormatProbeResult) {
     const nextProviders = providers.map((provider) =>
-      provider.id === providerId ? applyProviderProbeResult(provider, result) : provider,
+      provider.id === providerId ? applyProviderProbeAvailability(provider, result) : provider,
     );
     setProviders(nextProviders);
     try {
@@ -1620,18 +1620,16 @@ function ProviderDetail({
 
   useEffect(() => {
     const availableFormats = normalizeEndpointFormats(provider.available_upstream_formats);
-    const upstreamFormat = normalizedEndpointFormat(provider.upstream_format);
     setDraft((current) =>
       current.id === provider.id
         ? {
             ...current,
-            upstream_format: upstreamFormat,
             available_upstream_formats: availableFormats,
           }
         : current,
     );
     setEndpointTestState(availableFormats.length ? "success" : "idle");
-  }, [provider.id, provider.upstream_format, provider.available_upstream_formats]);
+  }, [provider.id, provider.available_upstream_formats]);
 
   useEffect(() => {
     if (probeResult) {
@@ -2506,6 +2504,13 @@ function applyProviderProbeResult(provider: Provider, result: UpstreamFormatProb
   return {
     ...provider,
     upstream_format: probeRecommendedEndpointFormat(result, provider.upstream_format),
+    available_upstream_formats: probeAvailableFormats(result),
+  };
+}
+
+function applyProviderProbeAvailability(provider: Provider, result: UpstreamFormatProbeResult): Provider {
+  return {
+    ...provider,
     available_upstream_formats: probeAvailableFormats(result),
   };
 }

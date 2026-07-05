@@ -756,16 +756,19 @@ test("provider endpoint probe persists detected formats and selects the recommen
 
   assert.match(typesSource, /available_upstream_formats\?: UpstreamFormat\[\] \| null;/);
   assert.match(pageSource, /async function persistProviderProbeResult\(providerId: string, result: UpstreamFormatProbeResult\)/);
-  assert.match(pageSource, /provider\.id === providerId \? applyProviderProbeResult\(provider, result\) : provider/);
+  assert.match(pageSource, /provider\.id === providerId \? applyProviderProbeAvailability\(provider, result\) : provider/);
   assert.match(pageSource, /probeRecommendedEndpointFormat\(result, fallbackFormat\)/);
   assert.match(pageSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
   assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
   assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
   assert.match(providerDetail, /setDraft\(\(current\) => applyProviderProbeResult\(current, result\)\);/);
+  assert.match(providerDetail, /current\.id === provider\.id[\s\S]*available_upstream_formats: availableFormats/);
+  assert.doesNotMatch(providerDetail, /const upstreamFormat = normalizedEndpointFormat\(provider\.upstream_format\);/);
   assert.match(addProviderPanel, /onFormChange\(applyAddProviderProbeResult\(form, result\)\);/);
   assert.match(providersSource, /function probeRecommendedEndpointFormat\([\s\S]*?return probeAvailableFormats\(result\)\[0\] \?\? normalizedEndpointFormat\(fallbackFormat\);/);
   assert.match(providersSource, /function applyProviderProbeResult\([\s\S]*?upstream_format: probeRecommendedEndpointFormat\(result, provider\.upstream_format\),[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),/);
+  assert.match(providersSource, /function applyProviderProbeAvailability\([\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?\};/);
   assert.match(providersSource, /function applyAddProviderProbeResult\([\s\S]*?upstream_format: probeRecommendedEndpointFormat\(result, form\.upstream_format\),[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),/);
   assert.match(
     providersSource,
