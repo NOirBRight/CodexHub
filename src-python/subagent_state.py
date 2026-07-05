@@ -40,6 +40,7 @@ class SubagentState:
     agents: dict[str, AgentState] = field(default_factory=dict)
     requested_count: int | None = None
     requested_append: bool = False
+    append_baseline_count: int | None = None
     bounded_request: bool = False
     implementation_epoch_by_task: dict[str, int] = field(default_factory=dict)
     pending_fix_targets: set[str] = field(default_factory=set)
@@ -86,6 +87,8 @@ class SubagentState:
             return len(self.agents) < self.requested_count
         if self.next_action != "spawn":
             return False
+        if self.requested_append:
+            return True
         return _allows_spawn_request(self.agents.values(), request, self.implementation_epoch_by_task)
 
 
@@ -104,11 +107,13 @@ def build_subagent_state(input_items: Any) -> SubagentState:
     events = _events_from_items(input_items)
     requested_count = _requested_spawn_count(input_items)
     requested_append = _has_append_intent(input_items)
+    append_baseline_count = _append_baseline_agent_count(input_items) if requested_append else None
     agents, epochs, pending_fix_targets = _apply_events(events)
     state = SubagentState(
         agents=agents,
         requested_count=requested_count,
         requested_append=requested_append,
+        append_baseline_count=append_baseline_count,
         bounded_request=requested_count is not None,
         implementation_epoch_by_task=epochs,
         pending_fix_targets=pending_fix_targets,
@@ -244,6 +249,9 @@ def _apply_events(events: Iterable[_Event]) -> tuple[dict[str, AgentState], dict
 
         if event.kind in {"send_input", "resume"} and event.target:
             pending_fix_targets.add(event.target)
+            agent = agents.get(event.target)
+            if agent is not None and event.kind == "resume":
+                agent.closed = False
 
     return agents, epochs, pending_fix_targets
 
@@ -269,6 +277,13 @@ def _compute_next_action(state: SubagentState) -> None:
 
     if state.agents and not _has_workflow_agents(state.agents.values()):
         state.close_waited_agents = True
+        if (
+            state.requested_append
+            and state.append_baseline_count is not None
+            and len(state.agents) <= state.append_baseline_count
+        ):
+            state.next_action = "spawn"
+            return
         if state.wait_agent_ids:
             state.next_action = "wait"
             return
@@ -287,7 +302,7 @@ def _compute_next_action(state: SubagentState) -> None:
     failed_review = _latest_failed_review(state.agents.values())
     if failed_review is not None:
         implementer = _latest_implementer(state.agents.values(), failed_review.task_key)
-        if implementer is not None and not implementer.closed:
+        if implementer is not None:
             state.next_action = "send_input"
             state.send_input_target = implementer.agent_id
             return
@@ -431,7 +446,19 @@ def _latest_failed_review(agents: Iterable[AgentState]) -> AgentState | None:
 
 def _contains_issue(text: str) -> bool:
     lowered = text.lower()
-    return any(token in lowered for token in ("issue", "missing", "not compliant", "fail", "failed", "问题", "缺失"))
+    if any(token in lowered for token in ("missing", "not compliant", "fail", "failed")):
+        return True
+    if re.search(r"\bissues?\b", lowered):
+        if re.search(r"\b(no|without|zero|0)\s+(?:[a-z]+\s+){0,3}issues?\b", lowered):
+            return False
+        if re.search(r"\bissues?\s*:\s*(none|no|n/a|nothing)\b", lowered):
+            return False
+        return True
+    if "问题" in text:
+        return not any(token in text for token in ("没有问题", "无问题", "未发现问题"))
+    if "缺失" in text:
+        return not any(token in text for token in ("没有缺失", "无缺失", "未发现缺失"))
+    return False
 
 
 def _contains_pass(text: str) -> bool:
@@ -502,7 +529,7 @@ def _event_from_tool_output(
         target = _string_value(arguments.get("target"))
         return _Event("close", call_id=call_id, arguments=arguments, target=target or None, targets=((target,) if target else ()))
     if tool_name in {"send_input", "resume_agent"}:
-        target = _string_value(arguments.get("target") or arguments.get("agent_id"))
+        target = _string_value(arguments.get("target") or arguments.get("agent_id") or arguments.get("id"))
         return _Event("send_input" if tool_name == "send_input" else "resume", call_id=call_id, arguments=arguments, target=target or None)
     return None
 
@@ -558,7 +585,7 @@ def _text_result_event(text: str, text_calls_by_id: Mapping[str, tuple[str, Mapp
 
 
 def _requested_spawn_count(value: Any) -> int | None:
-    text = _joined_text(value).lower()
+    text = _request_text(value).lower()
     if not any(token in text for token in ("spawn", "subagent", "sub-agent", "agent", "子代理", "multi_agent")):
         return None
 
@@ -619,8 +646,69 @@ def _requested_spawn_count(value: Any) -> int | None:
 
 
 def _has_append_intent(value: Any) -> bool:
-    text = _joined_text(value).lower()
+    text = _request_text(value).lower()
     return any(token in text for token in ("another", "second", "next child", "再", "另一个", "第二个", "追加"))
+
+
+def _append_baseline_agent_count(value: Any) -> int | None:
+    if not isinstance(value, list):
+        return 0
+
+    calls_by_id: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    text_calls_by_id: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    agent_ids: list[str] = []
+    baseline: int | None = None
+
+    def record_event(event: _Event | None) -> None:
+        if event is None or event.kind != "spawn" or not event.agent_id:
+            return
+        if event.agent_id not in agent_ids:
+            agent_ids.append(event.agent_id)
+
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            tool_name = _multi_agent_tool_name(item)
+            call_id = _string_value(item.get("call_id")) or None
+            if tool_name and call_id:
+                calls_by_id[call_id] = (tool_name, _json_object(item.get("arguments")) or {})
+            continue
+        if item_type == "function_call_output":
+            call_id = _string_value(item.get("call_id")) or None
+            if call_id and call_id in calls_by_id:
+                tool_name, arguments = calls_by_id[call_id]
+                record_event(_event_from_tool_output(call_id, tool_name, arguments, item.get("output")))
+            continue
+        if item_type == "message":
+            if _has_append_intent(item):
+                baseline = len(agent_ids)
+            text = _joined_text(item.get("content"))
+            call_entry = _text_call_entry(text)
+            if call_entry is not None:
+                call_id, tool_name, arguments = call_entry
+                if call_id:
+                    text_calls_by_id[call_id] = (tool_name, arguments)
+                continue
+            record_event(_text_result_event(text, text_calls_by_id))
+
+    return baseline
+
+
+def _request_text(value: Any) -> str:
+    if isinstance(value, list):
+        return "\n".join(_request_text(item) for item in value)
+    if isinstance(value, Mapping):
+        if value.get("type") != "message":
+            return ""
+        text = _joined_text(value.get("content"))
+        first_line = _first_nonempty_line(text) or ""
+        if first_line.startswith("Previous real Codex native ") or first_line.startswith("Codex native "):
+            return ""
+        role = value.get("role")
+        return text if role in {"user", "developer", "system"} else ""
+    return _joined_text(value)
 
 
 def _infer_role(text: str) -> str:

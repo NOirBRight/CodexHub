@@ -129,6 +129,44 @@ def chat_tool_payload(model: str, *, stream: bool) -> dict[str, Any]:
     }
 
 
+def chat_tool_history_payload(model: str) -> dict[str, Any]:
+    return {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "Use get_weather for Paris."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_weather",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": compact_json({"location": "Paris"}),
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_weather", "content": compact_json({"forecast": "sunny"})},
+            {"role": "user", "content": "Now use get_weather for Berlin."},
+        ],
+        "max_tokens": 64,
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Return fake weather for a city.",
+                    "parameters": weather_parameters(),
+                },
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+    }
+
+
 def anthropic_text_payload(model: str) -> dict[str, Any]:
     return {
         "model": model,
@@ -338,8 +376,10 @@ def recommended_format(result: dict[str, Any]) -> str:
 def recommended_tool_protocol(result: dict[str, Any]) -> str:
     if result.get("responses_tool_ok") or result.get("responses_tool_stream_ok"):
         return "responses_structured"
-    if result.get("chat_tool_ok") or result.get("chat_tool_stream_ok"):
+    if result.get("chat_tool_history_ok"):
         return "chat_tools"
+    if result.get("chat_tool_ok") or result.get("chat_tool_stream_ok"):
+        return "text_compat"
     return "none"
 
 
@@ -369,6 +409,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         "chat_text_ok": False,
         "chat_tool_ok": False,
         "chat_tool_stream_ok": False,
+        "chat_tool_history_ok": False,
         "anthropic_text_ok": False,
         "recommended_format": UPSTREAM_FORMAT_AUTO,
         "recommended_tool_protocol": "none",
@@ -415,6 +456,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
     tool_checks = [
         ("responses_tool_ok", "/responses", responses_tool_payload(model, stream=False), responses_tool_ok),
         ("chat_tool_ok", "/chat/completions", chat_tool_payload(model, stream=False), chat_tool_ok),
+        ("chat_tool_history_ok", "/chat/completions", chat_tool_history_payload(model), chat_tool_ok),
     ]
     for key, path, body, validator in tool_checks:
         ok, status, payload, detail = request_json(
@@ -447,6 +489,8 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         notes.append("Tool protocol: Responses structured tools")
     elif result["recommended_tool_protocol"] == "chat_tools":
         notes.append("Tool protocol: Chat Completions tool_calls")
+    elif result["recommended_tool_protocol"] == "text_compat":
+        notes.append("Tool protocol: Gateway compatibility tools")
     else:
         notes.append("Tool protocol: no reliable tool-call support detected")
 

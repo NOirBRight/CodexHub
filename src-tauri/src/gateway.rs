@@ -153,6 +153,14 @@ impl GatewayClientEndpointSelection {
         }
     }
 
+    fn zcode_api_format(self) -> &'static str {
+        match self.openai_compatible_selection() {
+            GatewayClientEndpointSelection::Responses => "openai-responses",
+            GatewayClientEndpointSelection::ChatCompletions => "openai-chat-completions",
+            GatewayClientEndpointSelection::AnthropicMessages => "openai-chat-completions",
+        }
+    }
+
     fn openai_compatible_selection(self) -> Self {
         match self {
             GatewayClientEndpointSelection::AnthropicMessages => {
@@ -4480,6 +4488,7 @@ fn zcode_catalog_provider_value(
         "name": group.display_name.clone(),
         "enabled": true,
         "source": "custom",
+        "apiFormat": group.endpoint_selection.zcode_api_format(),
         "endpoints": {
             "baseURL": gateway_base_without_v1(settings),
             "paths": {
@@ -4536,6 +4545,11 @@ fn zcode_v2_config_text(
 }
 
 fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGroup) -> Value {
+    let openai_compatible_path = match group.endpoint_selection.openai_compatible_selection() {
+        GatewayClientEndpointSelection::Responses => "/responses",
+        GatewayClientEndpointSelection::ChatCompletions
+        | GatewayClientEndpointSelection::AnthropicMessages => "/chat/completions",
+    };
     let models = group
         .models
         .iter()
@@ -4561,6 +4575,13 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
         "kind": "openai-compatible",
         "enabled": true,
         "source": "custom",
+        "apiFormat": group.endpoint_selection.zcode_api_format(),
+        "endpoints": {
+            "baseURL": group.base_url.clone(),
+            "paths": {
+                "openai-compatible": openai_compatible_path,
+            },
+        },
         "options": {
             "baseURL": group.base_url.clone(),
             "apiKey": settings.gateway_client_key,
@@ -5447,6 +5468,33 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/minimax/responses")
         );
+        assert_eq!(
+            zcode_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        let zcode_v2_text = super::zcode_v2_config_text(
+            &root.join("zcode").join("config.json"),
+            &settings,
+            &providers,
+            "minimax/minimax-m3",
+        )
+        .unwrap();
+        let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2_text).unwrap();
+        let zcode_v2_provider = zcode_v2_value.pointer("/provider/codexhub-minimax").unwrap();
+        assert_eq!(
+            zcode_v2_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            zcode_v2_provider
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
+        );
     }
 
     #[test]
@@ -5497,6 +5545,33 @@ mod tests {
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/minimax/chat/completions")
+        );
+        assert_eq!(
+            zcode_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-chat-completions")
+        );
+        let zcode_v2_text = super::zcode_v2_config_text(
+            &root.join("zcode").join("config.json"),
+            &settings,
+            &providers,
+            "minimax/minimax-m3",
+        )
+        .unwrap();
+        let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2_text).unwrap();
+        let zcode_v2_provider = zcode_v2_value.pointer("/provider/codexhub-minimax").unwrap();
+        assert_eq!(
+            zcode_v2_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-chat-completions")
+        );
+        assert_eq!(
+            zcode_v2_provider
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/chat/completions")
         );
     }
 
@@ -5772,9 +5847,21 @@ mod tests {
             .any(|model| model["id"] == "minimax-m3-lite"));
         assert_eq!(
             openai
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            openai
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/openai/responses")
+        );
+        assert_eq!(
+            minimax
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-chat-completions")
         );
         assert_eq!(
             minimax
@@ -6714,6 +6801,12 @@ mod tests {
         );
         assert_eq!(
             provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            provider
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/openai/responses")
@@ -6741,6 +6834,18 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("http://127.0.0.1:9099/v1/providers/openai")
         );
+        assert_eq!(
+            v2_config
+                .pointer("/provider/codexhub-openai/apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            v2_config
+                .pointer("/provider/codexhub-openai/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
+        );
         assert!(v2_config
             .pointer("/provider/codexhub-openai/models/gpt-5.5")
             .is_some());
@@ -6761,7 +6866,8 @@ mod tests {
         )
         .unwrap();
         let settings = Settings::default();
-        let providers = case_sensitive_client_export_test_providers();
+        let mut providers = case_sensitive_client_export_test_providers();
+        providers[0].upstream_format = Some(UpstreamFormat::Responses);
 
         let text = super::zcode_v2_config_text(
             &config_path,
@@ -6787,6 +6893,22 @@ mod tests {
                 .pointer("/options/baseURL")
                 .and_then(serde_json::Value::as_str),
             Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
+        );
+        assert_eq!(
+            provider.get("apiFormat").and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            provider
+                .pointer("/endpoints/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
+        );
+        assert_eq!(
+            provider
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
         );
         assert_eq!(
             provider

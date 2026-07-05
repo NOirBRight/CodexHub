@@ -772,6 +772,63 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(sent_payload["model"], "anthropic/claude-sonnet-4")
         self.assertEqual(handler._fake.status, 200)
 
+    def test_compact_empty_response_uses_compact_retry_budget(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"
+                            "Your task is to create a detailed summary of the conversation so far.\n"
+                            "Return an <analysis> block followed by a <summary> block."
+                        ),
+                    }
+                ],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = self._make_handler(body)
+        handler.headers["x-query-source"] = "compact"
+        empty_body = json.dumps(
+            {
+                "id": "resp_empty",
+                "object": "response",
+                "status": "completed",
+                "model": "gpt-5.5",
+                "output": [],
+            }
+        ).encode("utf-8")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "30",
+                    "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=[
+                    _FakeJsonResponse(empty_body),
+                    _FakeJsonResponse(empty_body),
+                    _FakeJsonResponse(empty_body),
+                    _FakeJsonResponse(empty_body),
+                ],
+            ) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 3)
+        self.assertEqual(handler._fake.status, 502)
+        payload = json.loads(handler.wfile.writes[0])
+        self.assertEqual(payload["error"]["type"], "compact_empty_response")
+
     def test_provider_scoped_chat_completions_image_proxy_uses_streaming_responses_vision(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         image_url = "data:image/png;base64,e2UydC12aXNpb24tcHJveHktZmFsbGJhY2t9"
@@ -864,6 +921,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(vision_responses_payload["model"], "minimax-m3")
         self.assertTrue(vision_responses_payload["stream"])
         self.assertNotIn("tools", vision_responses_payload)
+        self.assertNotIn("tool_choice", vision_responses_payload)
 
         main_request = mock_urlopen.call_args_list[1].args[0]
         main_payload = json.loads(main_request.data)
@@ -1173,6 +1231,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertFalse(vision_payload["stream"])
         self.assertIn("messages", vision_payload)
         self.assertNotIn("tools", vision_payload)
+        self.assertNotIn("tool_choice", vision_payload)
         self.assertIn(image_url, json.dumps(vision_payload))
 
         main_request = mock_urlopen.call_args_list[1].args[0]

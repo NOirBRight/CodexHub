@@ -96,6 +96,47 @@ class SubagentStateTests(unittest.TestCase):
         self.assertEqual(state.next_action, "wait")
         self.assertEqual(state.wait_agent_ids, ["agent-a", "agent-b"])
 
+    def test_append_intent_allows_one_more_spawn_after_latest_request(self):
+        state = build_subagent_state(
+            [
+                *spawn("call_spawn_a", "agent-a", "return A", "a"),
+                message("Spawn another subagent before waiting for the existing child."),
+            ]
+        )
+
+        self.assertTrue(state.requested_append)
+        self.assertTrue(state.should_allow_spawn)
+        self.assertEqual(state.next_action, "spawn")
+        self.assertTrue(state.allows_spawn_request({"message": "return B", "nickname": "b"}))
+
+    def test_append_intent_waits_after_one_additional_spawn_exists(self):
+        state = build_subagent_state(
+            [
+                *spawn("call_spawn_a", "agent-a", "return A", "a"),
+                message("Spawn another subagent before waiting for the existing child."),
+                *spawn("call_spawn_b", "agent-b", "return B", "b"),
+            ]
+        )
+
+        self.assertFalse(state.should_allow_spawn)
+        self.assertEqual(state.next_action, "wait")
+        self.assertEqual(state.wait_agent_ids, ["agent-a", "agent-b"])
+
+    def test_repeated_append_intent_uses_latest_request_as_baseline(self):
+        state = build_subagent_state(
+            [
+                *spawn("call_spawn_a", "agent-a", "return A", "a"),
+                message("Spawn another subagent before waiting for the existing child."),
+                *spawn("call_spawn_b", "agent-b", "return B", "b"),
+                message("Spawn another subagent before waiting for the existing children."),
+            ]
+        )
+
+        self.assertTrue(state.requested_append)
+        self.assertTrue(state.should_allow_spawn)
+        self.assertEqual(state.next_action, "spawn")
+        self.assertTrue(state.allows_spawn_request({"message": "return B", "nickname": "b"}))
+
     def test_duplicate_implementer_same_epoch_is_blocked(self):
         state = build_subagent_state(
             [
@@ -129,6 +170,47 @@ class SubagentStateTests(unittest.TestCase):
         self.assertEqual(state.next_action, "send_input")
         self.assertEqual(state.send_input_target, "impl-1")
         self.assertFalse(
+            state.allows_spawn_request(
+                {"message": "Spec compliance review for Task 1.", "nickname": "spec-reviewer-task-1"}
+            )
+        )
+
+    def test_reviewer_issue_routes_back_to_closed_implementer_for_resume(self):
+        state = build_subagent_state(
+            [
+                *spawn("call_impl", "impl-1", "Implement Task 1 exactly.", "implementer-task-1"),
+                *wait("call_impl_wait", ["impl-1"], "DONE"),
+                *close("call_impl_close", "impl-1"),
+                *spawn("call_spec", "spec-1", "Spec compliance review for Task 1.", "spec-reviewer-task-1"),
+                *wait("call_spec_wait", ["spec-1"], "ISSUE: missing required test"),
+            ]
+        )
+
+        self.assertEqual(state.next_action, "send_input")
+        self.assertEqual(state.send_input_target, "impl-1")
+        self.assertFalse(
+            state.allows_spawn_request(
+                {"message": "Spec compliance review for Task 1.", "nickname": "spec-reviewer-task-1"}
+            )
+        )
+
+    def test_resume_agent_id_argument_advances_implementation_epoch_after_fix(self):
+        state = build_subagent_state(
+            [
+                *spawn("call_impl", "impl-1", "Implement Task 1 exactly.", "implementer-task-1"),
+                *wait("call_impl_wait", ["impl-1"], "DONE"),
+                *close("call_impl_close", "impl-1"),
+                *spawn("call_spec", "spec-1", "Spec compliance review for Task 1.", "spec-reviewer-task-1"),
+                *wait("call_spec_wait", ["spec-1"], "ISSUE: missing required test"),
+                call("call_resume", "resume_agent", {"id": "impl-1"}),
+                output("call_resume", {"status": "resumed"}),
+                *wait("call_impl_wait_2", ["impl-1"], "DONE fixed"),
+            ]
+        )
+
+        self.assertEqual(state.implementation_epoch_by_task["task-1"], 2)
+        self.assertEqual(state.next_expected_role, "spec_reviewer")
+        self.assertTrue(
             state.allows_spawn_request(
                 {"message": "Spec compliance review for Task 1.", "nickname": "spec-reviewer-task-1"}
             )
@@ -190,6 +272,20 @@ class SubagentStateTests(unittest.TestCase):
                 {"message": "Implement Task 2 exactly.", "nickname": "implementer-task-2"}
             )
         )
+
+    def test_review_pass_with_no_issues_is_not_treated_as_failure(self):
+        state = build_subagent_state(
+            [
+                *spawn("call_impl", "impl-1", "Implement Task 1 exactly.", "implementer-task-1"),
+                *wait("call_impl_wait", ["impl-1"], "DONE"),
+                *spawn("call_spec", "spec-1", "Spec compliance review for Task 1.", "spec-reviewer-task-1"),
+                *wait("call_spec_wait", ["spec-1"], "PASS: no issues found"),
+            ]
+        )
+
+        self.assertEqual(state.next_action, "spawn")
+        self.assertEqual(state.next_expected_role, "code_quality_reviewer")
+        self.assertIsNone(state.send_input_target)
 
     def test_classifies_spawn_request_from_prompt_and_nickname(self):
         request = classify_spawn_request(

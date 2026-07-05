@@ -127,9 +127,21 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             "responses_tool_stream_ok": False,
             "chat_tool_ok": True,
             "chat_tool_stream_ok": False,
+            "chat_tool_history_ok": True,
         }
 
         self.assertEqual(recommended_tool_protocol(result), "chat_tools")
+
+    def test_recommends_text_compat_when_chat_tools_work_without_history(self) -> None:
+        result = {
+            "responses_tool_ok": False,
+            "responses_tool_stream_ok": False,
+            "chat_tool_ok": True,
+            "chat_tool_stream_ok": False,
+            "chat_tool_history_ok": False,
+        }
+
+        self.assertEqual(recommended_tool_protocol(result), "text_compat")
 
     def test_recommends_none_without_tool_support(self) -> None:
         result = {
@@ -137,6 +149,7 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             "responses_tool_stream_ok": False,
             "chat_tool_ok": False,
             "chat_tool_stream_ok": False,
+            "chat_tool_history_ok": False,
         }
 
         self.assertEqual(recommended_tool_protocol(result), "none")
@@ -174,12 +187,21 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
         self.assertTrue(result["responses_tool_ok"])
         self.assertTrue(result["chat_text_ok"])
         self.assertTrue(result["chat_tool_ok"])
+        self.assertTrue(result["chat_tool_history_ok"])
         self.assertFalse(result["anthropic_text_ok"])
         self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
         self.assertEqual(result["recommended_tool_protocol"], "responses_structured")
         self.assertEqual(
             [call.args[2] for call in request_json.call_args_list],
-            ["/models", "/responses", "/chat/completions", "/messages", "/responses", "/chat/completions"],
+            [
+                "/models",
+                "/responses",
+                "/chat/completions",
+                "/messages",
+                "/responses",
+                "/chat/completions",
+                "/chat/completions",
+            ],
         )
 
     def test_anthropic_message_shape_detection_is_lightweight(self) -> None:

@@ -61,6 +61,7 @@ export interface UpstreamFormatProbeResult {
   chat_text_ok: boolean;
   chat_tool_ok: boolean;
   chat_tool_stream_ok: boolean;
+  chat_tool_history_ok: boolean;
   anthropic_text_ok: boolean;
   recommended_format: UpstreamFormat;
   recommended_tool_protocol: ToolProtocol;
