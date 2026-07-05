@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 import codex_proxy
 from codex_proxy import (
     CodexProxyHandler,
+    RETRY_REQUEST_COMPACT,
     _chat_stream_chunks_to_response_events,
     _filtered_response_headers,
     _is_websocket_upgrade,
@@ -58,6 +59,21 @@ class FakeHandler:
 
     def end_headers(self):
         self.headers_ended = True
+
+    def _write_downstream_sse_error(self, **kwargs):
+        return CodexProxyHandler._write_downstream_sse_error(self, **kwargs)
+
+    def _write_sse_event(self, event, payload):
+        return CodexProxyHandler._write_sse_event(self, event, payload)
+
+    def _write_sse_protocol_error_event(self, upstream_name, status, detail, *, error="UpstreamProtocolError"):
+        return CodexProxyHandler._write_sse_protocol_error_event(
+            self,
+            upstream_name,
+            status,
+            detail,
+            error=error,
+        )
 
 
 class FakeSseResponse:
@@ -2377,6 +2393,176 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["output"][0]["role"], "assistant")
         self.assertIn("Invalid third-party function call transcript", payload["output"][0]["content"][0]["text"])
         self.assertIn("shell_command`", payload["output"][0]["content"][0]["text"])
+
+    def test_buffered_responses_sse_without_completed_returns_502_error(self):
+        handler = FakeHandler()
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            b"",
+        ])
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "official",
+            request_id="req_incomplete_buffer",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=False,
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(handler.status, 502)
+        payload = json.loads(handler.wfile.writes[0])
+        self.assertEqual(payload["error"]["type"], "upstream_stream_incomplete")
+        self.assertEqual(payload["error"]["code"], "upstream_stream_incomplete")
+        headers = dict(handler.headers)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Content-Length"], str(len(handler.wfile.writes[0])))
+        matching_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        ]
+        self.assertTrue(matching_events)
+        event_kwargs = matching_events[-1].kwargs
+        self.assertEqual(event_kwargs["request_id"], "req_incomplete_buffer")
+        self.assertEqual(event_kwargs["model"], "openai/gpt-5.5")
+        self.assertEqual(event_kwargs["upstream"], "official")
+        self.assertEqual(event_kwargs["status"], 502)
+        self.assertEqual(event_kwargs["upstream_format"], "responses")
+        self.assertEqual(event_kwargs["inbound_format"], "responses")
+
+    def test_responses_sse_to_chat_stream_without_completed_writes_sse_error(self):
+        handler = FakeHandler()
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            b"",
+        ])
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "official",
+            request_id="req_incomplete_chat_convert",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="chat_completions",
+            caller_stream=True,
+        )
+
+        self.assertEqual(status, 502)
+        data = b"".join(handler.wfile.writes)
+        self.assertIn(b"upstream_stream_incomplete", data)
+        self.assertNotIn(b"finish_reason", data)
+        self.assertNotIn(b"data: [DONE]", data)
+
+    def test_chat_sse_without_finish_or_done_writes_sse_error(self):
+        handler = FakeHandler()
+        response = FakeSseResponse([
+            b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+            b"",
+        ])
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_incomplete_chat_sse",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+        )
+
+        self.assertEqual(status, 502)
+        data = b"".join(handler.wfile.writes)
+        self.assertIn(b"upstream_stream_incomplete", data)
+        self.assertNotIn(b"data: [DONE]", data)
+
+    def test_responses_sse_passthrough_without_terminal_writes_sse_error(self):
+        handler = FakeHandler()
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            b"",
+        ])
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "official",
+            request_id="req_incomplete_responses_passthrough",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        self.assertEqual(status, 502)
+        data = b"".join(handler.wfile.writes)
+        self.assertIn(b"upstream_stream_incomplete", data)
+
+    def test_compact_non_sse_empty_chat_response_becomes_retryable_error(self):
+        handler = FakeHandler()
+        body = json.dumps(
+            {
+                "id": "resp_empty",
+                "object": "response",
+                "status": "completed",
+                "model": "glm-5.2",
+                "output": [],
+            }
+        ).encode("utf-8")
+        response = FakeResponse(body)
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            upstream_format="responses",
+            inbound_format="chat_completions",
+            caller_stream=False,
+            request_kind=RETRY_REQUEST_COMPACT,
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(handler.status, 502)
+        payload = json.loads(handler.wfile.writes[0])
+        self.assertEqual(payload["error"]["type"], "compact_empty_response")
+
+    def test_non_compact_empty_assistant_response_logs_telemetry_but_stays_successful(self):
+        handler = FakeHandler()
+        body = json.dumps(
+            {
+                "id": "resp_empty",
+                "object": "response",
+                "status": "completed",
+                "model": "gpt-5.5",
+                "output": [],
+            }
+        ).encode("utf-8")
+        response = FakeResponse(body)
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "official",
+            request_id="req_empty_non_compact",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=False,
+            request_kind="main_generation",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(handler.status, 200)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list]
+        self.assertIn("empty_assistant_response", event_names)
 
     def test_official_request_downgrades_invalid_tool_history_without_system_role(self):
         body = json.dumps(

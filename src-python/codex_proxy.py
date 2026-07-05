@@ -70,6 +70,8 @@ PROXY_FEATURES = [
     "ollama-output-token-cap",
     "official-upstream-open-retry",
     "browser-context-skill-guidance",
+    "compact-text-only-tool-strip",
+    "compact-empty-response-guard",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
@@ -270,6 +272,7 @@ DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
 RETRY_REQUEST_MAIN_GENERATION = "main_generation"
+RETRY_REQUEST_COMPACT = "compact"
 RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
 RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
 TRANSIENT_HTTP_RETRY_STATUSES = {408, 409, 421, 425, 429, 500, 502, 503, 504}
@@ -1102,6 +1105,159 @@ def _chat_content_text(value: Any) -> str:
     return "\n".join(fragments)
 
 
+def _tail_text_for_compact_detection(payload: Mapping[str, Any], inbound_format: str) -> str:
+    if inbound_format == "chat_completions":
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            fragments: list[str] = []
+            for message in messages[-5:]:
+                if isinstance(message, Mapping):
+                    fragments.append(_chat_content_text(message.get("content")))
+            return "\n".join(fragment for fragment in fragments if fragment)
+
+    input_items = payload.get("input")
+    if isinstance(input_items, list):
+        return "\n".join(_collect_text_fragments(input_items[-5:]))
+    return "\n".join(_collect_text_fragments(input_items))
+
+
+def _is_compact_summary_payload(payload: Mapping[str, Any], inbound_format: str) -> bool:
+    text = _tail_text_for_compact_detection(payload, inbound_format).lower()
+    if not text:
+        return False
+
+    summary_prompt = (
+        "detailed summary of the conversation so far" in text
+        or "create a detailed summary of the conversation" in text
+        or "compact summary" in text
+    )
+    text_only_instruction = "do not call any tools" in text or "respond with text only" in text
+    summary_shape = "<summary>" in text or "summary should include" in text
+    return summary_prompt and text_only_instruction and summary_shape
+
+
+def _request_kind_from_headers_and_payload(
+    headers: Mapping[str, str] | Any,
+    payload: Mapping[str, Any] | None,
+    inbound_format: str,
+) -> str:
+    for header_name in ("x-request-kind", "x-query-source"):
+        header_value = _get_header(headers, header_name)
+        if isinstance(header_value, str) and header_value.strip().lower() == RETRY_REQUEST_COMPACT:
+            return RETRY_REQUEST_COMPACT
+    if isinstance(payload, Mapping) and _is_compact_summary_payload(payload, inbound_format):
+        return RETRY_REQUEST_COMPACT
+    return RETRY_REQUEST_MAIN_GENERATION
+
+
+def _strip_tools_for_compact_payload(
+    payload: dict[str, Any],
+    *,
+    event_context: Mapping[str, Any] | None = None,
+    upstream_name: str | None = None,
+) -> bool:
+    removed_tools = payload.pop("tools", None)
+    removed_tool_choice = payload.pop("tool_choice", None)
+    if removed_tools is None and removed_tool_choice is None:
+        return False
+
+    removed_tool_count = len(removed_tools) if isinstance(removed_tools, list) else 0
+    _write_adapter_event(
+        event_context,
+        "compact_text_only_tools_stripped",
+        upstream=upstream_name,
+        model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+        removed_tool_count=removed_tool_count,
+        removed_tool_choice=removed_tool_choice if isinstance(removed_tool_choice, str) else None,
+    )
+    return True
+
+
+def _chat_completion_body_is_empty(body: bytes) -> bool:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or "error" in payload:
+        return False
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return True
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return False
+        if not isinstance(content, str) and _chat_content_text(content).strip():
+            return False
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            return False
+    return True
+
+
+def _responses_body_is_empty(body: bytes) -> bool:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or "error" in payload:
+        return False
+    output = payload.get("output")
+    if not isinstance(output, list) or not output:
+        return True
+    for item in output:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("type") == "function_call":
+            return False
+        if item.get("type") != "message":
+            continue
+        if _chat_content_text(item.get("content")).strip():
+            return False
+    return True
+
+
+def _compact_response_body_is_empty(body: bytes, inbound_format: str) -> bool:
+    if inbound_format == "chat_completions":
+        return _chat_completion_body_is_empty(body)
+    return _responses_body_is_empty(body)
+
+
+def _downstream_json_error_body(
+    *,
+    message: str,
+    error_type: str,
+    code: str,
+    upstream_name: str,
+) -> bytes:
+    return json.dumps(
+        {
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": code,
+                "upstream": upstream_name,
+            }
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _incomplete_stream_json_error_body(upstream_name: str) -> bytes:
+    return _downstream_json_error_body(
+        message="Upstream stream ended before a terminal event.",
+        error_type="upstream_stream_incomplete",
+        code="upstream_stream_incomplete",
+        upstream_name=upstream_name,
+    )
+
+
 def _responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
     if isinstance(value, str):
         return value
@@ -1304,7 +1460,7 @@ def _chat_completion_to_response_body(body: bytes) -> bytes:
     return json.dumps(response_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
-def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]) -> list[dict[str, Any]]:
     """Translate Chat Completions tool-call chunks into Responses events.
 
     OpenAI-compatible chat streams usually send tool_call.id only in the first
@@ -1350,6 +1506,11 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any]]) -> l
         state["added"] = True
 
     for chunk in chunks:
+        if chunk == "[DONE]":
+            finished = True
+            continue
+        if not isinstance(chunk, Mapping):
+            continue
         choices = chunk.get("choices")
         if not isinstance(choices, list):
             continue
@@ -1761,7 +1922,59 @@ def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
     return json.dumps({"error": normalized_error}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
-def _response_events_to_chat_stream_chunks(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+class UpstreamStreamIncompleteError(RuntimeError):
+    """Raised when an upstream stream ends without a terminal event."""
+
+
+RESPONSES_TERMINAL_EVENT_TYPES = {
+    "response.completed",
+    "response.failed",
+    "response.incomplete",
+    "error",
+}
+
+
+def _responses_events_have_terminal(events: list[Mapping[str, Any]]) -> bool:
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        event_type = event.get("type")
+        if isinstance(event_type, str) and event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+            return True
+    return False
+
+
+def _responses_events_have_completed(events: list[Mapping[str, Any]]) -> bool:
+    for event in events:
+        if isinstance(event, Mapping) and event.get("type") == "response.completed":
+            return True
+    return False
+
+
+def _chat_stream_chunk_has_finish(chunk: Mapping[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if isinstance(choice, Mapping) and choice.get("finish_reason") is not None:
+            return True
+    return False
+
+
+def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> bool:
+    for chunk in chunks:
+        if chunk == "[DONE]":
+            return True
+        if isinstance(chunk, Mapping) and _chat_stream_chunk_has_finish(chunk):
+            return True
+    return False
+
+
+def _response_events_to_chat_stream_chunks(
+    events: list[Mapping[str, Any]],
+    *,
+    require_completed: bool = False,
+) -> list[dict[str, Any]]:
     """Convert Responses API SSE events into Chat Completions stream chunks.
 
     Mirrors :func:`_chat_stream_chunks_to_response_events`.  Text deltas become
@@ -1769,6 +1982,9 @@ def _response_events_to_chat_stream_chunks(events: list[Mapping[str, Any]]) -> l
     ``delta.tool_calls`` fragments.  A final chunk with ``finish_reason`` is
     emitted when the response completes.
     """
+    if require_completed and not _responses_events_have_completed(events):
+        raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
+
     chunks: list[dict[str, Any]] = []
     tool_states: dict[str, dict[str, Any]] = {}
     model: str | None = None
@@ -1927,13 +2143,20 @@ def _is_reasoning_sse_payload(payload: Mapping[str, Any] | None) -> bool:
     return isinstance(item, dict) and item.get("type") == "reasoning"
 
 
-def _events_to_responses_body(events: list[Mapping[str, Any]]) -> bytes:
+def _events_to_responses_body(
+    events: list[Mapping[str, Any]],
+    *,
+    require_completed: bool = False,
+) -> bytes:
     """Reconstruct a non-streaming Responses API body from SSE events.
 
     Used when the upstream forces streaming (e.g. chatgpt.com) but the caller
     requested a non-streaming response.  Collects output items and text from
     the event stream into a single ``response`` object.
     """
+    if require_completed and not _responses_events_have_completed(events):
+        raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
+
     output: list[dict[str, Any]] = []
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     model: str | None = None
@@ -3579,6 +3802,10 @@ def request_context_from_headers(headers: Mapping[str, str] | Any) -> dict[str, 
         "x-codex-session-id": "session_id",
         "x-codex-window-id": "window_id",
         "x-codex-client-id": "client_id",
+        "x-request-id": "client_request_id",
+        "x-query-id": "query_id",
+        "x-session-id": "session_id",
+        "x-zcode-trace-id": "trace_id",
     }
     for header_name, field_name in direct_headers.items():
         value = _get_header(headers, header_name)
@@ -3657,6 +3884,7 @@ def _filtered_response_headers(
     headers: Mapping[str, str] | Any,
     is_event_stream: bool,
     content_length: int | None = None,
+    content_type: str | None = None,
 ) -> list[tuple[str, str]]:
     outgoing: list[tuple[str, str]] = []
     for key, value in _header_items(headers):
@@ -3665,7 +3893,11 @@ def _filtered_response_headers(
             continue
         if lowered == "content-length" and (is_event_stream or content_length is not None):
             continue
+        if lowered == "content-type" and content_type is not None:
+            continue
         outgoing.append((key, value))
+    if content_type is not None:
+        outgoing.append(("Content-Type", content_type))
     if content_length is not None:
         outgoing.append(("Content-Length", str(content_length)))
     return outgoing
@@ -4585,7 +4817,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
-        proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_MAIN_GENERATION)
+        request_kind = RETRY_REQUEST_MAIN_GENERATION
+        proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
         model = None
         model_requested = None
         upstream_name = None
@@ -4600,6 +4833,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             body, content_decoded, decode_error = decoded_request_body(body, content_encoding)
             if decode_error:
                 raise ValueError(f"request body content-encoding decode failed: {decode_error}")
+            try:
+                inbound_payload = json.loads(body.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                inbound_payload = None
+            request_kind = _request_kind_from_headers_and_payload(self.headers, inbound_payload, inbound_format)
+            if request_kind == RETRY_REQUEST_COMPACT:
+                proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+                if isinstance(inbound_payload, dict) and _strip_tools_for_compact_payload(
+                    inbound_payload,
+                    event_context={"request_id": request_id, **proxy_request_context},
+                ):
+                    body = json.dumps(inbound_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             # Convert inbound Chat Completions request to Responses format before routing.
             if inbound_format == "chat_completions":
                 body = _chat_completions_request_to_responses_body(body)
@@ -4666,7 +4911,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
 
             usage_capture: dict[str, Any] = {}
-            body = compatible_request_body(body, upstream, model_id=model, event_context=adapter_event_context)
+            body = compatible_request_body(
+                body,
+                upstream,
+                model_id=model,
+                event_context=adapter_event_context,
+                inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT,
+            )
             try:
                 image_proxy_payload = json.loads(body.decode("utf-8-sig"))
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -4743,7 +4994,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 timeout=upstream_timeout_seconds(),
                                 event_context=adapter_event_context,
                                 downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
-                                request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                                request_kind=request_kind,
                             ) as response:
                                 status = self._relay_upstream_response(
                                     response,
@@ -4756,6 +5007,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     event_context=adapter_event_context,
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
+                                    request_kind=request_kind,
                                 )
                             break
                         except IncompleteRead as exc:
@@ -4766,7 +5018,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 adapter_event_context,
                                 upstream_name=upstream_name,
                                 upstream_format=selected_upstream_format,
-                                request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                                request_kind=request_kind,
                                 attempt=relay_attempt,
                                 max_attempts=relay_attempts,
                                 exc=exc,
@@ -4776,7 +5028,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 _downstream_retry_payload(
                                     upstream_name=upstream_name,
                                     upstream_format=selected_upstream_format,
-                                    request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                                    request_kind=request_kind,
                                     attempt=relay_attempt,
                                     max_attempts=relay_attempts,
                                     exc=exc,
@@ -5284,16 +5536,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_name,
             status,
             detail or error or "upstream stream failed",
+            error=error or "UpstreamProtocolError",
         )
         self.close_connection = True
 
-    def _write_sse_protocol_error_event(self, upstream_name: str, status: int, detail: str) -> None:
+    def _write_sse_protocol_error_event(
+        self,
+        upstream_name: str,
+        status: int,
+        detail: str,
+        *,
+        error: str = "UpstreamProtocolError",
+    ) -> None:
         self._write_sse_event(
             "error",
             _downstream_stream_error_payload(
                 upstream_name=upstream_name,
                 status=status,
-                error="UpstreamProtocolError",
+                error=error,
                 detail=detail,
             ),
         )
@@ -5349,6 +5609,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         event_context: Mapping[str, Any] | None = None,
         usage_capture: dict[str, Any] | None = None,
         headers_already_sent: bool = False,
+        request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -5359,6 +5620,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
         # SSE into a single JSON response body.
         buffer_sse_to_json = is_event_stream and not caller_stream
+        buffered_json_response = False
         if not is_event_stream or buffer_sse_to_json:
             if buffer_sse_to_json:
                 # Buffer the full SSE stream into a list of events.
@@ -5377,9 +5639,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if isinstance(event, dict):
                         events.append(event)
                 # Reconstruct a Responses-format body from the events.
-                body = _events_to_responses_body(events)
+                try:
+                    body = _events_to_responses_body(events, require_completed=True)
+                except UpstreamStreamIncompleteError:
+                    status = 502
+                    body = _incomplete_stream_json_error_body(upstream_name)
+                    write_proxy_event(
+                        "upstream_stream_incomplete",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=status,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                    )
                 _capture_usage(usage_capture, _usage_from_json_body(body))
                 is_event_stream = False
+                buffered_json_response = True
             else:
                 body = b""
                 while True:
@@ -5399,6 +5675,50 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             else:
                 body = compatible_response_body(body, upstream_name, event_context=event_context)
             _capture_usage(usage_capture, _usage_from_json_body(body))
+            if status < 400 and request_kind == RETRY_REQUEST_COMPACT and _compact_response_body_is_empty(body, inbound_format):
+                status = 502
+                body = _downstream_json_error_body(
+                    message="Upstream returned an empty compact summary.",
+                    error_type="compact_empty_response",
+                    code="compact_empty_response",
+                    upstream_name=upstream_name,
+                )
+                event_fields = dict(event_context) if event_context else {}
+                event_fields.pop("request_id", None)
+                event_fields.pop("model", None)
+                event_fields.pop("upstream", None)
+                write_proxy_event(
+                    "compact_empty_response",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=status,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    **event_fields,
+                )
+                _capture_usage(usage_capture, None, missing_reason="compact_empty_response")
+            else:
+                empty_non_compact = (
+                    _chat_completion_body_is_empty(body)
+                    if inbound_format == "chat_completions"
+                    else _responses_body_is_empty(body)
+                )
+                if status < 400 and request_kind != RETRY_REQUEST_COMPACT and empty_non_compact:
+                    event_fields = dict(event_context) if event_context else {}
+                    event_fields.pop("request_id", None)
+                    event_fields.pop("model", None)
+                    event_fields.pop("upstream", None)
+                    write_proxy_event(
+                        "empty_assistant_response",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=status,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        **event_fields,
+                    )
             if headers_already_sent:
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
@@ -5414,7 +5734,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if not headers_already_sent:
             self.send_response(status)
             content_length = None if is_event_stream else len(body)
-            for key, value in _filtered_response_headers(response.headers, is_event_stream, content_length):
+            content_type = "application/json" if buffered_json_response else None
+            for key, value in _filtered_response_headers(
+                response.headers,
+                is_event_stream,
+                content_length,
+                content_type=content_type,
+            ):
                 self.send_header(key, value)
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
             self.send_header("Connection", "close")
@@ -5459,7 +5785,30 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
-                for chunk in _response_events_to_chat_stream_chunks(events):
+                try:
+                    chunks = _response_events_to_chat_stream_chunks(events, require_completed=True)
+                except UpstreamStreamIncompleteError:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_incomplete",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_incomplete",
+                        detail="Upstream stream ended before response.completed.",
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                    return 502
+
+                for chunk in chunks:
                     self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -5470,7 +5819,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
             if upstream_format == "chat_completions":
                 line_ending = b"\n"
-                chunks: list[Mapping[str, Any]] = []
+                chunks: list[Mapping[str, Any] | str] = []
                 try:
                     while True:
                         line = response.readline()
@@ -5479,6 +5828,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         line_ending = _sse_line_ending(line)
                         payload_bytes = _sse_payload_bytes(line)
                         if payload_bytes is None:
+                            continue
+                        if payload_bytes == b"[DONE]":
+                            chunks.append("[DONE]")
                             continue
                         try:
                             payload = json.loads(payload_bytes.decode("utf-8-sig"))
@@ -5505,9 +5857,31 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
+                if not _chat_stream_chunks_have_terminal(chunks):
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_incomplete",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_incomplete",
+                        detail="Upstream Chat Completions stream ended without finish_reason or [DONE].",
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                    return 502
                 if want_chat_output:
                     # Inbound and upstream are both Chat Completions; pass through.
                     for chunk in chunks:
+                        if chunk == "[DONE]":
+                            continue
                         self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                         self.wfile.flush()
                 else:
@@ -5529,6 +5903,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "delta_events": 0,
                 "delta_chars": 0,
             }
+            saw_response_event = False
+            saw_terminal_event = False
             try:
                 while True:
                     line = response.readline()
@@ -5537,6 +5913,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     usage_payload = _parse_sse_json_payload(line)
                     if isinstance(usage_payload, Mapping):
+                        event_type = usage_payload.get("type")
+                        if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
+                            saw_response_event = True
+                        if _responses_events_have_terminal([usage_payload]):
+                            saw_terminal_event = True
                         _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
                     line = compatible_sse_line(line, upstream_name, event_context=event_context)
                     rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
@@ -5561,6 +5942,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     exc=exc,
                 )
                 _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                return 502
+            if status < 400 and saw_response_event and not saw_terminal_event:
+                self.close_connection = True
+                write_proxy_event(
+                    "upstream_stream_incomplete",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=502,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                )
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=502,
+                    error="upstream_stream_incomplete",
+                    detail="Upstream Responses stream ended without a terminal event.",
+                )
+                _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
             if upstream_name != "official" and reasoning_stats["seen"]:
                 write_proxy_event(

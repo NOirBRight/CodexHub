@@ -21,7 +21,7 @@ const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_MODEL: &str = "openai/gpt-5.5";
 
 const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
-    ("openai/gpt-5.5", "OpenAI GPT-5.5", 272000),
+    ("openai/gpt-5.5", "OpenAI GPT-5.5", 258400),
     ("openai/gpt-5.4", "OpenAI GPT-5.4", 272000),
     ("openai/gpt-5.4-mini", "OpenAI GPT-5.4-Mini", 272000),
     (
@@ -36,7 +36,7 @@ const OFFICIAL_FAST_VARIANTS: &[(&str, &str, &str, u32)] = &[
         "openai/gpt-5.5",
         "openai/gpt-5.5-fast",
         "OpenAI GPT-5.5 Fast",
-        272000,
+        258400,
     ),
     (
         "openai/gpt-5.4",

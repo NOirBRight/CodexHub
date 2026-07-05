@@ -103,15 +103,15 @@ OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = {"gpt-5.5-fast", "gpt-5.4-fast"}
 
 OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.5": {
-        "context_window": 272000,
-        "max_context_window": 272000,
+        "context_window": 258400,
+        "max_context_window": 258400,
         "additional_speed_tiers": ["fast"],
         "service_tiers": OFFICIAL_FAST_SERVICE_TIERS,
         "default_reasoning_level": "medium",
     },
     "gpt-5.5-fast": {
-        "context_window": 272000,
-        "max_context_window": 272000,
+        "context_window": 258400,
+        "max_context_window": 258400,
         "default_reasoning_level": "medium",
     },
     "gpt-5.4": {

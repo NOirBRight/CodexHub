@@ -10,15 +10,21 @@ from urllib.error import HTTPError, URLError
 import codex_proxy
 from codex_proxy import (
     CodexProxyHandler,
+    UpstreamStreamIncompleteError,
     _chat_completions_request_to_responses_body,
+    _chat_stream_chunks_have_terminal,
     _chat_messages_to_responses_input,
     _chat_tool_choice_to_responses_tool_choice,
     _chat_tools_to_responses_tools,
     _events_to_responses_body,
+    _is_compact_summary_payload,
     _normalize_usage_for_event,
     _response_body_to_chat_completion_body,
     _response_events_to_chat_stream_chunks,
+    _request_kind_from_headers_and_payload,
     _responses_request_to_chat_completion_body,
+    _responses_events_have_terminal,
+    _strip_tools_for_compact_payload,
 )
 
 
@@ -129,6 +135,60 @@ class ChatRequestToResponsesTests(unittest.TestCase):
         self.assertEqual(len(payload["input"]), 1)
         self.assertEqual(payload["input"][0]["role"], "user")
 
+    def test_compact_prompt_detection_strips_tools_before_conversion(self):
+        payload = {
+            "model": "glm-5.2",
+            "messages": [
+                {"role": "assistant", "content": "previous work"},
+                {
+                    "role": "user",
+                    "content": (
+                        "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"
+                        "Your task is to create a detailed summary of the conversation so far.\n"
+                        "Your response must include an <analysis> block followed by a <summary> block."
+                    ),
+                },
+            ],
+            "tools": [{"type": "function", "function": {"name": "Bash", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+        }
+
+        self.assertTrue(_is_compact_summary_payload(payload, "chat_completions"))
+        self.assertTrue(_strip_tools_for_compact_payload(payload))
+
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+
+
+class RequestKindDetectionTests(unittest.TestCase):
+    def test_compact_header_marks_request_kind_without_prompt_heuristic(self):
+        payload = {"model": "gpt-5.5", "input": "summarize"}
+
+        request_kind = _request_kind_from_headers_and_payload(
+            {"x-query-source": "compact"},
+            payload,
+            "responses",
+        )
+
+        self.assertEqual(request_kind, "compact")
+
+    def test_compact_prompt_heuristic_marks_request_kind(self):
+        payload = {
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"
+                    "Your task is to create a detailed summary of the conversation so far.\n"
+                    "Return an <analysis> block followed by a <summary> block."
+                ),
+            }],
+        }
+
+        request_kind = _request_kind_from_headers_and_payload({}, payload, "chat_completions")
+
+        self.assertEqual(request_kind, "compact")
+
 
 class ChatToolChoiceTests(unittest.TestCase):
     def test_string_tool_choice(self):
@@ -206,6 +266,43 @@ class ResponseBodyToChatTests(unittest.TestCase):
 
 
 class ResponseEventsToChatStreamTests(unittest.TestCase):
+    def test_responses_events_terminal_detection_requires_completed_or_failure(self):
+        self.assertFalse(_responses_events_have_terminal([]))
+        self.assertFalse(_responses_events_have_terminal([
+            {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},
+            {"type": "response.output_text.delta", "delta": "partial"},
+        ]))
+        self.assertTrue(_responses_events_have_terminal([
+            {"type": "response.completed", "response": {"id": "resp_1", "model": "gpt-5.5", "output": []}},
+        ]))
+        self.assertTrue(_responses_events_have_terminal([
+            {"type": "response.failed", "response": {"id": "resp_1", "model": "gpt-5.5"}},
+        ]))
+
+    def test_events_to_responses_body_can_require_completed_event(self):
+        with self.assertRaises(UpstreamStreamIncompleteError):
+            _events_to_responses_body([
+                {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},
+                {"type": "response.output_text.delta", "delta": "partial"},
+            ], require_completed=True)
+
+    def test_response_events_to_chat_stream_chunks_can_require_completed_event(self):
+        with self.assertRaises(UpstreamStreamIncompleteError):
+            _response_events_to_chat_stream_chunks([
+                {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},
+                {"type": "response.output_text.delta", "delta": "partial"},
+            ], require_completed=True)
+
+    def test_chat_stream_chunks_terminal_detection_accepts_done_or_finish_reason(self):
+        self.assertFalse(_chat_stream_chunks_have_terminal([]))
+        self.assertFalse(_chat_stream_chunks_have_terminal([
+            {"choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": None}]},
+        ]))
+        self.assertTrue(_chat_stream_chunks_have_terminal([
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ]))
+        self.assertTrue(_chat_stream_chunks_have_terminal(["[DONE]"]))
+
     def test_text_delta_events(self):
         events = [
             {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},

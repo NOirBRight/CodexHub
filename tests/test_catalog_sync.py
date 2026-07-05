@@ -247,8 +247,10 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog([], [], policy, "0.142.0")
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
-        self.assertEqual(by_slug["openai/gpt-5.5"]["context_window"], 272000)
-        self.assertEqual(by_slug["openai/gpt-5.5"]["max_context_window"], 272000)
+        self.assertEqual(by_slug["openai/gpt-5.5"]["context_window"], 258400)
+        self.assertEqual(by_slug["openai/gpt-5.5"]["max_context_window"], 258400)
+        self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["context_window"], 258400)
+        self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["max_context_window"], 258400)
         self.assertEqual(by_slug["openai/gpt-5.5"]["additional_speed_tiers"], ["fast"])
         self.assertEqual(by_slug["openai/gpt-5.5"]["service_tiers"][0]["id"], "priority")
         self.assertEqual(by_slug["openai/gpt-5.5"]["default_reasoning_level"], "medium")
