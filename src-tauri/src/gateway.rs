@@ -310,6 +310,7 @@ pub struct GatewayClientInfo {
     pub config_path: Option<PathBuf>,
     pub route_mode: String,
     pub status: String,
+    pub versions_checked: bool,
     pub current_version: Option<String>,
     pub latest_version: Option<String>,
 }
@@ -615,6 +616,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         config_path: None,
         route_mode: "copy_only".to_string(),
         status: "Copy config is always available.".to_string(),
+        versions_checked: false,
         current_version: None,
         latest_version: None,
     }];
@@ -641,6 +643,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         config_path: opencode_path,
         route_mode: opencode_route_mode.to_string(),
         status: "Managed overwrite with backup is supported when config exists.".to_string(),
+        versions_checked: include_versions && opencode_installed,
         current_version: include_versions
             .then(|| command_version(&["opencode"]))
             .flatten(),
@@ -673,6 +676,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         config_path: Some(zcode_targets.v2_config_path.clone()),
         route_mode: zcode_route_mode.to_string(),
         status: gateway_client_status(zcode_installed, zcode_route_mode),
+        versions_checked: include_versions && zcode_installed,
         current_version: include_versions
             .then(|| {
                 command_version(&["zcode", "ZCode", "ZCode.exe"])
@@ -703,6 +707,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         config_path: Some(pi_paths.settings_path),
         route_mode: pi_route_mode.to_string(),
         status: gateway_client_status(pi_installed, pi_route_mode),
+        versions_checked: include_versions && pi_installed,
         current_version: include_versions.then(|| command_version(&["pi"])).flatten(),
         latest_version: (include_versions && pi_installed)
             .then(|| npm_latest_version("@earendil-works/pi-coding-agent"))
@@ -728,6 +733,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         config_path: Some(omp_paths.config_path),
         route_mode: omp_route_mode.to_string(),
         status: gateway_client_status(omp_installed, omp_route_mode),
+        versions_checked: include_versions && omp_installed,
         current_version: include_versions
             .then(|| command_version(&["omp"]))
             .flatten(),
@@ -5344,6 +5350,7 @@ mod tests {
             config_path: Some(PathBuf::from(format!("{id}.json"))),
             route_mode: route_mode.to_string(),
             status: "test".to_string(),
+            versions_checked: false,
             current_version: None,
             latest_version: None,
         }

@@ -41,6 +41,16 @@ type LoadRuntimeOptions = {
   includeClientVersions?: boolean;
 };
 
+type GatewayClientVersionCacheEntry = {
+  checked_at?: string | null;
+  current_version?: string | null;
+  id: string;
+  latest_version?: string | null;
+  versions_checked?: boolean | null;
+};
+
+const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
+
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
   return {
@@ -61,6 +71,93 @@ function addDays(date: Date, days: number) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 }
 
+function readGatewayClientVersionCache(): Map<string, GatewayClientVersionCacheEntry> {
+  if (typeof window === "undefined") {
+    return new Map();
+  }
+  try {
+    const raw = window.localStorage.getItem(GATEWAY_CLIENT_VERSION_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return new Map();
+    }
+    return new Map(
+      parsed
+        .filter((entry): entry is GatewayClientVersionCacheEntry => (
+          Boolean(entry) && typeof entry === "object" && typeof entry.id === "string"
+        ))
+        .map((entry) => [
+          entry.id,
+          {
+            checked_at: typeof entry.checked_at === "string" ? entry.checked_at : null,
+            current_version: typeof entry.current_version === "string" ? entry.current_version : null,
+            id: entry.id,
+            latest_version: typeof entry.latest_version === "string" ? entry.latest_version : null,
+            versions_checked: Boolean(entry.versions_checked),
+          },
+        ]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function applyGatewayClientVersionCache(clients: GatewayClientInfo[]): GatewayClientInfo[] {
+  const cache = readGatewayClientVersionCache();
+  if (!cache.size) {
+    return clients;
+  }
+  return clients.map((client) => {
+    const cached = cache.get(client.id);
+    if (!client.installed || !cached) {
+      return client;
+    }
+    return {
+      ...client,
+      versions_checked: Boolean(client.versions_checked ?? cached.versions_checked),
+      current_version: client.current_version ?? cached.current_version ?? null,
+      latest_version: client.latest_version ?? cached.latest_version ?? null,
+    };
+  });
+}
+
+function writeGatewayClientVersionCache(clients: GatewayClientInfo[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const cache = readGatewayClientVersionCache();
+  const checkedAt = new Date().toISOString();
+  clients.forEach((client) => {
+    if (client.id === "generic") {
+      cache.delete(client.id);
+      return;
+    }
+    if (!client.installed) {
+      cache.delete(client.id);
+      return;
+    }
+    if (!client.versions_checked && !client.current_version && !client.latest_version) {
+      return;
+    }
+    const previous = cache.get(client.id);
+    cache.set(client.id, {
+      checked_at: client.versions_checked ? checkedAt : previous?.checked_at ?? null,
+      current_version: client.current_version ?? null,
+      id: client.id,
+      latest_version: client.latest_version ?? null,
+      versions_checked: Boolean(client.versions_checked ?? previous?.versions_checked),
+    });
+  });
+  try {
+    window.localStorage.setItem(
+      GATEWAY_CLIENT_VERSION_CACHE_KEY,
+      JSON.stringify(Array.from(cache.values())),
+    );
+  } catch {
+    // Version cache is best-effort; UI should still work when storage is blocked.
+  }
+}
+
 function mergeGatewayClients(
   previous: GatewayClientInfo[],
   next: GatewayClientInfo[],
@@ -69,10 +166,12 @@ function mergeGatewayClients(
   return next.map((client) => {
     const previousClient = previousById.get(client.id);
     if (!client.installed) {
-      return { ...client, current_version: null, latest_version: null };
+      return { ...client, versions_checked: false, current_version: null, latest_version: null };
     }
+    const versionsChecked = Boolean(client.versions_checked ?? previousClient?.versions_checked);
     return {
       ...client,
+      versions_checked: versionsChecked,
       current_version: client.current_version ?? previousClient?.current_version ?? null,
       latest_version: client.latest_version ?? previousClient?.latest_version ?? null,
     };
@@ -125,15 +224,23 @@ export default function App() {
 
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
     const requestSeq = ++gatewayClientLoadSeq.current;
+    const includeClientVersions = Boolean(options?.includeClientVersions);
     try {
-      const clients = await api.listGatewayClients(Boolean(options?.includeClientVersions));
+      const clients = await api.listGatewayClients(includeClientVersions);
+      const cachedClients = applyGatewayClientVersionCache(clients);
+      const normalizedClients = includeClientVersions
+        ? cachedClients.map((client) => ({
+            ...client,
+            versions_checked: Boolean(client.versions_checked ?? (client.installed && client.id !== "generic")),
+          }))
+        : cachedClients;
       setRuntime((current) => {
         if (requestSeq !== gatewayClientLoadSeq.current) {
           return current;
         }
         return {
           ...current,
-          gatewayClients: mergeGatewayClients(current.gatewayClients, clients),
+          gatewayClients: mergeGatewayClients(current.gatewayClients, normalizedClients),
         };
       });
     } catch (err) {
@@ -217,7 +324,7 @@ export default function App() {
 
   useEffect(() => {
     void loadRuntime();
-    void loadGatewayClients();
+    void loadGatewayClients({ includeClientVersions: true });
     const timer = window.setInterval(() => void loadRuntime(), 5000);
     const clientTimer = window.setInterval(() => void loadGatewayClients(), 12 * 60 * 60 * 1000);
     return () => {
@@ -225,6 +332,10 @@ export default function App() {
       window.clearInterval(clientTimer);
     };
   }, [loadGatewayClients, loadRuntime]);
+
+  useEffect(() => {
+    writeGatewayClientVersionCache(runtime.gatewayClients);
+  }, [runtime.gatewayClients]);
 
   const visionModels = visionModelOptions(runtime.catalogModels);
 

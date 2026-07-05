@@ -303,6 +303,7 @@ export function GatewayPage({
     const toastId = showToast(t("gateway.refreshingClients"), "loading");
     try {
       await onRefreshClients({ includeClientVersions: true });
+      setClientBusy(null);
       updateToast(toastId, {
         action: null,
         text: t("gateway.clientsRefreshed"),

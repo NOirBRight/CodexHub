@@ -220,6 +220,7 @@ export interface GatewayClientInfo {
   config_path?: string | null;
   route_mode: string;
   status: string;
+  versions_checked?: boolean | null;
   current_version?: string | null;
   latest_version?: string | null;
 }

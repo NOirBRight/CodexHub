@@ -465,8 +465,22 @@ test("gateway client route switching refreshes without version probes", async ()
 
   assert.match(gatewaySource, /await onRefreshClients\(\)/);
   assert.doesNotMatch(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)[\s\S]*setMessage\(`\$\{clientName\} switched/);
-  assert.match(appSource, /void loadGatewayClients\(\)/);
-  assert.doesNotMatch(appSource, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
+  assert.match(appSource, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
+  assert.match(appSource, /const clientTimer = window\.setInterval\(\(\) => void loadGatewayClients\(\), 12 \* 60 \* 60 \* 1000\)/);
+});
+
+test("gateway client versions are checked on first load and cached", async () => {
+  const appSource = await readFile(appPath, "utf8");
+
+  assert.match(appSource, /GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub\.gatewayClientVersions\.v1"/);
+  assert.match(appSource, /function readGatewayClientVersionCache/);
+  assert.match(appSource, /function applyGatewayClientVersionCache/);
+  assert.match(appSource, /function writeGatewayClientVersionCache/);
+  assert.match(appSource, /window\.localStorage\.getItem\(GATEWAY_CLIENT_VERSION_CACHE_KEY\)/);
+  assert.match(appSource, /window\.localStorage\.setItem\(/);
+  assert.match(appSource, /const cachedClients = applyGatewayClientVersionCache\(clients\)/);
+  assert.match(appSource, /client\.id === "generic"/);
+  assert.match(appSource, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
 });
 
 test("gateway toast uses the shared dismissible page toast", async () => {
@@ -641,7 +655,9 @@ test("gateway client card does not render a disabled fake updater", async () => 
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
   assert.match(cardSource, /min-h-\[136px\]/);
-  assert.match(cardSource, /t\("gateway\.manualUpdateAvailable"\)/);
+  assert.match(cardSource, /t\("gateway\.versionNotChecked"\)/);
+  assert.doesNotMatch(cardSource, /manualUpdateAvailable/);
+  assert.doesNotMatch(cardSource, /noUpdateAction/);
   assert.doesNotMatch(cardSource, /<button[\s\S]*?\{hasUpdate \? "Manual" : "Update"\}/);
   assert.doesNotMatch(cardSource, /safe updater is not exposed by the backend/);
 });

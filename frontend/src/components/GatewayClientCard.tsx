@@ -35,13 +35,12 @@ export function GatewayClientCard({
   const configPath = info?.config_path ?? client.config_path;
   const currentVersion = info?.current_version?.trim() || null;
   const latestVersion = info?.latest_version?.trim() || null;
-  const hasUpdate = Boolean(currentVersion && latestVersion && currentVersion !== latestVersion);
+  const versionsChecked = Boolean(info?.versions_checked);
   const kindLabel = info?.kind ?? t(`gateway.clientKind.${client.id}`);
   const routeOptions: Array<SegmentedOption<RouteMode>> = [
     { value: "official", label: t("common.official") },
     { value: "hub", label: t("common.codexHub") },
   ];
-  const updateLabel = hasUpdate ? t("gateway.manualUpdateAvailable") : t("gateway.noUpdateAction");
   const routeDisabledReason = !installed
     ? t("gateway.notInstalled")
     : !autoApplySupported
@@ -73,6 +72,8 @@ export function GatewayClientCard({
     ? t("gateway.checkingVersion")
     : !installed
       ? t("gateway.notInstalled")
+      : !versionsChecked
+        ? t("gateway.versionNotChecked")
       : currentVersion || latestVersion
         ? t("gateway.currentLatest", {
             current: currentVersion ?? t("common.unknown").toLowerCase(),
@@ -114,21 +115,10 @@ export function GatewayClientCard({
           <span className="shrink-0 font-semibold text-slate-500">{t("common.config")}</span>
           <code className="truncate font-mono">{configPath || t("common.copyOnly")}</code>
         </div>
-        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2">
           <span className="font-semibold text-slate-500">{t("common.version")}</span>
           <span className="truncate" title={versionLabel}>
             {versionLabel}
-          </span>
-          <span
-            className={cx(
-              "inline-flex h-6 items-center justify-center rounded-md border px-2 text-[11px] font-semibold",
-              hasUpdate
-                ? "bg-amber-50 text-amber-700"
-                : "bg-panel text-slate-400",
-            )}
-            title={hasUpdate ? t("gateway.installUpdateManually") : t("gateway.noClientUpdateAction")}
-          >
-            {updateLabel}
           </span>
         </div>
       </div>
