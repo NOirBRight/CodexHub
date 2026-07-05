@@ -837,7 +837,12 @@ export function ProvidersPage({
     }
   }
 
-  async function probeUpstreamFormat(baseUrl: string, apiKey: string, model?: string | null) {
+  async function probeUpstreamFormat(
+    baseUrl: string,
+    apiKey: string,
+    model?: string | null,
+    fallbackFormat?: UpstreamFormat | null,
+  ) {
     setBusy("probe");
     setProbeResult(null);
     const toastId = showToast(t("providers.endpointSelectionTest"), "loading");
@@ -847,7 +852,7 @@ export function ProvidersPage({
       updateToast(toastId, {
         action: null,
         text: t("providers.probeCompleted", {
-          format: upstreamFormatLabel(result.recommended_format, tr),
+          format: upstreamFormatLabel(probeRecommendedEndpointFormat(result, fallbackFormat), tr),
         }),
         tone: "success",
       });
@@ -863,14 +868,7 @@ export function ProvidersPage({
 
   async function persistProviderProbeResult(providerId: string, result: UpstreamFormatProbeResult) {
     const nextProviders = providers.map((provider) =>
-      provider.id === providerId
-        ? {
-            ...provider,
-            upstream_format:
-              result.recommended_format !== "auto" ? result.recommended_format : provider.upstream_format,
-            available_upstream_formats: probeAvailableFormats(result),
-          }
-        : provider,
+      provider.id === providerId ? applyProviderProbeResult(provider, result) : provider,
     );
     setProviders(nextProviders);
     try {
@@ -978,15 +976,7 @@ export function ProvidersPage({
                 onDiscover={() => void discoverForForm()}
                 onFormChange={setForm}
                 onProbe={() =>
-                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModel()).then((result) => {
-                    if (result && result.recommended_format !== "auto") {
-                      setForm((current) => ({
-                        ...current,
-                        upstream_format: result.recommended_format,
-                      }));
-                    }
-                    return result;
-                  })
+                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModel(), form.upstream_format)
                 }
               />
             ) : selectedId === OFFICIAL_ID ? (
@@ -1010,14 +1000,17 @@ export function ProvidersPage({
                 onDelete={() => void deleteProvider(selectedProvider.id)}
                 onDraftStateChange={trackProviderDraft}
                 onProbe={(provider) =>
-                  probeUpstreamFormat(provider.base_url, provider.api_key ?? "", providerProbeModel(provider)).then(
-                    (result) => {
-                      if (result) {
-                        void persistProviderProbeResult(provider.id, result);
-                      }
-                      return result;
-                    },
-                  )
+                  probeUpstreamFormat(
+                    provider.base_url,
+                    provider.api_key ?? "",
+                    providerProbeModel(provider),
+                    provider.upstream_format,
+                  ).then((result) => {
+                    if (result) {
+                      void persistProviderProbeResult(provider.id, result);
+                    }
+                    return result;
+                  })
                 }
                 onRefresh={(provider) => void refreshProviderModels(provider)}
               />
@@ -1623,22 +1616,22 @@ function ProviderDetail({
   useEffect(() => {
     setDraft(normalizedProvider);
     setEndpointTestState(hasAvailableEndpointFormats(normalizedProvider.available_upstream_formats) ? "success" : "idle");
-  }, [provider.id, normalizedProvider]);
+  }, [provider.id]);
 
   useEffect(() => {
     const availableFormats = normalizeEndpointFormats(provider.available_upstream_formats);
+    const upstreamFormat = normalizedEndpointFormat(provider.upstream_format);
     setDraft((current) =>
       current.id === provider.id
         ? {
             ...current,
+            upstream_format: upstreamFormat,
             available_upstream_formats: availableFormats,
           }
         : current,
     );
-    if (availableFormats.length) {
-      setEndpointTestState("success");
-    }
-  }, [provider.id, provider.available_upstream_formats]);
+    setEndpointTestState(availableFormats.length ? "success" : "idle");
+  }, [provider.id, provider.upstream_format, provider.available_upstream_formats]);
 
   useEffect(() => {
     if (probeResult) {
@@ -1683,17 +1676,8 @@ function ProviderDetail({
   async function runProbe() {
     setEndpointTestState("testing");
     const result = await onProbe(draft);
-    if (result && result.recommended_format !== "auto") {
-      setDraft((current) => ({
-        ...current,
-        upstream_format: result.recommended_format,
-        available_upstream_formats: probeAvailableFormats(result),
-      }));
-    } else if (result) {
-      setDraft((current) => ({
-        ...current,
-        available_upstream_formats: probeAvailableFormats(result),
-      }));
+    if (result) {
+      setDraft((current) => applyProviderProbeResult(current, result));
     }
     setEndpointTestState(result ? "success" : "error");
   }
@@ -2508,6 +2492,32 @@ function hasAvailableEndpointFormats(values?: Array<UpstreamFormat | null | unde
   return normalizeEndpointFormats(values).length > 0;
 }
 
+function probeRecommendedEndpointFormat(
+  result: UpstreamFormatProbeResult,
+  fallbackFormat?: UpstreamFormat | null,
+): UpstreamFormat {
+  if (result.recommended_format !== "auto") {
+    return result.recommended_format;
+  }
+  return probeAvailableFormats(result)[0] ?? normalizedEndpointFormat(fallbackFormat);
+}
+
+function applyProviderProbeResult(provider: Provider, result: UpstreamFormatProbeResult): Provider {
+  return {
+    ...provider,
+    upstream_format: probeRecommendedEndpointFormat(result, provider.upstream_format),
+    available_upstream_formats: probeAvailableFormats(result),
+  };
+}
+
+function applyAddProviderProbeResult(form: AddProviderForm, result: UpstreamFormatProbeResult): AddProviderForm {
+  return {
+    ...form,
+    upstream_format: probeRecommendedEndpointFormat(result, form.upstream_format),
+    available_upstream_formats: probeAvailableFormats(result),
+  };
+}
+
 function isAddProviderFormDirty(form: AddProviderForm) {
   return Boolean(form.name.trim());
 }
@@ -2668,11 +2678,7 @@ function AddProviderPanel({
     setEndpointTestState("testing");
     const result = await onProbe();
     if (result) {
-      onFormChange({
-        ...form,
-        upstream_format: result.recommended_format !== "auto" ? result.recommended_format : form.upstream_format,
-        available_upstream_formats: probeAvailableFormats(result),
-      });
+      onFormChange(applyAddProviderProbeResult(form, result));
     }
     setEndpointTestState(result ? "success" : "error");
   }
@@ -2832,6 +2838,7 @@ function EndpointFormatSelect({
   const [open, setOpen] = useState(false);
   const selected = endpointSelectionOptions.find((option) => option.value === value) ?? endpointSelectionOptions[0];
   const available = new Set(availableFormats);
+  const selectedAvailable = available.has(selected.value);
   const { t } = useTranslation();
   const tr = t as Translate;
 
@@ -2852,7 +2859,10 @@ function EndpointFormatSelect({
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="truncate">{upstreamFormatLabel(selected.value, tr)}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate">{upstreamFormatLabel(selected.value, tr)}</span>
+          {selectedAvailable && <EndpointAvailableChip />}
+        </span>
         <ChevronDown size={15} className="shrink-0 text-slate-500" />
       </button>
       {open && (

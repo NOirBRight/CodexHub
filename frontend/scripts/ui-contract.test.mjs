@@ -706,10 +706,10 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.match(endpointFormatSelect, /className="select-trigger h-9 w-full"/);
   assert.match(endpointFormatSelect, /className="select-popover absolute left-0 top-\[calc\(100%\+6px\)\] z-30 w-full min-w-\[240px\]"/);
   assert.match(endpointFormatSelect, /className="select-option"/);
+  assert.match(endpointFormatSelect, /const selectedAvailable = available\.has\(selected\.value\);/);
+  assert.match(endpointFormatSelect, /selectedAvailable && <EndpointAvailableChip \/>/);
   assert.match(endpointFormatSelect, /optionAvailable && <EndpointAvailableChip \/>/);
   assert.doesNotMatch(endpointFormatSelect, /selectedOption && <Check/);
-  assert.doesNotMatch(endpointFormatSelect, /<EndpointAvailableChip \/>[\s\S]*<\/button>\s*\{open/);
-  assert.doesNotMatch(endpointFormatSelect, /selectedAvailable/);
   assert.doesNotMatch(endpointSelectionPanel, /Adapter \{/);
   assert.doesNotMatch(endpointSelectionPanel, /rounded-inner border border-line bg-panel/);
   assert.doesNotMatch(endpointSelectionPanel, /upstreamFormatShortLabel/);
@@ -756,23 +756,17 @@ test("provider endpoint probe persists detected formats and selects the recommen
 
   assert.match(typesSource, /available_upstream_formats\?: UpstreamFormat\[\] \| null;/);
   assert.match(pageSource, /async function persistProviderProbeResult\(providerId: string, result: UpstreamFormatProbeResult\)/);
-  assert.match(
-    pageSource,
-    /upstream_format:\s*result\.recommended_format !== "auto" \? result\.recommended_format : provider\.upstream_format/,
-  );
-  assert.match(pageSource, /available_upstream_formats: probeAvailableFormats\(result\)/);
+  assert.match(pageSource, /provider\.id === providerId \? applyProviderProbeResult\(provider, result\) : provider/);
+  assert.match(pageSource, /probeRecommendedEndpointFormat\(result, fallbackFormat\)/);
   assert.match(pageSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
   assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
   assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
-  assert.match(
-    providerDetail,
-    /if \(result && result\.recommended_format !== "auto"\) \{[\s\S]*upstream_format: result\.recommended_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\)/,
-  );
-  assert.match(
-    addProviderPanel,
-    /upstream_format: result\.recommended_format !== "auto" \? result\.recommended_format : form\.upstream_format,[\s\S]*available_upstream_formats: probeAvailableFormats\(result\)/,
-  );
+  assert.match(providerDetail, /setDraft\(\(current\) => applyProviderProbeResult\(current, result\)\);/);
+  assert.match(addProviderPanel, /onFormChange\(applyAddProviderProbeResult\(form, result\)\);/);
+  assert.match(providersSource, /function probeRecommendedEndpointFormat\([\s\S]*?return probeAvailableFormats\(result\)\[0\] \?\? normalizedEndpointFormat\(fallbackFormat\);/);
+  assert.match(providersSource, /function applyProviderProbeResult\([\s\S]*?upstream_format: probeRecommendedEndpointFormat\(result, provider\.upstream_format\),[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),/);
+  assert.match(providersSource, /function applyAddProviderProbeResult\([\s\S]*?upstream_format: probeRecommendedEndpointFormat\(result, form\.upstream_format\),[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),/);
   assert.match(
     providersSource,
     /if \(result\.recommended_format !== "auto" && !formats\.includes\(result\.recommended_format\)\) \{[\s\S]*formats\.push\(result\.recommended_format\);/,
