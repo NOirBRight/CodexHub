@@ -1,97 +1,99 @@
 # CodexHub
 
-> 把第三方模型接入 Codex，和 GPT 官方模型同时使用——无需重启，无缝切换。
+> [中文](README.zh-CN.md) | English
 
-CodexHub 是一个本地代理层 + 桌面管理工具，让你在 Codex 中同时使用官方 GPT 模型和第三方模型，保留所有官方功能，并将所有模型统一打包为 API 端点供其他编程软件使用。
+> Bring third-party models into Codex, side by side with official GPT models — no restart, seamless switching.
 
-## 为什么需要 CodexHub
+CodexHub is a local proxy layer + desktop management tool that lets you use official GPT models and third-party models together in Codex, preserves all native features, and packages every model as a unified API endpoint for other coding tools.
 
-多模型编程已经是趋势。GPT-5.5 适合规划和推理，更轻量的模型执行速度快、成本低——让每个模型做自己最擅长的事，能显著优化你的编程用量。
+## Why CodexHub
 
-但现实是：Codex 只能用官方模型，或者通过 CC Switch 之类的工具完全切换到第三方——**二选一，不能同时用**。而且一旦切换到第三方模型，子代理、Computer Use 等高级功能就全没了。
+Multi-model programming is the trend. GPT-5.5 excels at planning and reasoning; lighter models execute faster and cost less — letting each model do what it does best optimizes your coding spend.
 
-CodexHub 解决的就是这个问题：
+But the reality is: Codex only supports official models, or you use a tool like CC Switch to switch entirely to third-party — **one or the other, never both**. And once you switch to a third-party model, subagents, Computer Use, and other advanced features are gone.
 
-| | Codex 原生 | CC Switch | CodexHub |
+CodexHub solves exactly this:
+
+| | Codex Native | CC Switch | CodexHub |
 |---|---|---|---|
-| 官方模型 | ✅ | ❌ | ✅ |
-| 第三方模型 | ❌ | ✅ | ✅ |
-| 同时使用 | ❌ | ❌ | ✅ |
-| 子代理 / Subagent | ✅ | ❌ | ✅ |
+| Official models | ✅ | ❌ | ✅ |
+| Third-party models | ❌ | ✅ | ✅ |
+| Use both at once | ❌ | ❌ | ✅ |
+| Subagents | ✅ | ❌ | ✅ |
 | Computer Use | ✅ | ❌ | ✅ |
 | Remote Control | ✅ | ❌ | ✅ |
-| 无缝切换 | — | 需重启 | ✅ |
-| 模型打包为 API | ❌ | ❌ | ✅ |
+| Seamless switching | — | Restart needed | ✅ |
+| Models as API endpoint | ❌ | ❌ | ✅ |
 
-## 核心功能
+## Core Features
 
-### 1. 多模型同时接入
+### 1. Multi-Model Side-by-Side
 
-在 Codex 中同时使用官方 GPT 模型和第三方模型，不需要二选一。用 GPT-5.5 做规划，更轻量的模型做执行——在同一个会话里按需切换，优化你的编程用量。
+Use official GPT models and third-party models together in Codex — no need to pick one. Plan with GPT-5.5, execute with a lighter model — switch on the fly within the same session to optimize your coding spend.
 
-### 2. 无缝切换，无需重启
+### 2. Seamless Switching, No Restart
 
-官方模型和第三方模型之间切换不需要重启 Codex。在 CodexHub 界面里一键切换，会话历史自动归一化，对话不中断。
+Switching between official and third-party models doesn't require restarting Codex. One click in the CodexHub UI — conversation history is automatically normalized, no dialogue interruption.
 
-### 3. 子代理与高级功能保留
+### 3. Subagents & Advanced Features Preserved
 
-自建工具转换层，第三方模型也能在 Codex 中使用子代理（Subagent）等高级功能。`spawn_agent`、`wait_agent`、`send_input` 等多代理协议调用被自动适配，第三方模型也能分发和协调子任务。
+A custom tool translation layer lets third-party models use subagents and other advanced features in Codex. `spawn_agent`, `wait_agent`, `send_input` and other multi-agent protocol calls are automatically adapted — third-party models can dispatch and coordinate subtasks too.
 
-### 4. 保留所有官方 Codex 功能
+### 4. All Native Codex Features Retained
 
-Computer Use、Remote Control、Browser——所有官方 Codex 功能在第三方模型下照常工作。你甚至能在 Remote Control 中使用第三方模型操控远程机器。
+Computer Use, Remote Control, Browser — all native Codex features work normally under third-party models. You can even use third-party models in Remote Control to operate remote machines.
 
-### 5. 统一 API 端点
+### 5. Unified API Endpoint
 
-把所有模型——包括 Codex 订阅中的 GPT 模型和第三方模型——统一打包为一个本地 API 端点。一键配置到 OpenCode、ZCode、Pi、OMP 等主流编程软件中使用。切换软件后无需从头配置，ZCode 等不支持 OpenAI 订阅的软件也能通过这个端点接入 GPT 模型。
+Package every model — including GPT models from your Codex subscription and third-party models — into a single local API endpoint. One-click configure for OpenCode, ZCode, Pi, OMP and other major coding tools. No need to reconfigure when switching tools, and tools like ZCode that don't support OpenAI subscriptions can access GPT models through this endpoint.
 
-## 架构
+## Architecture
 
 ```
-Codex Desktop App  ──→  CodexHub Proxy (localhost:9099)  ──→  OpenAI 官方 API
+Codex Desktop App  ──→  CodexHub Proxy (localhost:9099)  ──→  OpenAI Official API
                             │
-                            └──→  任意 OpenAI 兼容端点
+                            └──→  Any OpenAI-compatible endpoint
                                     (Responses API / Chat Completions)
 
-CodexHub App (Tauri)  ──→  配置 Proxy / 管理模型 / 监控用量
+CodexHub App (Tauri)  ──→  Configure Proxy / Manage Models / Monitor Usage
                             │
-                            └──→  统一 API 端点  ──→  OpenCode / ZCode / Pi / OMP
+                            └──→  Unified API Endpoint  ──→  OpenCode / ZCode / Pi / OMP
 ```
 
-CodexHub 代理作为本地 HTTP 服务运行，透明路由请求：GPT 模型转发到官方 API，第三方模型转发到对应 Provider。代理自动处理 **Responses API** 和 **Chat Completions** 两种上游协议之间的双向转换，兼容端点即可接入。
+The CodexHub proxy runs as a local HTTP service, transparently routing requests: GPT models forward to the official API, third-party models forward to their respective providers. The proxy automatically handles bidirectional conversion between **Responses API** and **Chat Completions** upstream protocols — any compatible endpoint works.
 
-代理和桌面 App 独立运行——关闭 App 不影响代理。
+The proxy and desktop app run independently — closing the app does not affect the proxy.
 
-## 快速开始
+## Quick Start
 
-1. 下载最新版本（.msi / .dmg / .AppImage）从 [Releases](../../releases) 页面
-2. 启动 CodexHub，添加你的 Provider（base_url + API Key）
-3. 选择要启用的模型，CodexHub 自动发现并生成统一目录
-4. 在 Codex 中切换到 Custom Provider——开始使用
-5. 需要接入其他编程软件？在 Gateway 页面一键配置
+1. Download the latest version from the [Releases](../../releases) page
+2. Launch CodexHub, add your provider (base_url + API Key)
+3. Select models to enable — CodexHub auto-discovers and generates a unified catalog
+4. Switch to Custom Provider in Codex — start using
+5. Want to connect other coding tools? One-click configure in the Gateway page
 
-> CodexHub 内置 Python 运行时，无需单独安装 Python。
+> CodexHub bundles a Python runtime — no separate Python installation required.
 
-## 其他亮点
+## More Highlights
 
-- **Usage 监控** — 实时查看请求量、Token 用量、预估成本，按模型和 Provider 维度统计
-- **自动重试守护** — 上游请求失败时自动重试，支持流式续传，保证生成不中断
-- **会话历史归一化** — 切换 Provider 时自动处理历史记录标签，对话无缝衔接
-- **桌面原生体验** — Tauri 构建，Windows / macOS / Linux 原生运行
+- **Usage Monitoring** — Real-time view of request volume, token usage, and estimated cost, broken down by model and provider
+- **Auto-Retry Guardian** — Automatically retries failed upstream requests with stream continuation, ensuring generation is not interrupted
+- **Conversation History Normalization** — Automatically handles history record labels when switching providers, seamless dialogue continuity
+- **Native Desktop Experience** — Built with Tauri, native Windows support
 
 ## FAQ
 
-### 为什么要接入第三方模型？
+### Why bring in third-party models?
 
-多模型编程已经是趋势。GPT-5.5 适合规划和推理，更轻量的模型执行速度快、成本低——让每个模型做自己最擅长的事，能显著优化编程用量。
+Multi-model programming is the trend. GPT-5.5 excels at planning and reasoning; lighter models execute faster and cost less — letting each model do what it does best significantly optimizes your coding spend.
 
-### 为什么不使用 CC Switch？
+### Why not use CC Switch?
 
-CC Switch 无法让 Codex 在使用官方模型的同时接入第三方模型，只能二选一。且使用第三方模型后，子代理等高级功能无法使用。CodexHub 支持同时使用、无缝切换，并保留所有高级功能。
+CC Switch cannot let Codex use official models and third-party models at the same time — it's one or the other. And after switching to third-party models, advanced features like subagents are unavailable. CodexHub supports using both simultaneously, seamless switching, and preserves all advanced features.
 
-### OpenAI 的订阅本来就可以在 OpenCode、Pi 中使用，为什么还要做个 API 端点？
+### OpenAI subscriptions already work in OpenCode, Pi — why make an API endpoint?
 
-一方面是方便配置——当你切换软件后，无须从头开始配置，一键接入。另一方面像 ZCode 这种不支持 OpenAI 订阅的软件，也可以通过这个方式接入 GPT 模型。
+For one, it's convenient configuration — when you switch tools, no need to set up from scratch, one-click connect. For another, tools like ZCode that don't support OpenAI subscriptions can access GPT models through this endpoint.
 
 ## License
 
