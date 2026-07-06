@@ -1678,6 +1678,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         sse_lines = [
             b'data: {"type":"response.created","response":{"id":"resp_s","model":"gpt-5.5"}}\n',
             b'\n',
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n',
+            b'\n',
             OSError("responses stream reset"),
         ]
 

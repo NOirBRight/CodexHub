@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 import gzip
 import hashlib
 import io
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -83,7 +86,10 @@ PROXY_FEATURES = [
     "compact-empty-response-guard",
     "stream-read-error-retry-before-downstream",
     "downstream-sse-keepalive",
-    "post-content-sse-idle-timeout",
+    "split-transport-model-event-sse-idle-timeouts",
+    "capacity-aware-upstream-retry",
+    "stream-transient-global-retry-budget",
+    "third-party-tool-terminal-synthesis",
     "browser-context-skill-guidance",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
@@ -293,14 +299,27 @@ PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 PROXY_EVENT_LOG_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
-DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = 90.0
-DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = 60.0
+DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
+DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
+DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
+DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
+DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
+DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
 RETRY_REQUEST_MAIN_GENERATION = "main_generation"
 RETRY_REQUEST_COMPACT = "compact"
 RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
 RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
+RETRY_FAILURE_QUICK_TRANSIENT = "quick_transient"
+RETRY_FAILURE_PROVIDER_THROTTLE = "provider_throttle"
+RETRY_FAILURE_PROVIDER_OVERLOADED = "provider_overloaded"
+RETRY_FAILURE_PERMANENT = "permanent"
+CAPACITY_RETRY_FAILURE_CLASSES = {
+    RETRY_FAILURE_PROVIDER_THROTTLE,
+    RETRY_FAILURE_PROVIDER_OVERLOADED,
+}
+CAPACITY_RETRY_CADENCE_SECONDS = (10, 20, 30, 60)
 TRANSIENT_HTTP_RETRY_STATUSES = {408, 409, 421, 425, 429, 500, 502, 503, 504}
 AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES = {404, 405, 415, 422}
 PERMANENT_HTTP_ERROR_STATUSES = {
@@ -378,11 +397,16 @@ class UpstreamStreamIncompleteError(RuntimeError):
 class UpstreamStreamIdleTimeoutError(TimeoutError):
     """Raised when an upstream SSE stream stalls before completion."""
 
-    def __init__(self, timeout_seconds: float, phase: str = "post_output"):
+    def __init__(self, timeout_seconds: float, phase: str = "model_event"):
         self.timeout_seconds = timeout_seconds
         self.phase = phase
-        detail = "before output started" if phase == "pre_output" else "after output started"
-        super().__init__(f"Upstream stream produced no real event for {timeout_seconds:g} seconds {detail}.")
+        if phase == "transport":
+            detail = "without upstream bytes"
+        elif phase == "model_event":
+            detail = "without a valid model event"
+        else:
+            detail = "before output started" if phase == "pre_output" else "after output started"
+        super().__init__(f"Upstream stream stalled for {timeout_seconds:g} seconds {detail}.")
 
 
 def upstream_timeout_seconds() -> int:
@@ -416,6 +440,77 @@ def sse_keepalive_seconds() -> float:
     if value <= 0:
         return 0.0
     return max(0.001, min(value, 60.0))
+
+
+def _number_setting_or_env(
+    *,
+    settings_name: str,
+    env_name: str,
+    default: float,
+    fallback_settings_names: tuple[str, ...] = (),
+    fallback_env_names: tuple[str, ...] = (),
+) -> float:
+    def parse_setting(name: str) -> float | None:
+        settings_value = _runtime_settings_value(name)
+        if isinstance(settings_value, (int, float)) and not isinstance(settings_value, bool):
+            return float(settings_value) if settings_value > 0 else 0.0
+        if isinstance(settings_value, str):
+            try:
+                value = float(settings_value)
+            except ValueError:
+                return None
+            return value if value > 0 else 0.0
+        return None
+
+    def parse_env(name: str) -> float | None:
+        raw_value = os.environ.get(name)
+        if raw_value is None:
+            return None
+        try:
+            value = float(raw_value)
+        except ValueError:
+            return None
+        return value if value > 0 else 0.0
+
+    primary_setting = parse_setting(settings_name)
+    if primary_setting is not None:
+        return primary_setting
+    primary_env = parse_env(env_name)
+    if primary_env is not None:
+        return primary_env
+    for name in fallback_settings_names:
+        fallback_setting = parse_setting(name)
+        if fallback_setting is not None:
+            return fallback_setting
+    for name in fallback_env_names:
+        fallback_env = parse_env(name)
+        if fallback_env is not None:
+            return fallback_env
+    return default
+
+
+def transport_sse_idle_timeout_seconds() -> float:
+    return _number_setting_or_env(
+        settings_name="gateway_transport_sse_idle_timeout_seconds",
+        env_name="CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS",
+        default=DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS,
+    )
+
+
+def model_event_sse_idle_timeout_seconds() -> float:
+    return _number_setting_or_env(
+        settings_name="gateway_model_event_sse_idle_timeout_seconds",
+        env_name="CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS",
+        default=DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS,
+        fallback_settings_names=(
+            "gateway_post_content_sse_idle_timeout_seconds",
+            "gateway_pre_output_sse_idle_timeout_seconds",
+        ),
+        fallback_env_names=(
+            "CODEX_PROXY_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS",
+            "CODEX_PROXY_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS",
+        ),
+    )
 
 
 def pre_output_sse_idle_timeout_seconds() -> float:
@@ -527,7 +622,48 @@ def gateway_auto_retry_max_attempts() -> int:
     return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
 
 
-def gateway_retry_delay_seconds(attempt: int) -> int:
+def gateway_capacity_retry_elapsed_limit_seconds() -> float:
+    return _number_setting_or_env(
+        settings_name="gateway_capacity_retry_elapsed_limit_seconds",
+        env_name="CODEX_PROXY_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS",
+        default=DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS,
+    )
+
+
+def gateway_stream_retry_elapsed_limit_seconds() -> float:
+    return _number_setting_or_env(
+        settings_name="gateway_stream_retry_elapsed_limit_seconds",
+        env_name="CODEX_PROXY_STREAM_RETRY_ELAPSED_LIMIT_SECONDS",
+        default=DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS,
+    )
+
+
+def gateway_downstream_retry_notice_enabled() -> bool:
+    return _env_or_settings_flag(
+        "CODEX_PROXY_DOWNSTREAM_RETRY_NOTICE_ENABLED",
+        "gateway_downstream_retry_notice_enabled",
+        False,
+    )
+
+
+def gateway_capacity_retry_delay_seconds(attempt: int) -> int:
+    index = max(1, attempt) - 1
+    if index < len(CAPACITY_RETRY_CADENCE_SECONDS):
+        return CAPACITY_RETRY_CADENCE_SECONDS[index]
+    return CAPACITY_RETRY_CADENCE_SECONDS[-1]
+
+
+def gateway_retry_delay_seconds(
+    attempt: int,
+    *,
+    failure_class: str = RETRY_FAILURE_QUICK_TRANSIENT,
+    exc: BaseException | None = None,
+) -> int:
+    retry_after_seconds = _retry_after_delay_seconds(exc)
+    if retry_after_seconds is not None:
+        return retry_after_seconds
+    if failure_class in CAPACITY_RETRY_FAILURE_CLASSES:
+        return gateway_capacity_retry_delay_seconds(attempt)
     return min(max(1, attempt) * 2, 8)
 
 
@@ -1275,11 +1411,106 @@ def _responses_event_starts_downstream_output(event: Mapping[str, Any]) -> bool:
     return False
 
 
+def _responses_event_commits_downstream_output(event: Mapping[str, Any], upstream_name: str) -> bool:
+    event_type = event.get("type")
+    if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+        delta = event.get("delta")
+        return isinstance(delta, str) and bool(delta)
+    if event_type == "response.output_text.done":
+        text = event.get("text")
+        return isinstance(text, str) and bool(text)
+    if event_type == "response.refusal.done":
+        refusal = event.get("refusal")
+        return isinstance(refusal, str) and bool(refusal)
+    if upstream_name == "official" and event_type == "response.reasoning_summary_text.delta":
+        delta = event.get("delta")
+        return isinstance(delta, str) and bool(delta)
+    if event_type == "response.output_item.done":
+        item = event.get("item")
+        return isinstance(item, Mapping) and item.get("type") == "reasoning"
+    return False
+
+
+def _responses_event_is_tool_call_construction(event: Mapping[str, Any]) -> bool:
+    event_type = event.get("type")
+    if event_type in {
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.custom_tool_call_input.delta",
+        "response.custom_tool_call_input.done",
+    }:
+        return True
+    if event_type in {"response.output_item.added", "response.output_item.done"}:
+        item = event.get("item")
+        return isinstance(item, Mapping) and item.get("type") in {"function_call", "custom_tool_call"}
+    return False
+
+
+def _responses_completed_tool_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    item_type = item.get("type")
+    call_id = item.get("call_id")
+    name = item.get("name")
+    if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+        return None
+    if item_type == "function_call":
+        arguments = item.get("arguments")
+        if not isinstance(arguments, str):
+            return None
+        return dict(item)
+    if item_type == "custom_tool_call":
+        tool_input = item.get("input")
+        if not isinstance(tool_input, str):
+            return None
+        return dict(item)
+    return None
+
+
+def _synthetic_response_completed_from_tool_items(
+    *,
+    created_response: Mapping[str, Any] | None,
+    model: str,
+    output_items: list[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    completed_items = [
+        completed
+        for item in output_items
+        if isinstance(item, Mapping)
+        for completed in [_responses_completed_tool_item(item)]
+        if completed is not None
+    ]
+    if not completed_items:
+        return None
+    response = dict(created_response or {})
+    response_id = response.get("id")
+    if not isinstance(response_id, str) or not response_id:
+        response_id = f"resp_{uuid.uuid4().hex[:12]}"
+    response["id"] = response_id
+    response.setdefault("object", "response")
+    response["status"] = "completed"
+    response["model"] = response.get("model") if isinstance(response.get("model"), str) else model
+    response["output"] = completed_items
+    return {"type": "response.completed", "response": response}
+
+
 def _responses_sse_line_resets_idle_timeout(line: bytes) -> bool:
     event = _parse_sse_json_payload(line)
     if not isinstance(event, Mapping):
         return False
-    return _responses_event_starts_downstream_output(event) or _responses_events_have_terminal([event])
+    event_type = event.get("type")
+    return isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error")
+
+
+def _stream_error_event_detail(payload: Mapping[str, Any]) -> str:
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        message = error.get("message")
+        code = error.get("code")
+        if isinstance(message, str) and message:
+            return f"{code}: {message}" if code is not None else message
+        return json.dumps(error, ensure_ascii=True, separators=(",", ":"))[:300]
+    if isinstance(error, str) and error:
+        return error[:300]
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))[:300]
 
 
 def _chat_stream_chunk_has_finish(chunk: Mapping[str, Any]) -> bool:
@@ -1320,9 +1551,7 @@ def _chat_sse_line_resets_idle_timeout(line: bytes) -> bool:
         payload = json.loads(payload_bytes.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
-    if not isinstance(payload, Mapping):
-        return False
-    return _chat_stream_chunk_starts_downstream_output(payload) or _chat_stream_chunk_has_finish(payload)
+    return isinstance(payload, Mapping)
 
 
 def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> bool:
@@ -2300,6 +2529,14 @@ class UpstreamStreamIncompleteError(RuntimeError):
     """Raised when an upstream stream ends without a terminal event."""
 
 
+class UpstreamStreamErrorEvent(RuntimeError):
+    """Raised when an upstream Responses SSE stream emits an error event."""
+
+    def __init__(self, payload: Mapping[str, Any]):
+        self.payload = dict(payload)
+        super().__init__(_stream_error_event_detail(payload))
+
+
 RESPONSES_TERMINAL_EVENT_TYPES = {
     "response.completed",
     "response.failed",
@@ -2594,6 +2831,137 @@ def _events_to_responses_body(
     if usage is not None:
         payload["usage"] = dict(usage)
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _response_body_to_response_sse_events(body: bytes) -> list[dict[str, Any]]:
+    payload = json.loads(body.decode("utf-8-sig"))
+    if not isinstance(payload, dict):
+        return []
+    if isinstance(payload.get("error"), (str, Mapping)):
+        return []
+
+    response = dict(payload)
+    response_id = response.get("id") if isinstance(response.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}"
+    response["id"] = response_id
+    response.setdefault("object", "response")
+    response.setdefault("status", "completed")
+    output = response.get("output")
+    output_items = output if isinstance(output, list) else []
+    model_value = response.get("model")
+
+    created_response = dict(response)
+    created_response["status"] = "in_progress"
+    created_response["output"] = []
+    events: list[dict[str, Any]] = [
+        {"type": "response.created", "response": created_response},
+        {"type": "response.in_progress", "response": created_response},
+    ]
+
+    for output_index, raw_item in enumerate(output_items):
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        item_type = item.get("type")
+        item_id = item.get("id") if isinstance(item.get("id"), str) else f"item_{output_index}"
+        item["id"] = item_id
+        if item_type == "message":
+            in_progress_item = dict(item)
+            in_progress_item["status"] = "in_progress"
+            events.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": in_progress_item,
+                }
+            )
+            text = "".join(_collect_text_fragments(item.get("content")))
+            if text:
+                part = {"type": "output_text", "text": "", "annotations": []}
+                events.append(
+                    {
+                        "type": "response.content_part.added",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "part": part,
+                    }
+                )
+                events.append(
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "delta": text,
+                    }
+                )
+                events.append(
+                    {
+                        "type": "response.output_text.done",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "text": text,
+                    }
+                )
+                events.append(
+                    {
+                        "type": "response.content_part.done",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": text, "annotations": []},
+                    }
+                )
+            events.append(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                }
+            )
+            continue
+        if item_type == "function_call":
+            in_progress_item = dict(item)
+            in_progress_item["status"] = "in_progress"
+            events.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": in_progress_item,
+                }
+            )
+            arguments = item.get("arguments")
+            if isinstance(arguments, str) and arguments:
+                events.append(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "delta": arguments,
+                    }
+                )
+            events.append(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "output_index": output_index,
+                    "item_id": item_id,
+                    "arguments": arguments if isinstance(arguments, str) else "",
+                }
+            )
+            events.append(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                }
+            )
+
+    response["status"] = "completed"
+    if model_value is not None:
+        response["model"] = model_value
+    events.append({"type": "response.completed", "response": response})
+    return events
 
 
 def _count_sse_reasoning_event(
@@ -5444,6 +5812,35 @@ def _upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) 
     return min(gateway_auto_retry_max_attempts(), default)
 
 
+def _request_kind_retry_attempts_configured(request_kind: str) -> bool:
+    settings_name = _request_kind_retry_settings_name(request_kind)
+    if settings_name and _runtime_settings_value(settings_name) is not None:
+        return True
+    env_name = _request_kind_retry_env_name(request_kind)
+    return bool(env_name and os.environ.get(env_name) is not None)
+
+
+def _retry_attempts_for_failure_class(
+    *,
+    request_kind: str,
+    base_attempts: int,
+    failure_class: str,
+    explicit_max_attempts: bool,
+    stream_failure: bool = False,
+) -> int:
+    if (
+        explicit_max_attempts
+        or base_attempts <= 1
+        or _request_kind_retry_attempts_configured(request_kind)
+    ):
+        return base_attempts
+    if failure_class in CAPACITY_RETRY_FAILURE_CLASSES:
+        return max(base_attempts, gateway_auto_retry_max_attempts())
+    if stream_failure and failure_class == RETRY_FAILURE_QUICK_TRANSIENT:
+        return max(base_attempts, gateway_auto_retry_max_attempts())
+    return base_attempts
+
+
 def _http_retry_header_override(exc: HTTPError) -> bool | None:
     value = _get_header(getattr(exc, "headers", {}), "x-should-retry")
     if not isinstance(value, str):
@@ -5485,24 +5882,34 @@ def _http_error_payload(exc: HTTPError) -> Mapping[str, Any] | None:
     return payload if isinstance(payload, Mapping) else None
 
 
-def _http_error_values(exc: HTTPError) -> set[str]:
-    payload = _http_error_payload(exc)
+def _payload_error_values(payload: Mapping[str, Any] | None) -> set[str]:
     if not isinstance(payload, Mapping):
         return set()
     error = payload.get("error")
     values: set[str] = set()
+
+    def add_value(value: Any) -> None:
+        if isinstance(value, str) and value:
+            values.add(value.strip().lower())
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            values.add(str(value))
+
     if isinstance(error, Mapping):
         for key in ("type", "code", "param", "message"):
-            value = error.get(key)
-            if isinstance(value, str) and value:
-                values.add(value.strip().lower())
+            add_value(error.get(key))
     elif isinstance(error, str) and error:
         values.add(error.strip().lower())
     for key in ("type", "code", "detail", "message"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            values.add(value.strip().lower())
+        add_value(payload.get(key))
     return values
+
+
+def _http_error_values(exc: HTTPError) -> set[str]:
+    return _payload_error_values(_http_error_payload(exc))
+
+
+def _http_error_values_contain(values: set[str], needles: tuple[str, ...]) -> bool:
+    return any(needle in value for value in values for needle in needles)
 
 
 def _has_permanent_upstream_error_value(exc: HTTPError) -> bool:
@@ -5515,28 +5922,119 @@ def _has_permanent_upstream_error_value(exc: HTTPError) -> bool:
     return False
 
 
+def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
+    if not isinstance(exc, HTTPError):
+        return None
+    value = _get_header(getattr(exc, "headers", {}), "retry-after")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    stripped = value.strip()
+    try:
+        seconds = float(stripped)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        return max(0, math.ceil(seconds))
+    try:
+        retry_at = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0, math.ceil(retry_at.timestamp() - time.time()))
+
+
+def _upstream_failure_class(exc: BaseException) -> str:
+    if isinstance(exc, UpstreamStreamInterruptedError):
+        return _upstream_failure_class(exc.cause)
+    if isinstance(exc, UpstreamStreamErrorEvent):
+        values = _payload_error_values(exc.payload)
+        if any(value in PERMANENT_UPSTREAM_ERROR_VALUES for value in values):
+            return RETRY_FAILURE_PERMANENT
+        if (
+            "11210" in values
+            or _http_error_values_contain(values, ("tpm", "tokens per minute", "rate limit", "rate_limit", "too many requests"))
+        ):
+            return RETRY_FAILURE_PROVIDER_THROTTLE
+        if (
+            "10012" in values
+            or _http_error_values_contain(
+                values,
+                ("overload", "overloaded", "queue", "queued", "temporarily unavailable", "system is busy", "engineinternalerror"),
+            )
+        ):
+            return RETRY_FAILURE_PROVIDER_OVERLOADED
+        return RETRY_FAILURE_QUICK_TRANSIENT
+    if isinstance(exc, HTTPError):
+        override = _http_retry_header_override(exc)
+        if override is False:
+            return RETRY_FAILURE_PERMANENT
+        status = _upstream_retry_status(exc)
+        values = _http_error_values(exc)
+        if status in PERMANENT_HTTP_ERROR_STATUSES:
+            return RETRY_FAILURE_QUICK_TRANSIENT if override is True else RETRY_FAILURE_PERMANENT
+        if status == 429 and _has_permanent_upstream_error_value(exc):
+            return RETRY_FAILURE_PERMANENT
+        if _has_permanent_upstream_error_value(exc):
+            return RETRY_FAILURE_PERMANENT
+        if (
+            status == 429
+            or "11210" in values
+            or _http_error_values_contain(values, ("tpm", "tokens per minute", "rate limit", "rate_limit", "too many requests"))
+        ):
+            return RETRY_FAILURE_PROVIDER_THROTTLE
+        if (
+            status == 503
+            or "10012" in values
+            or _http_error_values_contain(
+                values,
+                ("overload", "overloaded", "queue", "queued", "temporarily unavailable", "system is busy", "engineinternalerror"),
+            )
+        ):
+            return RETRY_FAILURE_PROVIDER_OVERLOADED
+        if override is True:
+            return RETRY_FAILURE_QUICK_TRANSIENT
+        if status in TRANSIENT_HTTP_RETRY_STATUSES:
+            return RETRY_FAILURE_QUICK_TRANSIENT
+        if status is not None and 520 <= status <= 599:
+            return RETRY_FAILURE_QUICK_TRANSIENT
+        return RETRY_FAILURE_PERMANENT
+    if isinstance(
+        exc,
+        (
+            CompactEmptyResponseError,
+            IncompleteRead,
+            OSError,
+            TimeoutError,
+            URLError,
+            UpstreamStreamIdleTimeoutError,
+            UpstreamStreamIncompleteError,
+        ),
+    ):
+        return RETRY_FAILURE_QUICK_TRANSIENT
+    return RETRY_FAILURE_PERMANENT
+
+
+def _capacity_retry_elapsed_limit_allows(started_at: float, delay_seconds: int) -> bool:
+    limit_seconds = gateway_capacity_retry_elapsed_limit_seconds()
+    if limit_seconds <= 0:
+        return True
+    return (time.monotonic() - started_at + delay_seconds) <= limit_seconds
+
+
+def _stream_retry_elapsed_limit_allows(started_at: float, delay_seconds: int) -> bool:
+    limit_seconds = gateway_stream_retry_elapsed_limit_seconds()
+    if limit_seconds <= 0:
+        return True
+    return (time.monotonic() - started_at + delay_seconds) <= limit_seconds
+
+
 def _upstream_error_retryable(
     exc: BaseException,
     *,
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
 ) -> bool:
-    if isinstance(exc, HTTPError):
-        override = _http_retry_header_override(exc)
-        if override is not None:
-            return override
-        status = _upstream_retry_status(exc)
-        if status in PERMANENT_HTTP_ERROR_STATUSES:
-            return False
-        if status == 429 and _has_permanent_upstream_error_value(exc):
-            return False
-        if _has_permanent_upstream_error_value(exc):
-            return False
-        if status in TRANSIENT_HTTP_RETRY_STATUSES:
-            return True
-        if status is not None and 520 <= status <= 599:
-            return True
-        return False
-    return isinstance(exc, (IncompleteRead, OSError, URLError))
+    return _upstream_failure_class(exc) != RETRY_FAILURE_PERMANENT
 
 
 def _emit_upstream_retry_event(
@@ -5549,7 +6047,9 @@ def _emit_upstream_retry_event(
     max_attempts: int,
     exc: BaseException,
     delay_seconds: int,
+    failure_class: str | None = None,
 ) -> None:
+    resolved_failure_class = failure_class or _upstream_failure_class(exc)
     _write_adapter_event(
         event_context,
         "upstream_retry",
@@ -5558,6 +6058,7 @@ def _emit_upstream_retry_event(
         upstream_format=upstream_format,
         request_kind=request_kind,
         retryable=True,
+        failure_class=resolved_failure_class,
         status=_upstream_retry_status(exc),
         attempt=attempt,
         max_attempts=max_attempts,
@@ -5576,12 +6077,14 @@ def _downstream_retry_payload(
     max_attempts: int,
     exc: BaseException,
     delay_seconds: int,
+    failure_class: str | None = None,
 ) -> dict[str, Any]:
     return {
         "type": "codexhub.retry",
         "upstream": upstream_name,
         "upstream_format": upstream_format,
         "request_kind": request_kind,
+        "failure_class": failure_class or _upstream_failure_class(exc),
         "status": _upstream_retry_status(exc),
         "attempt": attempt,
         "max_attempts": max_attempts,
@@ -5601,13 +6104,26 @@ def _downstream_stream_error_payload(
 ) -> dict[str, Any]:
     error_type = error or (type(exc).__name__ if exc is not None else "UpstreamStreamError")
     error_detail = detail or (safe_upstream_error_detail(exc) if exc is not None else "")
-    return {
+    failure_class = _upstream_failure_class(exc) if exc is not None else None
+    if failure_class is None and error_type in {
+        "upstream_stream_idle_timeout",
+        "upstream_stream_incomplete",
+        "UpstreamStreamError",
+        "UpstreamProtocolError",
+    }:
+        failure_class = RETRY_FAILURE_QUICK_TRANSIENT
+    payload = {
         "type": "upstream_stream_error",
         "status": status,
         "upstream": upstream_name,
         "error": error_type,
         "detail": error_detail,
+        "retry_owner": "client",
     }
+    if failure_class is not None:
+        payload["failure_class"] = failure_class
+        payload["retryable"] = failure_class != RETRY_FAILURE_PERMANENT
+    return payload
 
 
 def _chat_completion_error_payload(
@@ -5685,14 +6201,29 @@ def _open_upstream_response(
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
     max_attempts: int | None = None,
 ) -> Any:
-    retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
-    for attempt in range(1, retry_attempts + 1):
+    explicit_max_attempts = max_attempts is not None
+    base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
+    retry_started_at = time.monotonic()
+    attempt = 1
+    while True:
         try:
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
-            if attempt >= retry_attempts or not _upstream_error_retryable(exc, request_kind=request_kind):
+            failure_class = _upstream_failure_class(exc)
+            retry_attempts = _retry_attempts_for_failure_class(
+                request_kind=request_kind,
+                base_attempts=base_retry_attempts,
+                failure_class=failure_class,
+                explicit_max_attempts=explicit_max_attempts,
+            )
+            if attempt >= retry_attempts or failure_class == RETRY_FAILURE_PERMANENT:
                 raise
-            delay_seconds = gateway_retry_delay_seconds(attempt)
+            delay_seconds = gateway_retry_delay_seconds(attempt, failure_class=failure_class, exc=exc)
+            if (
+                failure_class in CAPACITY_RETRY_FAILURE_CLASSES
+                and not _capacity_retry_elapsed_limit_allows(retry_started_at, delay_seconds)
+            ):
+                raise
             _emit_upstream_retry_event(
                 event_context,
                 upstream_name=upstream_name,
@@ -5702,6 +6233,7 @@ def _open_upstream_response(
                 max_attempts=retry_attempts,
                 exc=exc,
                 delay_seconds=delay_seconds,
+                failure_class=failure_class,
             )
             if downstream_retry_callback is not None:
                 downstream_retry_callback(
@@ -5713,10 +6245,11 @@ def _open_upstream_response(
                         max_attempts=retry_attempts,
                         exc=exc,
                         delay_seconds=delay_seconds,
-                    )
+                        failure_class=failure_class,
                 )
+            )
             time.sleep(delay_seconds)
-    raise RuntimeError("unreachable upstream retry state")
+            attempt += 1
 
 
 class CodexProxyHandler(BaseHTTPRequestHandler):
@@ -5900,7 +6433,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             responses_body = body
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
-            emit_retry_to_downstream = caller_stream and inbound_format == "responses"
+            emit_retry_to_downstream = (
+                caller_stream
+                and inbound_format == "responses"
+                and gateway_downstream_retry_notice_enabled()
+            )
 
             def upstream_request_for_format(selected_format: str) -> Request:
                 if selected_format == "chat_completions":
@@ -5955,9 +6492,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
             for format_index, selected_upstream_format in enumerate(upstream_format_options):
                 request = upstream_request_for_format(selected_upstream_format)
-                relay_attempts = _upstream_retry_attempts(request_kind)
+                base_relay_attempts = _upstream_retry_attempts(request_kind)
+                relay_attempts = base_relay_attempts
+                relay_attempt = 1
                 try:
-                    for relay_attempt in range(1, relay_attempts + 1):
+                    while relay_attempt <= relay_attempts:
                         try:
                             with _open_upstream_response(
                                 request,
@@ -5980,7 +6519,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
-                                    defer_stream_errors=relay_attempt < relay_attempts and not downstream_sse_started,
+                                    defer_stream_errors=relay_attempt < gateway_auto_retry_max_attempts(),
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                 )
                             break
@@ -5988,12 +6527,45 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             CompactEmptyResponseError,
                             IncompleteRead,
                             UpstreamStreamInterruptedError,
+                            UpstreamStreamIdleTimeoutError,
                             UpstreamStreamIncompleteError,
+                            UpstreamStreamErrorEvent,
                         ) as exc:
+                            stream_failure = isinstance(
+                                exc,
+                                (
+                                    UpstreamStreamInterruptedError,
+                                    UpstreamStreamIdleTimeoutError,
+                                    UpstreamStreamIncompleteError,
+                                ),
+                            )
                             retry_exc = exc.cause if isinstance(exc, UpstreamStreamInterruptedError) else exc
-                            if relay_attempt >= relay_attempts:
+                            failure_class = _upstream_failure_class(retry_exc)
+                            relay_attempts = _retry_attempts_for_failure_class(
+                                request_kind=request_kind,
+                                base_attempts=base_relay_attempts,
+                                failure_class=failure_class,
+                                explicit_max_attempts=False,
+                                stream_failure=stream_failure,
+                            )
+                            if relay_attempt >= relay_attempts or failure_class == RETRY_FAILURE_PERMANENT:
                                 raise retry_exc
-                            delay_seconds = gateway_retry_delay_seconds(relay_attempt)
+                            delay_seconds = gateway_retry_delay_seconds(
+                                relay_attempt,
+                                failure_class=failure_class,
+                                exc=retry_exc,
+                            )
+                            if failure_class in CAPACITY_RETRY_FAILURE_CLASSES and not _capacity_retry_elapsed_limit_allows(
+                                started_at,
+                                delay_seconds,
+                            ):
+                                raise retry_exc
+                            if (
+                                stream_failure
+                                and failure_class == RETRY_FAILURE_QUICK_TRANSIENT
+                                and not _stream_retry_elapsed_limit_allows(started_at, delay_seconds)
+                            ):
+                                raise retry_exc
                             _emit_upstream_retry_event(
                                 adapter_event_context,
                                 upstream_name=upstream_name,
@@ -6003,6 +6575,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 max_attempts=relay_attempts,
                                 exc=retry_exc,
                                 delay_seconds=delay_seconds,
+                                failure_class=failure_class,
                             )
                             emit_downstream_retry(
                                 _downstream_retry_payload(
@@ -6013,9 +6586,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     max_attempts=relay_attempts,
                                     exc=retry_exc,
                                     delay_seconds=delay_seconds,
+                                    failure_class=failure_class,
                                 )
                             )
                             time.sleep(delay_seconds)
+                            relay_attempt += 1
+                            continue
+                        relay_attempt += 1
                     else:
                         raise RuntimeError("unreachable upstream relay retry state")
                     upstream_format = selected_upstream_format
@@ -6521,14 +7098,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
     ) -> Any:
         keepalive_interval = sse_keepalive_seconds()
-        pre_output_timeout_seconds = pre_output_sse_idle_timeout_seconds()
-        post_output_timeout_seconds = post_content_sse_idle_timeout_seconds()
-        pre_output_idle_guard_enabled = pre_output_timeout_seconds > 0 and line_resets_idle_timeout is not None
-        post_output_idle_guard_enabled = (
-            post_output_timeout_seconds > 0
-            and (downstream_output_started is not None or line_resets_idle_timeout is not None)
-        )
-        if keepalive_interval <= 0 and not pre_output_idle_guard_enabled and not post_output_idle_guard_enabled:
+        transport_timeout_seconds = transport_sse_idle_timeout_seconds()
+        model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
+        transport_idle_guard_enabled = transport_timeout_seconds > 0
+        model_event_idle_guard_enabled = model_event_timeout_seconds > 0 and line_resets_idle_timeout is not None
+        if keepalive_interval <= 0 and not transport_idle_guard_enabled and not model_event_idle_guard_enabled:
             while True:
                 line = response.readline()
                 yield line
@@ -6549,16 +7123,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         threading.Thread(target=read_upstream_lines, name="codex-proxy-sse-reader", daemon=True).start()
         stream_started_at = time.monotonic()
-        idle_reset_seen = False
-        post_output_idle_guard_active = False
-        last_progress_at = stream_started_at
+        last_transport_at = stream_started_at
+        last_model_event_at = stream_started_at
         last_keepalive_at = stream_started_at
-
-        def mark_idle_reset_seen() -> None:
-            nonlocal idle_reset_seen, post_output_idle_guard_active, last_progress_at
-            idle_reset_seen = True
-            post_output_idle_guard_active = post_output_idle_guard_enabled
-            last_progress_at = time.monotonic()
 
         def close_response_for_idle_timeout() -> None:
             close = getattr(response, "close", None)
@@ -6574,31 +7141,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         while True:
             now = time.monotonic()
-            if (
-                post_output_idle_guard_enabled
-                and not idle_reset_seen
-                and downstream_output_started is not None
-                and downstream_output_started()
-            ):
-                mark_idle_reset_seen()
-                now = time.monotonic()
-
             timeout_seconds: float | None = None
             if keepalive_interval > 0:
                 timeout_seconds = max(0.001, keepalive_interval - (now - last_keepalive_at))
-            if pre_output_idle_guard_enabled and not idle_reset_seen:
-                remaining_idle = pre_output_timeout_seconds - (now - stream_started_at)
+            if transport_idle_guard_enabled:
+                remaining_idle = transport_timeout_seconds - (now - last_transport_at)
                 if remaining_idle <= 0:
-                    raise_idle_timeout(pre_output_timeout_seconds, "pre_output")
+                    raise_idle_timeout(transport_timeout_seconds, "transport")
                 timeout_seconds = (
                     remaining_idle
                     if timeout_seconds is None
                     else max(0.001, min(timeout_seconds, remaining_idle))
                 )
-            if post_output_idle_guard_active:
-                remaining_idle = post_output_timeout_seconds - (now - last_progress_at)
+            if model_event_idle_guard_enabled:
+                remaining_idle = model_event_timeout_seconds - (now - last_model_event_at)
                 if remaining_idle <= 0:
-                    raise_idle_timeout(post_output_timeout_seconds, "post_output")
+                    raise_idle_timeout(model_event_timeout_seconds, "model_event")
                 timeout_seconds = (
                     remaining_idle
                     if timeout_seconds is None
@@ -6612,11 +7170,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     kind, value = lines.get(timeout=timeout_seconds)
             except queue.Empty:
                 now = time.monotonic()
-                if pre_output_idle_guard_enabled and not idle_reset_seen:
-                    if (now - stream_started_at) >= pre_output_timeout_seconds:
-                        raise_idle_timeout(pre_output_timeout_seconds, "pre_output")
-                if post_output_idle_guard_active and (now - last_progress_at) >= post_output_timeout_seconds:
-                    raise_idle_timeout(post_output_timeout_seconds, "post_output")
+                if transport_idle_guard_enabled and (now - last_transport_at) >= transport_timeout_seconds:
+                    raise_idle_timeout(transport_timeout_seconds, "transport")
+                if model_event_idle_guard_enabled and (now - last_model_event_at) >= model_event_timeout_seconds:
+                    raise_idle_timeout(model_event_timeout_seconds, "model_event")
                 if keepalive_interval > 0:
                     self._write_sse_keepalive()
                     last_keepalive_at = time.monotonic()
@@ -6624,12 +7181,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if kind == "error":
                 raise value
             if isinstance(value, bytes) and value:
-                if line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
-                    mark_idle_reset_seen()
-                elif post_output_idle_guard_active and line_resets_idle_timeout is None:
-                    last_progress_at = time.monotonic()
-                elif post_output_idle_guard_active and (time.monotonic() - last_progress_at) >= post_output_timeout_seconds:
-                    raise_idle_timeout(post_output_timeout_seconds, "post_output")
+                now = time.monotonic()
+                last_transport_at = now
+                if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
+                    last_model_event_at = now
             yield value
             if not value:
                 return
@@ -6893,6 +7448,29 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         inbound_format=inbound_format,
                         **event_fields,
                     )
+            downstream_expects_sse = caller_stream and (
+                headers_already_sent or mark_downstream_sse_started is not None
+            )
+            if downstream_expects_sse and not want_chat_output and status < 400:
+                try:
+                    response_events = _response_body_to_response_sse_events(body)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    response_events = []
+                if response_events:
+                    if not headers_already_sent:
+                        self._send_sse_headers(status, upstream_name)
+                        if mark_downstream_sse_started is not None:
+                            mark_downstream_sse_started()
+                    for event in response_events:
+                        event, _ = _normalize_third_party_tool_call(event)
+                        event, _ = _downgrade_invalid_third_party_tool_calls(event)
+                        event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
+                        event_type = event.get("type")
+                        if isinstance(event_type, str) and event_type:
+                            self._write_sse_event(event_type, event)
+                    self.close_connection = True
+                    _capture_usage(usage_capture, None)
+                    return status
             if headers_already_sent:
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
@@ -6946,6 +7524,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             events.append(event)
                             _capture_usage(usage_capture, _usage_from_response_event(event))
                 except UpstreamStreamIdleTimeoutError as exc:
+                    if defer_stream_errors:
+                        raise
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_idle_timeout",
@@ -7047,6 +7627,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             chunks.append(payload)
                             _capture_usage(usage_capture, _usage_from_payload(payload))
                 except UpstreamStreamIdleTimeoutError as exc:
+                    if defer_stream_errors:
+                        raise
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_idle_timeout",
@@ -7140,11 +7722,98 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "delta_events": 0,
                 "delta_chars": 0,
             }
-            saw_response_event = False
             saw_terminal_event = False
             downstream_output_started = False
             pending_sse_event_metadata: list[bytes] = []
+            pending_downstream_lines: list[bytes] = []
             drop_next_sse_separator = False
+            created_response: dict[str, Any] | None = None
+            completed_tool_output_items: list[dict[str, Any]] = []
+            last_response_event_type: str | None = None
+
+            def write_or_queue_downstream_line(out_line: bytes, *, buffer: bool = False, force: bool = False) -> None:
+                if not out_line:
+                    return
+                if buffer and not force:
+                    pending_downstream_lines.append(out_line)
+                    return
+                if pending_downstream_lines:
+                    for pending_line in pending_downstream_lines:
+                        self.wfile.write(pending_line)
+                    pending_downstream_lines.clear()
+                self.wfile.write(out_line)
+                self.wfile.flush()
+
+            def flush_pending_downstream_lines() -> None:
+                if not pending_downstream_lines:
+                    return
+                for pending_line in pending_downstream_lines:
+                    self.wfile.write(pending_line)
+                pending_downstream_lines.clear()
+                self.wfile.flush()
+
+            def write_response_failed_event(error_payload: Mapping[str, Any]) -> None:
+                pending_downstream_lines.clear()
+                error_value = error_payload.get("error")
+                response_payload = {
+                    "id": f"resp_{uuid.uuid4().hex[:12]}",
+                    "object": "response",
+                    "status": "failed",
+                    "model": model,
+                    "output": [],
+                    "error": error_value if isinstance(error_value, Mapping) else {"message": str(error_value or "Upstream stream error")},
+                }
+                self._write_sse_event(
+                    "response.failed",
+                    {"type": "response.failed", "response": response_payload},
+                )
+
+            def remember_completed_tool_event(payload: Mapping[str, Any]) -> None:
+                nonlocal created_response
+                event_type = payload.get("type")
+                if event_type == "response.created":
+                    response_payload = payload.get("response")
+                    if isinstance(response_payload, Mapping):
+                        created_response = dict(response_payload)
+                    return
+                if event_type != "response.output_item.done":
+                    return
+                item = payload.get("item")
+                if not isinstance(item, Mapping):
+                    return
+                completed = _responses_completed_tool_item(item)
+                if completed is not None:
+                    completed_tool_output_items.append(completed)
+
+            def synthesize_completed_tool_response() -> bool:
+                if upstream_name == "official" or downstream_output_started or not completed_tool_output_items:
+                    return False
+                event = _synthetic_response_completed_from_tool_items(
+                    created_response=created_response,
+                    model=model,
+                    output_items=completed_tool_output_items,
+                )
+                if event is None:
+                    return False
+                pending_line_count = len(pending_downstream_lines)
+                pending_byte_count = sum(len(pending_line) for pending_line in pending_downstream_lines)
+                flush_pending_downstream_lines()
+                self._write_sse_event("response.completed", event)
+                write_proxy_event(
+                    "upstream_stream_incomplete_synthesized_terminal",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=200,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    completed_tool_calls=len(completed_tool_output_items),
+                    pending_downstream_lines=pending_line_count,
+                    pending_downstream_bytes=pending_byte_count,
+                    last_event_type=last_response_event_type,
+                )
+                return True
+
             try:
                 for line in self._iter_upstream_sse_lines(
                     response,
@@ -7160,25 +7829,74 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         if pending_sse_event_metadata:
                             pending_sse_event_metadata = []
                             continue
-                        self.wfile.write(line)
-                        self.wfile.flush()
+                        write_or_queue_downstream_line(line, buffer=bool(pending_downstream_lines))
                         continue
                     if upstream_name != "official" and _is_sse_event_metadata_line(line):
                         pending_sse_event_metadata.append(line)
                         continue
                     original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     usage_payload = _parse_sse_json_payload(line)
+                    buffer_current_line = False
                     if isinstance(usage_payload, Mapping):
                         event_type = usage_payload.get("type")
                         if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
-                            saw_response_event = True
+                            last_response_event_type = event_type
+                        if event_type == "error":
+                            exc = UpstreamStreamErrorEvent(usage_payload)
+                            if defer_stream_errors and not downstream_output_started:
+                                pending_downstream_lines.clear()
+                                pending_sse_event_metadata = []
+                                raise exc
+                            self.close_connection = True
+                            write_proxy_event(
+                                "upstream_stream_error_event",
+                                request_id=request_id,
+                                model=model,
+                                upstream=upstream_name,
+                                status=502,
+                                upstream_format=upstream_format,
+                                inbound_format=inbound_format,
+                                failure_class=_upstream_failure_class(exc),
+                                detail=safe_upstream_error_detail(exc),
+                            )
+                            write_response_failed_event(usage_payload)
+                            _capture_usage(usage_capture, None, missing_reason="stream_error_event")
+                            return 502
                         if _responses_events_have_terminal([usage_payload]):
                             saw_terminal_event = True
-                        if _responses_event_starts_downstream_output(usage_payload):
-                            downstream_output_started = True
+                        is_tool_construction = _responses_event_is_tool_call_construction(usage_payload)
+                        if (
+                            is_tool_construction
+                            and not downstream_output_started
+                            and not saw_terminal_event
+                        ):
+                            buffer_current_line = True
+                        else:
+                            item = usage_payload.get("item") if event_type == "response.output_item.done" else None
+                            is_reasoning_done = isinstance(item, Mapping) and item.get("type") == "reasoning"
+                            if (
+                                _responses_event_commits_downstream_output(usage_payload, upstream_name)
+                                and (upstream_name == "official" or is_reasoning_done)
+                            ):
+                                downstream_output_started = True
+                        buffer_current_line = (
+                            buffer_current_line
+                            or not downstream_output_started
+                            and not saw_terminal_event
+                        )
                         _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
+                    elif (
+                        pending_downstream_lines
+                        and not downstream_output_started
+                        and not saw_terminal_event
+                    ):
+                        buffer_current_line = True
                     line = compatible_sse_line(line, upstream_name, event_context=event_context)
                     rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
+                    if isinstance(rewritten_payload, Mapping):
+                        remember_completed_tool_event(rewritten_payload)
+                    elif isinstance(usage_payload, Mapping):
+                        remember_completed_tool_event(usage_payload)
                     _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
 
                     if not line and upstream_name != "official":
@@ -7188,17 +7906,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
                     if pending_sse_event_metadata:
                         for metadata_line in pending_sse_event_metadata:
-                            self.wfile.write(metadata_line)
+                            write_or_queue_downstream_line(metadata_line, buffer=buffer_current_line)
                         pending_sse_event_metadata = []
-                    self.wfile.write(line)
+                    write_or_queue_downstream_line(line, buffer=buffer_current_line)
                     if saw_terminal_event:
                         separator = _sse_event_separator_after_line(line)
                         if separator:
-                            self.wfile.write(separator)
-                    self.wfile.flush()
+                            write_or_queue_downstream_line(separator, force=True)
                     if saw_terminal_event:
                         break
             except UpstreamStreamIdleTimeoutError as exc:
+                if defer_stream_errors and not downstream_output_started:
+                    raise
                 self.close_connection = True
                 write_proxy_event(
                     "upstream_stream_idle_timeout",
@@ -7224,7 +7943,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
             except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
-                if defer_stream_errors and not saw_response_event:
+                if defer_stream_errors and not downstream_output_started:
                     raise UpstreamStreamInterruptedError(exc) from exc
                 self.close_connection = True
                 write_proxy_event(
@@ -7243,7 +7962,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
-            if status < 400 and saw_response_event and not saw_terminal_event:
+            if status < 400 and not saw_terminal_event:
+                if synthesize_completed_tool_response():
+                    self.close_connection = True
+                    _capture_usage(usage_capture, None, missing_reason="synthetic_tool_terminal")
+                    return status
+                if defer_stream_errors and not downstream_output_started:
+                    raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
                 self.close_connection = True
                 write_proxy_event(
                     "upstream_stream_incomplete",
@@ -7253,6 +7978,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     status=502,
                     upstream_format=upstream_format,
                     inbound_format=inbound_format,
+                    terminal_seen=saw_terminal_event,
+                    downstream_output_started=downstream_output_started,
+                    completed_tool_calls=len(completed_tool_output_items),
+                    pending_downstream_lines=len(pending_downstream_lines),
+                    pending_downstream_bytes=sum(len(pending_line) for pending_line in pending_downstream_lines),
+                    last_event_type=last_response_event_type,
                 )
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
