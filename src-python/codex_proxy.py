@@ -1174,9 +1174,19 @@ def _responses_event_starts_downstream_output(event: Mapping[str, Any]) -> bool:
     if event_type == "response.output_text.done":
         text = event.get("text")
         return isinstance(text, str) and bool(text)
+    if event_type == "response.function_call_arguments.delta":
+        delta = event.get("delta")
+        return isinstance(delta, str) and bool(delta)
+    if event_type == "response.function_call_arguments.done":
+        return True
+    if event_type == "response.custom_tool_call_input.delta":
+        delta = event.get("delta")
+        return isinstance(delta, str) and bool(delta)
+    if event_type == "response.custom_tool_call_input.done":
+        return True
     if event_type in {"response.output_item.added", "response.output_item.done"}:
         item = event.get("item")
-        return isinstance(item, Mapping) and item.get("type") in {"function_call", "message"}
+        return isinstance(item, Mapping) and item.get("type") in {"function_call", "custom_tool_call", "message"}
     return False
 
 

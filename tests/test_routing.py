@@ -2773,6 +2773,109 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(event_kwargs["stream_idle_phase"], "post_output")
         self.assertTrue(event_kwargs["downstream_output_started"])
 
+    def test_responses_sse_function_call_argument_deltas_keep_idle_timer_alive(self):
+        handler = FakeHandler()
+        response = FakeSequencedDelayedSseResponse(
+            [
+                (0, b'data: {"type":"response.created","response":{"id":"resp_tool","model":"gpt-5.5"}}\n\n'),
+                (
+                    0,
+                    b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_tool","type":"function_call","status":"in_progress","call_id":"call_tool","name":"shell_command","arguments":""}}\n\n',
+                ),
+                (
+                    0.03,
+                    b'data: {"type":"response.function_call_arguments.delta","item_id":"fc_tool","output_index":0,"delta":"{\\"command\\":"}\n\n',
+                ),
+                (
+                    0.03,
+                    b'data: {"type":"response.function_call_arguments.delta","item_id":"fc_tool","output_index":0,"delta":"\\"rg idle\\""}\n\n',
+                ),
+                (
+                    0.03,
+                    b'data: {"type":"response.function_call_arguments.done","item_id":"fc_tool","output_index":0,"arguments":"{\\"command\\":\\"rg idle\\"}"}\n\n',
+                ),
+                (
+                    0,
+                    b'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_tool","type":"function_call","status":"completed","call_id":"call_tool","name":"shell_command","arguments":"{\\"command\\":\\"rg idle\\"}"}}\n\n',
+                ),
+                (0, b'data: {"type":"response.completed","response":{"id":"resp_tool","status":"completed","output":[]}}\n\n'),
+                (0, b""),
+            ]
+        )
+
+        with patch.dict(os.environ, {"CODEX_PROXY_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS": "0.05"}, clear=False):
+            status = CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "official",
+                request_id="req_tool_arg_idle",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+            )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.function_call_arguments.done", data)
+        self.assertIn(b"response.completed", data)
+        self.assertNotIn(b"upstream_stream_idle_timeout", data)
+
+    def test_responses_sse_custom_tool_input_deltas_keep_idle_timer_alive(self):
+        handler = FakeHandler()
+        response = FakeSequencedDelayedSseResponse(
+            [
+                (0, b'data: {"type":"response.created","response":{"id":"resp_patch","model":"gpt-5.5"}}\n\n'),
+                (
+                    0,
+                    b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_patch","type":"custom_tool_call","status":"in_progress","call_id":"call_patch","name":"apply_patch","input":""}}\n\n',
+                ),
+                (
+                    0.03,
+                    b'data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_patch","output_index":0,"delta":"*** Begin Patch\\n"}\n\n',
+                ),
+                (
+                    0.03,
+                    b'data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_patch","output_index":0,"delta":"*** Add File: e2e.py\\n"}\n\n',
+                ),
+                (
+                    0.03,
+                    b'data: {"type":"response.custom_tool_call_input.done","item_id":"ctc_patch","output_index":0,"input":"*** Begin Patch\\n*** Add File: e2e.py\\n*** End Patch\\n"}\n\n',
+                ),
+                (
+                    0,
+                    b'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_patch","type":"custom_tool_call","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\\n*** Add File: e2e.py\\n*** End Patch\\n"}}\n\n',
+                ),
+                (0, b'data: {"type":"response.completed","response":{"id":"resp_patch","status":"completed","output":[]}}\n\n'),
+                (0, b""),
+            ]
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_PROXY_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS": "0.05",
+                "CODEX_PROXY_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS": "0.05",
+            },
+            clear=False,
+        ):
+            status = CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "official",
+                request_id="req_custom_tool_idle",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+            )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.custom_tool_call_input.done", data)
+        self.assertIn(b"response.completed", data)
+        self.assertNotIn(b"upstream_stream_idle_timeout", data)
+
     def test_ollama_non_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
         handler = FakeHandler()
         body = json.dumps(
