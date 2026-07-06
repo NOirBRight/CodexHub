@@ -39,6 +39,14 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             "https://example.test/v1/responses",
         )
         self.assertEqual(
+            endpoint_url("https://example.test/v1/response", "/responses"),
+            "https://example.test/v1/response",
+        )
+        self.assertEqual(
+            endpoint_url("https://example.test/v1/response", "/models"),
+            "https://example.test/v1/models",
+        )
+        self.assertEqual(
             endpoint_url("https://example.test/v1/responses", "/models"),
             "https://example.test/v1/models",
         )

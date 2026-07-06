@@ -13,8 +13,14 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
-const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] =
-    &["/chat/completions", "/responses", "/messages", "/models"];
+const RESPONSE_ENDPOINT_SUFFIXES: &[&str] = &["/responses", "/response"];
+const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
+    "/chat/completions",
+    "/responses",
+    "/response",
+    "/messages",
+    "/models",
+];
 
 pub fn refresh_official_models() -> Result<Vec<Model>, String> {
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -364,7 +370,14 @@ fn provider_endpoint_root(base_url: &str) -> String {
 }
 
 fn base_url_path_matches(base_url: &str, path: &str) -> bool {
-    base_url_path(base_url).ends_with(&path.to_ascii_lowercase())
+    let base_path = base_url_path(base_url);
+    let requested_path = path.to_ascii_lowercase();
+    if requested_path == "/responses" {
+        return RESPONSE_ENDPOINT_SUFFIXES
+            .iter()
+            .any(|suffix| base_path.ends_with(suffix));
+    }
+    base_path.ends_with(&requested_path)
 }
 
 fn base_url_path(base_url: &str) -> String {
@@ -380,7 +393,11 @@ fn base_url_has_version_suffix(base_url: &str) -> bool {
     let Some(last_segment) = path.rsplit('/').next().filter(|value| !value.is_empty()) else {
         return false;
     };
-    let Some(version) = last_segment.to_ascii_lowercase().strip_prefix('v').map(str::to_string) else {
+    let Some(version) = last_segment
+        .to_ascii_lowercase()
+        .strip_prefix('v')
+        .map(str::to_string)
+    else {
         return false;
     };
     !version.is_empty()
@@ -1262,10 +1279,10 @@ fn find_python() -> PathBuf {
 mod tests {
     use super::{
         discover_provider_models_with_timeout, enrich_models_with_ollama_show,
-        generate_catalog_with_runner, list_model_metadata, list_models, merge_metadata_with_overrides,
-        ollama_show_endpoint, provider_api_endpoint, provider_models_endpoint,
-        refresh_official_models_from_endpoint, test_model_endpoint_with_timeout, CatalogCommandOutcome,
-        CatalogSyncRunner, ModelPaths,
+        generate_catalog_with_runner, list_model_metadata, list_models,
+        merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        provider_models_endpoint, refresh_official_models_from_endpoint,
+        test_model_endpoint_with_timeout, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
     use crate::{MetadataProvenance, Model, UpstreamFormat};
     use reqwest::blocking::Client;
@@ -1508,6 +1525,14 @@ mod tests {
             "https://example.test/v1/responses"
         );
         assert_eq!(
+            provider_api_endpoint("https://example.test/v1/response", "/responses").unwrap(),
+            "https://example.test/v1/response"
+        );
+        assert_eq!(
+            provider_models_endpoint("https://example.test/v1/response").unwrap(),
+            "https://example.test/v1/models"
+        );
+        assert_eq!(
             provider_models_endpoint("https://example.test/v1/responses").unwrap(),
             "https://example.test/v1/models"
         );
@@ -1533,11 +1558,8 @@ mod tests {
             "https://example.test/v1/responses"
         );
         assert_eq!(
-            provider_api_endpoint(
-                "https://example.test/api/coding/v3",
-                "/chat/completions",
-            )
-            .unwrap(),
+            provider_api_endpoint("https://example.test/api/coding/v3", "/chat/completions",)
+                .unwrap(),
             "https://example.test/api/coding/v3/chat/completions"
         );
     }

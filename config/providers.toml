@@ -82,10 +82,11 @@ enabled = true
 [[providers]]
 id = "xunfei"
 name = "Xunfei MaaS"
-base_url = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
+base_url = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v1/responses"
 api_key = "{env:XUNFEI_MAAS_API_KEY}"
 display_prefix = "Xunfei"
-upstream_format = "chat_completions"
+upstream_format = "responses"
+available_upstream_formats = ["responses"]
 sort_order = 4
 enabled = true
 

@@ -3404,6 +3404,39 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("multi_agent_v1__resume_agent", tools_by_name)
         self.assertIn("multi_agent_v1__send_input", tools_by_name)
 
+    def test_responses_structured_provider_normalizes_openai_message_shorthand(self):
+        body = json.dumps(
+            {
+                "model": "xopglm52",
+                "input": [
+                    {"role": "developer", "content": "System guidance."},
+                    {"role": "user", "content": [{"type": "input_text", "text": "test"}]},
+                    {"type": "function_call", "call_id": "call_tool", "name": "known_tool", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_tool", "output": "ok"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "xunfei",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "req"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "message")
+        self.assertEqual(payload["input"][0]["role"], "developer")
+        self.assertEqual(payload["input"][1]["type"], "message")
+        self.assertEqual(payload["input"][1]["role"], "user")
+        self.assertEqual(payload["input"][1]["content"], [{"type": "input_text", "text": "test"}])
+        self.assertEqual(payload["input"][2]["type"], "function_call")
+        self.assertEqual(payload["input"][3]["type"], "function_call_output")
+
     def test_responses_structured_provider_preserves_multi_agent_tool_history(self):
         body = json.dumps(
             {

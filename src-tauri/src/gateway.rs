@@ -3414,10 +3414,25 @@ fn zcode_v2_provider_matches_expected(
     provider: &Value,
     group: &GatewayClientProviderGroup,
 ) -> bool {
+    let kind = group.endpoint_selection.zcode_kind();
+    let (expected_base_url, expected_path) =
+        zcode_provider_endpoint(&Settings::default(), group, ZcodeProviderFileKind::V2Cache);
     provider
         .get("kind")
         .and_then(Value::as_str)
-        .is_some_and(|value| value == group.endpoint_selection.zcode_kind())
+        .is_some_and(|value| value == kind)
+        && provider
+            .get("apiFormat")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
+        && provider
+            .pointer("/endpoints/baseURL")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_base_url)
+        && provider
+            .pointer(&format!("/endpoints/paths/{kind}"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_path)
         && provider
             .pointer("/options/baseURL")
             .and_then(Value::as_str)
@@ -4766,11 +4781,20 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
             )
         })
         .collect::<Map<_, _>>();
+    let (base_url, endpoint_path) =
+        zcode_provider_endpoint(settings, group, ZcodeProviderFileKind::V2Cache);
+    let mut paths = Map::new();
+    paths.insert(kind.to_string(), Value::String(endpoint_path));
     json!({
         "name": group.display_name.clone(),
         "kind": kind,
         "enabled": true,
         "source": "custom",
+        "apiFormat": group.endpoint_selection.zcode_api_format(),
+        "endpoints": {
+            "baseURL": base_url,
+            "paths": Value::Object(paths),
+        },
         "options": {
             "baseURL": group.base_url.clone(),
             "apiKey": settings.gateway_client_key,
@@ -5686,8 +5710,24 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("openai")
         );
-        assert!(zcode_v2_provider.get("apiFormat").is_none());
-        assert!(zcode_v2_provider.get("endpoints").is_none());
+        assert_eq!(
+            zcode_v2_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            zcode_v2_provider
+                .pointer("/endpoints/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/minimax")
+        );
+        assert_eq!(
+            zcode_v2_provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
+        );
     }
 
     #[test]
@@ -5762,8 +5802,24 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("openai-compatible")
         );
-        assert!(zcode_v2_provider.get("apiFormat").is_none());
-        assert!(zcode_v2_provider.get("endpoints").is_none());
+        assert_eq!(
+            zcode_v2_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-chat-completions")
+        );
+        assert_eq!(
+            zcode_v2_provider
+                .pointer("/endpoints/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/minimax")
+        );
+        assert_eq!(
+            zcode_v2_provider
+                .pointer("/endpoints/paths/openai-compatible")
+                .and_then(serde_json::Value::as_str),
+            Some("/chat/completions")
+        );
     }
 
     #[test]
@@ -5918,8 +5974,12 @@ mod tests {
             Some("openai-completions")
         );
         assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
-        assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5-fast"));
-        assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.4-fast"));
+        assert!(openai_models
+            .iter()
+            .any(|model| model["id"] == "gpt-5.5-fast"));
+        assert!(openai_models
+            .iter()
+            .any(|model| model["id"] == "gpt-5.4-fast"));
         assert!(minimax_models
             .iter()
             .any(|model| model["id"] == "minimax-m3"));
@@ -7051,12 +7111,24 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("openai")
         );
-        assert!(v2_config
-            .pointer("/provider/codexhub-openai/apiFormat")
-            .is_none());
-        assert!(v2_config
-            .pointer("/provider/codexhub-openai/endpoints")
-            .is_none());
+        assert_eq!(
+            v2_config
+                .pointer("/provider/codexhub-openai/apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            v2_config
+                .pointer("/provider/codexhub-openai/endpoints/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/openai")
+        );
+        assert_eq!(
+            v2_config
+                .pointer("/provider/codexhub-openai/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
+        );
         assert!(v2_config
             .pointer("/provider/codexhub-openai/models/gpt-5.5")
             .is_some());
@@ -7070,8 +7142,12 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&v2_cache_path).unwrap()).unwrap();
         let cache_provider = v2_cache.pointer("/providers/0").unwrap();
         let cache_models = cache_provider["models"].as_array().unwrap();
-        assert!(cache_models.iter().any(|model| model["id"] == "gpt-5.5-fast"));
-        assert!(cache_models.iter().any(|model| model["id"] == "gpt-5.4-fast"));
+        assert!(cache_models
+            .iter()
+            .any(|model| model["id"] == "gpt-5.5-fast"));
+        assert!(cache_models
+            .iter()
+            .any(|model| model["id"] == "gpt-5.4-fast"));
         assert_eq!(
             cache_provider
                 .pointer("/endpoints/baseURL")
@@ -7125,8 +7201,24 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
         );
-        assert!(provider.get("apiFormat").is_none());
-        assert!(provider.get("endpoints").is_none());
+        assert_eq!(
+            provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            provider
+                .pointer("/endpoints/baseURL")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:9099/v1/providers/ollama-cloud")
+        );
+        assert_eq!(
+            provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
+        );
         assert_eq!(
             provider
                 .pointer("/models/glm-5.2/limit/context")

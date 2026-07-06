@@ -2093,6 +2093,32 @@ def _normalize_responses_string_input(payload: dict[str, Any]) -> bool:
     return True
 
 
+def _normalize_responses_message_input_items(payload: dict[str, Any]) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    changed = False
+    normalized_items: list[Any] = []
+    for item in input_items:
+        if (
+            isinstance(item, dict)
+            and item.get("type") is None
+            and isinstance(item.get("role"), str)
+            and "content" in item
+        ):
+            rewritten = dict(item)
+            rewritten["type"] = "message"
+            normalized_items.append(rewritten)
+            changed = True
+        else:
+            normalized_items.append(item)
+
+    if changed:
+        payload["input"] = normalized_items
+    return changed
+
+
 def _chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
     """Convert chat-completions ``tools`` into Responses ``tools``."""
     if not isinstance(value, list):
@@ -4256,8 +4282,10 @@ def compatible_request_body(
     upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
+    changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
-        changed = _sanitize_official_reasoning_items(payload)
+        if _sanitize_official_reasoning_items(payload):
+            changed = True
         if _normalize_responses_string_input(payload):
             changed = True
         if _sanitize_official_system_messages(payload):
@@ -4296,7 +4324,8 @@ def compatible_request_body(
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
     if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
-        changed = _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name)
+        if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+            changed = True
     elif tool_protocol == "none":
         tools = payload.get("tools")
         if isinstance(tools, list):
@@ -4304,10 +4333,9 @@ def compatible_request_body(
             if len(filtered_tools) != len(tools):
                 payload["tools"] = filtered_tools
                 changed = True
-        else:
-            changed = False
     else:
-        changed = _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name)
+        if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+            changed = True
     input_items = payload.get("input")
     if _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
         changed = True
@@ -4815,7 +4843,13 @@ def _json_response_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=True).encode("utf-8")
 
 
-KNOWN_UPSTREAM_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/messages", "/models")
+RESPONSE_ENDPOINT_SUFFIXES = ("/responses", "/response")
+KNOWN_UPSTREAM_ENDPOINT_SUFFIXES = (
+    "/chat/completions",
+    *RESPONSE_ENDPOINT_SUFFIXES,
+    "/messages",
+    "/models",
+)
 
 
 def _upstream_endpoint_url(upstream: Mapping[str, Any], path: str) -> str:
@@ -4842,7 +4876,11 @@ def _upstream_endpoint_root(base_url: str) -> str:
 
 
 def _upstream_base_path_matches(base_url: str, path: str) -> bool:
-    return urlsplit(base_url).path.rstrip("/").lower().endswith(path.lower())
+    lowered_path = urlsplit(base_url).path.rstrip("/").lower()
+    requested_path = path.lower()
+    if requested_path == "/responses":
+        return any(lowered_path.endswith(suffix) for suffix in RESPONSE_ENDPOINT_SUFFIXES)
+    return lowered_path.endswith(requested_path)
 
 
 def _upstream_base_has_version_suffix(base_url: str) -> bool:

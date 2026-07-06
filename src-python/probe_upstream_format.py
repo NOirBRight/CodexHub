@@ -18,7 +18,13 @@ UPSTREAM_FORMAT_ANTHROPIC = "anthropic_messages"
 PROBE_REQUEST_TIMEOUT_SECONDS = 6
 PROBE_MAX_ATTEMPTS = 2
 PROBE_RETRY_DELAY_SECONDS = 0.35
-KNOWN_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/messages", "/models")
+RESPONSE_ENDPOINT_SUFFIXES = ("/responses", "/response")
+KNOWN_ENDPOINT_SUFFIXES = (
+    "/chat/completions",
+    *RESPONSE_ENDPOINT_SUFFIXES,
+    "/messages",
+    "/models",
+)
 
 
 def endpoint_url(base_url: str, path: str) -> str:
@@ -45,7 +51,11 @@ def endpoint_root(base_url: str) -> str:
 
 
 def base_path_matches(base_url: str, path: str) -> bool:
-    return urlsplit(base_url).path.rstrip("/").lower().endswith(path.lower())
+    lowered_path = urlsplit(base_url).path.rstrip("/").lower()
+    requested_path = path.lower()
+    if requested_path == "/responses":
+        return any(lowered_path.endswith(suffix) for suffix in RESPONSE_ENDPOINT_SUFFIXES)
+    return lowered_path.endswith(requested_path)
 
 
 def base_has_version_suffix(base_url: str) -> bool:

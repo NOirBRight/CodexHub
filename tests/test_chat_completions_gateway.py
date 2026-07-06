@@ -41,6 +41,22 @@ class UpstreamUrlTests(unittest.TestCase):
             "https://example.test/v1/chat/completions",
         )
 
+    def test_upstream_urls_accept_complete_singular_response_endpoint(self):
+        upstream = {"base_url": "https://example.test/v1/response"}
+
+        self.assertEqual(
+            codex_proxy._responses_url(upstream, "/v1/responses"),
+            "https://example.test/v1/response",
+        )
+        self.assertEqual(
+            codex_proxy._responses_url(upstream, "/v1/responses?cursor=abc"),
+            "https://example.test/v1/response?cursor=abc",
+        )
+        self.assertEqual(
+            codex_proxy._chat_completions_url(upstream),
+            "https://example.test/v1/chat/completions",
+        )
+
     def test_upstream_urls_do_not_duplicate_existing_version_base(self):
         upstream = {"base_url": "https://example.test/v1"}
 
