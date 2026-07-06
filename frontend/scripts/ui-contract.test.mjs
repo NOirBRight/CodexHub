@@ -202,11 +202,12 @@ test("copy buttons keep stable dimensions when copied feedback appears", async (
   assert.doesNotMatch(providersSource, /min-w-\[66px\]/);
 });
 
-test("gateway OpenAI auth status uses unambiguous signed-in copy", async () => {
+test("gateway top card avoids duplicated status summary cards", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
-  assert.match(gatewaySource, /label=\{t\("gateway\.openaiAuth"\)\}[\s\S]*value=\{authPresent \? t\("gateway\.signedIn"\) : t\("gateway\.notSignedIn"\)\}/);
-  assert.doesNotMatch(gatewaySource, /"Present"/);
+  assert.doesNotMatch(gatewaySource, /StatusCard/);
+  assert.doesNotMatch(gatewaySource, /authPresent|bindAddress/);
+  assert.doesNotMatch(gatewaySource, /label=\{t\("gateway\.openaiAuth"\)\}/);
 });
 
 test("sortable drag cursors override the global cursor contract", async () => {
@@ -384,24 +385,28 @@ test("gateway layout reserves space for the client rail", async () => {
     readFile(stackedUsagePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /min-h-\[704px\] min-w-\[972px\] grid-cols-\[minmax\(636px,1fr\)_minmax\(320px,340px\)\] gap-4/);
+  assert.match(gatewaySource, /min-h-\[704px\] w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(300px,340px\)\] gap-4 overflow-hidden/);
   assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
-  assert.match(gatewaySource, /grid min-w-0 gap-3 overflow-hidden rounded-panel bg-surface p-3/);
+  assert.match(gatewaySource, /grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2\.5/);
   assert.doesNotMatch(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
   assert.doesNotMatch(gatewaySource, /\[-webkit-line-clamp:2\]/);
   assert.doesNotMatch(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
   assert.doesNotMatch(gatewaySource, /Clients discover models from/);
-  assert.match(gatewaySource, /grid-cols-\[minmax\(300px,1fr\)_minmax\(270px,0\.95fr\)\] items-stretch gap-3/);
-  assert.match(gatewaySource, /grid h-full min-w-0 grid-rows-\[auto_1fr\] gap-3 rounded-panel bg-panel p-3 shadow-card/);
-  assert.match(gatewaySource, /grid min-w-0 self-end content-start gap-3 rounded-inner bg-surface p-3 shadow-control/);
-  assert.match(gatewaySource, /grid h-full min-w-0 content-start gap-3 rounded-panel bg-panel p-3 shadow-card/);
+  assert.match(gatewaySource, /grid-cols-\[minmax\(300px,1fr\)_minmax\(270px,0\.95fr\)\] items-stretch gap-2/);
+  assert.match(gatewaySource, /<Server size=\{15\} className="shrink-0 text-action" \/>/);
+  assert.match(gatewaySource, /<SwitchControl/);
+  assert.match(gatewaySource, /grid min-w-0 content-start rounded-panel bg-panel p-2 shadow-card/);
+  assert.doesNotMatch(gatewaySource, /<div className="grid grid-cols-3 gap-1\.5">[\s\S]*label=\{t\("gateway\.gateway"\)\}/);
+  assert.match(gatewaySource, /grid min-w-0 content-start gap-1\.5 rounded-inner bg-surface p-2 shadow-control/);
+  assert.match(gatewaySource, /grid min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\] gap-1\.5 rounded-panel bg-panel p-2 pb-2\.5 shadow-card/);
+  assert.match(gatewaySource, /grid min-h-\[118px\] grid-rows-3 gap-1\.5/);
   assert.match(gatewaySource, /grid min-w-0 grid-cols-\[minmax\(0,1fr\)_auto_auto\] items-center gap-2/);
-  assert.match(gatewaySource, /grid-cols-\[minmax\(64px,0\.75fr\)_minmax\(64px,0\.75fr\)_minmax\(112px,0\.9fr\)\] items-end gap-2/);
+  assert.match(gatewaySource, /grid-cols-\[minmax\(64px,0\.75fr\)_minmax\(64px,0\.75fr\)_minmax\(112px,0\.9fr\)\] items-end gap-1\.5/);
   assert.match(gatewaySource, /className="focus-ring inline-flex h-9 self-end/);
   assert.match(gatewaySource, /whitespace-nowrap rounded-control bg-ink/);
   assert.match(gatewaySource, /className="flex items-center justify-between gap-3 whitespace-nowrap"/);
-  assert.match(gatewaySource, /<h3 className="shrink-0 text-sm font-semibold text-ink">\{t\("gateway\.copyConnection"\)\}<\/h3>/);
-  assert.match(gatewaySource, /<aside className="grid h-full min-h-\[704px\] grid-rows-\[auto_minmax\(0,1fr\)\]/);
+  assert.match(gatewaySource, /<h3 className="shrink-0 text-xs font-semibold text-ink">\{t\("gateway\.copyConnection"\)\}<\/h3>/);
+  assert.match(gatewaySource, /<aside className="grid h-full min-h-\[704px\] min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
   assert.match(gatewaySource, /clients\.length > 4 \? "min-h-0 overflow-auto" : "overflow-visible"/);
   assert.match(gatewaySource, /clients\.length > 4 \? "auto-rows-\[minmax\(144px,auto\)\]" : "min-h-full auto-rows-fr"/);
   assert.match(usageSource, /min-h-\[320px\] min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
@@ -412,7 +417,39 @@ test("gateway layout reserves space for the client rail", async () => {
   assert.doesNotMatch(gatewaySource, /OpenAI-compatible routes/);
   assert.doesNotMatch(gatewaySource, /sm:grid-cols-\[minmax\(0,1fr\)_auto_auto\]/);
   assert.doesNotMatch(gatewaySource, /min-w-\[1200px\]/);
+  assert.doesNotMatch(gatewaySource, /min-w-\[972px\]/);
   assert.doesNotMatch(gatewaySource, /0\.86fr|1\.14fr/);
+});
+
+test("gateway recovery panel stays compact and labels actual observed requests", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+
+  assert.match(gatewaySource, /<RecoveryActivityPanel/);
+  assert.match(gatewaySource, /grid min-w-0 gap-1\.5 rounded-panel bg-surface px-2\.5 py-2 shadow-card/);
+  assert.match(gatewaySource, /grid-cols-\[repeat\(3,minmax\(0,0\.72fr\)\)_minmax\(210px,1\.7fr\)\]/);
+  assert.match(gatewaySource, /const routeText = event \? \(client \? `\$\{client\} → \$\{provider\}` : provider\) : t\("gateway\.recoveryEmpty"\)/);
+  assert.match(gatewaySource, /title=\{event \? recoveryEventTitle\(event\) : t\("gateway\.recoveryOverviewTitle"\)\}/);
+  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/);
+  assert.match(gatewaySource, /<RecoveryEventRow[\s\S]*event=\{latestEvent\}[\s\S]*onOverview=\{\(\) => void openOverview\(\)\}/);
+  assert.match(gatewaySource, /aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/);
+  assert.match(gatewaySource, /className="focus-ring grid h-7 w-7 shrink-0 place-items-center/);
+  assert.match(gatewaySource, /event: GatewayEvent \| null;/);
+  assert.match(gatewaySource, /const RECOVERY_OVERVIEW_HOURS = 24;/);
+  assert.match(gatewaySource, /const RECOVERY_OVERVIEW_PAGE_SIZE = 50;/);
+  assert.match(gatewaySource, /api\.gatewayRecentEvents\(\{[\s\S]*limit: RECOVERY_OVERVIEW_LIMIT,[\s\S]*sinceTs,/);
+  assert.match(gatewaySource, /setOverviewEvents\(sortRecoveryRetryEvents\(recent\)\)/);
+  assert.match(gatewaySource, /const pageEvents = events\.slice\(pageStart, pageStart \+ RECOVERY_OVERVIEW_PAGE_SIZE\)/);
+  assert.match(gatewaySource, /t\("gateway\.recoveryOverviewSubtitle", \{ count: events\.length, hours: RECOVERY_OVERVIEW_HOURS \}\)/);
+  assert.match(gatewaySource, /t\("gateway\.recoveryPageSummary"/);
+  assert.doesNotMatch(gatewaySource, /disabled=\{summary\.retryCount === 0\}[\s\S]*\{t\("gateway\.recoveryOverview"\)\}/);
+  assert.doesNotMatch(gatewaySource, /<ListChecks size=\{13\} \/>\s*\{t\("gateway\.recoveryOverview"\)\}/);
+  assert.doesNotMatch(gatewaySource, /summary\.overviewEvents/);
+  assert.match(gatewaySource, /recoveryProviderRaw\(event\)/);
+  assert.match(gatewaySource, /providerFromGatewayPath\(event\.path\)/);
+  assert.match(gatewaySource, /<span>\{t\("gateway\.recoveryColumnClient"\)\}<\/span>/);
+  assert.match(gatewaySource, /<span>\{t\("gateway\.recoveryColumnProvider"\)\}<\/span>/);
+  assert.match(gatewaySource, /<span>\{t\("gateway\.recoveryColumnRequest"\)\}<\/span>/);
+  assert.doesNotMatch(gatewaySource, /main_generation/);
 });
 
 test("gateway copy actions use inline copied state instead of success toasts", async () => {
@@ -421,6 +458,7 @@ test("gateway copy actions use inline copied state instead of success toasts", a
     readFile(endpointRowPath, "utf8"),
   ]);
 
+  assert.match(endpointSource, /min-h-9 grid-cols-\[104px_minmax\(0,1fr\)_auto\] px-2 py-1/);
   assert.match(gatewaySource, /const \[copiedTarget, setCopiedTarget\]/);
   assert.match(gatewaySource, /markCopied\(target\)/);
   assert.match(gatewaySource, /aria-label=\{apiKeyCopied \? t\("gateway\.apiKeyCopied"\) : t\("gateway\.copyApiKey"\)\}/);
@@ -455,6 +493,23 @@ test("gateway client route switching reports completion", async () => {
   assert.match(segmentedSource, /const pending = !active && option\.value === pendingValue;/);
   assert.match(segmentedSource, /pending[\s\S]*\? "bg-slate-200\/80 text-slate-500 shadow-control"/);
   assert.match(segmentedSource, /aria-busy=\{pending \|\| undefined\}/);
+});
+
+test("gateway client stale CodexHub route is shown as reapply state", async () => {
+  const cardSource = await readFile(gatewayClientCardPath, "utf8");
+
+  assert.match(cardSource, /type DisplayRouteMode = RouteMode \| "stale" \| "unknown";/);
+  assert.match(cardSource, /type ClientStatusKind = "checking" \| "not_installed" \| "installed" \| "ready" \| "pending_sync" \| "unknown";/);
+  assert.match(cardSource, /const routeValue = routeMode === "stale" \? "hub" : routeMode === "unknown" \? null : routeMode;/);
+  assert.match(cardSource, /routeMode === "stale"[\s\S]*\? "pending_sync"/);
+  assert.match(cardSource, /statusKind === "pending_sync"[\s\S]*t\("gateway\.routePendingSync"\)/);
+  assert.match(cardSource, /statusKind === "ready"[\s\S]*t\("gateway\.routeReady"\)/);
+  assert.match(cardSource, /routeMode === "stale"[\s\S]*t\("gateway\.routePendingSyncTitle"\)/);
+  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("hub"\)\}/);
+  assert.match(cardSource, /statusKind === "not_installed" \? "bg-panel opacity-75 grayscale" : "bg-surface"/);
+  assert.match(cardSource, /grid-cols-\[56px_minmax\(0,1fr\)\]/);
+  assert.match(cardSource, /<code className="truncate text-left font-mono">/);
+  assert.match(cardSource, /info\?\.route_mode === "official" \|\| info\?\.route_mode === "hub" \|\| info\?\.route_mode === "stale"/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -688,7 +743,7 @@ test("app content region owns horizontal overflow for minimum-width pages", asyn
 
   assert.match(appSource, /h-screen min-h-\[720px\] min-w-0/);
   assert.doesNotMatch(appSource, /min-w-\[1004px\]/);
-  assert.match(appSource, /className="min-h-0 overflow-x-auto overflow-y-auto p-4"/);
+  assert.match(appSource, /activeTab === "gateway" \? "overflow-x-hidden" : "overflow-x-auto"/);
   assert.doesNotMatch(appSource, /className="min-h-0 overflow-hidden p-4"/);
 });
 

@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { PendingPanel } from "./PendingPanel";
@@ -192,6 +192,7 @@ export function StackedUsageChartShell({
     <section className="grid h-full min-h-[320px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
+          <BarChart3 size={15} className="shrink-0 text-action" />
           <h2 className="shrink-0 text-sm font-semibold text-ink">{t("usage.usageCost")}</h2>
         </div>
         <div className="flex shrink-0 items-center justify-end gap-1.5">
@@ -762,7 +763,7 @@ function StackedUsageChart({
           )}
         </div>
         {series.length > 0 && (
-          <div className="flex max-h-12 min-h-7 flex-wrap items-start justify-center gap-x-3 gap-y-1 overflow-y-auto border-t border-slate-100 px-8 py-1.5 text-[10px] font-semibold text-slate-500">
+          <div className="flex min-h-7 flex-wrap items-start justify-center gap-x-2.5 gap-y-1 overflow-visible border-t border-slate-100 px-6 py-1.5 text-[10px] font-semibold text-slate-500">
             {series.map((item) => {
               const hidden = hiddenSeriesKeys.has(item.key);
               return (

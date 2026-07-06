@@ -137,7 +137,12 @@ export const api = {
   gatewayStatus: () => call<GatewayStatus>("gateway_status"),
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>
     call<GatewayTestResult>("gateway_test_request", { kind, model: model ?? null }),
-  gatewayRecentEvents: (limit = 20) => call<GatewayEvent[]>("gateway_recent_events", { limit }),
+  gatewayRecentEvents: (
+    limitOrOptions: number | { limit?: number; sinceTs?: string | null } = 20,
+  ) => {
+    const args = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
+    return call<GatewayEvent[]>("gateway_recent_events", args);
+  },
   gatewayUsageSnapshot: (window?: UsageQueryWindow | null) =>
     call<GatewayUsageSnapshot>("gateway_usage_snapshot", usageWindowArgs(window)),
   gatewayUsageSummary: (window?: UsageQueryWindow | null) =>

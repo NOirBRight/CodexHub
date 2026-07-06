@@ -482,7 +482,7 @@ function Toggle({
   );
 }
 
-function SwitchControl({
+export function SwitchControl({
   ariaLabel,
   checked,
   disabled,

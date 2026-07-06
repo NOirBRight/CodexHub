@@ -18,7 +18,7 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
       className={cx(
         "grid items-center gap-2 rounded-inner bg-surface text-sm shadow-control",
         compact
-          ? "h-8 grid-cols-[104px_minmax(0,1fr)_auto] px-2 py-0"
+          ? "min-h-9 grid-cols-[104px_minmax(0,1fr)_auto] px-2 py-1"
           : "grid-cols-[130px_minmax(0,1fr)_auto] px-3 py-2",
       )}
     >

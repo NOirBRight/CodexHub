@@ -293,7 +293,8 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
                 .get("limit")
                 .and_then(Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
-            to_value(gateway::gateway_recent_events(limit))
+            let since_ts = optional_string_arg(&request.args, &["sinceTs", "since_ts"]);
+            to_value(gateway::gateway_recent_events(limit, since_ts))
         }
         "gateway_usage_summary" => {
             let start_ts = optional_string_arg(&request.args, &["startTs", "start_ts"]);

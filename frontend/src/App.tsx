@@ -11,6 +11,7 @@ import type {
   AppStatus,
   GatewayClientContract,
   GatewayClientInfo,
+  GatewayEvent,
   GatewayStatus,
   GatewayUsageEvent,
   GatewayUsageSummary,
@@ -32,6 +33,7 @@ type RuntimeSnapshot = {
   gatewayUsageSummary: GatewayUsageSummary | null;
   gatewayUsageEvents: GatewayUsageEvent[];
   gatewayUsageStatus: TelemetryStatus | null;
+  gatewayEvents: GatewayEvent[];
   usageError: string | null;
   gatewayClients: GatewayClientInfo[];
   catalogModels: Model[];
@@ -212,6 +214,7 @@ export default function App() {
     gatewayUsageSummary: null,
     gatewayUsageEvents: [],
     gatewayUsageStatus: null,
+    gatewayEvents: [],
     usageError: null,
     gatewayClients: [],
     catalogModels: [],
@@ -261,6 +264,7 @@ export default function App() {
         gatewayResult,
         catalogResult,
         usageSnapshotResult,
+        gatewayEventsResult,
       ] =
         await Promise.allSettled([
           api.getStatus(),
@@ -269,6 +273,7 @@ export default function App() {
           api.gatewayStatus(),
           api.listModels(),
           api.gatewayUsageSnapshot(usageWindow),
+          api.gatewayRecentEvents(80),
         ]);
 
       setRuntime((current) => ({
@@ -290,6 +295,10 @@ export default function App() {
           usageSnapshotResult.status === "fulfilled"
             ? usageSnapshotResult.value.telemetry_status
             : current.gatewayUsageStatus,
+        gatewayEvents:
+          gatewayEventsResult.status === "fulfilled"
+            ? gatewayEventsResult.value
+            : current.gatewayEvents,
         usageError:
           usageSnapshotResult.status === "fulfilled"
             ? null
@@ -481,7 +490,7 @@ export default function App() {
         </span>
       </nav>
 
-      <div className="min-h-0 overflow-x-auto overflow-y-auto p-4">
+      <div className={cx("min-h-0 min-w-0 max-w-full overflow-y-auto p-4", activeTab === "gateway" ? "overflow-x-hidden" : "overflow-x-auto")}>
         {activeTab === "codexhub" ? (
           <ProvidersPage
             gatewayStatus={runtime.gatewayStatus}
@@ -500,6 +509,7 @@ export default function App() {
             usageEvents={runtime.gatewayUsageEvents}
             usageStatus={runtime.gatewayUsageStatus}
             usageError={runtime.usageError}
+            recentEvents={runtime.gatewayEvents}
             clientInfos={runtime.gatewayClients}
             busy={busy}
             clients={contract.gatewayClients as GatewayClientContract[]}

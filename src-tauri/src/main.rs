@@ -336,8 +336,11 @@ fn gateway_test_request(
 }
 
 #[tauri::command]
-fn gateway_recent_events(limit: Option<usize>) -> Result<Vec<gateway::GatewayEvent>, String> {
-    gateway::gateway_recent_events(limit)
+fn gateway_recent_events(
+    limit: Option<usize>,
+    since_ts: Option<String>,
+) -> Result<Vec<gateway::GatewayEvent>, String> {
+    gateway::gateway_recent_events(limit, since_ts)
 }
 
 #[tauri::command]

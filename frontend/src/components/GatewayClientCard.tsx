@@ -8,7 +8,8 @@ import { cx } from "../lib/format";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
 type RouteMode = "official" | "hub";
-type DisplayRouteMode = RouteMode | "unknown";
+type DisplayRouteMode = RouteMode | "stale" | "unknown";
+type ClientStatusKind = "checking" | "not_installed" | "installed" | "ready" | "pending_sync" | "unknown";
 
 interface GatewayClientCardProps {
   busy?: boolean;
@@ -27,7 +28,7 @@ export function GatewayClientCard({
 }: GatewayClientCardProps) {
   const { t } = useTranslation();
   const routeMode = routeModeFromInfo(info);
-  const routeValue = routeMode === "unknown" ? null : routeMode;
+  const routeValue = routeMode === "stale" ? "hub" : routeMode === "unknown" ? null : routeMode;
   const pendingRouteValue = busy ? busyMode ?? null : null;
   const hasInfo = Boolean(info);
   const installed = Boolean(info?.installed);
@@ -49,25 +50,56 @@ export function GatewayClientCard({
   const routeTitle = busy
     ? t("gateway.switchingRoute", { name: info?.name ?? client.name })
     : routeDisabledReason ??
-      (routeMode === "unknown" ? t("gateway.routeUnknownTitle") : undefined);
+      (routeMode === "stale"
+        ? t("gateway.routePendingSyncTitle")
+        : routeMode === "unknown"
+          ? t("gateway.routeUnknownTitle")
+          : undefined);
+  const statusKind: ClientStatusKind = !hasInfo
+    ? "checking"
+    : !installed
+      ? "not_installed"
+      : routeMode === "stale"
+        ? "pending_sync"
+        : routeMode === "hub"
+          ? "ready"
+          : routeMode === "official"
+            ? "installed"
+            : "unknown";
   const statusLabel = busy
     ? t("gateway.switching")
-    : !hasInfo
+    : statusKind === "checking"
     ? t("gateway.checking")
-    : !installed
+    : statusKind === "not_installed"
       ? t("gateway.notInstalled")
-      : routeMode === "unknown"
+      : statusKind === "pending_sync"
+        ? t("gateway.routePendingSync")
+      : statusKind === "ready"
+        ? t("gateway.routeReady")
+      : statusKind === "unknown"
         ? t("gateway.routeUnknown")
         : t("gateway.installed");
   const statusClass = busy
     ? "border-amber-200 bg-amber-50 text-amber-700"
-    : !hasInfo
+    : statusKind === "checking"
       ? "border-line bg-panel text-slate-500"
-      : !installed
+      : statusKind === "not_installed"
         ? "border-line bg-panel text-slate-500"
-        : routeMode === "unknown"
+        : statusKind === "pending_sync"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+        : statusKind === "ready"
+          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : statusKind === "unknown"
           ? "border-amber-200 bg-amber-50 text-amber-700"
           : "border-blue-200 bg-blue-50 text-blue-700";
+  const statusTitle =
+    statusKind === "pending_sync"
+      ? routeTitle
+      : statusKind === "ready"
+        ? info?.status
+        : statusKind === "unknown"
+          ? routeTitle
+          : undefined;
   const versionLabel = !hasInfo
     ? t("gateway.checkingVersion")
     : !installed
@@ -81,21 +113,42 @@ export function GatewayClientCard({
           })
         : t("gateway.versionUnknown");
   return (
-    <section className="grid h-full min-h-[136px] content-between gap-1.5 rounded-panel bg-surface p-2 shadow-card">
+    <section
+      className={cx(
+        "grid h-full min-h-[136px] content-between gap-1.5 rounded-panel p-2 shadow-card",
+        statusKind === "not_installed" ? "bg-panel opacity-75 grayscale" : "bg-surface",
+      )}
+    >
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <ClientLogo id={client.id} name={info?.name ?? client.name} />
         <div className="min-w-0">
           <h3 className="truncate text-sm font-semibold text-ink">{info?.name ?? client.name}</h3>
           <p className="truncate text-xs text-slate-500">{kindLabel}</p>
         </div>
-        <span
-          className={cx(
-            "rounded-full px-2 py-0.5 text-[11px] font-semibold shadow-control",
-            statusClass,
-          )}
-        >
-          {statusLabel}
-        </span>
+        {statusKind === "pending_sync" ? (
+          <button
+            type="button"
+            className={cx(
+              "focus-ring rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]",
+              statusClass,
+            )}
+            disabled={busy || Boolean(routeDisabledReason)}
+            onClick={() => onSwitchMode("hub")}
+            title={statusTitle}
+          >
+            {statusLabel}
+          </button>
+        ) : (
+          <span
+            className={cx(
+              "rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-control",
+              statusClass,
+            )}
+            title={statusTitle}
+          >
+            {statusLabel}
+          </span>
+        )}
       </div>
 
       <div title={routeTitle}>
@@ -111,11 +164,11 @@ export function GatewayClientCard({
       </div>
 
       <div className="grid min-w-0 gap-1 text-xs text-slate-600">
-        <div className="flex min-w-0 items-center justify-between gap-2">
-          <span className="shrink-0 font-semibold text-slate-500">{t("common.config")}</span>
-          <code className="truncate font-mono">{configPath || t("common.copyOnly")}</code>
+        <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)] items-center gap-2">
+          <span className="font-semibold text-slate-500">{t("common.config")}</span>
+          <code className="truncate text-left font-mono">{configPath || t("common.copyOnly")}</code>
         </div>
-        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2">
+        <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)] items-center gap-2">
           <span className="font-semibold text-slate-500">{t("common.version")}</span>
           <span className="truncate" title={versionLabel}>
             {versionLabel}
@@ -127,7 +180,7 @@ export function GatewayClientCard({
 }
 
 function routeModeFromInfo(info?: GatewayClientInfo): DisplayRouteMode {
-  if (info?.route_mode === "official" || info?.route_mode === "hub") {
+  if (info?.route_mode === "official" || info?.route_mode === "hub" || info?.route_mode === "stale") {
     return info.route_mode;
   }
   return "unknown";

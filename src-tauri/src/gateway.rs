@@ -381,13 +381,25 @@ pub struct GatewayEvent {
     pub ts: Option<String>,
     pub event: Option<String>,
     pub request_id: Option<String>,
+    pub client_request_id: Option<String>,
+    pub query_id: Option<String>,
+    pub session_id: Option<String>,
+    pub client_id: Option<String>,
     pub path: Option<String>,
     pub method: Option<String>,
     pub model: Option<String>,
     pub upstream: Option<String>,
+    pub provider_id: Option<String>,
     pub upstream_format: Option<String>,
     pub inbound_format: Option<String>,
+    pub request_kind: Option<String>,
     pub route_reason: Option<String>,
+    pub route_mode: Option<String>,
+    pub failure_class: Option<String>,
+    pub retryable: Option<bool>,
+    pub attempt: Option<i64>,
+    pub max_attempts: Option<i64>,
+    pub delay_ms: Option<i64>,
     pub status: Option<i64>,
     pub duration_ms: Option<i64>,
     pub error: Option<String>,
@@ -522,9 +534,12 @@ pub fn gateway_test_request(
     }
 }
 
-pub fn gateway_recent_events(limit: Option<usize>) -> Result<Vec<GatewayEvent>, String> {
-    let limit = limit.unwrap_or(20).clamp(1, 100);
-    Ok(read_recent_events(limit, None))
+pub fn gateway_recent_events(
+    limit: Option<usize>,
+    since_ts: Option<String>,
+) -> Result<Vec<GatewayEvent>, String> {
+    let limit = limit.unwrap_or(20).clamp(1, 5_000);
+    Ok(read_recent_events(limit, None, since_ts.as_deref()))
 }
 
 pub fn gateway_usage_summary(
@@ -1062,7 +1077,7 @@ pub fn provider_probe_upstream_format(
 pub fn subagent_matrix_status() -> Result<SubagentMatrixStatus, String> {
     let status = gateway_status()?;
     let readiness = subagent_readiness(&status.features);
-    let recent_events = read_recent_events(20, Some(subagent_event_filter));
+    let recent_events = read_recent_events(20, Some(subagent_event_filter), None);
     let rows = OFFICIAL_MODELS
         .iter()
         .map(|(id, _, _)| SubagentMatrixRow {
@@ -1865,6 +1880,7 @@ fn gateway_diagnostics(
 fn read_recent_events(
     limit: usize,
     filter: Option<fn(&GatewayEvent) -> bool>,
+    since_ts: Option<&str>,
 ) -> Vec<GatewayEvent> {
     let text = match read_event_log_text() {
         Ok(text) => text,
@@ -1880,6 +1896,14 @@ fn read_recent_events(
             continue;
         };
         let event = sanitize_event(&value);
+        if let Some(since_ts) = since_ts {
+            let Some(event_ts) = event.ts.as_deref() else {
+                continue;
+            };
+            if event_ts < since_ts {
+                break;
+            }
+        }
         if filter.map(|predicate| predicate(&event)).unwrap_or(true) {
             events.push(event);
         }
@@ -3142,13 +3166,25 @@ fn sanitize_event(value: &Value) -> GatewayEvent {
         ts: string_field(value, "ts"),
         event: string_field(value, "event"),
         request_id: string_field(value, "request_id"),
+        client_request_id: string_field(value, "client_request_id"),
+        query_id: string_field(value, "query_id"),
+        session_id: string_field(value, "session_id"),
+        client_id: string_field(value, "client_id"),
         path: string_field(value, "path"),
         method: string_field(value, "method"),
         model: string_field(value, "model"),
         upstream: string_field(value, "upstream"),
+        provider_id: string_field(value, "provider_id"),
         upstream_format: string_field(value, "upstream_format"),
         inbound_format: string_field(value, "inbound_format"),
+        request_kind: string_field(value, "request_kind"),
         route_reason: string_field(value, "route_reason"),
+        route_mode: string_field(value, "route_mode"),
+        failure_class: string_field(value, "failure_class"),
+        retryable: value.get("retryable").and_then(Value::as_bool),
+        attempt: value.get("attempt").and_then(Value::as_i64),
+        max_attempts: value.get("max_attempts").and_then(Value::as_i64),
+        delay_ms: value.get("delay_ms").and_then(Value::as_i64),
         status: value.get("status").and_then(Value::as_i64),
         duration_ms: value.get("duration_ms").and_then(Value::as_i64),
         error: string_field(value, "error"),
@@ -3173,6 +3209,7 @@ fn classify_event(value: &Value) -> String {
         .unwrap_or("")
         .to_ascii_lowercase();
     match event {
+        "upstream_retry" => "recovery".to_string(),
         "upstream_stream_interrupted" => "streaming".to_string(),
         "explicit_codex_tools_injected"
         | "third_party_tool_call_alias_normalized"
