@@ -71,6 +71,7 @@ class ProviderConfig:
     api_key: str
     upstream_format: str = "auto"
     available_upstream_formats: tuple[str, ...] = ()
+    reports_cached_input_tokens: bool = False
     display_prefix: str | None = None
     sort_order: int = 0
     enabled: bool = True
@@ -198,6 +199,7 @@ def build_external_model_index(
                 "base_url": base_url,
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
+                "reports_cached_input_tokens": provider.reports_cached_input_tokens,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -290,6 +292,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             api_key=_string_field(raw_provider.get("api_key")),
             upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
             available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
+            reports_cached_input_tokens=_bool_field(raw_provider.get("reports_cached_input_tokens"), False),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
@@ -323,6 +326,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             chunks.append(_toml_string_line("upstream_format", provider.upstream_format))
         if provider.available_upstream_formats:
             chunks.append(_toml_string_list_line("available_upstream_formats", provider.available_upstream_formats))
+        if provider.reports_cached_input_tokens:
+            chunks.append(_toml_bool_line("reports_cached_input_tokens", provider.reports_cached_input_tokens))
         chunks.extend(
             [
                 _toml_int_line("sort_order", provider.sort_order),

@@ -310,6 +310,7 @@ const zhCN = {
   usage: {
     allSeriesHidden: "使用图例恢复序列。",
     by: "按",
+    client: "客户端",
     custom: "自定义",
     day: "日",
     eventWindowEmpty: "事件窗口为空",
@@ -337,6 +338,7 @@ const zhCN = {
     usageCost: "用量与成本",
     usageSeriesHidden: "用量序列已隐藏",
     usageTelemetry: "用量遥测",
+    unknownClient: "未知客户端",
     unknownModel: "未知模型",
     unknownProvider: "未知供应商",
     usageUnavailableMessage: "已记录 {{requests}} 个请求，其中 {{missing}} 条缺少用量记录。只有上游返回用量后，token 和成本才会显示。",

@@ -17,7 +17,7 @@ interface StackedUsageChartShellProps {
 type UsageRange = "7d" | "1m" | "custom";
 type UsageGroup = "day" | "week";
 type UsageMetric = "token" | "request";
-type UsageBreakdown = "provider" | "model";
+type UsageBreakdown = "provider" | "model" | "client";
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 interface DateSpan {
@@ -103,6 +103,7 @@ export function StackedUsageChartShell({
 
   const queryWindow = useMemo(() => usageQueryWindow(range, customRange), [customRange, range]);
   const providerLabels = useMemo(() => providerLabelMap(providers), [providers]);
+  const cacheCapableProviders = useMemo(() => cacheCapableProviderKeys(providers), [providers]);
   const stacked = useMemo(
     () => buildStackedBuckets(events, range, groupBy, customRange, metric, breakdown, providerLabels, locale, tr),
     [breakdown, customRange, events, groupBy, locale, metric, providerLabels, range, tr],
@@ -119,12 +120,13 @@ export function StackedUsageChartShell({
         events,
         hiddenSeriesKeys,
         providerLabels,
+        cacheCapableProviders,
         range,
         series: stacked.series,
         summary,
         tr,
       }),
-    [breakdown, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary, tr],
+    [breakdown, cacheCapableProviders, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary, tr],
   );
 
   useEffect(() => {
@@ -222,9 +224,10 @@ export function StackedUsageChartShell({
             options={[
               { value: "provider", label: t("usage.provider") },
               { value: "model", label: t("usage.model") },
+              { value: "client", label: t("usage.client") },
             ]}
             value={breakdown}
-            valueLabel={breakdown === "model" ? t("usage.model") : t("usage.provider")}
+            valueLabel={t(`usage.${breakdown}`)}
             onToggle={() => {
               setBreakdownOpen((open) => !open);
               setMetricOpen(false);
@@ -970,6 +973,7 @@ function visibleUsageSummary({
   events,
   hiddenSeriesKeys,
   providerLabels,
+  cacheCapableProviders,
   range,
   series,
   summary,
@@ -980,6 +984,7 @@ function visibleUsageSummary({
   events: GatewayUsageEvent[];
   hiddenSeriesKeys: Set<string>;
   providerLabels: Map<string, string>;
+  cacheCapableProviders: Set<string>;
   range: UsageRange;
   series: StackSeries[];
   summary: GatewayUsageSummary | null;
@@ -1029,7 +1034,11 @@ function visibleUsageSummary({
     }
     inputTokens += event.input_tokens ?? 0;
     outputTokens += event.output_tokens ?? 0;
-    if (event.cached_input_tokens !== null && event.cached_input_tokens !== undefined) {
+    if (
+      eventReportsCacheUsage(event, cacheCapableProviders) &&
+      event.cached_input_tokens !== null &&
+      event.cached_input_tokens !== undefined
+    ) {
       hasCachedInput = true;
       cachedInputTokens += event.cached_input_tokens;
     }
@@ -1052,7 +1061,7 @@ function visibleUsageSummary({
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     cached_input_tokens: hasCachedInput ? cachedInputTokens : null,
-    cache_hit_rate: hasCachedInput && inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null,
+    cache_hit_rate: cacheHitRate(events, breakdown, hiddenSeriesKeys, visibleTopKeys, hideOther, providerLabels, cacheCapableProviders, tr, startTime, endTime),
     estimated_cost_usd: estimatedCost,
     cost_label: estimatedCost !== null ? tr("gateway.filteredEstimate") : summary?.cost_label ?? tr("common.unknown"),
   };
@@ -1253,6 +1262,14 @@ function breakdownSegment(event: GatewayUsageEvent, breakdown: UsageBreakdown, p
   const provider = event.upstream?.trim() || t("usage.unknownProvider");
   const providerName = providerLabel(provider, providerLabels, t);
 
+  if (breakdown === "client") {
+    const client = event.client_id?.trim() || t("usage.unknownClient");
+    return {
+      key: `client:${client.toLowerCase()}`,
+      label: clientLabel(client, t),
+    };
+  }
+
   if (breakdown === "model") {
     const model = event.model?.trim() || t("usage.unknownModel");
     const modelId = displayModelId(model);
@@ -1266,6 +1283,110 @@ function breakdownSegment(event: GatewayUsageEvent, breakdown: UsageBreakdown, p
     key: `provider:${provider}`,
     label: providerName,
   };
+}
+
+function cacheHitRate(
+  events: GatewayUsageEvent[],
+  breakdown: UsageBreakdown,
+  hiddenSeriesKeys: Set<string>,
+  visibleTopKeys: Set<string>,
+  hideOther: boolean,
+  providerLabels: Map<string, string>,
+  cacheCapableProviders: Set<string>,
+  t: Translate,
+  startTime: number,
+  endTime: number,
+) {
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+
+  for (const event of events) {
+    if (!event.ts || !eventReportsCacheUsage(event, cacheCapableProviders)) {
+      continue;
+    }
+    const time = Date.parse(event.ts);
+    if (Number.isNaN(time) || time < startTime || time > endTime) {
+      continue;
+    }
+    const segment = breakdownSegment(event, breakdown, providerLabels, t);
+    if (hiddenSeriesKeys.has(segment.key) || (hideOther && !visibleTopKeys.has(segment.key))) {
+      continue;
+    }
+    if (
+      event.input_tokens !== null &&
+      event.input_tokens !== undefined &&
+      event.input_tokens > 0 &&
+      event.cached_input_tokens !== null &&
+      event.cached_input_tokens !== undefined
+    ) {
+      inputTokens += event.input_tokens;
+      cachedInputTokens += event.cached_input_tokens;
+    }
+  }
+
+  return inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
+}
+
+function eventReportsCacheUsage(event: GatewayUsageEvent, cacheCapableProviders: Set<string>) {
+  if (event.reports_cached_input_tokens !== null && event.reports_cached_input_tokens !== undefined) {
+    return event.reports_cached_input_tokens;
+  }
+  if (event.upstream && cacheCapableProviders.has(cacheProviderKey(event.upstream))) {
+    return true;
+  }
+  return cacheUsageCapableModel(event.model);
+}
+
+function cacheCapableProviderKeys(providers: Provider[]) {
+  const keys = new Set(["official", "openai", "official_openai"].map(cacheProviderKey));
+  for (const provider of providers) {
+    if (provider.reports_cached_input_tokens !== true) {
+      continue;
+    }
+    insertCacheProviderAliases(keys, provider.id);
+  }
+  return keys;
+}
+
+function insertCacheProviderAliases(keys: Set<string>, providerId: string) {
+  keys.add(cacheProviderKey(providerId));
+  if (providerId === "volc") {
+    keys.add(cacheProviderKey("volcengine"));
+  }
+  if (providerId === "minimax-cn") {
+    keys.add(cacheProviderKey("minimax_cn"));
+  }
+}
+
+function cacheProviderKey(value: string) {
+  return value.trim().toLowerCase().replace(/[-\s]+/g, "_");
+}
+
+function cacheUsageCapableModel(model: string | null | undefined) {
+  return model?.trim().toLowerCase().startsWith("openai/") === true;
+}
+
+function clientLabel(client: string, t: Translate) {
+  const normalized = client.trim().toLowerCase();
+  if (!normalized || normalized === "unknown") {
+    return t("usage.unknownClient");
+  }
+  if (normalized === "codex-app") {
+    return "Codex App";
+  }
+  if (normalized === "opencode") {
+    return "OpenCode";
+  }
+  if (normalized === "zcode") {
+    return "ZCode";
+  }
+  if (normalized === "pi") {
+    return "Pi";
+  }
+  if (normalized === "omp") {
+    return "OMP";
+  }
+  return titleizeProviderId(client);
 }
 
 function providerLabelMap(providers: Provider[]) {

@@ -190,6 +190,9 @@ pub struct GatewayUsageEvent {
     pub request_id: Option<String>,
     pub model: Option<String>,
     pub upstream: Option<String>,
+    pub client_id: Option<String>,
+    pub client_inference_source: Option<String>,
+    pub reports_cached_input_tokens: Option<bool>,
     pub status: Option<i64>,
     pub duration_ms: Option<i64>,
     pub usage_source: String,
@@ -2171,6 +2174,7 @@ fn initialize_telemetry_db(connection: &Connection) -> Result<(), String> {
                 provider_id TEXT,
                 upstream TEXT,
                 upstream_format TEXT,
+                reports_cached_input_tokens INTEGER,
                 inbound_format TEXT,
                 model TEXT,
                 model_requested TEXT,
@@ -2267,6 +2271,7 @@ fn gateway_request_column_defs() -> &'static [(&'static str, &'static str)] {
         ("provider_id", "TEXT"),
         ("upstream", "TEXT"),
         ("upstream_format", "TEXT"),
+        ("reports_cached_input_tokens", "INTEGER"),
         ("inbound_format", "TEXT"),
         ("model", "TEXT"),
         ("model_requested", "TEXT"),
@@ -2469,6 +2474,7 @@ fn upsert_gateway_request_from_event(
                 provider_id = COALESCE(?, provider_id),
                 upstream = COALESCE(?, upstream),
                 upstream_format = COALESCE(?, upstream_format),
+                reports_cached_input_tokens = COALESCE(?, reports_cached_input_tokens),
                 inbound_format = COALESCE(?, inbound_format),
                 model = COALESCE(?, model),
                 model_requested = COALESCE(?, model_requested),
@@ -2521,6 +2527,7 @@ fn upsert_gateway_request_from_event(
                 provider_id,
                 upstream,
                 string_field(value, "upstream_format"),
+                bool_or_i64_field(value, "reports_cached_input_tokens"),
                 string_field(value, "inbound_format"),
                 model,
                 model_requested,
@@ -2625,6 +2632,9 @@ fn read_usage_events_from_sqlite_path_with_window(
                 request_id,
                 COALESCE(model_canonical, model, model_requested) AS model,
                 COALESCE(provider_id, upstream) AS upstream,
+                COALESCE(client_id, 'unknown') AS client_id,
+                COALESCE(client_inference_source, 'unknown') AS client_inference_source,
+                reports_cached_input_tokens,
                 status,
                 duration_ms,
                 COALESCE(usage_source, 'missing') AS usage_source,
@@ -2673,17 +2683,22 @@ fn read_usage_events_from_sqlite_path_with_window(
                     request_id: row.get(1)?,
                     model: normalize_usage_model(row.get(3)?, row.get(2)?),
                     upstream: row.get(3)?,
-                    status: row.get(4)?,
-                    duration_ms: row.get(5)?,
+                    client_id: row.get(4)?,
+                    client_inference_source: row.get(5)?,
+                    reports_cached_input_tokens: optional_i64_to_bool(
+                        row.get::<_, Option<i64>>(6)?,
+                    ),
+                    status: row.get(7)?,
+                    duration_ms: row.get(8)?,
                     usage_source: row
-                        .get::<_, Option<String>>(6)?
+                        .get::<_, Option<String>>(9)?
                         .unwrap_or_else(|| "missing".to_string()),
-                    usage_missing_reason: row.get(7)?,
-                    input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(8)?),
-                    output_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(9)?),
-                    total_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(10)?),
-                    cached_input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(11)?),
-                    reasoning_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(12)?),
+                    usage_missing_reason: row.get(10)?,
+                    input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(11)?),
+                    output_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(12)?),
+                    total_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(13)?),
+                    cached_input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(14)?),
+                    reasoning_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(15)?),
                 })
             },
         )
@@ -2740,6 +2755,7 @@ fn read_usage_summary_from_events_with_pricing(
     events: &[GatewayUsageEvent],
     pricing: &HashMap<String, UsagePricing>,
 ) -> GatewayUsageSummary {
+    let cache_capable_providers = cache_usage_capable_provider_aliases();
     let requests = events.len() as u64;
     let successful_requests = events
         .iter()
@@ -2763,10 +2779,18 @@ fn read_usage_summary_from_events_with_pricing(
                 _ => None,
             }
         });
-    let cached_input_tokens = sum_optional(events.iter().map(|event| event.cached_input_tokens));
+    let cached_input_tokens = sum_optional(
+        events
+            .iter()
+            .filter(|event| event_reports_cache_usage(event, &cache_capable_providers))
+            .map(|event| event.cached_input_tokens),
+    );
     let mut cache_known_input_tokens = 0_u64;
     let mut cache_known_cached_tokens = 0_u64;
     for event in events {
+        if !event_reports_cache_usage(event, &cache_capable_providers) {
+            continue;
+        }
         if let (Some(input), Some(cached)) = (event.input_tokens, event.cached_input_tokens) {
             if input > 0 {
                 cache_known_input_tokens = cache_known_input_tokens.saturating_add(input);
@@ -2782,7 +2806,7 @@ fn read_usage_summary_from_events_with_pricing(
     } else {
         None
     };
-    let cost = estimate_usage_cost(&events, pricing);
+    let cost = estimate_usage_cost(&events, pricing, &cache_capable_providers);
 
     GatewayUsageSummary {
         requests,
@@ -2798,8 +2822,71 @@ fn read_usage_summary_from_events_with_pricing(
     }
 }
 
+fn event_reports_cache_usage(
+    event: &GatewayUsageEvent,
+    cache_capable_providers: &HashSet<String>,
+) -> bool {
+    if let Some(reports) = event.reports_cached_input_tokens {
+        return reports;
+    }
+    if event
+        .upstream
+        .as_deref()
+        .is_some_and(|upstream| cache_capable_providers.contains(&cache_provider_key(upstream)))
+    {
+        return true;
+    }
+    event
+        .model
+        .as_deref()
+        .is_some_and(cache_usage_capable_model)
+}
+
+fn cache_usage_capable_provider_aliases() -> HashSet<String> {
+    let mut aliases = HashSet::from([
+        cache_provider_key("official"),
+        cache_provider_key("openai"),
+        cache_provider_key("official_openai"),
+    ]);
+    if let Ok(providers) = config::get_providers() {
+        for provider in providers {
+            if provider.reports_cached_input_tokens != Some(true) {
+                continue;
+            }
+            insert_provider_aliases(&mut aliases, &provider.id);
+        }
+    }
+    aliases
+}
+
+fn insert_provider_aliases(aliases: &mut HashSet<String>, provider_id: &str) {
+    aliases.insert(cache_provider_key(provider_id));
+    match provider_id {
+        "volc" => {
+            aliases.insert(cache_provider_key("volcengine"));
+        }
+        "minimax-cn" => {
+            aliases.insert(cache_provider_key("minimax_cn"));
+        }
+        _ => {}
+    }
+}
+
+fn cache_provider_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+fn cache_usage_capable_model(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.starts_with("openai/")
+}
+
 fn optional_i64_to_u64(value: Option<i64>) -> Option<u64> {
     value.and_then(|item| u64::try_from(item).ok())
+}
+
+fn optional_i64_to_bool(value: Option<i64>) -> Option<bool> {
+    value.map(|item| item != 0)
 }
 
 fn normalize_usage_model(upstream: Option<String>, model: Option<String>) -> Option<String> {
@@ -2896,12 +2983,15 @@ struct UsageCostEstimate {
 fn estimate_usage_cost(
     events: &[GatewayUsageEvent],
     pricing: &HashMap<String, UsagePricing>,
+    cache_capable_providers: &HashSet<String>,
 ) -> UsageCostEstimate {
     let mut estimated_cost_usd = 0.0_f64;
     let mut priced_requests = 0_u64;
     let mut missing_usage_requests = 0_u64;
     let mut missing_pricing_requests = 0_u64;
     let mut cached_priced_as_input_requests = 0_u64;
+    let mut estimated_cached_input_requests = 0_u64;
+    let average_cache_hit_ratio = average_cache_hit_ratio(events, cache_capable_providers);
 
     for event in events {
         let input_tokens = event.input_tokens.unwrap_or(0);
@@ -2922,7 +3012,21 @@ fn estimate_usage_cost(
             continue;
         };
 
-        let cached_tokens = event.cached_input_tokens.unwrap_or(0).min(input_tokens);
+        let cached_tokens = match (
+            event_reports_cache_usage(event, cache_capable_providers),
+            event.cached_input_tokens,
+            model_pricing.cached_input_per_million,
+            average_cache_hit_ratio,
+        ) {
+            (true, Some(tokens), _, _) => tokens.min(input_tokens),
+            (_, None, Some(_), Some(ratio)) | (false, Some(_), Some(_), Some(ratio))
+                if input_tokens > 0 =>
+            {
+                estimated_cached_input_requests = estimated_cached_input_requests.saturating_add(1);
+                ((input_tokens as f64 * ratio).round() as u64).min(input_tokens)
+            }
+            _ => 0,
+        };
         let uncached_tokens = input_tokens.saturating_sub(cached_tokens);
         let cached_rate = match model_pricing.cached_input_per_million {
             Some(value) => value,
@@ -2955,6 +3059,12 @@ fn estimate_usage_cost(
             "{cached_priced_as_input_requests} requests used input pricing for cached tokens"
         ));
     }
+    if estimated_cached_input_requests > 0 {
+        let rate = average_cache_hit_ratio.unwrap_or_default() * 100.0;
+        label_parts.push(format!(
+            "{estimated_cached_input_requests} requests estimated cached input at {rate:.1}% average hit rate"
+        ));
+    }
     if missing_pricing_requests > 0 {
         label_parts.push(format!(
             "{missing_pricing_requests} requests missing model pricing"
@@ -2970,6 +3080,26 @@ fn estimate_usage_cost(
         estimated_cost_usd: Some(estimated_cost_usd),
         label: label_parts.join("; "),
     }
+}
+
+fn average_cache_hit_ratio(
+    events: &[GatewayUsageEvent],
+    cache_capable_providers: &HashSet<String>,
+) -> Option<f64> {
+    let mut input_tokens = 0_u64;
+    let mut cached_tokens = 0_u64;
+    for event in events {
+        if !event_reports_cache_usage(event, cache_capable_providers) {
+            continue;
+        }
+        if let (Some(input), Some(cached)) = (event.input_tokens, event.cached_input_tokens) {
+            if input > 0 {
+                input_tokens = input_tokens.saturating_add(input);
+                cached_tokens = cached_tokens.saturating_add(cached.min(input));
+            }
+        }
+    }
+    (input_tokens > 0).then_some(cached_tokens as f64 / input_tokens as f64)
 }
 
 fn usage_pricing_by_model() -> HashMap<String, UsagePricing> {
@@ -3076,6 +3206,11 @@ fn read_usage_events_from_text(text: &str, limit: usize) -> Vec<GatewayUsageEven
             request_id: string_field(&value, "request_id"),
             model: string_field(&value, "model"),
             upstream: string_field(&value, "upstream"),
+            client_id: string_field(&value, "client_id"),
+            client_inference_source: string_field(&value, "client_inference_source"),
+            reports_cached_input_tokens: value
+                .get("reports_cached_input_tokens")
+                .and_then(Value::as_bool),
             status: value.get("status").and_then(Value::as_i64),
             duration_ms: value.get("duration_ms").and_then(Value::as_i64),
             usage_source: string_field(&value, "usage_source")
@@ -5004,6 +5139,7 @@ mod tests {
             api_key: None,
             upstream_format: None,
             available_upstream_formats: None,
+            reports_cached_input_tokens: None,
             display_prefix: Some("minimax/".to_string()),
             sort_order: None,
             enabled: true,
@@ -5034,6 +5170,7 @@ mod tests {
                 api_key: None,
                 upstream_format: None,
                 available_upstream_formats: None,
+                reports_cached_input_tokens: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5053,6 +5190,7 @@ mod tests {
                 api_key: None,
                 upstream_format: None,
                 available_upstream_formats: None,
+                reports_cached_input_tokens: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5072,6 +5210,7 @@ mod tests {
                 api_key: None,
                 upstream_format: None,
                 available_upstream_formats: None,
+                reports_cached_input_tokens: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -5096,6 +5235,7 @@ mod tests {
             api_key: None,
             upstream_format: None,
             available_upstream_formats: None,
+            reports_cached_input_tokens: None,
             display_prefix: Some("MiniMax.cn".to_string()),
             sort_order: Some(1),
             enabled: true,
@@ -5272,6 +5412,7 @@ mod tests {
                 api_key: None,
                 upstream_format: None,
                 available_upstream_formats: None,
+                reports_cached_input_tokens: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5290,6 +5431,7 @@ mod tests {
                 api_key: None,
                 upstream_format: None,
                 available_upstream_formats: None,
+                reports_cached_input_tokens: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5308,6 +5450,7 @@ mod tests {
                 api_key: None,
                 upstream_format: None,
                 available_upstream_formats: None,
+                reports_cached_input_tokens: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -5711,6 +5854,7 @@ mod tests {
             api_key: None,
             upstream_format: None,
             available_upstream_formats: None,
+            reports_cached_input_tokens: None,
             display_prefix: Some("Ollama".to_string()),
             sort_order: None,
             enabled: true,
@@ -5779,6 +5923,7 @@ mod tests {
     fn usage_summary_counts_missing_usage_without_estimating_tokens() {
         let text = [
             r#"{"event":"request_complete","model":"openai/gpt-5.5","status":200,"duration_ms":120,"usage_source":"upstream","usage_input_tokens":10,"usage_output_tokens":4,"usage_cached_input_tokens":3}"#,
+            r#"{"event":"request_complete","upstream":"ollama_cloud","model":"ollama-cloud/glm-5.2","reports_cached_input_tokens":false,"status":200,"duration_ms":80,"usage_source":"upstream","usage_input_tokens":100,"usage_output_tokens":2,"usage_cached_input_tokens":0}"#,
             r#"{"event":"request_complete","model":"ollama/glm-5.2","status":200,"duration_ms":80,"usage_source":"upstream","usage_input_tokens":5,"usage_output_tokens":2}"#,
             r#"{"event":"request_complete","model":"ollama/glm-5.2","status":200,"duration_ms":90,"usage_source":"missing","usage_missing_reason":"upstream_missing_usage"}"#,
             r#"{"event":"request_complete","method":"GET","model":null,"upstream":"local","route_reason":"local_responses_probe","status":204,"duration_ms":1}"#,
@@ -5788,18 +5933,20 @@ mod tests {
         let summary = read_usage_summary_from_text(&text);
         let events = read_usage_events_from_text(&text, usize::MAX);
 
-        assert_eq!(summary.requests, 3);
-        assert_eq!(summary.total_tokens, Some(21));
+        assert_eq!(summary.requests, 4);
+        assert_eq!(summary.total_tokens, Some(123));
+        assert_eq!(summary.cached_input_tokens, Some(3));
         assert_eq!(summary.cache_hit_rate, Some(30.0));
         assert_eq!(summary.missing_usage_requests, 1);
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
     }
 
     #[test]
     fn usage_summary_estimates_cost_from_priced_token_usage() {
         let text = [
             r#"{"event":"request_complete","model":"openai/example","status":200,"duration_ms":120,"usage_source":"upstream","usage_input_tokens":10,"usage_output_tokens":4,"usage_cached_input_tokens":3}"#,
-            r#"{"event":"request_complete","model":"fallback","status":200,"duration_ms":80,"usage_source":"upstream","usage_input_tokens":10,"usage_output_tokens":1,"usage_cached_input_tokens":5}"#,
+            r#"{"event":"request_complete","model":"fallback","reports_cached_input_tokens":true,"status":200,"duration_ms":80,"usage_source":"upstream","usage_input_tokens":10,"usage_output_tokens":1,"usage_cached_input_tokens":5}"#,
+            r#"{"event":"request_complete","model":"estimated-cache","reports_cached_input_tokens":false,"status":200,"duration_ms":70,"usage_source":"upstream","usage_input_tokens":10,"usage_output_tokens":1,"usage_cached_input_tokens":0}"#,
             r#"{"event":"request_complete","model":"missing-price","status":200,"duration_ms":70,"usage_source":"upstream","usage_input_tokens":9,"usage_output_tokens":1}"#,
             r#"{"event":"request_complete","model":"openai/example","status":200,"duration_ms":90,"usage_source":"missing","usage_missing_reason":"upstream_missing_usage"}"#,
         ]
@@ -5821,12 +5968,22 @@ mod tests {
                     output_per_million: 3.0,
                 },
             ),
+            (
+                "estimated-cache".to_string(),
+                UsagePricing {
+                    input_per_million: 1.0,
+                    cached_input_per_million: Some(0.2),
+                    output_per_million: 3.0,
+                },
+            ),
         ]);
 
         let summary = read_usage_summary_from_text_with_pricing(&text, &pricing);
 
-        let expected =
-            ((7.0 * 2.0 + 3.0 * 0.2 + 4.0 * 8.0) + (10.0 * 1.0 + 1.0 * 3.0)) / 1_000_000.0;
+        let expected = ((7.0 * 2.0 + 3.0 * 0.2 + 4.0 * 8.0)
+            + (10.0 * 1.0 + 1.0 * 3.0)
+            + (6.0 * 1.0 + 4.0 * 0.2 + 1.0 * 3.0))
+            / 1_000_000.0;
         let actual = summary
             .estimated_cost_usd
             .expect("priced requests should produce an estimate");
@@ -5834,6 +5991,9 @@ mod tests {
         assert!(summary
             .cost_label
             .contains("1 requests used input pricing for cached tokens"));
+        assert!(summary
+            .cost_label
+            .contains("1 requests estimated cached input at 40.0% average hit rate"));
         assert!(summary
             .cost_label
             .contains("1 requests missing model pricing"));
@@ -5862,6 +6022,7 @@ mod tests {
                     model_canonical TEXT,
                     upstream TEXT,
                     provider_id TEXT,
+                    reports_cached_input_tokens INTEGER,
                     status INTEGER,
                     duration_ms INTEGER,
                     usage_source TEXT,
@@ -5873,21 +6034,22 @@ mod tests {
                     usage_reasoning_tokens INTEGER
                 );
                 INSERT INTO gateway_requests (
-                    request_id, completed_ts, method, path, route_reason, model_canonical, upstream, provider_id, status,
+                    request_id, completed_ts, method, path, route_reason, model_canonical, upstream, provider_id,
+                    reports_cached_input_tokens, status,
                     duration_ms, usage_source, usage_input_tokens, usage_cached_input_tokens,
                     usage_output_tokens, usage_total_tokens
                 ) VALUES
-                    ('req-a', '2026-07-03T01:00:00Z', 'POST', '/v1/responses', 'model', 'openai/example', 'official', 'official', 200,
+                    ('req-a', '2026-07-03T01:00:00Z', 'POST', '/v1/responses', 'model', 'openai/example', 'official', 'official', 1, 200,
                      120, 'upstream', 10, 3, 4, 14),
-                    ('req-b', '2026-07-03T01:00:01Z', 'POST', '/v1/chat/completions', 'model', 'fallback', 'external', 'external', 200,
+                    ('req-b', '2026-07-03T01:00:01Z', 'POST', '/v1/chat/completions', 'model', 'fallback', 'external', 'external', 1, 200,
                      80, 'upstream', 10, 5, 1, 11),
-                    ('req-missing', '2026-07-03T01:00:02Z', 'POST', '/v1/responses', 'model', 'openai/example', 'official', 'official', 200,
+                    ('req-missing', '2026-07-03T01:00:02Z', 'POST', '/v1/responses', 'model', 'openai/example', 'official', 'official', 1, 200,
                      90, 'missing', NULL, NULL, NULL, NULL),
-                    ('req-failed', '2026-07-03T01:00:03Z', 'POST', '/v1/responses', 'model', 'openai/example', 'official', 'official', 502,
+                    ('req-failed', '2026-07-03T01:00:03Z', 'POST', '/v1/responses', 'model', 'openai/example', 'official', 'official', 1, 502,
                      40, 'missing', NULL, NULL, NULL, NULL),
-                    ('req-control', '2026-07-03T01:00:04Z', 'GET', '/v1/models', 'official_control', NULL, 'official', 'official', 200,
+                    ('req-control', '2026-07-03T01:00:04Z', 'GET', '/v1/models', 'official_control', NULL, 'official', 'official', 1, 200,
                      20, 'missing', NULL, NULL, NULL, NULL),
-                    ('req-local', '2026-07-03T01:00:05Z', 'GET', '/v1/responses', 'local_responses_probe', NULL, 'local', 'local', 204,
+                    ('req-local', '2026-07-03T01:00:05Z', 'GET', '/v1/responses', 'local_responses_probe', NULL, 'local', 'local', 0, 204,
                      1, NULL, NULL, NULL, NULL, NULL);
                 "#,
             )

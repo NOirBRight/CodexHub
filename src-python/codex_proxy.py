@@ -719,6 +719,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "base_url": official_base_url(),
             "auth": "codex_auth",
             "upstream_model": official_alias,
+            "reports_cached_input_tokens": True,
         }
 
     ollama_alias = ollama_cloud_alias_upstream_model(slug, policy)
@@ -728,6 +729,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "base_url": ollama_cloud_base_url(),
             "auth": "ollama_api_key",
             "upstream_model": ollama_alias,
+            "reports_cached_input_tokens": False,
         }
 
     if slug.startswith(official_prefixes()):
@@ -737,6 +739,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "name": "official",
             "base_url": official_base_url(),
             "auth": "codex_auth",
+            "reports_cached_input_tokens": True,
         }
 
     external_model = resolve_external_model_alias(slug)
@@ -753,6 +756,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "api_key": external_model["api_key"],
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
+            "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
 
@@ -767,6 +771,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "name": "ollama_cloud",
             "base_url": ollama_cloud_base_url(),
             "auth": "ollama_api_key",
+            "reports_cached_input_tokens": False,
         }
 
     raise ValueError(f"model is not in the generated cloud catalog: {slug}")
@@ -777,6 +782,7 @@ def official_upstream() -> dict[str, Any]:
         "name": "official",
         "base_url": official_base_url(),
         "auth": "codex_auth",
+        "reports_cached_input_tokens": True,
     }
 
 
@@ -4913,6 +4919,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream = choose_upstream(model) if model else official_upstream()
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
+            reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
             model_canonical = canonical_model_id(model) if model else None
             request_observability = proxy_telemetry.enrich_request_observability(
                 body=body,
@@ -4931,6 +4938,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 provider_id=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                reports_cached_input_tokens=reports_cached_input_tokens,
                 route_reason=route_reason,
                 route_mode="official" if upstream_name == "official" else "codexhub",
                 inbound_format=inbound_format,
@@ -5139,6 +5147,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 provider_id=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                reports_cached_input_tokens=reports_cached_input_tokens,
                 inbound_format=inbound_format,
                 route_reason=route_reason,
                 route_mode="official" if upstream_name == "official" else "codexhub",

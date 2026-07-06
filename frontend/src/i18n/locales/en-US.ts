@@ -310,6 +310,7 @@ const enUS = {
   usage: {
     allSeriesHidden: "Use the legend to restore a series.",
     by: "By",
+    client: "Client",
     custom: "Custom",
     day: "Day",
     eventWindowEmpty: "event window empty",
@@ -337,6 +338,7 @@ const enUS = {
     usageCost: "Usage & Cost",
     usageSeriesHidden: "Usage series hidden",
     usageTelemetry: "Usage telemetry",
+    unknownClient: "Unknown client",
     unknownModel: "Unknown model",
     unknownProvider: "Unknown provider",
     usageUnavailableMessage: "{{requests}} requests are recorded, with {{missing}} missing usage records. Tokens and cost stay unknown until upstream usage exists.",
