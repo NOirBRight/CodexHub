@@ -837,6 +837,65 @@ def _capture_usage(
     usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
 
 
+OFFICIAL_PASSTHROUGH_USAGE_QUEUE: queue.Queue[tuple[dict[str, Any], bytes]] = queue.Queue(maxsize=2048)
+_OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED = False
+_OFFICIAL_PASSTHROUGH_USAGE_WORKER_LOCK = threading.Lock()
+
+
+def _start_official_passthrough_usage_worker() -> None:
+    global _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED
+    if _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED:
+        return
+    with _OFFICIAL_PASSTHROUGH_USAGE_WORKER_LOCK:
+        if _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED:
+            return
+        threading.Thread(
+            target=_official_passthrough_usage_worker,
+            name="codex-proxy-official-usage",
+            daemon=True,
+        ).start()
+        _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED = True
+
+
+def _offer_official_passthrough_usage_line(context: Mapping[str, Any], line: bytes) -> None:
+    if not line.startswith(b"data:"):
+        return
+    _start_official_passthrough_usage_worker()
+    try:
+        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((dict(context), line))
+    except queue.Full:
+        return
+
+
+def _official_passthrough_usage_worker() -> None:
+    while True:
+        context, line = OFFICIAL_PASSTHROUGH_USAGE_QUEUE.get()
+        try:
+            payload_bytes = _sse_payload_bytes(line)
+            if payload_bytes is None:
+                continue
+            try:
+                payload = json.loads(payload_bytes.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            usage = _usage_from_response_event(payload)
+            if usage is None:
+                continue
+            write_proxy_event(
+                "official_passthrough_usage_observed",
+                request_id=context.get("request_id"),
+                model=context.get("model"),
+                upstream=context.get("upstream"),
+                upstream_format=context.get("upstream_format"),
+                inbound_format=context.get("inbound_format"),
+                **_normalize_usage_for_event(usage),
+            )
+        finally:
+            OFFICIAL_PASSTHROUGH_USAGE_QUEUE.task_done()
+
+
 def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
     if event_context is None:
         return
@@ -4682,6 +4741,36 @@ def _replace_embedded_model(body: bytes, model_id: str, upstream_model: str) -> 
     return EMBEDDED_MODEL_RE.sub(replace_match, body)
 
 
+def official_passthrough_request_body(
+    body: bytes,
+    payload: Mapping[str, Any] | None,
+    upstream: Mapping[str, Any],
+    model_id: str | None = None,
+) -> bytes:
+    if not isinstance(payload, Mapping):
+        upstream_model = upstream.get("upstream_model")
+        if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
+            return _replace_embedded_model(body, model_id, upstream_model)
+        return body
+
+    next_payload = dict(payload)
+    upstream_model = upstream.get("upstream_model")
+    changed = False
+    if isinstance(upstream_model, str) and upstream_model and next_payload.get("model") != upstream_model:
+        next_payload["model"] = upstream_model
+        changed = True
+    service_tier = upstream.get("service_tier")
+    if isinstance(service_tier, str) and service_tier and next_payload.get("service_tier") != service_tier:
+        next_payload["service_tier"] = service_tier
+        changed = True
+    if next_payload.get("store") is not False:
+        next_payload["store"] = False
+        changed = True
+    if not changed:
+        return body
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -4706,19 +4795,7 @@ def compatible_request_body(
     requested_model = payload.get("model")
     changed = False
     if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
-        if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
-            payload["model"] = upstream_model
-            changed = True
-        service_tier = upstream.get("service_tier")
-        if isinstance(service_tier, str) and service_tier and payload.get("service_tier") != service_tier:
-            payload["service_tier"] = service_tier
-            changed = True
-        if payload.get("store") is not False:
-            payload["store"] = False
-            changed = True
-        if not changed:
-            return body
-        return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
@@ -5210,6 +5287,7 @@ def upstream_headers(
     incoming_headers: Mapping[str, str] | Any,
     upstream: Mapping[str, Any],
     drop_content_encoding: bool = False,
+    behavior_profile: str | None = None,
 ) -> dict[str, str]:
     auth_mode = upstream.get("auth")
     outgoing: dict[str, str] = {}
@@ -5237,6 +5315,7 @@ def upstream_headers(
             raise ValueError(f"API key is not set for upstream: {upstream.get('name', 'unknown')}")
         outgoing["Authorization"] = f"Bearer {api_key}"
     elif auth_mode == "codex_auth":
+        strict_official_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
         token = codex_access_token()
         outgoing["Authorization"] = f"Bearer {token}"
         # The chatgpt.com backend requires the account id header to identify
@@ -5245,27 +5324,28 @@ def upstream_headers(
             account = codex_account_id()
             if account:
                 outgoing["Chatgpt-account-id"] = account
-        # The chatgpt.com/backend-api/codex endpoint expects Codex CLI-style
-        # headers. When the caller (e.g. ZCode) does not provide them, inject
-        # sensible defaults so the backend does not reject the request.
-        if not _get_header(outgoing, "Accept"):
-            outgoing["Accept"] = "text/event-stream"
-        if not _get_header(outgoing, "Originator"):
-            outgoing["Originator"] = "codexhub-proxy"
-        if not _get_header(outgoing, "User-Agent"):
-            outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
-        # The backend requires session/thread identifiers. Generate per-request
-        # UUIDs when the caller doesn't supply them.
-        session_id = _get_header(outgoing, "Session-id")
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            outgoing["Session-id"] = session_id
-        if not _get_header(outgoing, "Thread-id"):
-            outgoing["Thread-id"] = session_id
-        if not _get_header(outgoing, "X-codex-window-id"):
-            outgoing["X-codex-window-id"] = f"{session_id}:1"
-        if not _get_header(outgoing, "X-client-request-id"):
-            outgoing["X-client-request-id"] = str(uuid.uuid4())
+        if not strict_official_passthrough:
+            # The chatgpt.com/backend-api/codex endpoint expects Codex CLI-style
+            # headers. When the caller (e.g. ZCode) does not provide them, inject
+            # sensible defaults so the backend does not reject the request.
+            if not _get_header(outgoing, "Accept"):
+                outgoing["Accept"] = "text/event-stream"
+            if not _get_header(outgoing, "Originator"):
+                outgoing["Originator"] = "codexhub-proxy"
+            if not _get_header(outgoing, "User-Agent"):
+                outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
+            # The backend requires session/thread identifiers. Generate per-request
+            # UUIDs when the caller doesn't supply them.
+            session_id = _get_header(outgoing, "Session-id")
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                outgoing["Session-id"] = session_id
+            if not _get_header(outgoing, "Thread-id"):
+                outgoing["Thread-id"] = session_id
+            if not _get_header(outgoing, "X-codex-window-id"):
+                outgoing["X-codex-window-id"] = f"{session_id}:1"
+            if not _get_header(outgoing, "X-client-request-id"):
+                outgoing["X-client-request-id"] = str(uuid.uuid4())
     else:
         raise ValueError(f"unsupported upstream auth mode: {auth_mode}")
 
@@ -6462,7 +6542,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             request_kind = _request_kind_from_headers_and_payload(self.headers, inbound_payload, inbound_format)
             if request_kind == RETRY_REQUEST_COMPACT:
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
-            model_requested = try_extract_model(body)
+            if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("model"), str):
+                model_requested = inbound_payload["model"]
+            else:
+                model_requested = try_extract_model(body)
             model = provider_scoped_route_model(model_requested, provider_hint)
             if provider_hint is not None and not model:
                 raise ValueError(f"model is required for provider path: {provider_hint}")
@@ -6495,16 +6578,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             # Convert inbound Chat Completions request to Responses format before routing.
             if inbound_format == "chat_completions":
                 body = _chat_completions_request_to_responses_body(body)
-            # Capture the caller's desired stream mode before compatible_request_body
-            # forces stream=true for the official upstream.
-            try:
-                caller_stream = json.loads(body.decode("utf-8-sig")).get("stream") is True
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            # Capture the caller's desired stream mode before compatibility
+            # helpers can force stream=true for some upstreams.
+            if isinstance(inbound_payload, Mapping):
+                caller_stream = inbound_payload.get("stream") is True
+            else:
                 caller_stream = True
+            prompt_cache_key = None
+            if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("prompt_cache_key"), str):
+                prompt_cache_key = inbound_payload["prompt_cache_key"]
             request_observability = proxy_telemetry.enrich_request_observability(
                 body=body,
                 codex_home=RUNTIME_CODEX_DIR,
                 upstream=upstream,
+                include_body_hmac=not is_official_http_passthrough,
+                prompt_cache_key=prompt_cache_key,
+                extract_prompt_cache_key=not is_official_http_passthrough,
             )
             write_proxy_event(
                 "request_start",
@@ -6552,32 +6641,41 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
 
             usage_capture: dict[str, Any] = {}
-            body = compatible_request_body(
-                body,
-                upstream,
-                model_id=model,
-                event_context=adapter_event_context,
-                inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT,
-                behavior_profile=behavior_profile,
-            )
-            try:
-                image_proxy_payload = json.loads(body.decode("utf-8-sig"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                image_proxy_payload = None
-            if (
-                not is_official_http_passthrough
-                and isinstance(image_proxy_payload, dict)
-                and apply_image_proxy_to_responses_payload(
+            if is_official_http_passthrough:
+                body = official_passthrough_request_body(
+                    body,
+                    inbound_payload,
+                    upstream,
+                    model_id=model,
+                )
+            else:
+                body = compatible_request_body(
+                    body,
+                    upstream,
+                    model_id=model,
+                    event_context=adapter_event_context,
+                    inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT,
+                    behavior_profile=behavior_profile,
+                )
+                try:
+                    image_proxy_payload = json.loads(body.decode("utf-8-sig"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    image_proxy_payload = None
+                if isinstance(image_proxy_payload, dict) and apply_image_proxy_to_responses_payload(
                     image_proxy_payload,
                     model,
                     upstream,
                     event_context=adapter_event_context,
                     progress_callback=emit_downstream_status if caller_stream else None,
-                )
-            ):
-                body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                ):
+                    body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             responses_body = body
-            headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
+            headers = upstream_headers(
+                self.headers,
+                upstream,
+                drop_content_encoding=content_decoded,
+                behavior_profile=behavior_profile,
+            )
             emit_retry_to_downstream = (
                 not is_official_http_passthrough
                 and caller_stream
@@ -6671,6 +6769,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     if is_official_http_passthrough
                                     else relay_attempt < gateway_auto_retry_max_attempts(),
                                     mark_downstream_sse_started=mark_downstream_sse_started,
+                                    behavior_profile=behavior_profile,
                                 )
                             break
                         except (
@@ -7564,6 +7663,64 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 detail=safe_upstream_error_detail(exc),
             )
 
+    def _relay_official_passthrough_sse_response(
+        self,
+        response: Any,
+        upstream_name: str,
+        *,
+        request_id: str | None = None,
+        model: str | None = None,
+        upstream_format: str = "responses",
+        inbound_format: str = "responses",
+        usage_capture: dict[str, Any] | None = None,
+        headers_already_sent: bool = False,
+        mark_downstream_sse_started: Callable[[], None] | None = None,
+    ) -> int:
+        status = getattr(response, "status", None) or getattr(response, "code", 502)
+        if not headers_already_sent:
+            self.send_response(status)
+            for key, value in _filtered_response_headers(response.headers, True):
+                self.send_header(key, value)
+            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if mark_downstream_sse_started is not None:
+                mark_downstream_sse_started()
+
+        usage_context = {
+            "request_id": request_id,
+            "model": model,
+            "upstream": upstream_name,
+            "upstream_format": upstream_format,
+            "inbound_format": inbound_format,
+        }
+        _capture_usage(usage_capture, None, missing_reason="async_official_passthrough")
+        try:
+            while True:
+                line = response.readline()
+                if not line:
+                    break
+                self.wfile.write(line)
+                self.wfile.flush()
+                _offer_official_passthrough_usage_line(usage_context, line)
+        except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+            self.close_connection = True
+            write_proxy_event(
+                "official_passthrough_stream_closed",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=502,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+            )
+            return 502
+
+        self.close_connection = True
+        return status
+
     def _relay_upstream_response(
         self,
         response: Any,
@@ -7579,6 +7736,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
         defer_stream_errors: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
+        behavior_profile: str | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -7590,6 +7748,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # SSE into a single JSON response body.
         buffer_sse_to_json = is_event_stream and not caller_stream
         buffered_json_response = False
+        if (
+            behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+            and is_event_stream
+            and caller_stream
+            and inbound_format == "responses"
+            and upstream_format == "responses"
+            and not want_chat_output
+            and not buffer_sse_to_json
+        ):
+            return self._relay_official_passthrough_sse_response(
+                response,
+                upstream_name,
+                request_id=request_id,
+                model=model,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                usage_capture=usage_capture,
+                headers_already_sent=headers_already_sent,
+                mark_downstream_sse_started=mark_downstream_sse_started,
+            )
         if not is_event_stream or buffer_sse_to_json:
             if buffer_sse_to_json:
                 # Buffer the full SSE stream into a list of events.

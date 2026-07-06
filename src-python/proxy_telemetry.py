@@ -151,14 +151,22 @@ def enrich_request_observability(
     body: bytes,
     codex_home: Path,
     upstream: Mapping[str, Any] | None = None,
+    include_body_hmac: bool = True,
+    prompt_cache_key: str | None = None,
+    extract_prompt_cache_key: bool = True,
 ) -> dict[str, Any]:
     prefix = body[:REQUEST_PREFIX_BYTES]
     fields: dict[str, Any] = {
-        "request_body_hmac": telemetry_hmac(codex_home, b"body", body),
         "request_prefix_hmac": telemetry_hmac(codex_home, b"prefix", prefix),
         "prefix_bytes": len(prefix),
     }
-    cache_key = _extract_prompt_cache_key(body)
+    if include_body_hmac:
+        fields["request_body_hmac"] = telemetry_hmac(codex_home, b"body", body)
+    else:
+        fields["request_body_hmac_skipped"] = True
+    cache_key = prompt_cache_key
+    if cache_key is None and extract_prompt_cache_key:
+        cache_key = _extract_prompt_cache_key(body)
     if cache_key:
         fields["prompt_cache_key_hash"] = telemetry_hmac(codex_home, b"prompt-cache-key", cache_key.encode("utf-8"))
     if upstream:

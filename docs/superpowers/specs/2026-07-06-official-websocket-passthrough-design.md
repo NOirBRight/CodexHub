@@ -91,6 +91,16 @@ Allowed work:
 - add `store = false` only if the current official backend endpoint still requires it
 - log routing, status, timing, and redacted request metadata
 
+Hardening constraints added after live Phase 1 testing:
+
+- Official passthrough is semantic and transport-thin HTTP/SSE behavior, not transport-equivalent to native official WebSocket.
+- Official request processing should parse the JSON body at most once before upstream dispatch.
+- Full-body telemetry hashing should be skipped for official passthrough when the same diagnostic value can be retained through prefix hash, route metadata, and provider config hash.
+- Official SSE relay must forward upstream SSE bytes or lines without parsing, rewriting, buffering pre-output events, synchronous usage extraction, terminal-event repair, keepalive injection, or synthetic downstream error events.
+- Token usage telemetry for official passthrough may parse copied SSE lines asynchronously after the line has already been flushed downstream. This telemetry is best-effort: queue pressure, parse failure, or stream interruption may drop token stats without affecting the user-visible stream.
+- CodexHub may replace auth/account headers for official backend access, but it must not generate session, thread, window, request, Originator, or User-Agent headers for Codex App official passthrough traffic.
+- If the official upstream stream closes or fails after downstream headers have been sent, CodexHub should close the downstream stream and let Codex App's own recovery path run instead of writing a CodexHub-specific SSE error event.
+
 Disabled work:
 
 - no gateway automatic retry
