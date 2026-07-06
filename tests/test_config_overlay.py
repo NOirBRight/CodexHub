@@ -136,6 +136,21 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
             self.assertFalse(backup_path.exists())
 
+    def test_proxy_overlay_stays_non_websocket_for_phase1(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "model-catalogs" / "catalog.json"
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            updated = config_path.read_text(encoding="utf-8")
+
+            self.assertIn("supports_websockets = false", updated)
+            self.assertIn("responses_websockets = false", updated)
+            self.assertIn("responses_websockets_v2 = false", updated)
+            self.assertNotIn("supports_websockets = true", updated)
+
     def test_restore_overlay_can_inject_unified_official_history_bucket(self):
         original = "\n".join(
             [

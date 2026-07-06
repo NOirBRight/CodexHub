@@ -40,6 +40,14 @@ from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
 from subagent_state import build_subagent_state, state_guidance_message
+from websocket_transport import (
+    WebSocketProtocolError,
+    close_frame,
+    read_frame,
+    redacted_handshake_metadata,
+    websocket_upgrade_response_headers,
+    write_frame,
+)
 import proxy_telemetry
 
 try:
@@ -311,6 +319,9 @@ RETRY_REQUEST_MAIN_GENERATION = "main_generation"
 RETRY_REQUEST_COMPACT = "compact"
 RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
 RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
+BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH = "official_codex_app_http_passthrough"
+BEHAVIOR_OFFICIAL_GATEWAY_COMPAT = "official_gateway_compat"
+BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY = "external_provider_gateway"
 RETRY_FAILURE_QUICK_TRANSIENT = "quick_transient"
 RETRY_FAILURE_PROVIDER_THROTTLE = "provider_throttle"
 RETRY_FAILURE_PROVIDER_OVERLOADED = "provider_overloaded"
@@ -600,6 +611,40 @@ def gateway_auto_retry_enabled() -> bool:
         "gateway_auto_retry_enabled",
         True,
     )
+
+
+def gateway_official_http_passthrough_enabled() -> bool:
+    return _env_or_settings_flag(
+        "CODEX_PROXY_OFFICIAL_HTTP_PASSTHROUGH_ENABLED",
+        "gateway_official_http_passthrough_enabled",
+        True,
+    )
+
+
+def gateway_websocket_recorder_enabled() -> bool:
+    return _env_or_settings_flag(
+        "CODEX_PROXY_WEBSOCKET_RECORDER_ENABLED",
+        "gateway_websocket_recorder_enabled",
+        False,
+    )
+
+
+def gateway_websocket_recorder_max_frames() -> int:
+    value = _number_setting_or_env(
+        settings_name="gateway_websocket_recorder_max_frames",
+        env_name="CODEX_PROXY_WEBSOCKET_RECORDER_MAX_FRAMES",
+        default=8,
+    )
+    return max(1, min(int(value), 32))
+
+
+def gateway_websocket_recorder_idle_timeout_seconds() -> float:
+    value = _number_setting_or_env(
+        settings_name="gateway_websocket_recorder_idle_timeout_seconds",
+        env_name="CODEX_PROXY_WEBSOCKET_RECORDER_IDLE_TIMEOUT_SECONDS",
+        default=2.0,
+    )
+    return max(0.1, min(float(value), 30.0))
 
 
 def gateway_auto_retry_max_attempts() -> int:
@@ -4635,6 +4680,7 @@ def compatible_request_body(
     model_id: str | None = None,
     event_context: Mapping[str, Any] | None = None,
     inject_codex_tools: bool = True,
+    behavior_profile: str = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
 ) -> bytes:
     try:
         payload = json.loads(body.decode("utf-8-sig"))
@@ -4650,6 +4696,22 @@ def compatible_request_body(
     upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
+    changed = False
+    if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+        if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
+            payload["model"] = upstream_model
+            changed = True
+        service_tier = upstream.get("service_tier")
+        if isinstance(service_tier, str) and service_tier and payload.get("service_tier") != service_tier:
+            payload["service_tier"] = service_tier
+            changed = True
+        if payload.get("store") is not False:
+            payload["store"] = False
+            changed = True
+        if not changed:
+            return body
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
         if _sanitize_official_reasoning_items(payload):
@@ -4981,6 +5043,31 @@ def _is_websocket_upgrade(headers: Mapping[str, str] | Any) -> bool:
     return "upgrade" in _header_tokens(headers, "Connection")
 
 
+def _websocket_probe_frame_metadata(frame: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "direction": "client_to_proxy",
+        "opcode": int(frame.opcode),
+        "fin": bool(frame.fin),
+        "payload_length": len(frame.payload),
+        "appears_json": False,
+        "json_top_level_keys": [],
+    }
+    if frame.opcode == 0x8:
+        metadata["close_code"] = int.from_bytes(frame.payload[:2], "big") if len(frame.payload) >= 2 else None
+        metadata["close_reason_length"] = max(0, len(frame.payload) - 2)
+        return metadata
+    if frame.opcode not in {0x1, 0x2}:
+        return metadata
+    try:
+        payload = json.loads(frame.payload.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return metadata
+    metadata["appears_json"] = True
+    if isinstance(payload, Mapping):
+        metadata["json_top_level_keys"] = sorted(str(key) for key in payload.keys())
+    return metadata
+
+
 def request_context_from_headers(headers: Mapping[str, str] | Any) -> dict[str, str]:
     context: dict[str, str] = {}
     direct_headers = {
@@ -5055,6 +5142,27 @@ def _infer_client_id(user_agent: str | None) -> str | None:
     if "codex" in value:
         return "codex-app"
     return None
+
+
+def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
+    return request_context.get("client_id") == "codex-app"
+
+
+def behavior_profile_for_request(
+    upstream: Mapping[str, Any],
+    request_context: Mapping[str, str],
+    *,
+    inbound_format: str,
+) -> str:
+    if str(upstream.get("name")) != "official":
+        return BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY
+    if (
+        gateway_official_http_passthrough_enabled()
+        and inbound_format == "responses"
+        and _is_codex_app_context(request_context)
+    ):
+        return BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+    return BEHAVIOR_OFFICIAL_GATEWAY_COMPAT
 
 
 def _is_event_stream(headers: Mapping[str, str] | Any) -> bool:
@@ -6257,6 +6365,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if _is_websocket_upgrade(self.headers) and gateway_websocket_recorder_enabled():
+            self._handle_websocket_recording_probe()
+            return
         if parsed.path == "/health":
             self._send_json(
                 200,
@@ -6324,6 +6435,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         model_requested = None
         upstream_name = None
         upstream_format = "responses"
+        behavior_profile = None
         downstream_sse_started = False
 
         try:
@@ -6341,11 +6453,35 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             request_kind = _request_kind_from_headers_and_payload(self.headers, inbound_payload, inbound_format)
             if request_kind == RETRY_REQUEST_COMPACT:
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
-                if isinstance(inbound_payload, dict) and _strip_tools_for_compact_payload(
+            model_requested = try_extract_model(body)
+            model = provider_scoped_route_model(model_requested, provider_hint)
+            if provider_hint is not None and not model:
+                raise ValueError(f"model is required for provider path: {provider_hint}")
+            route_reason = "provider_path" if provider_hint and model else "model" if model else "official_control_fallback"
+            upstream = choose_upstream(model) if model else official_upstream()
+            upstream_name = upstream["name"]
+            upstream_format = str(upstream.get("upstream_format", "responses"))
+            behavior_profile = behavior_profile_for_request(
+                upstream,
+                request_context,
+                inbound_format=inbound_format,
+            )
+            is_official_http_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+            model_canonical = canonical_model_id(model) if model else None
+            if (
+                request_kind == RETRY_REQUEST_COMPACT
+                and behavior_profile != BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+                and isinstance(inbound_payload, dict)
+                and _strip_tools_for_compact_payload(
                     inbound_payload,
-                    event_context={"request_id": request_id, **proxy_request_context},
-                ):
-                    body = json.dumps(inbound_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                    event_context={
+                        "request_id": request_id,
+                        "behavior_profile": behavior_profile,
+                        **proxy_request_context,
+                    },
+                )
+            ):
+                body = json.dumps(inbound_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             # Convert inbound Chat Completions request to Responses format before routing.
             if inbound_format == "chat_completions":
                 body = _chat_completions_request_to_responses_body(body)
@@ -6355,15 +6491,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 caller_stream = json.loads(body.decode("utf-8-sig")).get("stream") is True
             except (UnicodeDecodeError, json.JSONDecodeError):
                 caller_stream = True
-            model_requested = try_extract_model(body)
-            model = provider_scoped_route_model(model_requested, provider_hint)
-            if provider_hint is not None and not model:
-                raise ValueError(f"model is required for provider path: {provider_hint}")
-            route_reason = "provider_path" if provider_hint and model else "model" if model else "official_control_fallback"
-            upstream = choose_upstream(model) if model else official_upstream()
-            upstream_name = upstream["name"]
-            upstream_format = str(upstream.get("upstream_format", "responses"))
-            model_canonical = canonical_model_id(model) if model else None
             request_observability = proxy_telemetry.enrich_request_observability(
                 body=body,
                 codex_home=RUNTIME_CODEX_DIR,
@@ -6381,6 +6508,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 provider_id=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 route_reason=route_reason,
                 route_mode="official" if upstream_name == "official" else "codexhub",
                 inbound_format=inbound_format,
@@ -6397,6 +6525,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             adapter_event_context = {
                 "request_id": request_id,
                 "model": model_canonical,
+                "behavior_profile": behavior_profile,
                 **proxy_request_context,
             }
 
@@ -6418,23 +6547,29 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model_id=model,
                 event_context=adapter_event_context,
                 inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT,
+                behavior_profile=behavior_profile,
             )
             try:
                 image_proxy_payload = json.loads(body.decode("utf-8-sig"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 image_proxy_payload = None
-            if isinstance(image_proxy_payload, dict) and apply_image_proxy_to_responses_payload(
-                image_proxy_payload,
-                model,
-                upstream,
-                event_context=adapter_event_context,
-                progress_callback=emit_downstream_status if caller_stream else None,
+            if (
+                not is_official_http_passthrough
+                and isinstance(image_proxy_payload, dict)
+                and apply_image_proxy_to_responses_payload(
+                    image_proxy_payload,
+                    model,
+                    upstream,
+                    event_context=adapter_event_context,
+                    progress_callback=emit_downstream_status if caller_stream else None,
+                )
             ):
                 body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             responses_body = body
             headers = upstream_headers(self.headers, upstream, drop_content_encoding=content_decoded)
             emit_retry_to_downstream = (
-                caller_stream
+                not is_official_http_passthrough
+                and caller_stream
                 and inbound_format == "responses"
                 and gateway_downstream_retry_notice_enabled()
             )
@@ -6472,6 +6607,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         "upstream": upstream_name,
                         "provider_id": upstream_name,
                         "upstream_format": upstream_format,
+                        "behavior_profile": behavior_profile,
                         "route_reason": route_reason,
                         "route_mode": "official" if upstream_name == "official" else "codexhub",
                         "inbound_format": inbound_format,
@@ -6492,7 +6628,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
             for format_index, selected_upstream_format in enumerate(upstream_format_options):
                 request = upstream_request_for_format(selected_upstream_format)
-                base_relay_attempts = _upstream_retry_attempts(request_kind)
+                base_relay_attempts = 1 if is_official_http_passthrough else _upstream_retry_attempts(request_kind)
                 relay_attempts = base_relay_attempts
                 relay_attempt = 1
                 try:
@@ -6506,6 +6642,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 event_context=adapter_event_context,
                                 downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
                                 request_kind=request_kind,
+                                max_attempts=1 if is_official_http_passthrough else None,
                             ) as response:
                                 status = self._relay_upstream_response(
                                     response,
@@ -6519,7 +6656,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
-                                    defer_stream_errors=relay_attempt < gateway_auto_retry_max_attempts(),
+                                    defer_stream_errors=False
+                                    if is_official_http_passthrough
+                                    else relay_attempt < gateway_auto_retry_max_attempts(),
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                 )
                             break
@@ -6616,6 +6755,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             provider_id=upstream_name,
                             provider_hint=provider_hint,
                             upstream_format=configured_upstream_format,
+                            behavior_profile=behavior_profile,
                             failed_upstream_format=selected_upstream_format,
                             next_upstream_format=upstream_format_options[format_index + 1],
                             status=getattr(exc, "code", 502),
@@ -6638,6 +6778,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 provider_id=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 inbound_format=inbound_format,
                 route_reason=route_reason,
                 route_mode="official" if upstream_name == "official" else "codexhub",
@@ -6658,6 +6799,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 inbound_format=inbound_format,
                 status=502,
                 error="compact_empty_response",
@@ -6694,6 +6836,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 inbound_format=inbound_format,
                 status=502,
                 error=type(exc).__name__,
@@ -6720,6 +6863,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream=upstream_name,
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 inbound_format=inbound_format,
                 status=400,
                 error=type(exc).__name__,
@@ -6751,6 +6895,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     model=canonical_model_id(model) if model else None,
                     upstream=upstream_name,
                     upstream_format=upstream_format,
+                    behavior_profile=behavior_profile,
                     status=getattr(exc, "code", 502),
                     error="HTTPError",
                     detail=safe_upstream_error_detail(exc),
@@ -6762,6 +6907,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 adapter_event_context = {
                     "request_id": request_id,
                     "model": canonical_model_id(model) if model else None,
+                    "behavior_profile": behavior_profile,
                     **proxy_request_context,
                 }
                 status = self._relay_upstream_response(
@@ -6781,6 +6927,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     model=canonical_model_id(model) if model else None,
                     upstream=upstream_name,
                     upstream_format=upstream_format,
+                    behavior_profile=behavior_profile,
                     status=getattr(exc, "code", 502),
                     error=type(relay_exc).__name__,
                     detail=safe_upstream_error_detail(relay_exc),
@@ -6794,6 +6941,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model=canonical_model_id(model) if model else None,
                 upstream=upstream_name,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 status=status,
                 error="HTTPError",
                 detail=safe_upstream_error_detail(exc),
@@ -6808,6 +6956,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model=canonical_model_id(model) if model else None,
                 upstream=upstream_name,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 status=502,
                 error=type(exc).__name__,
                 detail=detail,
@@ -6837,6 +6986,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model=canonical_model_id(model) if model else None,
                 upstream=upstream_name,
                 upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 status=502,
                 error=type(exc).__name__,
                 detail=detail,
@@ -6866,6 +7016,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_id=request_id,
                 model=canonical_model_id(model) if model else None,
                 upstream=upstream_name,
+                upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
                 status=500,
                 error=type(exc).__name__,
                 detail=detail,
@@ -6919,6 +7071,112 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             route_reason="local_responses_probe",
             status=204,
             duration_ms=int((time.monotonic() - started_at) * 1000),
+            **request_context,
+        )
+
+    def _handle_websocket_recording_probe(self) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        started_at = time.monotonic()
+        request_context = request_context_from_headers(self.headers)
+        handshake_metadata = redacted_handshake_metadata(self.path, self.headers)
+        selected_subprotocol = handshake_metadata.get("selected_subprotocol")
+        key = _get_header(self.headers, "Sec-WebSocket-Key")
+        if not key:
+            self._send_json(400, {"error": "missing Sec-WebSocket-Key"})
+            self.close_connection = True
+            write_proxy_event(
+                "websocket_probe_error",
+                request_id=request_id,
+                error="MissingSecWebSocketKey",
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **handshake_metadata,
+                **request_context,
+            )
+            return
+
+        write_proxy_event(
+            "websocket_probe_start",
+            request_id=request_id,
+            **handshake_metadata,
+            **request_context,
+        )
+        self.send_response(101, "Switching Protocols")
+        for header, value in websocket_upgrade_response_headers(key, selected_subprotocol if isinstance(selected_subprotocol, str) else None):
+            self.send_header(header, value)
+        self.end_headers()
+
+        frames_recorded = 0
+        close_code = None
+        error_name = None
+        stop_reason = "max_frames"
+        max_frames = gateway_websocket_recorder_max_frames()
+        recorder_idle_timeout = gateway_websocket_recorder_idle_timeout_seconds()
+        connection = getattr(self, "connection", None)
+        if connection is not None and hasattr(connection, "settimeout"):
+            try:
+                connection.settimeout(recorder_idle_timeout)
+            except OSError:
+                pass
+        try:
+            while frames_recorded < max_frames:
+                try:
+                    frame = read_frame(self.rfile, expect_masked=True, max_payload_bytes=1024 * 1024)
+                except EOFError:
+                    stop_reason = "eof"
+                    break
+                except TimeoutError:
+                    stop_reason = "idle_timeout"
+                    break
+                frames_recorded += 1
+                frame_metadata = _websocket_probe_frame_metadata(frame)
+                write_proxy_event(
+                    "websocket_probe_frame",
+                    request_id=request_id,
+                    frame_index=frames_recorded,
+                    **frame_metadata,
+                    **request_context,
+                )
+                if frame.opcode == 0x8:
+                    close_code = frame_metadata.get("close_code")
+                    stop_reason = "client_close"
+                    break
+        except WebSocketProtocolError as exc:
+            error_name = type(exc).__name__
+            write_proxy_event(
+                "websocket_probe_error",
+                request_id=request_id,
+                error=error_name,
+                detail=str(exc)[:160],
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **handshake_metadata,
+                **request_context,
+            )
+        finally:
+            try:
+                write_frame(self.wfile, close_frame(1000, "recorded"), mask=False)
+                self.wfile.flush()
+            except OSError as exc:
+                error_name = type(exc).__name__
+                write_proxy_event(
+                    "websocket_probe_error",
+                    request_id=request_id,
+                    error=error_name,
+                    detail=safe_upstream_error_detail(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                    **handshake_metadata,
+                    **request_context,
+                )
+            self.close_connection = True
+
+        write_proxy_event(
+            "websocket_probe_complete",
+            request_id=request_id,
+            frames_recorded=frames_recorded,
+            close_code=close_code,
+            stop_reason=stop_reason,
+            error=error_name,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            **handshake_metadata,
             **request_context,
         )
 
