@@ -44,6 +44,7 @@ export interface Provider {
   upstream_format?: UpstreamFormat | null;
   available_upstream_formats?: UpstreamFormat[] | null;
   tool_protocol?: ToolProtocol | null;
+  reports_cached_input_tokens?: boolean | null;
   display_prefix?: string | null;
   sort_order?: number | null;
   enabled: boolean;
@@ -146,6 +147,9 @@ export interface GatewayUsageEvent {
   request_id?: string | null;
   model?: string | null;
   upstream?: string | null;
+  client_id?: string | null;
+  client_inference_source?: string | null;
+  reports_cached_input_tokens?: boolean | null;
   status?: number | null;
   duration_ms?: number | null;
   usage_source: string;

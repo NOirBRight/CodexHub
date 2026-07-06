@@ -545,6 +545,7 @@ mod tests {
                 UpstreamFormat::ChatCompletions,
             ]),
             tool_protocol: Some(ToolProtocol::ChatTools),
+            reports_cached_input_tokens: Some(true),
             display_prefix: Some("Volc".to_string()),
             sort_order: Some(2),
             enabled: true,
@@ -596,6 +597,7 @@ mod tests {
         assert!(written.contains("upstream_format = \"chat_completions\""));
         assert!(written.contains("available_upstream_formats"));
         assert!(written.contains("tool_protocol = \"chat_tools\""));
+        assert!(written.contains("reports_cached_input_tokens = true"));
         assert!(written.contains("\"responses\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
         assert!(written.contains("aliases"));
@@ -624,6 +626,7 @@ mod tests {
             upstream_format: Some(UpstreamFormat::AnthropicMessages),
             available_upstream_formats: Some(vec![UpstreamFormat::AnthropicMessages]),
             tool_protocol: Some(ToolProtocol::None),
+            reports_cached_input_tokens: None,
             display_prefix: Some("anthropic/".to_string()),
             sort_order: Some(3),
             enabled: true,
