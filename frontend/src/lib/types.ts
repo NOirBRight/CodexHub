@@ -176,6 +176,38 @@ export interface GatewayUsageSnapshot {
   telemetry_status: TelemetryStatus;
 }
 
+export interface OpenAIUsageQueryWindow {
+  startTime?: number | null;
+  endTime?: number | null;
+  forceRefresh?: boolean | null;
+}
+
+export interface OpenAIUsageBucket {
+  date: string;
+  start_time: number;
+  end_time: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  input_cached_tokens: number;
+  num_model_requests: number;
+}
+
+export interface OpenAIUsageSnapshot {
+  start_time: number;
+  end_time: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  input_cached_tokens: number;
+  num_model_requests: number;
+  peak_daily_tokens?: number | null;
+  longest_running_turn_sec?: number | null;
+  current_streak_days?: number | null;
+  longest_streak_days?: number | null;
+  buckets: OpenAIUsageBucket[];
+}
+
 export interface UsageQueryWindow {
   startTs?: string | null;
   endTs?: string | null;

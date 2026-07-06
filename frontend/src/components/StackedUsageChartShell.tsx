@@ -1243,11 +1243,11 @@ function rangeToSpan(range: UsageRange, customRange: DateSpan): DateSpan {
 
 function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="rounded-inner bg-panel p-2.5 shadow-control" title={title}>
-      <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
+    <div className="rounded-inner bg-panel px-2 py-1.5 shadow-control" title={title}>
+      <div className="truncate text-[10px] font-semibold uppercase leading-3 text-slate-500">
         {label}
       </div>
-      <div className="mt-1.5 truncate font-mono text-base font-semibold text-ink">{value}</div>
+      <div className="mt-0.5 truncate font-mono text-[13px] font-semibold leading-5 text-ink">{value}</div>
     </div>
   );
 }

@@ -15,6 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import type { FocusEvent as ReactFocusEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../components/PageToast";
@@ -27,6 +28,7 @@ import type {
   GatewayStatus,
   GatewayClientSyncSummary,
   Model,
+  OpenAIUsageSnapshot,
   Provider,
   Settings,
   ToolProtocol,
@@ -43,6 +45,13 @@ const DEFAULT_OFFICIAL_MODEL_ORDER = [
   "openai/gpt-5.4-mini",
   "openai/gpt-5.3-codex-spark",
 ];
+const OPENAI_USAGE_DAY_SECONDS = 86_400;
+const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
+const OPENAI_USAGE_QUERY_WINDOW_DAYS = 730;
+const OPENAI_USAGE_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const OFFICIAL_USAGE_CELL_GAP = 2;
+const OFFICIAL_USAGE_CELL_SIZE = 8;
+const OFFICIAL_USAGE_COLOR_STOPS = ["#eff2f5", "#d8ebff", "#acd7ff", "#7cc1ff", "#48a7fb", "#1687e8"];
 
 function useVerticalOverflow<T extends HTMLElement>(dependencies: ReadonlyArray<unknown>) {
   const ref = useRef<T | null>(null);
@@ -71,6 +80,38 @@ function useVerticalOverflow<T extends HTMLElement>(dependencies: ReadonlyArray<
   }, dependencies);
 
   return [ref, hasOverflow] as const;
+}
+
+function useElementContentWidth<T extends HTMLElement>(dependencies: ReadonlyArray<unknown> = []) {
+  const ref = useRef<T | null>(null);
+  const [contentWidth, setContentWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) {
+      setContentWidth(0);
+      return;
+    }
+
+    const update = () => {
+      const style = window.getComputedStyle(element);
+      const padding =
+        (Number.parseFloat(style.paddingLeft) || 0) +
+        (Number.parseFloat(style.paddingRight) || 0);
+      setContentWidth(Math.max(0, element.clientWidth - padding));
+    };
+
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, dependencies);
+
+  return [ref, contentWidth] as const;
 }
 
 const emptyProvider = {
@@ -115,6 +156,46 @@ type PendingProviderNavigation =
     };
 type InlineTestState = "idle" | "testing" | "success" | "error";
 type Translate = (key: string, options?: Record<string, unknown>) => string;
+type OpenAIUsageMode = "day" | "week";
+type OfficialOpenAIUsageDay = {
+  date: Date;
+  dateKey: string;
+  inputTokens: number;
+  outputTokens: number;
+  requests: number;
+  startTime: number;
+  totalTokens: number;
+};
+type OfficialOpenAIUsageChartColumn = {
+  date: Date;
+  days: Array<OfficialOpenAIUsageDay | null>;
+  endTime: number;
+  inputTokens: number;
+  index: number;
+  key: string;
+  outputTokens: number;
+  requests: number;
+  startTime: number;
+  totalTokens: number;
+};
+type OfficialOpenAIUsageChartCell = {
+  column: OfficialOpenAIUsageChartColumn;
+  columnKey: string;
+  day: OfficialOpenAIUsageDay | null;
+  filled: boolean;
+  intensity: number;
+  key: string;
+  mode: OpenAIUsageMode;
+  rowIndex: number;
+  selectionKey: string;
+  value: number;
+};
+type OfficialOpenAIUsageTooltipState = {
+  cell: OfficialOpenAIUsageChartCell;
+  cursorX: number;
+  cursorY: number;
+  hostWidth: number;
+};
 
 export function ProvidersPage({
   gatewayStatus: gatewayStatusSnapshot,
@@ -136,6 +217,11 @@ export function ProvidersPage({
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>("unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>([]);
+  const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(null);
+  const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
+  const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
+  const [officialUsageHidden, setOfficialUsageHidden] = useState(true);
+  const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState<string>(OFFICIAL_ID);
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
@@ -158,6 +244,19 @@ export function ProvidersPage({
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    officialUsageSnapshotRef.current = officialUsageSnapshot;
+  }, [officialUsageSnapshot]);
+
+  useEffect(() => {
+    if (selectedId !== OFFICIAL_ID) {
+      return;
+    }
+    void loadOfficialOpenAIUsage(false);
+    const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(false), OPENAI_USAGE_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(usageRefreshTimer);
+  }, [selectedId]);
 
   useEffect(() => {
     if (gatewayStatusSnapshot !== undefined) {
@@ -451,6 +550,30 @@ export function ProvidersPage({
       setError(messageFromError(err));
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function loadOfficialOpenAIUsage(forceRefresh = false) {
+    setOfficialUsageBusy(true);
+    try {
+      const snapshot = await api.openaiUsageCompletions({
+        ...defaultOfficialOpenAIUsageWindow(),
+        forceRefresh,
+      });
+      officialUsageSnapshotRef.current = snapshot;
+      setOfficialUsageSnapshot(snapshot);
+      setOfficialUsageError(null);
+      setOfficialUsageHidden(false);
+    } catch (err) {
+      if (officialUsageSnapshotRef.current) {
+        setOfficialUsageError(null);
+        setOfficialUsageHidden(false);
+        return;
+      }
+      setOfficialUsageError(messageFromError(err));
+      setOfficialUsageHidden(false);
+    } finally {
+      setOfficialUsageBusy(false);
     }
   }
 
@@ -1009,8 +1132,13 @@ export function ProvidersPage({
                 models={officialModels}
                 officialDisabledModels={officialDisabledModels}
                 onRefresh={() => void refreshOfficialModels()}
+                onRefreshUsage={() => void loadOfficialOpenAIUsage(true)}
                 onReorder={(models) => void reorderOfficialModels(models)}
                 onToggleModel={toggleOfficialModel}
+                usageBusy={officialUsageBusy}
+                usageError={officialUsageError}
+                usageHidden={officialUsageHidden}
+                usageSnapshot={officialUsageSnapshot}
               />
             ) : selectedProvider ? (
               <ProviderDetail
@@ -1472,9 +1600,267 @@ function SourceStatusChip({ label, tone }: { label: string; tone: "ok" | "muted"
 
 function SourceMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-inner bg-surface px-2 py-1.5 shadow-control">
-      <div className="truncate text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-0.5 truncate font-semibold text-ink">{value}</div>
+    <div className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1.5 text-center shadow-control">
+      <div className="text-[9px] font-semibold uppercase leading-3 text-slate-500">{label}</div>
+      <div className="mt-0.5 font-semibold leading-4 text-ink">{value}</div>
+    </div>
+  );
+}
+
+function OfficialOpenAIUsagePanel({
+  busy,
+  error,
+  onRefresh,
+  snapshot,
+  usageHidden,
+}: {
+  busy: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  snapshot: OpenAIUsageSnapshot | null;
+  usageHidden: boolean;
+}) {
+  const { i18n, t } = useTranslation();
+  const locale = resolvedUsageLocale(i18n.language || "en-US");
+  const [mode, setMode] = useState<OpenAIUsageMode>("day");
+  const [hoveredUsageCell, setHoveredUsageCell] = useState<OfficialOpenAIUsageTooltipState | null>(null);
+  const [selectedUsageCellKey, setSelectedUsageCellKey] = useState<string | null>(null);
+  const [chartHostRef, chartContentWidth] = useElementContentWidth<HTMLDivElement>([usageHidden, Boolean(snapshot)]);
+  const visibleUsageColumnCount = responsiveUsageColumnCount(chartContentWidth);
+  const days = useMemo(
+    () => buildOfficialOpenAIUsageDays(snapshot, visibleUsageColumnCount),
+    [snapshot, visibleUsageColumnCount],
+  );
+  const chart = useMemo(
+    () => buildOfficialOpenAIUsageChart(days, mode, visibleUsageColumnCount),
+    [days, mode, visibleUsageColumnCount],
+  );
+  const streaks = useMemo(() => usageStreaks(days), [days]);
+  const peakTokens = snapshot?.peak_daily_tokens ?? days.reduce((peak, day) => Math.max(peak, day.totalTokens), 0);
+  const currentStreak = snapshot?.current_streak_days ?? streaks.current;
+  const longestStreak = snapshot?.longest_streak_days ?? streaks.longest;
+  const modeOptions: Array<{ label: string; value: OpenAIUsageMode }> = [
+    { label: t("usage.day"), value: "day" },
+    { label: t("usage.week"), value: "week" },
+  ];
+  const selectedUsageColumnKey = selectedUsageCellKey?.startsWith("week-") ? selectedUsageCellKey : null;
+  const hoveredUsageColumnKey = hoveredUsageCell?.cell.mode === "week" ? hoveredUsageCell.cell.columnKey : null;
+  const highlightedUsageCellKey = hoveredUsageCell?.cell.selectionKey ?? selectedUsageCellKey;
+
+  useEffect(() => {
+    setHoveredUsageCell(null);
+    setSelectedUsageCellKey(null);
+  }, [mode, snapshot]);
+
+  function activateUsageCell(event: ReactPointerEvent<HTMLButtonElement>, cell: OfficialOpenAIUsageChartCell) {
+    const host = event.currentTarget.closest("[data-openai-usage-chart]");
+    if (!(host instanceof HTMLElement)) {
+      return;
+    }
+    const hostRect = host.getBoundingClientRect();
+    setHoveredUsageCell({
+      cell,
+      cursorX: event.clientX - hostRect.left,
+      cursorY: event.clientY - hostRect.top,
+      hostWidth: hostRect.width,
+    });
+  }
+
+  function focusUsageCell(event: ReactFocusEvent<HTMLButtonElement>, cell: OfficialOpenAIUsageChartCell) {
+    const host = event.currentTarget.closest("[data-openai-usage-chart]");
+    if (!(host instanceof HTMLElement)) {
+      return;
+    }
+    const hostRect = host.getBoundingClientRect();
+    const cellRect = event.currentTarget.getBoundingClientRect();
+    setHoveredUsageCell({
+      cell,
+      cursorX: cellRect.left - hostRect.left + cellRect.width / 2,
+      cursorY: cellRect.top - hostRect.top,
+      hostWidth: hostRect.width,
+    });
+  }
+
+  if (usageHidden) {
+    return null;
+  }
+
+  return (
+    <section className="grid gap-3 rounded-inner bg-panel-soft p-3 shadow-hairline">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="truncate text-sm font-semibold text-ink">{t("providers.openaiUsage")}</h3>
+          <button
+            type="button"
+            className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
+            disabled={busy}
+            aria-label={t("providers.refreshOpenAIUsage")}
+            title={t("providers.refreshOpenAIUsage")}
+            onClick={onRefresh}
+          >
+            <RefreshCcw size={14} className={busy ? "animate-spin" : undefined} />
+          </button>
+        </div>
+        <div className="flex shrink-0 rounded-full bg-surface p-0.5 shadow-control">
+          {modeOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={cx(
+                "focus-ring h-6 rounded-full px-2 text-[11px] font-semibold transition-[background-color,color]",
+                mode === option.value ? "bg-ink text-white" : "text-slate-500 hover:bg-panel hover:text-ink",
+              )}
+              onClick={() => setMode(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-inner bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 shadow-hairline">
+          {error}
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-5 gap-2 text-xs">
+            <SourceMetric
+              label={t("gateway.tokens")}
+              value={snapshot ? formatUsageNumber(snapshot.total_tokens, locale) : t("common.unknown")}
+            />
+            <SourceMetric
+              label={t("providers.peakDayTokens")}
+              value={snapshot ? formatUsageNumber(peakTokens, locale) : t("common.unknown")}
+            />
+            <SourceMetric
+              label={t("providers.longestTaskDuration")}
+              value={snapshot ? formatUsageDuration(snapshot.longest_running_turn_sec, locale, t as Translate) : t("common.unknown")}
+            />
+            <SourceMetric
+              label={t("providers.currentStreak")}
+              value={snapshot ? t("providers.daysCount", { count: currentStreak }) : t("common.unknown")}
+            />
+            <SourceMetric
+              label={t("providers.longestStreak")}
+              value={snapshot ? t("providers.daysCount", { count: longestStreak }) : t("common.unknown")}
+            />
+          </div>
+
+          <div
+            ref={chartHostRef}
+            className="relative min-w-0 overflow-visible rounded-inner bg-surface px-3 py-2 shadow-control"
+            data-openai-usage-chart
+            onPointerLeave={() => setHoveredUsageCell(null)}
+          >
+            {snapshot && days.length ? (
+              <div className="overflow-hidden">
+                <div
+                  className="grid"
+                  role="img"
+                  aria-label={t("providers.openaiUsageActivity")}
+                  style={{
+                    gridAutoFlow: "column",
+                    gridTemplateColumns: `repeat(${Math.max(1, chart.columns.length)}, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+                    gridTemplateRows: `repeat(7, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+                    gap: `${OFFICIAL_USAGE_CELL_GAP}px`,
+                    height: usageGridHeight(),
+                    width: usageGridWidth(chart.columns.length),
+                  }}
+                >
+                  {chart.cells.map((cell, index) => {
+                    if (!cell) {
+                      return <span key={`empty-${index}`} className="h-full w-full" />;
+                    }
+                    const highlighted =
+                      cell.mode === "week"
+                        ? cell.columnKey === (hoveredUsageColumnKey ?? selectedUsageColumnKey)
+                        : cell.selectionKey === highlightedUsageCellKey;
+                    return (
+                      <button
+                        key={cell.key}
+                        type="button"
+                        className={cx(
+                          "focus-ring h-full w-full rounded-[3px] border-0 p-0 hover:brightness-[0.97]",
+                          highlighted && "ring-1 ring-action/20 brightness-[0.96]",
+                        )}
+                        style={{ backgroundColor: usageCellColor(cell.intensity, cell.filled) }}
+                        aria-label={formatUsageCellLabel(cell, locale, t as Translate)}
+                        onPointerEnter={(event) => activateUsageCell(event, cell)}
+                        onPointerMove={(event) => activateUsageCell(event, cell)}
+                        onFocus={(event) => focusUsageCell(event, cell)}
+                        onBlur={() => setHoveredUsageCell(null)}
+                        onClick={() => setSelectedUsageCellKey(cell.selectionKey)}
+                      />
+                    );
+                  })}
+                </div>
+                <div
+                  className="relative mt-1 h-4 text-[10px] text-slate-400"
+                  style={{ width: usageGridWidth(chart.columns.length) }}
+                >
+                  {usageMonthLabels(chart.columns, locale).map((label) => (
+                    <span
+                      key={label.key}
+                      className={cx(
+                        "absolute top-0 truncate",
+                        label.align === "start" && "translate-x-0",
+                        label.align === "center" && "-translate-x-1/2",
+                        label.align === "end" && "-translate-x-full",
+                      )}
+                      style={{ left: `${label.leftPercent}%` }}
+                    >
+                      {label.label}
+                    </span>
+                  ))}
+                </div>
+                <OfficialOpenAIUsageTooltip tooltip={hoveredUsageCell} locale={locale} t={t as Translate} />
+              </div>
+            ) : (
+              <div className="grid min-h-[82px] place-items-center text-xs font-medium text-slate-500">
+                {busy ? t("providers.loadingOpenAIUsage") : t("providers.openaiUsageNoData")}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function OfficialOpenAIUsageTooltip({
+  locale,
+  t,
+  tooltip,
+}: {
+  locale: string;
+  t: Translate;
+  tooltip: OfficialOpenAIUsageTooltipState | null;
+}) {
+  if (!tooltip) {
+    return null;
+  }
+  const { cell } = tooltip;
+  const isWeek = cell.mode === "week";
+  const tooltipWidth = Math.min(184, Math.max(148, tooltip.hostWidth - 16));
+  const left = Math.min(
+    Math.max(tooltipWidth / 2 + 8, tooltip.cursorX),
+    Math.max(tooltipWidth / 2 + 8, tooltip.hostWidth - tooltipWidth / 2 - 8),
+  );
+  const top = isWeek ? -8 : tooltip.cursorY - 8;
+  const title = isWeek
+    ? formatUsageDateRange(cell.column.startTime, cell.column.endTime, locale)
+    : formatUsageDate(cell.day?.date ?? cell.column.date, locale);
+  const tokens = isWeek ? cell.column.totalTokens : cell.value;
+
+  return (
+    <div
+      className="pointer-events-none absolute z-20 rounded-inner bg-surface px-2.5 py-1.5 text-center text-xs font-medium text-ink shadow-floating"
+      style={{ left, top, width: tooltipWidth, transform: "translate(-50%, -100%)" }}
+    >
+      <span className="block whitespace-nowrap">
+        {t("providers.openaiUsageTooltipCompact", { date: title, tokens: formatUsageNumber(tokens, locale) })}
+      </span>
     </div>
   );
 }
@@ -1534,8 +1920,13 @@ function OfficialDetail({
   models,
   officialDisabledModels,
   onRefresh,
+  onRefreshUsage,
   onReorder,
   onToggleModel,
+  usageBusy,
+  usageError,
+  usageHidden,
+  usageSnapshot,
 }: {
   authState: CodexAuthState;
   busy: string | null;
@@ -1543,8 +1934,13 @@ function OfficialDetail({
   models: Model[];
   officialDisabledModels: string[];
   onRefresh: () => void;
+  onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
+  usageBusy: boolean;
+  usageError: string | null;
+  usageHidden: boolean;
+  usageSnapshot: OpenAIUsageSnapshot | null;
 }) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
@@ -1578,7 +1974,7 @@ function OfficialDetail({
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
-      <div className="grid gap-4 border-b border-line p-5">
+      <div className="grid gap-3 border-b border-line p-4">
         <HeaderRow
           title={t("common.codex")}
           subtitle={t("providers.openaiSubscriptionCatalog")}
@@ -1587,6 +1983,13 @@ function OfficialDetail({
               <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
             </>
           }
+        />
+        <OfficialOpenAIUsagePanel
+          busy={usageBusy}
+          error={usageError}
+          onRefresh={onRefreshUsage}
+          snapshot={usageSnapshot}
+          usageHidden={usageHidden}
         />
       </div>
       <ModelSection
@@ -1795,6 +2198,12 @@ function ProviderDetail({
         onTestModel={testModel}
         onToggle={(modelId, enabled) => updateModel(modelId, { enabled })}
         onUpdate={updateModel}
+        onCancelNewModel={(modelId) =>
+          setDraft((current) => ({
+            ...current,
+            models: renumberModels(current.models.filter((model) => model.id !== modelId)),
+          }))
+        }
         modelTestDisabled={!draft.base_url.trim()}
       />
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
@@ -1821,6 +2230,7 @@ function ModelSection({
   models,
   modelTestDisabled,
   onAdd,
+  onCancelNewModel,
   onDiscover,
   onRefresh,
   onRemove,
@@ -1842,6 +2252,7 @@ function ModelSection({
   models: Model[];
   modelTestDisabled?: boolean;
   onAdd?: () => string | undefined;
+  onCancelNewModel?: (modelId: string) => void;
   onDiscover?: () => void;
   onRefresh?: () => void;
   onRemove?: (modelId: string) => void;
@@ -1857,9 +2268,11 @@ function ModelSection({
 }) {
   const { t } = useTranslation();
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
+  const [pendingNewModelId, setPendingNewModelId] = useState<string | null>(null);
   const [modelTestStates, setModelTestStates] = useState<Record<string, InlineTestState>>({});
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const editingModel = editingModelId ? models.find((model) => model.id === editingModelId) ?? null : null;
+  const editingModelIsNew = pendingNewModelId !== null && pendingNewModelId === editingModelId;
   const [modelListRef, modelListHasOverflow] = useVerticalOverflow<HTMLDivElement>([
     disabled,
     editingModelId,
@@ -1871,12 +2284,24 @@ function ModelSection({
   function addAndEdit() {
     const modelId = onAdd?.();
     if (modelId) {
+      setPendingNewModelId(modelId);
       setEditingModelId(modelId);
     }
   }
 
   function applyModelUpdate(modelId: string, nextModel: Model) {
     onUpdate?.(modelId, nextModel);
+    if (pendingNewModelId === modelId) {
+      setPendingNewModelId(null);
+    }
+    setEditingModelId(null);
+  }
+
+  function closeModelEditor() {
+    if (editingModelIsNew && pendingNewModelId) {
+      onCancelNewModel?.(pendingNewModelId);
+      setPendingNewModelId(null);
+    }
     setEditingModelId(null);
   }
 
@@ -2049,8 +2474,11 @@ function ModelSection({
         <ModelEditorOverlay
           model={editingModel}
           onApply={(nextModel) => applyModelUpdate(editingModel.id, nextModel)}
-          onClose={() => setEditingModelId(null)}
+          onClose={closeModelEditor}
           onRemove={onRemove ? () => {
+            if (pendingNewModelId === editingModel.id) {
+              setPendingNewModelId(null);
+            }
             onRemove(editingModel.id);
             setEditingModelId(null);
           } : undefined}
@@ -2573,6 +3001,346 @@ function pendingProviderName(pending: PendingProviderNavigation, t: Translate) {
   return pending.form.name.trim() || t("providers.newProvider");
 }
 
+function defaultOfficialOpenAIUsageWindow() {
+  const endTime = Math.floor(Date.now() / 1000);
+  return {
+    startTime: endTime - (OPENAI_USAGE_QUERY_WINDOW_DAYS - 1) * OPENAI_USAGE_DAY_SECONDS,
+    endTime,
+  };
+}
+
+function buildOfficialOpenAIUsageDays(
+  snapshot: OpenAIUsageSnapshot | null,
+  visibleColumnCount: number,
+): OfficialOpenAIUsageDay[] {
+  if (!snapshot || snapshot.start_time >= snapshot.end_time) {
+    return [];
+  }
+  const endDay = localDayStartSeconds(Math.max(snapshot.start_time, snapshot.end_time - 1));
+  const displayWindowDays = Math.max(
+    OPENAI_USAGE_MIN_WINDOW_DAYS,
+    visibleColumnCount * 7,
+  );
+  const startDay = addLocalDays(endDay, -(displayWindowDays - 1));
+  const totals = new Map<string, Omit<OfficialOpenAIUsageDay, "date" | "dateKey" | "startTime">>();
+  for (const bucket of snapshot.buckets) {
+    const bucketDate = bucket.date ? parseLocalUsageDate(bucket.date) : new Date(bucket.start_time * 1000);
+    if (!bucketDate) {
+      continue;
+    }
+    const day = localDayStartSeconds(bucketDate);
+    if (day < startDay || day > endDay) {
+      continue;
+    }
+    const dateKey = localDateKey(bucketDate);
+    const current = totals.get(dateKey) ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      requests: 0,
+      totalTokens: 0,
+    };
+    totals.set(dateKey, {
+      inputTokens: current.inputTokens + bucket.input_tokens,
+      outputTokens: current.outputTokens + bucket.output_tokens,
+      requests: current.requests + bucket.num_model_requests,
+      totalTokens: current.totalTokens + bucket.total_tokens,
+    });
+  }
+
+  const days: OfficialOpenAIUsageDay[] = [];
+  for (let time = startDay; time <= endDay; time = addLocalDays(time, 1)) {
+    const date = new Date(time * 1000);
+    const dateKey = localDateKey(date);
+    const total = totals.get(dateKey) ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      requests: 0,
+      totalTokens: 0,
+    };
+    days.push({
+      date,
+      dateKey,
+      startTime: time,
+      ...total,
+    });
+  }
+  return days;
+}
+
+function buildOfficialOpenAIUsageChart(
+  days: OfficialOpenAIUsageDay[],
+  mode: OpenAIUsageMode,
+  visibleColumnCount: number,
+) {
+  const allColumns = buildOfficialOpenAIUsageWeekColumns(days);
+  const columns = visibleUsageColumns(allColumns, visibleColumnCount);
+  if (mode === "week") {
+    const maxWeekTotal = Math.max(1, ...allColumns.map((column) => column.totalTokens));
+    const cells = columns.flatMap((column) => {
+      const intensity = column.totalTokens > 0 ? Math.max(0.18, Math.min(1, column.totalTokens / maxWeekTotal)) : 0;
+      const filledRows = column.totalTokens > 0 ? Math.max(1, Math.ceil(intensity * 7)) : 0;
+      return column.days.map((day, rowIndex): OfficialOpenAIUsageChartCell => {
+        const filled = filledRows > 0 && rowIndex >= 7 - filledRows;
+        return {
+          column,
+          columnKey: column.key,
+          day,
+          filled,
+          intensity: filled ? intensity : 0,
+          key: `${column.key}-row-${rowIndex}`,
+          mode,
+          rowIndex,
+          selectionKey: column.key,
+          value: column.totalTokens,
+        };
+      });
+    });
+    return { cells, columns };
+  }
+
+  const maxDayTotal = Math.max(1, ...days.map((day) => day.totalTokens));
+  const cells = columns.flatMap((column) =>
+    column.days.map((day, rowIndex): OfficialOpenAIUsageChartCell | null => {
+      if (!day) {
+        return null;
+      }
+      const intensity = day.totalTokens > 0 ? Math.max(0.18, Math.min(1, day.totalTokens / maxDayTotal)) : 0;
+      return {
+        column,
+        columnKey: column.key,
+        day,
+        filled: day.totalTokens > 0,
+        intensity,
+        key: `day-${day.startTime}`,
+        mode,
+        rowIndex,
+        selectionKey: `day-${day.startTime}`,
+        value: day.totalTokens,
+      };
+    }),
+  );
+  return { cells, columns };
+}
+
+function responsiveUsageColumnCount(contentWidth: number) {
+  const minimumColumns = Math.ceil(OPENAI_USAGE_MIN_WINDOW_DAYS / 7);
+  if (contentWidth <= 0) {
+    return minimumColumns;
+  }
+  return Math.max(
+    1,
+    Math.floor((contentWidth + OFFICIAL_USAGE_CELL_GAP) / (OFFICIAL_USAGE_CELL_SIZE + OFFICIAL_USAGE_CELL_GAP)),
+  );
+}
+
+function visibleUsageColumns(columns: OfficialOpenAIUsageChartColumn[], visibleColumnCount: number) {
+  const start = Math.max(0, columns.length - visibleColumnCount);
+  return columns.slice(start).map((column, index) => ({ ...column, index }));
+}
+
+function usageGridWidth(columnCount: number) {
+  if (columnCount <= 0) {
+    return 0;
+  }
+  return columnCount * OFFICIAL_USAGE_CELL_SIZE + (columnCount - 1) * OFFICIAL_USAGE_CELL_GAP;
+}
+
+function usageGridHeight() {
+  return 7 * OFFICIAL_USAGE_CELL_SIZE + 6 * OFFICIAL_USAGE_CELL_GAP;
+}
+
+function buildOfficialOpenAIUsageWeekColumns(days: OfficialOpenAIUsageDay[]): OfficialOpenAIUsageChartColumn[] {
+  if (!days.length) {
+    return [];
+  }
+  const leadingBlanks = mondayWeekdayIndex(days[0].date);
+  const rawSlots: Array<OfficialOpenAIUsageDay | null> = [
+    ...Array.from({ length: leadingBlanks }, () => null),
+    ...days,
+  ];
+  const trailingBlanks = (7 - (rawSlots.length % 7)) % 7;
+  const slots = [...rawSlots, ...Array.from({ length: trailingBlanks }, () => null)];
+  const columns: OfficialOpenAIUsageChartColumn[] = [];
+  for (let index = 0; index < slots.length; index += 7) {
+    const weekSlots = slots.slice(index, index + 7);
+    const actualDays = weekSlots.filter((day): day is OfficialOpenAIUsageDay => Boolean(day));
+    const firstDay = actualDays[0] ?? days[0];
+    const weekStart = addLocalDays(firstDay.startTime, -mondayWeekdayIndex(firstDay.date));
+    const totals = actualDays.reduce(
+      (sum, day) => ({
+        inputTokens: sum.inputTokens + day.inputTokens,
+        outputTokens: sum.outputTokens + day.outputTokens,
+        requests: sum.requests + day.requests,
+        totalTokens: sum.totalTokens + day.totalTokens,
+      }),
+      { inputTokens: 0, outputTokens: 0, requests: 0, totalTokens: 0 },
+    );
+    columns.push({
+      date: new Date(weekStart * 1000),
+      days: weekSlots,
+      endTime: addLocalDays(weekStart, 6),
+      index: columns.length,
+      key: `week-${weekStart}`,
+      startTime: weekStart,
+      ...totals,
+    });
+  }
+  return columns;
+}
+
+function usageStreaks(days: OfficialOpenAIUsageDay[]) {
+  let currentRun = 0;
+  let longest = 0;
+  let run = 0;
+  for (const day of days) {
+    if (day.totalTokens > 0) {
+      run += 1;
+      longest = Math.max(longest, run);
+    } else {
+      run = 0;
+    }
+  }
+  for (let index = days.length - 1; index >= 0; index -= 1) {
+    if (days[index].totalTokens <= 0) {
+      break;
+    }
+    currentRun += 1;
+  }
+  return { current: currentRun, longest };
+}
+
+function usageMonthLabels(columns: OfficialOpenAIUsageChartColumn[], locale: string) {
+  const timeZone = localUsageTimeZone();
+  const formatter = new Intl.DateTimeFormat(resolvedUsageLocale(locale), {
+    month: "short",
+    ...(timeZone ? { timeZone } : {}),
+  });
+  const labels: Array<{ align: "start" | "center" | "end"; key: string; label: string; leftPercent: number }> = [];
+  let previous = "";
+  for (const column of columns) {
+    for (const day of column.days) {
+      if (!day) {
+        continue;
+      }
+      const key = `${day.date.getFullYear()}-${day.date.getMonth()}`;
+      if (key === previous) {
+        continue;
+      }
+      previous = key;
+      const leftPercent = columns.length <= 1 ? 0 : (column.index / (columns.length - 1)) * 100;
+      labels.push({
+        align: leftPercent <= 3 ? "start" : leftPercent >= 97 ? "end" : "center",
+        key,
+        label: formatter.format(day.date),
+        leftPercent,
+      });
+    }
+  }
+  return labels;
+}
+
+function usageCellColor(intensity: number, filled = true) {
+  if (!filled || intensity <= 0) {
+    return OFFICIAL_USAGE_COLOR_STOPS[0];
+  }
+  const index = Math.min(
+    OFFICIAL_USAGE_COLOR_STOPS.length - 1,
+    Math.max(1, Math.ceil(Math.min(1, intensity) * (OFFICIAL_USAGE_COLOR_STOPS.length - 1))),
+  );
+  return OFFICIAL_USAGE_COLOR_STOPS[index];
+}
+
+function resolvedUsageLocale(locale: string) {
+  const normalized = locale.replace(/_/g, "-").toLowerCase();
+  return normalized === "zh" || normalized.startsWith("zh-") ? "zh-CN" : "en-US";
+}
+
+function formatUsageCellLabel(cell: OfficialOpenAIUsageChartCell, locale: string, t: Translate) {
+  if (cell.mode === "week") {
+    return `${formatUsageDateRange(cell.column.startTime, cell.column.endTime, locale)}: ${formatUsageNumber(cell.column.totalTokens, locale)} ${t("gateway.tokens")}`;
+  }
+  const date = cell.day?.date ?? cell.column.date;
+  return `${formatUsageDate(date, locale)}: ${formatUsageNumber(cell.value, locale)} ${t("gateway.tokens")}`;
+}
+
+function formatUsageDateRange(startTime: number, endTime: number, locale: string) {
+  return `${formatUsageDate(new Date(startTime * 1000), locale)} - ${formatUsageDate(new Date(endTime * 1000), locale)}`;
+}
+
+function formatUsageNumber(value: number, locale: string) {
+  return new Intl.NumberFormat(locale, {
+    maximumFractionDigits: value >= 10_000 ? 1 : 0,
+    notation: value >= 10_000 ? "compact" : "standard",
+  }).format(value);
+}
+
+function formatUsageDuration(seconds: number | null | undefined, locale: string, t: Translate) {
+  if (seconds == null) {
+    return t("common.unknown");
+  }
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const formatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 0 });
+  if (days > 0) {
+    return `${formatter.format(days)} ${t("providers.daysShort")} ${formatter.format(hours)} ${t("providers.hoursShort")}`;
+  }
+  if (hours > 0) {
+    return `${formatter.format(hours)} ${t("providers.hoursShort")} ${formatter.format(minutes)} ${t("providers.minutesShort")}`;
+  }
+  return `${formatter.format(Math.max(1, minutes))} ${t("providers.minutesShort")}`;
+}
+
+function formatUsageDate(date: Date, locale: string) {
+  const timeZone = localUsageTimeZone();
+  return new Intl.DateTimeFormat(resolvedUsageLocale(locale), {
+    day: "numeric",
+    month: "short",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(date);
+}
+
+function localDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localUsageTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseLocalUsageDate(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return new Date(year, month - 1, day);
+}
+
+function localDayStartSeconds(value: number | Date) {
+  const date = value instanceof Date ? value : new Date(value * 1000);
+  return Math.floor(new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime() / 1000);
+}
+
+function addLocalDays(timestamp: number, days: number) {
+  const date = new Date(timestamp * 1000);
+  date.setDate(date.getDate() + days);
+  return Math.floor(date.getTime() / 1000);
+}
+
+function mondayWeekdayIndex(date: Date) {
+  return (date.getDay() + 6) % 7;
+}
+
 function sortOfficialModels(models: Model[], sortOrder: string[]) {
   const order = new Map<string, number>();
   const effectiveOrder = sortOrder.length ? sortOrder : DEFAULT_OFFICIAL_MODEL_ORDER;
@@ -2809,6 +3577,12 @@ function AddProviderPanel({
         onTestModel={testModel}
         onToggle={(modelId, enabled) => updateModel(modelId, { enabled })}
         onUpdate={updateModel}
+        onCancelNewModel={(modelId) =>
+          onFormChange({
+            ...form,
+            models: renumberModels(form.models.filter((model) => model.id !== modelId)),
+          })
+        }
         modelTestDisabled={!form.base_url.trim()}
       />
 

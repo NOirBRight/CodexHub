@@ -1,4 +1,4 @@
-use crate::{autostart, catalog, config, gateway, history, models, proxy};
+use crate::{autostart, catalog, config, gateway, history, models, openai_usage, proxy};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -223,6 +223,17 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
             to_value(config::save_settings(settings))
         }
         "refresh_official_models" => to_value(models::refresh_official_models()),
+        "openai_usage_completions" => {
+            let start_time = optional_u64_arg(&request.args, &["startTime", "start_time"]);
+            let end_time = optional_u64_arg(&request.args, &["endTime", "end_time"]);
+            let force_refresh =
+                optional_bool_arg(&request.args, &["forceRefresh", "force_refresh"]);
+            to_value(openai_usage::openai_usage_completions(
+                start_time,
+                end_time,
+                force_refresh,
+            ))
+        }
         "discover_provider_models" => {
             let base_url = string_arg(&request.args, "baseUrl")?;
             let api_key = string_arg(&request.args, "apiKey")?;
@@ -450,6 +461,18 @@ fn optional_string_arg(args: &Value, names: &[&str]) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     })
+}
+
+fn optional_u64_arg(args: &Value, names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| args.get(*name).and_then(Value::as_u64))
+}
+
+fn optional_bool_arg(args: &Value, names: &[&str]) -> Option<bool> {
+    names
+        .iter()
+        .find_map(|name| args.get(*name).and_then(Value::as_bool))
 }
 
 #[derive(Debug)]

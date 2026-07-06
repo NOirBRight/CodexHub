@@ -22,6 +22,8 @@ const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
+const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
+const tauriWebBridgePath = new URL("../../src-tauri/src/web_bridge.rs", import.meta.url);
 const i18nIndexPath = new URL("../src/i18n/index.ts", import.meta.url);
 const enLocalePath = new URL("../src/i18n/locales/en-US.ts", import.meta.url);
 const zhLocalePath = new URL("../src/i18n/locales/zh-CN.ts", import.meta.url);
@@ -328,6 +330,10 @@ test("usage summary and chart use the same global time window", async () => {
   assert.match(gatewaySource, /onUsageWindowChange/);
   assert.match(usageSource, /onWindowChange\?\.\(queryWindow\)/);
   assert.match(usageSource, /function usageQueryWindow/);
+  assert.match(usageSource, /rounded-inner bg-panel px-2 py-1\.5 shadow-control/);
+  assert.match(usageSource, /truncate text-\[10px\] font-semibold uppercase leading-3 text-slate-500/);
+  assert.match(usageSource, /mt-0\.5 truncate font-mono text-\[13px\] font-semibold leading-5 text-ink/);
+  assert.doesNotMatch(usageSource, /rounded-inner bg-panel p-2\.5 shadow-control|mt-1\.5 truncate font-mono text-base/);
   assert.match(usageSource, /const \[hiddenSeriesKeys, setHiddenSeriesKeys\] = useState<Set<string>>/);
   assert.match(usageSource, /visibleUsageSummary\(/);
   assert.match(usageSource, /hiddenSeriesKeys\.has\(segment\.key\)/);
@@ -365,6 +371,118 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
   assert.match(gatewaySource, /showToast\(text, "error"\)/);
   assert.doesNotMatch(usageSource, /Usage telemetry delayed/);
   assert.doesNotMatch(usageSource, /usageError/);
+});
+
+test("official OpenAI usage chart reads cached Codex account usage only on the official provider page", async () => {
+  const [providersSource, tauriSource, typesSource, mainSource, webBridgeSource, openAiUsageSource, enSource, zhSource] =
+    await Promise.all([
+      readFile(providersPagePath, "utf8"),
+      readFile(tauriSourcePath, "utf8"),
+      readFile(typesPath, "utf8"),
+      readFile(tauriMainPath, "utf8"),
+      readFile(tauriWebBridgePath, "utf8"),
+      readFile(tauriOpenAiUsagePath, "utf8"),
+      readFile(enLocalePath, "utf8"),
+      readFile(zhLocalePath, "utf8"),
+    ]);
+
+  assert.match(tauriSource, /openaiUsageCompletions: \(window\?: OpenAIUsageQueryWindow \| null\) =>/);
+  assert.match(tauriSource, /call<OpenAIUsageSnapshot>\("openai_usage_completions"/);
+  assert.match(typesSource, /export interface OpenAIUsageSnapshot/);
+  assert.match(typesSource, /export interface OpenAIUsageBucket/);
+  assert.match(typesSource, /forceRefresh\?: boolean \| null;/);
+  assert.match(typesSource, /date: string;/);
+  assert.match(tauriSource, /forceRefresh: window\?\.forceRefresh \?\? null/);
+  assert.match(mainSource, /fn openai_usage_completions\([\s\S]*force_refresh: Option<bool>/);
+  assert.match(mainSource, /openai_usage_completions,/);
+  assert.match(webBridgeSource, /"openai_usage_completions"/);
+  assert.match(webBridgeSource, /optional_bool_arg\(&request\.args, &\["forceRefresh", "force_refresh"\]\)/);
+  assert.match(openAiUsageSource, /account\/usage\/read/);
+  assert.match(openAiUsageSource, /codex app-server/);
+  assert.match(openAiUsageSource, /const CACHE_REFRESH_INTERVAL_SECONDS: u64 = 12 \* 60 \* 60;/);
+  assert.match(openAiUsageSource, /const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;/);
+  assert.match(openAiUsageSource, /struct CodexAccountUsageCache/);
+  assert.match(openAiUsageSource, /write_usage_cache/);
+  assert.match(openAiUsageSource, /read_usage_cache/);
+  assert.match(openAiUsageSource, /read_codex_account_usage_with_retries/);
+  assert.doesNotMatch(openAiUsageSource, /OPENAI_ADMIN_KEY|organization\/usage\/completions|OPENAI_USAGE_COMPLETIONS_URL/);
+
+  const officialUsagePanel = providersSource.match(/function OfficialOpenAIUsagePanel[\s\S]*function OfficialOpenAIUsageTooltip/)?.[0] ?? "";
+  assert.ok(officialUsagePanel, "OfficialOpenAIUsagePanel should be present");
+
+  assert.match(providersSource, /openaiUsageCompletions/);
+  assert.match(providersSource, /OfficialOpenAIUsagePanel/);
+  assert.match(providersSource, /const OPENAI_USAGE_REFRESH_INTERVAL_MS = 12 \* 60 \* 60 \* 1000;/);
+  assert.match(providersSource, /const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot \| null>\(null\);/);
+  assert.match(providersSource, /async function loadOfficialOpenAIUsage\(forceRefresh = false\)/);
+  assert.match(providersSource, /api\.openaiUsageCompletions\(\{[\s\S]*forceRefresh[\s\S]*\}\)/);
+  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(false\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
+  assert.match(providersSource, /if \(officialUsageSnapshotRef\.current\) \{[\s\S]*setOfficialUsageError\(null\);[\s\S]*setOfficialUsageHidden\(false\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(providersSource, /selectedId === OFFICIAL_ID[\s\S]*loadOfficialOpenAIUsage/);
+  assert.match(providersSource, /longest_running_turn_sec/);
+  assert.match(providersSource, /formatUsageDuration/);
+  assert.match(providersSource, /type OpenAIUsageMode = "day" \| "week";/);
+  assert.match(providersSource, /function SourceMetric\(\{ label, value \}/);
+  assert.match(providersSource, /className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1\.5 text-center shadow-control"/);
+  assert.match(providersSource, /className="text-\[9px\] font-semibold uppercase leading-3 text-slate-500"/);
+  assert.match(providersSource, /OfficialOpenAIUsageTooltip/);
+  assert.match(providersSource, /const \[hoveredUsageCell, setHoveredUsageCell\]/);
+  assert.match(providersSource, /const \[selectedUsageCellKey, setSelectedUsageCellKey\]/);
+  assert.match(providersSource, /onPointerEnter=\{\(event\) => activateUsageCell\(event, cell\)\}/);
+  assert.match(providersSource, /onPointerMove=\{\(event\) => activateUsageCell\(event, cell\)\}/);
+  assert.match(providersSource, /onClick=\{\(\) => setSelectedUsageCellKey\(cell\.selectionKey\)\}/);
+  assert.match(providersSource, /const highlightedUsageCellKey/);
+  assert.match(providersSource, /cursorX: event\.clientX - hostRect\.left/);
+  assert.match(providersSource, /cursorY: event\.clientY - hostRect\.top/);
+  assert.match(providersSource, /const tooltipWidth = Math\.min\(184, Math\.max\(148, tooltip\.hostWidth - 16\)\)/);
+  assert.match(providersSource, /const top = isWeek \? -8 : tooltip\.cursorY - 8/);
+  assert.match(providersSource, /transform: "translate\(-50%, -100%\)"/);
+  assert.match(providersSource, /text-center/);
+  assert.match(providersSource, /t\("providers\.openaiUsageTooltipCompact"/);
+  assert.doesNotMatch(officialUsagePanel, /scale-110|duration-100|shadow-\[0_0_0_1px/);
+  assert.doesNotMatch(providersSource, /openaiUsageTooltipTokens|truncate">\s*\{\s*t\("providers\.openaiUsageTooltip|tooltipWidth = 220|UsageTooltipMetric|t\("usage\.requests"\)|isWeek \? t\("usage\.week"\) : t\("usage\.day"\)/);
+  assert.match(providersSource, /const selectedUsageColumnKey/);
+  assert.match(providersSource, /buildOfficialOpenAIUsageWeekColumns/);
+  assert.match(providersSource, /filledRows/);
+  assert.match(providersSource, /usageMonthLabels\(chart\.columns, locale\)/);
+  assert.match(providersSource, /function localDateKey/);
+  assert.match(providersSource, /function localUsageTimeZone/);
+  assert.match(providersSource, /Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/);
+  assert.match(providersSource, /function parseLocalUsageDate/);
+  assert.match(providersSource, /function localDayStartSeconds/);
+  assert.match(providersSource, /bucket\.date \? parseLocalUsageDate\(bucket\.date\)/);
+  assert.doesNotMatch(providersSource, /timeZone: "UTC"|getUTCDay\(\)|getUTCFullYear\(\)|getUTCMonth\(\)|utcDayStartSeconds|utcWeekStartSeconds/);
+  assert.match(providersSource, /const OFFICIAL_USAGE_CELL_SIZE = 8;/);
+  assert.match(providersSource, /const OFFICIAL_USAGE_CELL_GAP = 2;/);
+  assert.match(providersSource, /const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;/);
+  assert.match(providersSource, /const OPENAI_USAGE_QUERY_WINDOW_DAYS = 730;/);
+  assert.match(providersSource, /OPENAI_USAGE_QUERY_WINDOW_DAYS - 1/);
+  assert.match(providersSource, /function useElementContentWidth/);
+  assert.match(providersSource, /const visibleUsageColumnCount = responsiveUsageColumnCount\(chartContentWidth\);/);
+  assert.match(providersSource, /buildOfficialOpenAIUsageDays\(snapshot, visibleUsageColumnCount\)/);
+  assert.match(providersSource, /const displayWindowDays = Math\.max\([\s\S]*OPENAI_USAGE_MIN_WINDOW_DAYS,[\s\S]*visibleColumnCount \* 7,[\s\S]*\);/);
+  assert.match(providersSource, /const startDay = addLocalDays\(endDay, -\(displayWindowDays - 1\)\);/);
+  assert.match(providersSource, /buildOfficialOpenAIUsageChart\(days, mode, visibleUsageColumnCount\)/);
+  assert.match(providersSource, /function responsiveUsageColumnCount\(contentWidth: number\)/);
+  assert.match(providersSource, /const minimumColumns = Math\.ceil\(OPENAI_USAGE_MIN_WINDOW_DAYS \/ 7\);/);
+  assert.match(providersSource, /if \(contentWidth <= 0\) \{[\s\S]*return minimumColumns;[\s\S]*\}/);
+  assert.match(providersSource, /function visibleUsageColumns\(columns: OfficialOpenAIUsageChartColumn\[\], visibleColumnCount: number\)/);
+  assert.match(providersSource, /function usageGridWidth\(columnCount: number\)/);
+  assert.match(providersSource, /function usageGridHeight\(\)/);
+  assert.match(providersSource, /gridTemplateColumns: `repeat\(\$\{Math\.max\(1, chart\.columns\.length\)\}, \$\{OFFICIAL_USAGE_CELL_SIZE\}px\)`/);
+  assert.match(providersSource, /gridTemplateRows: `repeat\(7, \$\{OFFICIAL_USAGE_CELL_SIZE\}px\)`/);
+  assert.match(providersSource, /height: usageGridHeight\(\)/);
+  assert.match(providersSource, /width: usageGridWidth\(chart\.columns\.length\)/);
+  assert.doesNotMatch(officialUsagePanel, /gridAutoColumns: "10px"|className="grid w-max gap-\[3px\]"|minmax\(0, 1fr\)|className="grid h-\[68px\] w-full gap-\[2px\]"/);
+  assert.match(providersSource, /resolvedUsageLocale/);
+  assert.match(providersSource, /OFFICIAL_USAGE_COLOR_STOPS/);
+  assert.doesNotMatch(providersSource, /providers\.cumulative|mode === "cumulative"|value: "cumulative"/);
+  assert.doesNotMatch(providersSource, /isMissingOpenAIAdminKeyError|OPENAI_ADMIN_KEY|num_model_requests, locale\)/);
+  assert.doesNotMatch(providersSource, /gatewayUsageSnapshot|gatewayUsageEvents|StackedUsageChartShell/);
+  assert.match(enSource, /openaiUsage/);
+  assert.match(enSource, /longestTaskDuration/);
+  assert.match(zhSource, /openaiUsage/);
+  assert.match(zhSource, /longestTaskDuration/);
 });
 
 test("usage custom date popover closes on outside click", async () => {
@@ -917,6 +1035,20 @@ test("add provider only prompts and saves when a name is present", async () => {
   assert.match(discardPending, /pending\.kind === "add"[\s\S]*setForm\(emptyProvider\)/);
   assert.match(addSave, /base_url: nextForm\.base_url\.trim\(\)/);
   assert.match(addSave, /return null;/);
+});
+
+test("canceling a newly added model removes the temporary draft before navigation", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
+  const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
+  const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
+
+  assert.match(modelSection, /const \[pendingNewModelId, setPendingNewModelId\]/);
+  assert.match(modelSection, /setPendingNewModelId\(modelId\);[\s\S]*setEditingModelId\(modelId\);/);
+  assert.match(modelSection, /function closeModelEditor\(\)[\s\S]*onCancelNewModel\?\.\(pendingNewModelId\);/);
+  assert.match(modelSection, /onClose=\{closeModelEditor\}/);
+  assert.match(providerDetail, /onCancelNewModel=\{\(modelId\) =>[\s\S]*models: renumberModels\(current\.models\.filter\(\(model\) => model\.id !== modelId\)\)/);
+  assert.match(addProviderPanel, /onCancelNewModel=\{\(modelId\) =>[\s\S]*models: renumberModels\(form\.models\.filter\(\(model\) => model\.id !== modelId\)\)/);
 });
 
 test("official model rows remain pointer-interactive while editing is disabled", async () => {

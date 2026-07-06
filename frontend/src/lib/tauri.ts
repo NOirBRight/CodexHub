@@ -15,6 +15,8 @@ import type {
   GatewayUsageSummary,
   Model,
   ModelEndpointTestResult,
+  OpenAIUsageQueryWindow,
+  OpenAIUsageSnapshot,
   Provider,
   Settings,
   SubagentMatrixStatus,
@@ -97,6 +99,14 @@ function usageWindowArgs(window?: UsageQueryWindow | null) {
   };
 }
 
+function openaiUsageWindowArgs(window?: OpenAIUsageQueryWindow | null) {
+  return {
+    startTime: window?.startTime ?? null,
+    endTime: window?.endTime ?? null,
+    forceRefresh: window?.forceRefresh ?? null,
+  };
+}
+
 export const api = {
   getStatus: () => call<AppStatus>("get_status"),
   switchMode: (mode: string, autoSync: boolean) =>
@@ -114,6 +124,8 @@ export const api = {
       }),
     ),
   refreshOfficialModels: () => call<Model[]>("refresh_official_models"),
+  openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
+    call<OpenAIUsageSnapshot>("openai_usage_completions", openaiUsageWindowArgs(window)),
   discoverProviderModels: (baseUrl: string, apiKey: string) =>
     call<Model[]>("discover_provider_models", { baseUrl, apiKey }),
   probeUpstreamFormat: (baseUrl: string, apiKey: string, model?: string | null) =>

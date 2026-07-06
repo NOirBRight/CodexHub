@@ -5,6 +5,7 @@ mod config;
 mod gateway;
 mod history;
 mod models;
+mod openai_usage;
 mod proxy;
 mod web_bridge;
 
@@ -290,6 +291,15 @@ fn save_settings(settings: Settings) -> Result<Settings, String> {
 #[tauri::command]
 fn refresh_official_models() -> Result<Vec<Model>, String> {
     models::refresh_official_models()
+}
+
+#[tauri::command]
+fn openai_usage_completions(
+    start_time: Option<u64>,
+    end_time: Option<u64>,
+    force_refresh: Option<bool>,
+) -> Result<openai_usage::OpenAiUsageSnapshot, String> {
+    openai_usage::openai_usage_completions(start_time, end_time, force_refresh)
 }
 
 #[tauri::command]
@@ -676,6 +686,7 @@ fn run_gui() {
             get_settings,
             save_settings,
             refresh_official_models,
+            openai_usage_completions,
             discover_provider_models,
             probe_upstream_format,
             provider_probe_upstream_format,
