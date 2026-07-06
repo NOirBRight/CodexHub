@@ -9,6 +9,7 @@ from catalog import (
     display_name_for,
     load_catalog_models,
     load_policy,
+    should_include_external_provider_model,
     should_include_model,
 )
 
@@ -68,6 +69,13 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertFalse(should_include_model("volc/minimax-m2.7", policy))
         self.assertFalse(should_include_model("gemma3:12b", policy))
         self.assertTrue(should_include_model("gpt-5.5", policy))
+
+    def test_external_provider_models_use_runtime_config_visibility_plus_policy_denies(self):
+        policy = load_policy(POLICY_PATH)
+
+        self.assertTrue(should_include_external_provider_model("volc/minimax-m3", policy))
+        self.assertFalse(should_include_external_provider_model("volc/qwen3-embedding", policy))
+        self.assertFalse(should_include_external_provider_model("ollama-cloud/glm-5.1", policy))
 
     def test_provider_namespace_tags_are_not_base_matched(self):
         policy = CatalogPolicy(

@@ -262,6 +262,9 @@ class RoutingTests(unittest.TestCase):
         )
         self.external_patch.start()
         self.addCleanup(self.external_patch.stop)
+        self.ollama_runtime_patch = patch("codex_proxy.resolve_ollama_cloud_model", return_value=(False, None))
+        self.ollama_runtime_patch.start()
+        self.addCleanup(self.ollama_runtime_patch.stop)
 
     def test_gateway_auto_retry_settings_default_to_enabled_thirty_attempts(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -1247,6 +1250,84 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body)["model"], "gpt-5.5")
 
+    def test_openai_fast_alias_routes_to_priority_service_tier(self):
+        upstream = choose_upstream("openai/gpt-5.5-fast")
+
+        self.assertEqual(upstream["name"], "official")
+        self.assertEqual(upstream["auth"], "codex_auth")
+        self.assertEqual(upstream["upstream_model"], "gpt-5.5")
+        self.assertEqual(upstream["service_tier"], "priority")
+
+        body = compatible_request_body(
+            b'{"model":"openai/gpt-5.5-fast","input":"hi"}',
+            upstream,
+            "openai/gpt-5.5-fast",
+        )
+        payload = json.loads(body)
+
+        self.assertEqual(payload["model"], "gpt-5.5")
+        self.assertEqual(payload["service_tier"], "priority")
+
+    def test_provider_scoped_openai_fast_routes_to_priority_service_tier(self):
+        route_model = codex_proxy.provider_scoped_route_model("gpt-5.5-fast", "openai")
+        upstream = choose_upstream(route_model)
+
+        self.assertEqual(route_model, "openai/gpt-5.5-fast")
+        self.assertEqual(upstream["name"], "official")
+        self.assertEqual(upstream["upstream_model"], "gpt-5.5")
+        self.assertEqual(upstream["service_tier"], "priority")
+
+    def test_bare_fast_model_routes_to_priority_service_tier(self):
+        upstream = choose_upstream("gpt-5.5-fast")
+
+        self.assertEqual(upstream["name"], "official")
+        self.assertEqual(upstream["auth"], "codex_auth")
+        self.assertEqual(upstream["upstream_model"], "gpt-5.5")
+        self.assertEqual(upstream["service_tier"], "priority")
+
+        body = compatible_request_body(
+            b'{"model":"gpt-5.5-fast","input":"hi","service_tier":"default"}',
+            upstream,
+            "gpt-5.5-fast",
+        )
+        payload = json.loads(body)
+
+        self.assertEqual(payload["model"], "gpt-5.5")
+        self.assertEqual(payload["service_tier"], "priority")
+
+    def test_current_catalog_data_exposes_official_fast_pseudo_models(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "openai/gpt-5.5",
+                                "display_name": "OpenAI GPT-5.5",
+                                "context_window": 258400,
+                            },
+                            {
+                                "slug": "openai/gpt-5.4",
+                                "display_name": "OpenAI GPT-5.4",
+                                "context_window": 272000,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path):
+                catalog = codex_proxy.current_catalog_data()
+
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["display_name"], "OpenAI GPT-5.5 Fast")
+        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["context_window"], 258400)
+        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
+        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["codex_proxy_metadata"]["service_tier"], "priority")
+        self.assertEqual(by_slug["openai/gpt-5.4-fast"]["display_name"], "OpenAI GPT-5.4 Fast")
+
     def test_responses_to_chat_completion_body_preserves_input_images(self):
         body = json.dumps(
             {
@@ -1320,6 +1401,61 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["upstream_model"], "glm-5.2")
         self.assertEqual(upstream["upstream_format"], "chat_completions")
         self.assertEqual(upstream["tool_protocol"], "text_compat")
+
+    def test_runtime_enabled_external_provider_model_routes_without_static_policy_allowlist(self):
+        volc_minimax = {
+            "alias": "volc/minimax-m3",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "minimax-m3",
+            "priority_base": 200,
+            "context_window": 200000,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+
+        with patch("codex_proxy.resolve_external_model_alias", return_value=volc_minimax):
+            upstream = choose_upstream("volc/minimax-m3")
+
+        self.assertEqual(upstream["name"], "volcengine")
+        self.assertEqual(upstream["upstream_model"], "minimax-m3")
+
+    def test_runtime_ollama_provider_model_routes_without_static_policy_allowlist_or_generated_catalog(self):
+        runtime_model = {
+            "alias": "ollama-cloud/new-runtime-model",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "display_prefix": "Ollama",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-runtime-token",
+            "upstream_model": "new-runtime-model",
+            "upstream_format": "responses",
+            "tool_protocol": "auto",
+            "input_modalities": ("text",),
+        }
+
+        with (
+            patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, runtime_model)),
+            patch("codex_proxy.generated_catalog_slugs", return_value=set()),
+        ):
+            upstream = choose_upstream("ollama-cloud/new-runtime-model")
+
+        self.assertEqual(upstream["name"], "ollama_cloud")
+        self.assertEqual(upstream["auth"], "api_key")
+        self.assertEqual(upstream["base_url"], "https://ollama.example.test/v1")
+        self.assertEqual(upstream["upstream_model"], "new-runtime-model")
+
+    def test_runtime_ollama_provider_rejects_disabled_model_despite_static_policy_allowlist(self):
+        with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, None)):
+            with self.assertRaises(ValueError) as context:
+                choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertIn("model is not allowed", str(context.exception))
 
     def test_provider_scoped_short_model_routes_to_external_provider(self):
         route_model = codex_proxy.provider_scoped_route_model("glm-5.2", "volc")
@@ -2285,7 +2421,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["item"]["summary"], [])
         self.assertNotIn("content", payload["item"])
 
-    def test_external_sse_relay_maps_reasoning_text_delta_to_summary_delta_for_codex_app(self):
+    def test_external_sse_relay_drops_reasoning_text_delta_for_codex_app(self):
         handler = FakeHandler()
         event = {
             "type": "response.reasoning_text.delta",
@@ -2294,11 +2430,58 @@ class RoutingTests(unittest.TestCase):
             "content_index": 0,
             "delta": "streamed raw thinking",
         }
-        response = FakeSseResponse([f"data: {json.dumps(event)}\n".encode("utf-8"), b"\n", b""])
+        response = FakeSseResponse(
+            [
+                f"data: {json.dumps(event)}\n".encode("utf-8"),
+                b"\n",
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n',
+                b"\n",
+                b"",
+            ]
+        )
 
-        CodexProxyHandler._relay_upstream_response(handler, response, "ollama_cloud")
+        status = CodexProxyHandler._relay_upstream_response(handler, response, "ollama_cloud")
 
-        self.assertEqual(handler.wfile.writes[0], b"")
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"streamed raw thinking", data)
+        self.assertIn(b"response.completed", data)
+
+    def test_external_responses_sse_relay_drops_named_reasoning_summary_event_frame(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b"event: response.reasoning_summary_text.delta\n",
+                b'data: {"type":"response.reasoning_summary_text.delta","delta":"hidden"}\n',
+                b"\n",
+                b"event: response.output_text.delta\n",
+                b'data: {"type":"response.output_text.delta","delta":"ok"}\n',
+                b"\n",
+                b"event: response.completed\n",
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n',
+                b"\n",
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_named_reasoning_summary",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"event: response.reasoning_summary_text.delta", data)
+        self.assertNotIn(b"hidden", data)
+        self.assertIn(b"event: response.output_text.delta", data)
+        self.assertIn(b'"delta":"ok"', data)
+        self.assertIn(b"event: response.completed", data)
 
     def test_external_sse_relay_downgrades_invalid_function_call_name(self):
         handler = FakeHandler()
@@ -3128,6 +3311,24 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["input"][0]["role"], "assistant")
         self.assertEqual(payload["input"][1]["role"], "assistant")
         self.assertNotIn('"role":"system"', transformed.decode("utf-8"))
+
+    def test_official_request_normalizes_string_input_to_message_list(self):
+        transformed = compatible_request_body(
+            b'{"model":"gpt-5.5","input":"Say hi","stream":true}',
+            {"name": "official", "auth": "codex_auth"},
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            payload["input"],
+            [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Say hi"}],
+                }
+            ],
+        )
 
     def test_official_request_downgrades_system_message_history(self):
         body = json.dumps(

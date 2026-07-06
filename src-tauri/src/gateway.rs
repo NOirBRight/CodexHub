@@ -5589,6 +5589,8 @@ mod tests {
 
         assert_eq!(value["model"], "codexhub-openai/gpt-5.5");
         assert!(openai_models.contains_key("gpt-5.5"));
+        assert!(openai_models.contains_key("gpt-5.5-fast"));
+        assert!(openai_models.contains_key("gpt-5.4-fast"));
         assert!(minimax_models.contains_key("minimax-m3"));
         assert!(!minimax_models.contains_key("minimax-m3-lite"));
         assert_eq!(minimax_models["minimax-m3"]["name"], "MiniMax M3");
@@ -5859,6 +5861,24 @@ mod tests {
     }
 
     #[test]
+    fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
+        let settings = Settings::default();
+        let providers = client_export_test_providers();
+
+        let text = opencode_config_text(&settings, &providers, "openai/gpt-5.5-fast").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let openai_models = value
+            .pointer("/provider/codexhub-openai/models")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+
+        assert_eq!(value["model"], "codexhub-openai/gpt-5.5-fast");
+        assert_eq!(value["small_model"], "codexhub-openai/gpt-5.5-fast");
+        assert!(openai_models.contains_key("gpt-5.5"));
+        assert!(openai_models.contains_key("gpt-5.5-fast"));
+    }
+
+    #[test]
     fn pi_config_exports_all_active_gateway_models() {
         let root = unique_temp_dir("codexhub-pi-export");
         let settings_path = root.join("settings.json");
@@ -5898,6 +5918,8 @@ mod tests {
             Some("openai-completions")
         );
         assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
+        assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5-fast"));
+        assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.4-fast"));
         assert!(minimax_models
             .iter()
             .any(|model| model["id"] == "minimax-m3"));
@@ -5963,6 +5985,8 @@ mod tests {
         assert!(text.contains("codexhub-openai:"));
         assert!(text.contains("api: openai-responses"));
         assert!(text.contains("id: gpt-5.5"));
+        assert!(text.contains("id: gpt-5.5-fast"));
+        assert!(text.contains("id: gpt-5.4-fast"));
         assert!(text.contains("codexhub-minimax:"));
         assert!(text.contains("api: openai-completions"));
         assert!(text.contains("id: minimax-m3"));
@@ -6869,6 +6893,8 @@ mod tests {
         assert!(models.contains("api: openai-responses"));
         assert!(models.contains("apiKey: codexhub-proxy"));
         assert!(models.contains("id: gpt-5.5"));
+        assert!(models.contains("id: gpt-5.5-fast"));
+        assert!(models.contains("id: gpt-5.4-fast"));
     }
 
     #[test]
@@ -7034,9 +7060,18 @@ mod tests {
         assert!(v2_config
             .pointer("/provider/codexhub-openai/models/gpt-5.5")
             .is_some());
+        assert!(v2_config
+            .pointer("/provider/codexhub-openai/models/gpt-5.5-fast")
+            .is_some());
+        assert!(v2_config
+            .pointer("/provider/codexhub-openai/models/gpt-5.4-fast")
+            .is_some());
         let v2_cache: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&v2_cache_path).unwrap()).unwrap();
         let cache_provider = v2_cache.pointer("/providers/0").unwrap();
+        let cache_models = cache_provider["models"].as_array().unwrap();
+        assert!(cache_models.iter().any(|model| model["id"] == "gpt-5.5-fast"));
+        assert!(cache_models.iter().any(|model| model["id"] == "gpt-5.4-fast"));
         assert_eq!(
             cache_provider
                 .pointer("/endpoints/baseURL")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import gzip
 import hashlib
 import io
@@ -24,10 +25,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
 from urllib.request import Request, urlopen
 
-from catalog import canonical_model_id, deny_match_model_id, load_catalog_models, load_policy, should_include_model
+from catalog import (
+    canonical_model_id,
+    deny_match_model_id,
+    load_catalog_models,
+    load_policy,
+    should_include_external_provider_model,
+    should_include_model,
+)
 from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
-from providers_config import resolve_external_model_alias
+from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
 from subagent_state import build_subagent_state, state_guidance_message
 import proxy_telemetry
 
@@ -80,6 +88,15 @@ PROXY_FEATURES = [
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
+OFFICIAL_FAST_VARIANT_SERVICE_TIER = "priority"
+OFFICIAL_FAST_VARIANT_BASE_MODELS = {
+    "gpt-5.5-fast": "gpt-5.5",
+    "gpt-5.4-fast": "gpt-5.4",
+}
+OFFICIAL_FAST_VARIANT_DISPLAY_NAMES = {
+    "gpt-5.5-fast": "OpenAI GPT-5.5 Fast",
+    "gpt-5.4-fast": "OpenAI GPT-5.4 Fast",
+}
 OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
 UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6",)
 UPSTREAM_MAX_OUTPUT_TOKEN_CAPS = {
@@ -738,6 +755,19 @@ def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
     return None
 
 
+def official_fast_variant_upstream_model(slug: str, policy: Any) -> str | None:
+    fast_model = slug[len(OFFICIAL_ALIAS_PREFIX) :] if slug.startswith(OFFICIAL_ALIAS_PREFIX) else slug
+    upstream_model = OFFICIAL_FAST_VARIANT_BASE_MODELS.get(fast_model)
+    if upstream_model is None:
+        return None
+    upstream_alias = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
+    if policy_denies_any_model((slug, fast_model, upstream_model, upstream_alias), policy):
+        raise ValueError(f"model is not allowed: {slug}")
+    if upstream_model.startswith(official_prefixes()) and should_include_model(upstream_model, policy):
+        return upstream_model
+    return None
+
+
 OLLAMA_CLOUD_ALIAS_PREFIX = "ollama-cloud/"
 
 
@@ -769,7 +799,35 @@ def provider_scoped_route_model(model_id: str | None, provider_hint: str | None)
     return f"{provider}/{slug}"
 
 
-def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> str | None:
+def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] | None:
+    configured, runtime_model = resolve_ollama_cloud_model(model_id, require_api_key=False)
+    if not configured:
+        return None
+    slug = canonical_model_id(model_id)
+    if runtime_model is None:
+        raise ValueError(f"model is not allowed: {slug}")
+
+    policy_alias = runtime_model.get("alias", f"{OLLAMA_CLOUD_ALIAS_PREFIX}{slug}")
+    upstream_model = runtime_model.get("upstream_model", slug)
+    if policy_denies_any_model((slug, policy_alias, upstream_model), policy):
+        raise ValueError(f"model is not allowed: {slug}")
+
+    api_key = runtime_model.get("api_key")
+    upstream: dict[str, Any] = {
+        "name": "ollama_cloud",
+        "base_url": runtime_model.get("base_url") or ollama_cloud_base_url(),
+        "auth": "api_key" if api_key else "ollama_api_key",
+        "upstream_model": upstream_model,
+        "upstream_format": runtime_model.get("upstream_format", "responses"),
+        "tool_protocol": runtime_model.get("tool_protocol", "auto"),
+        "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
+    }
+    if api_key:
+        upstream["api_key"] = api_key
+    return upstream
+
+
+def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] | None:
     if not slug.startswith(OLLAMA_CLOUD_ALIAS_PREFIX):
         return None
     upstream_model = slug[len(OLLAMA_CLOUD_ALIAS_PREFIX) :]
@@ -777,11 +835,21 @@ def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> str | None:
         return None
     if policy_denies_any_model((slug, upstream_model), policy):
         raise ValueError(f"model is not allowed: {slug}")
+
+    runtime_upstream = ollama_cloud_runtime_upstream(slug, policy)
+    if runtime_upstream is not None:
+        return runtime_upstream
+
     if not (should_include_model(slug, policy) or should_include_model(upstream_model, policy)):
         raise ValueError(f"model is not allowed: {slug}")
     if upstream_model not in generated_catalog_slugs():
         raise ValueError(f"model is not in the generated cloud catalog: {upstream_model}")
-    return upstream_model
+    return {
+        "name": "ollama_cloud",
+        "base_url": ollama_cloud_base_url(),
+        "auth": "ollama_api_key",
+        "upstream_model": upstream_model,
+    }
 
 
 def choose_upstream(model_id: str) -> dict[str, Any]:
@@ -790,6 +858,16 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
         raise ValueError("model is required")
 
     policy = load_policy(POLICY_PATH)
+    official_fast_variant = official_fast_variant_upstream_model(slug, policy)
+    if official_fast_variant is not None:
+        return {
+            "name": "official",
+            "base_url": official_base_url(),
+            "auth": "codex_auth",
+            "upstream_model": official_fast_variant,
+            "service_tier": OFFICIAL_FAST_VARIANT_SERVICE_TIER,
+        }
+
     official_alias = official_alias_upstream_model(slug, policy)
     if official_alias is not None:
         return {
@@ -801,12 +879,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
 
     ollama_alias = ollama_cloud_alias_upstream_model(slug, policy)
     if ollama_alias is not None:
-        return {
-            "name": "ollama_cloud",
-            "base_url": ollama_cloud_base_url(),
-            "auth": "ollama_api_key",
-            "upstream_model": ollama_alias,
-        }
+        return ollama_alias
 
     if slug.startswith(official_prefixes()):
         if not should_include_model(slug, policy):
@@ -822,7 +895,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
         policy_alias = external_model.get("alias", slug)
         if policy_denies_any_model((slug, policy_alias, external_model.get("matched_alias")), policy):
             raise ValueError(f"model is not allowed: {slug}")
-        if not should_include_model(policy_alias, policy):
+        if not should_include_external_provider_model(policy_alias, policy):
             raise ValueError(f"model is not allowed: {slug}")
         return {
             "name": external_model["upstream_name"],
@@ -837,6 +910,10 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
 
     if "/" in slug:
         raise ValueError(f"external provider model is not configured: {slug}")
+
+    runtime_ollama = ollama_cloud_runtime_upstream(slug, policy)
+    if runtime_ollama is not None:
+        return runtime_ollama
 
     if not should_include_model(slug, policy):
         raise ValueError(f"model is not allowed: {slug}")
@@ -1119,6 +1196,14 @@ def _sse_event_separator_after_line(line: bytes) -> bytes:
     if line.endswith(line_ending):
         return line_ending
     return line_ending + line_ending
+
+
+def _is_sse_blank_line(line: bytes) -> bool:
+    return line in {b"\n", b"\r\n", b"\r"}
+
+
+def _is_sse_event_metadata_line(line: bytes) -> bool:
+    return line.startswith((b"event:", b"id:", b"retry:"))
 
 
 def _sse_payload_bytes(line: bytes) -> bytes | None:
@@ -1992,6 +2077,20 @@ def _chat_messages_to_responses_input(messages: Any) -> tuple[str | None, list[d
 
     instructions = "\n\n".join(instructions_parts) if instructions_parts else None
     return instructions, input_items
+
+
+def _normalize_responses_string_input(payload: dict[str, Any]) -> bool:
+    value = payload.get("input")
+    if not isinstance(value, str):
+        return False
+    payload["input"] = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": value}],
+        }
+    ]
+    return True
 
 
 def _chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
@@ -4159,6 +4258,8 @@ def compatible_request_body(
     requested_model = payload.get("model")
     if upstream_name == "official":
         changed = _sanitize_official_reasoning_items(payload)
+        if _normalize_responses_string_input(payload):
+            changed = True
         if _sanitize_official_system_messages(payload):
             changed = True
         if _sanitize_official_invalid_tool_calls(payload):
@@ -4167,6 +4268,10 @@ def compatible_request_body(
             changed = True
         if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
             payload["model"] = upstream_model
+            changed = True
+        service_tier = upstream.get("service_tier")
+        if isinstance(service_tier, str) and service_tier and payload.get("service_tier") != service_tier:
+            payload["service_tier"] = service_tier
             changed = True
         # The chatgpt.com/backend-api/codex endpoint requires store=false,
         # forces streaming, and rejects max_output_tokens. Inject/fix these
@@ -4665,7 +4770,45 @@ def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
-    return json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+    return catalog_with_official_fast_variants(
+        json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+    )
+
+
+def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, Any]:
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return catalog
+
+    by_slug = {
+        canonical_model_id(str(model.get("slug", ""))): model
+        for model in models
+        if isinstance(model, Mapping)
+    }
+    for fast_model, upstream_model in OFFICIAL_FAST_VARIANT_BASE_MODELS.items():
+        base_slug = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
+        fast_slug = f"{OFFICIAL_ALIAS_PREFIX}{fast_model}"
+        base_model = by_slug.get(base_slug)
+        if not isinstance(base_model, Mapping) or fast_slug in by_slug:
+            continue
+        fast_entry = deepcopy(dict(base_model))
+        fast_entry["slug"] = fast_slug
+        fast_entry["display_name"] = OFFICIAL_FAST_VARIANT_DISPLAY_NAMES.get(
+            fast_model,
+            f"{base_model.get('display_name', upstream_model)} Fast",
+        )
+        metadata = dict(fast_entry.get("codex_proxy_metadata", {}))
+        metadata.update(
+            {
+                "provider": "openai",
+                "upstream_model": upstream_model,
+                "service_tier": OFFICIAL_FAST_VARIANT_SERVICE_TIER,
+            }
+        )
+        fast_entry["codex_proxy_metadata"] = metadata
+        models.append(fast_entry)
+        by_slug[fast_slug] = fast_entry
+    return catalog
 
 
 def _json_response_bytes(payload: dict[str, Any]) -> bytes:
@@ -6962,6 +7105,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             saw_response_event = False
             saw_terminal_event = False
             downstream_output_started = False
+            pending_sse_event_metadata: list[bytes] = []
+            drop_next_sse_separator = False
             try:
                 for line in self._iter_upstream_sse_lines(
                     response,
@@ -6969,6 +7114,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 ):
                     if not line:
                         break
+                    if upstream_name != "official" and _is_sse_blank_line(line):
+                        if drop_next_sse_separator:
+                            drop_next_sse_separator = False
+                            pending_sse_event_metadata = []
+                            continue
+                        if pending_sse_event_metadata:
+                            pending_sse_event_metadata = []
+                            continue
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                        continue
+                    if upstream_name != "official" and _is_sse_event_metadata_line(line):
+                        pending_sse_event_metadata.append(line)
+                        continue
                     original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     usage_payload = _parse_sse_json_payload(line)
                     if isinstance(usage_payload, Mapping):
@@ -6984,6 +7143,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
 
+                    if not line and upstream_name != "official":
+                        pending_sse_event_metadata = []
+                        drop_next_sse_separator = True
+                        continue
+
+                    if pending_sse_event_metadata:
+                        for metadata_line in pending_sse_event_metadata:
+                            self.wfile.write(metadata_line)
+                        pending_sse_event_metadata = []
                     self.wfile.write(line)
                     if saw_terminal_event:
                         separator = _sse_event_separator_after_line(line)

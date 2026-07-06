@@ -72,6 +72,22 @@ def should_include_model(model_id: str, policy: CatalogPolicy) -> bool:
     return policy.auto_include_ollama_cloud
 
 
+def should_include_external_provider_model(model_id: str, policy: CatalogPolicy) -> bool:
+    slug = canonical_model_id(model_id)
+    if not slug:
+        return False
+    lowered = slug.lower()
+    deny_candidates = {slug, deny_match_model_id(slug)}
+    if "/" in slug:
+        _provider, _separator, provider_model_id = slug.partition("/")
+        if provider_model_id:
+            deny_candidates.add(provider_model_id)
+            deny_candidates.add(deny_match_model_id(provider_model_id))
+    if any(candidate in policy.denied_models for candidate in deny_candidates):
+        return False
+    return not any(part in lowered for part in policy.denied_substrings)
+
+
 def display_name_for(model_id: str, policy: CatalogPolicy) -> str:
     slug = canonical_model_id(model_id)
     if slug in policy.display_names:

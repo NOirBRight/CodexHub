@@ -39,6 +39,7 @@ def runtime_providers_path() -> Path:
 OFFICIAL_OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
 ENV_PLACEHOLDER_RE = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
+    "ollama-cloud": "ollama_cloud",
     "minimax-cn": "minimax_cn",
     "volc": "volcengine",
 }
@@ -234,6 +235,100 @@ def catalog_visible_external_models(
         for entry in build_external_model_index(providers, require_api_key=require_api_key).values()
         if "matched_alias" not in entry
     ]
+
+
+def build_ollama_cloud_model_index(
+    providers: Iterable[ProviderConfig],
+    *,
+    require_api_key: bool = True,
+) -> tuple[bool, dict[str, dict[str, Any]]]:
+    result: dict[str, dict[str, Any]] = {}
+    configured = False
+    for provider in providers:
+        provider_id = canonical_model_id(provider.id)
+        if provider_id != "ollama-cloud":
+            continue
+        configured = True
+        if not provider.enabled:
+            continue
+
+        base_url = provider.base_url.strip()
+        if not base_url:
+            continue
+
+        api_key = provider.resolved_api_key()
+        if require_api_key and not api_key:
+            continue
+
+        for model in provider.models:
+            if not model.enabled or not model.gateway_exported:
+                continue
+
+            model_id = canonical_model_id(model.id)
+            if not model_id:
+                continue
+
+            qualified_alias = canonical_model_id(f"{provider_id}/{model_id}")
+            entry = {
+                "alias": qualified_alias,
+                "provider_alias": provider_id,
+                "upstream_name": EXTERNAL_PROVIDER_UPSTREAM_NAMES[provider_id],
+                "display_prefix": provider.display_prefix or provider.name,
+                "base_url": base_url,
+                "api_key": api_key,
+                "upstream_format": provider.upstream_format,
+                "tool_protocol": provider.tool_protocol,
+                "upstream_model": _upstream_model_name(model),
+                "context_window": model.context_window,
+                "max_output_tokens": model.max_output_tokens,
+                "input_modalities": model.input_modalities or ("text",),
+                "supported_reasoning_levels": model.supported_reasoning_levels,
+                "default_reasoning_level": model.default_reasoning_level,
+                "context_source": "providers_toml",
+                "max_output_source": "providers_toml",
+                "priority_base": _provider_priority_base(provider),
+            }
+            result[model_id] = entry
+            result[qualified_alias] = entry
+            for model_alias in model.aliases:
+                alias_id = canonical_model_id(model_alias)
+                if not alias_id:
+                    continue
+                result.setdefault(alias_id, entry)
+                result.setdefault(canonical_model_id(f"{provider_id}/{alias_id}"), entry)
+    return configured, result
+
+
+def catalog_visible_ollama_cloud_models(
+    providers: Iterable[ProviderConfig],
+    *,
+    require_api_key: bool = True,
+) -> tuple[bool, list[dict[str, Any]]]:
+    configured, index = build_ollama_cloud_model_index(providers, require_api_key=require_api_key)
+    seen_aliases: set[str] = set()
+    models: list[dict[str, Any]] = []
+    for entry in index.values():
+        alias = str(entry.get("alias", ""))
+        if not alias or alias in seen_aliases:
+            continue
+        seen_aliases.add(alias)
+        models.append(entry)
+    return configured, models
+
+
+def resolve_ollama_cloud_model(
+    model_id: str,
+    providers_path: Path | None = None,
+    *,
+    require_api_key: bool = True,
+) -> tuple[bool, dict[str, Any] | None]:
+    if providers_path is None:
+        providers_path = runtime_providers_path()
+    configured, index = build_ollama_cloud_model_index(
+        load_providers(providers_path),
+        require_api_key=require_api_key,
+    )
+    return configured, index.get(canonical_model_id(model_id))
 
 
 def resolve_external_model_alias(

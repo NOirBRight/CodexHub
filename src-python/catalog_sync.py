@@ -11,8 +11,22 @@ from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from catalog import CatalogPolicy, canonical_model_id, display_name_for, load_catalog_models, load_policy, should_include_model
-from providers_config import DEFAULT_PROVIDERS_PATH, catalog_visible_external_models, load_providers, runtime_providers_path
+from catalog import (
+    CatalogPolicy,
+    canonical_model_id,
+    display_name_for,
+    load_catalog_models,
+    load_policy,
+    should_include_external_provider_model,
+    should_include_model,
+)
+from providers_config import (
+    DEFAULT_PROVIDERS_PATH,
+    catalog_visible_external_models,
+    catalog_visible_ollama_cloud_models,
+    load_providers,
+    runtime_providers_path,
+)
 
 
 PROXY_DIR = Path(__file__).resolve().parent
@@ -434,6 +448,44 @@ def ordered_ollama_candidates(model_ids: Iterable[str], policy: CatalogPolicy) -
     return [slug for slug in policy.allowed_ollama_cloud_models if slug in discovered_slugs]
 
 
+def runtime_ollama_candidates(model_ids: Iterable[str], policy: CatalogPolicy) -> list[str]:
+    result: list[str] = []
+    for slug in dedupe_canonical_model_ids(model_ids):
+        if not should_include_external_provider_model(slug, policy):
+            continue
+        if not should_include_external_provider_model(f"ollama-cloud/{slug}", policy):
+            continue
+        result.append(slug)
+    return result
+
+
+def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for model in ollama_models:
+        slug = canonical_model_id(str(model.get("upstream_model") or model.get("alias", "")))
+        if not slug:
+            continue
+
+        entry: dict[str, Any] = {}
+        context_window = model.get("context_window")
+        if isinstance(context_window, int) and context_window > 0:
+            entry["context_window"] = context_window
+            entry["context_source"] = "providers_toml"
+
+        max_output_tokens = model.get("max_output_tokens")
+        if isinstance(max_output_tokens, int) and max_output_tokens > 0:
+            entry["max_output_tokens"] = max_output_tokens
+            entry["max_output_source"] = "providers_toml"
+
+        input_modalities = model.get("input_modalities")
+        if isinstance(input_modalities, (list, tuple)) and input_modalities:
+            entry["input_modalities"] = [str(value) for value in input_modalities if str(value)]
+
+        if entry:
+            metadata[slug] = entry
+    return metadata
+
+
 def fallback_model_index(fallback_models: Iterable[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for model in fallback_models or []:
@@ -569,14 +621,34 @@ def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: 
     if isinstance(max_output_tokens, int) and max_output_tokens > 0:
         model["max_output_tokens"] = max_output_tokens
 
+    dynamic_max_output_tokens = dynamic_metadata.get("max_output_tokens")
+    if isinstance(dynamic_max_output_tokens, int) and dynamic_max_output_tokens > 0:
+        model["max_output_tokens"] = dynamic_max_output_tokens
+
+    input_modalities = dynamic_metadata.get("input_modalities")
+    if isinstance(input_modalities, list) and input_modalities:
+        model["input_modalities"] = [str(value) for value in input_modalities if str(value)]
+    else:
+        capabilities = dynamic_metadata.get("capabilities")
+        if isinstance(capabilities, list):
+            model["input_modalities"] = ["text", "image"] if "vision" in capabilities else ["text"]
+
+    max_output_source = dynamic_metadata.get("max_output_source")
+    if isinstance(max_output_source, str) and max_output_source:
+        proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
+        proxy_metadata["max_output_source"] = max_output_source
+        model["codex_proxy_metadata"] = proxy_metadata
+
     capabilities = dynamic_metadata.get("capabilities")
-    if isinstance(capabilities, list):
+    if isinstance(capabilities, list) and "input_modalities" not in dynamic_metadata:
         model["input_modalities"] = ["text", "image"] if "vision" in capabilities else ["text"]
 
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     if context_source:
         proxy_metadata["context_source"] = context_source
-    if static_limits.get("max_output_source"):
+    if isinstance(max_output_source, str) and max_output_source:
+        proxy_metadata["max_output_source"] = max_output_source
+    elif static_limits.get("max_output_source"):
         proxy_metadata["max_output_source"] = static_limits["max_output_source"]
     if proxy_metadata:
         model["codex_proxy_metadata"] = proxy_metadata
@@ -660,6 +732,7 @@ def build_codex_catalog(
     external_models: Iterable[dict[str, Any]] | None = None,
     official_model_sort_order: Iterable[str] | None = None,
     disabled_official_model_ids: Iterable[str] | None = None,
+    use_ollama_policy_allowlist: bool = True,
     fetched_at: str | None = None,
 ) -> dict[str, Any]:
     models: list[dict[str, Any]] = []
@@ -688,8 +761,13 @@ def build_codex_catalog(
     fallback_by_slug = fallback_model_index(fallback_list)
     fallback_template = fallback_list[0] if fallback_list else None
 
-    for priority_offset, raw_id in enumerate(ordered_ollama_candidates(ollama_ids, policy)):
-        if not should_include_model(str(raw_id), policy):
+    ollama_candidates = (
+        ordered_ollama_candidates(ollama_ids, policy)
+        if use_ollama_policy_allowlist
+        else runtime_ollama_candidates(ollama_ids, policy)
+    )
+    for priority_offset, raw_id in enumerate(ollama_candidates):
+        if use_ollama_policy_allowlist and not should_include_model(str(raw_id), policy):
             continue
         slug = canonical_model_id(str(raw_id))
         if not slug or slug in seen_slugs:
@@ -701,7 +779,7 @@ def build_codex_catalog(
 
     for priority_offset, external_model in enumerate(external_models or []):
         slug = canonical_model_id(str(external_model.get("alias", "")))
-        if not slug or not should_include_model(slug, policy):
+        if not slug or not should_include_external_provider_model(slug, policy):
             continue
         if slug in seen_slugs:
             continue
@@ -815,18 +893,33 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
     discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
     providers = load_providers()
+    ollama_runtime_configured, runtime_ollama_models = catalog_visible_ollama_cloud_models(
+        providers,
+        require_api_key=False,
+    )
+    ollama_catalog_ids = (
+        [str(model["upstream_model"]) for model in runtime_ollama_models]
+        if ollama_runtime_configured
+        else discovered_ids
+    )
     external_models = catalog_visible_external_models(providers, require_api_key=False)
     discovered_slugs = dedupe_canonical_model_ids(discovered_ids)
-    visible_ollama_slugs = [
-        canonical_model_id(str(slug))
-        for slug in ordered_ollama_candidates(discovered_ids, policy)
-        if should_include_model(str(slug), policy)
-    ]
+    visible_ollama_slugs = (
+        runtime_ollama_candidates(ollama_catalog_ids, policy)
+        if ollama_runtime_configured
+        else [
+            canonical_model_id(str(slug))
+            for slug in ordered_ollama_candidates(discovered_ids, policy)
+            if should_include_model(str(slug), policy)
+        ]
+    )
     ollama_model_metadata, metadata_detail = discover_ollama_model_metadata(visible_ollama_slugs)
+    if ollama_runtime_configured:
+        ollama_model_metadata.update(ollama_provider_model_metadata(runtime_ollama_models))
 
     catalog = build_codex_catalog(
         official_models,
-        discovered_ids,
+        ollama_catalog_ids,
         policy,
         client_version,
         fallback_models=fallback_models,
@@ -834,6 +927,7 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         external_models=external_models,
         official_model_sort_order=official_model_sort_order,
         disabled_official_model_ids=disabled_official_models,
+        use_ollama_policy_allowlist=not ollama_runtime_configured,
     )
     visible_slugs = [str(model["slug"]) for model in catalog["models"] if model.get("slug")]
     previous_visible_slugs = load_previous_visible_models(GENERATED_STATE_PATH)

@@ -113,6 +113,43 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["deepseek-v4-flash"]["context_window"], 1048576)
         self.assertEqual(by_slug["deepseek-v4-flash"]["max_output_tokens"], 393216)
 
+    def test_build_catalog_runtime_ollama_models_use_provider_settings_instead_of_static_allowlist(self):
+        policy = CatalogPolicy(
+            denied_models={"blocked-model", "ollama-cloud/provider-blocked"},
+            denied_substrings={"embedding"},
+            display_names={},
+            official_models=(),
+            allowed_ollama_cloud_models=("glm-5.2",),
+        )
+
+        metadata = catalog_sync.ollama_provider_model_metadata(
+            [
+                {
+                    "upstream_model": "runtime-model",
+                    "context_window": 123000,
+                    "max_output_tokens": 456,
+                    "input_modalities": ("text", "image"),
+                }
+            ]
+        )
+        catalog = build_codex_catalog(
+            [],
+            ["runtime-model", "blocked-model", "provider-blocked"],
+            policy,
+            "0.142.0",
+            ollama_model_metadata=metadata,
+            use_ollama_policy_allowlist=False,
+        )
+        slugs = [model["slug"] for model in catalog["models"]]
+
+        self.assertEqual(slugs, ["runtime-model"])
+        model = catalog["models"][0]
+        self.assertEqual(model["context_window"], 123000)
+        self.assertEqual(model["max_output_tokens"], 456)
+        self.assertEqual(model["input_modalities"], ["text", "image"])
+        self.assertEqual(model["codex_proxy_metadata"]["context_source"], "providers_toml")
+        self.assertEqual(model["codex_proxy_metadata"]["max_output_source"], "providers_toml")
+
     def test_build_catalog_applies_official_model_sort_order(self):
         official = [
             {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list"},

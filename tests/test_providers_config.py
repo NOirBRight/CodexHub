@@ -11,10 +11,13 @@ from providers_config import (
     ModelConfig,
     ProviderConfig,
     build_external_model_index,
+    build_ollama_cloud_model_index,
+    catalog_visible_ollama_cloud_models,
     discover_official_models,
     discover_provider_models,
     load_providers,
     resolve_external_model_alias,
+    resolve_ollama_cloud_model,
     save_providers,
 )
 
@@ -542,6 +545,73 @@ hidden = true
         ]
 
         self.assertEqual(build_external_model_index(providers), {})
+
+    def test_ollama_cloud_runtime_index_uses_enabled_gateway_exported_models(self):
+        providers = [
+            ProviderConfig(
+                id="ollama-cloud",
+                name="Ollama Cloud",
+                base_url="https://ollama.example.test/v1",
+                api_key="ollama-secret",
+                upstream_format="responses",
+                models=[
+                    ModelConfig(
+                        id="runtime-model",
+                        aliases=("runtime-alias",),
+                        context_window=123000,
+                        max_output_tokens=456,
+                    ),
+                    ModelConfig(id="disabled-model", enabled=False),
+                    ModelConfig(id="hidden-model", gateway_exported=False),
+                ],
+            )
+        ]
+
+        configured, index = build_ollama_cloud_model_index(providers)
+        visible_configured, visible_models = catalog_visible_ollama_cloud_models(providers)
+
+        self.assertTrue(configured)
+        self.assertTrue(visible_configured)
+        self.assertEqual(sorted(index), ["ollama-cloud/runtime-alias", "ollama-cloud/runtime-model", "runtime-alias", "runtime-model"])
+        self.assertEqual([model["alias"] for model in visible_models], ["ollama-cloud/runtime-model"])
+        self.assertEqual(index["runtime-model"]["upstream_name"], "ollama_cloud")
+        self.assertEqual(index["runtime-alias"]["upstream_model"], "runtime-model")
+        self.assertEqual(index["runtime-model"]["context_window"], 123000)
+        self.assertEqual(index["runtime-model"]["max_output_tokens"], 456)
+
+    def test_resolve_ollama_cloud_model_reports_configured_disabled_and_unknown_models(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+enabled = true
+
+  [[providers.models]]
+  id = "runtime-model"
+  enabled = true
+
+  [[providers.models]]
+  id = "disabled-model"
+  enabled = false
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            configured, resolved = resolve_ollama_cloud_model("ollama-cloud/runtime-model", providers_path=path)
+            disabled_configured, disabled = resolve_ollama_cloud_model("disabled-model", providers_path=path)
+            unknown_configured, unknown = resolve_ollama_cloud_model("unknown-model", providers_path=path)
+
+        self.assertTrue(configured)
+        self.assertEqual(resolved["upstream_model"], "runtime-model")
+        self.assertTrue(disabled_configured)
+        self.assertIsNone(disabled)
+        self.assertTrue(unknown_configured)
+        self.assertIsNone(unknown)
 
     def test_resolve_external_model_alias_uses_canonical_aliases_and_returns_none_for_unknown_or_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
