@@ -52,7 +52,7 @@ class FakeHandler:
         self.close_connection = False
         self.wfile = FakeWFile()
 
-    def send_response(self, status):
+    def send_response(self, status, message=None):
         self.status = status
 
     def send_header(self, key, value):
@@ -167,6 +167,51 @@ class FakeContextResponse(FakeResponse):
         return None
 
 
+class TimeoutAfterBytes:
+    def __init__(self, data: bytes):
+        self.stream = io.BytesIO(data)
+
+    def read(self, size=-1):
+        chunk = self.stream.read(size)
+        if chunk:
+            return chunk
+        raise TimeoutError("idle websocket probe")
+
+
+def masked_client_ws_frame(payload: bytes, *, opcode: int = 0x1, mask: bytes = b"\x05\x06\x07\x08") -> bytes:
+    if len(payload) > 65535:
+        raise ValueError("test helper only supports 16-bit websocket frames")
+    if len(payload) <= 125:
+        length_bytes = bytes([0x80 | len(payload)])
+    else:
+        length_bytes = b"\xfe" + len(payload).to_bytes(2, "big")
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return bytes([0x80 | opcode]) + length_bytes + mask + masked
+
+
+def websocket_get_handler(path: str, frame_bytes: bytes = b""):
+    handler = CodexProxyHandler.__new__(CodexProxyHandler)
+    handler.path = path
+    handler.headers = {
+        "Connection": "keep-alive, Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Protocol": "codex, realtime",
+        "Authorization": "Bearer secret-token",
+        "Cookie": "sid=secret",
+        "X-Codex-Client-Id": "codex-app",
+    }
+    handler.rfile = io.BytesIO(frame_bytes)
+    handler.close_connection = False
+    fake = FakeHandler()
+    handler.send_response = fake.send_response
+    handler.send_header = fake.send_header
+    handler.end_headers = fake.end_headers
+    handler.wfile = fake.wfile
+    return handler, fake
+
+
 class RoutingTests(unittest.TestCase):
     def setUp(self):
         self.runtime_proxy_dir = tempfile.TemporaryDirectory()
@@ -273,6 +318,339 @@ class RoutingTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(codex_proxy.gateway_auto_retry_enabled())
             self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 30)
+
+    def test_official_http_passthrough_setting_defaults_enabled_and_env_can_disable(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(codex_proxy.gateway_official_http_passthrough_enabled())
+        with patch.dict(os.environ, {"CODEX_PROXY_OFFICIAL_HTTP_PASSTHROUGH_ENABLED": "0"}, clear=True):
+            self.assertFalse(codex_proxy.gateway_official_http_passthrough_enabled())
+
+    def test_official_codex_app_responses_uses_http_passthrough_profile(self):
+        upstream = {"name": "official"}
+        context = {"client_id": "codex-app"}
+
+        self.assertEqual(
+            codex_proxy.behavior_profile_for_request(upstream, context, inbound_format="responses"),
+            codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+
+    def test_official_chat_completions_uses_gateway_compat_profile(self):
+        upstream = {"name": "official"}
+        context = {"client_id": "codex-app"}
+
+        self.assertEqual(
+            codex_proxy.behavior_profile_for_request(upstream, context, inbound_format="chat_completions"),
+            codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+        )
+
+    def test_official_unknown_client_uses_gateway_compat_profile(self):
+        upstream = {"name": "official"}
+        context = {"client_id": "unknown"}
+
+        self.assertEqual(
+            codex_proxy.behavior_profile_for_request(upstream, context, inbound_format="responses"),
+            codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+        )
+
+    def test_third_party_always_uses_external_gateway_profile(self):
+        upstream = {"name": "ollama"}
+        context = {"client_id": "codex-app"}
+
+        self.assertEqual(
+            codex_proxy.behavior_profile_for_request(upstream, context, inbound_format="responses"),
+            codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
+        )
+
+    def test_official_codex_app_compact_request_does_not_strip_tools_before_passthrough_profile(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": (
+                            "Create a detailed summary of the conversation so far. "
+                            "This is a compact summary. Do not call any tools. "
+                            "The summary should include <summary>."
+                        ),
+                    }
+                ],
+                "tools": [{"type": "function", "name": "multi_agent_v1__spawn_agent"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", return_value=FakeContextResponse(b'{"id":"resp_official","output":[]}')),
+            patch("codex_proxy._strip_tools_for_compact_payload", wraps=codex_proxy._strip_tools_for_compact_payload) as strip_tools,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        strip_tools.assert_not_called()
+
+    def test_third_party_compact_request_still_strips_tools(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": (
+                            "Create a detailed summary of the conversation so far. "
+                            "This is a compact summary. Respond with text only. "
+                            "The summary should include <summary>."
+                        ),
+                    }
+                ],
+                "tools": [{"type": "function", "name": "multi_agent_v1__spawn_agent"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        with (
+            patch("codex_proxy._open_upstream_response", return_value=FakeContextResponse(b'{"id":"resp_external","output":[]}')),
+            patch("codex_proxy._strip_tools_for_compact_payload", wraps=codex_proxy._strip_tools_for_compact_payload) as strip_tools,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        strip_tools.assert_called_once()
+
+    def test_post_request_events_include_behavior_profile_on_success(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", return_value=FakeContextResponse(b'{"id":"resp_official","output":[]}')),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
+        request_start = next(fields for event, fields in events if event == "request_start")
+        request_complete = next(fields for event, fields in events if event == "request_complete")
+        self.assertEqual(
+            request_start["behavior_profile"],
+            codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        self.assertEqual(
+            request_complete["behavior_profile"],
+            codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+
+    def test_post_request_error_includes_behavior_profile(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            400,
+            "Bad Request",
+            {"Content-Type": "application/json"},
+            io.BytesIO(b'{"error":{"type":"invalid_request_error","message":"bad request"}}'),
+        )
+
+        with patch("codex_proxy._open_upstream_response", side_effect=error):
+            CodexProxyHandler.do_POST(handler)
+
+        events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
+        request_error = next(fields for event, fields in events if event == "request_error")
+        self.assertEqual(
+            request_error["behavior_profile"],
+            codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
+        )
+
+    def test_official_http_passthrough_uses_single_open_attempt_and_no_stream_retry_deferral(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        relayed = []
+        handler._relay_upstream_response = lambda response, upstream_name, **kwargs: relayed.append(kwargs) or 200
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", return_value=FakeContextResponse(b'{"id":"resp_official","output":[]}')) as open_response,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(open_response.call_args.kwargs.get("max_attempts"), 1)
+        self.assertFalse(relayed[0]["defer_stream_errors"])
+
+    def test_official_http_passthrough_does_not_call_image_proxy(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "describe this"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "1"}, clear=False),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", return_value=FakeContextResponse(b'{"id":"resp_official","output":[]}')),
+            patch("codex_proxy.apply_image_proxy_to_responses_payload", return_value=False) as image_proxy,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        image_proxy.assert_not_called()
+
+    def test_official_http_passthrough_open_failure_does_not_emit_gateway_retry_or_notice(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        error = HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            503,
+            "Service Unavailable",
+            {"Content-Type": "application/json"},
+            io.BytesIO(b'{"error":{"type":"server_error","message":"try later"}}'),
+        )
+        success = FakeContextResponse(b'{"id":"resp_official","output":[]}')
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                    "CODEX_PROXY_DOWNSTREAM_RETRY_NOTICE_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("upstream_retry", event_names)
+        self.assertNotIn("sse_retry_notice", event_names)
 
     def test_gateway_auto_retry_settings_fall_back_to_runtime_settings_when_env_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2395,6 +2773,57 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(payload["store"])
         self.assertTrue(payload["stream"])
         self.assertNotIn("max_output_tokens", payload)
+
+    def test_official_http_passthrough_only_maps_model_service_tier_and_store(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5-fast",
+                "input": [{"role": "user", "content": "Current URL: https://example.test/page"}],
+                "tools": [{"type": "function", "name": "multi_agent_v1__spawn_agent"}],
+                "stream": False,
+                "max_output_tokens": 123,
+            }
+        ).encode("utf-8")
+        upstream = {"name": "official", "upstream_model": "gpt-5.5", "service_tier": "priority"}
+
+        transformed = compatible_request_body(
+            body,
+            upstream,
+            model_id="openai/gpt-5.5-fast",
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["model"], "gpt-5.5")
+        self.assertEqual(payload["service_tier"], "priority")
+        self.assertIs(payload["store"], False)
+        self.assertIs(payload["stream"], False)
+        self.assertEqual(payload["max_output_tokens"], 123)
+        self.assertNotIn("Codex browser context detected.", json.dumps(payload))
+        self.assertEqual(payload["tools"], [{"type": "function", "name": "multi_agent_v1__spawn_agent"}])
+
+    def test_official_gateway_compat_keeps_existing_official_mutations(self):
+        upstream = choose_upstream("gpt-5.5")
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [{"role": "user", "content": "Current URL: https://example.test/page"}],
+                "stream": False,
+                "max_output_tokens": 100,
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            upstream,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+        )
+        payload = json.loads(transformed)
+
+        self.assertIs(payload["store"], False)
+        self.assertIs(payload["stream"], True)
+        self.assertNotIn("max_output_tokens", payload)
+        self.assertIn("Codex browser context detected.", json.dumps(payload))
 
     def test_official_body_downgrades_invalid_function_call_names(self):
         upstream = choose_upstream("gpt-5.5")
@@ -5767,6 +6196,102 @@ class RoutingTests(unittest.TestCase):
             )
         )
         self.assertFalse(_is_websocket_upgrade({"Connection": "keep-alive", "Upgrade": "websocket"}))
+
+    def test_websocket_recorder_disabled_uses_existing_fast_reject(self):
+        handler, fake = websocket_get_handler("/v1/responses")
+
+        with patch.dict(os.environ, {"CODEX_PROXY_WEBSOCKET_RECORDER_ENABLED": "0"}, clear=False):
+            CodexProxyHandler.do_GET(handler)
+
+        self.assertEqual(fake.status, 405)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list]
+        self.assertEqual(event_names, ["request_start", "request_complete"])
+        request_start = self.write_proxy_event.call_args_list[0].kwargs
+        self.assertEqual(request_start["route_reason"], "local_responses_websocket_fast_reject")
+
+    def test_websocket_recorder_accepts_upgrade_and_logs_only_metadata(self):
+        payload = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"role": "user", "content": "SECRET_PROMPT"}],
+                "tools": [{"name": "shell", "arguments": "SECRET_TOOL_ARGUMENTS"}],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        handler, fake = websocket_get_handler(
+            "/v1/responses?model=openai/gpt-5.5&thread_id=thread-1",
+            masked_client_ws_frame(payload),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_PROXY_WEBSOCKET_RECORDER_ENABLED": "1",
+                "CODEX_PROXY_WEBSOCKET_RECORDER_MAX_FRAMES": "1",
+            },
+            clear=False,
+        ):
+            CodexProxyHandler.do_GET(handler)
+
+        self.assertEqual(fake.status, 101)
+        response_headers = dict(fake.headers)
+        self.assertEqual(response_headers["Upgrade"], "websocket")
+        self.assertEqual(response_headers["Connection"], "Upgrade")
+        self.assertEqual(response_headers["Sec-WebSocket-Accept"], "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+        self.assertEqual(response_headers["Sec-WebSocket-Protocol"], "codex")
+        self.assertTrue(any(write.startswith(b"\x88") for write in fake.wfile.writes))
+        self.assertTrue(handler.close_connection)
+
+        events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
+        event_names = [event for event, _fields in events]
+        self.assertEqual(event_names, ["websocket_probe_start", "websocket_probe_frame", "websocket_probe_complete"])
+        start = events[0][1]
+        frame = events[1][1]
+        complete = events[2][1]
+        self.assertEqual(start["path"], "/v1/responses")
+        self.assertEqual(start["query_keys"], ["model", "thread_id"])
+        self.assertEqual(start["selected_subprotocol"], "codex")
+        self.assertIn("authorization", start["header_names"])
+        self.assertEqual(frame["direction"], "client_to_proxy")
+        self.assertEqual(frame["opcode"], 1)
+        self.assertEqual(frame["payload_length"], len(payload))
+        self.assertTrue(frame["appears_json"])
+        self.assertEqual(frame["json_top_level_keys"], ["input", "model", "tools"])
+        self.assertEqual(complete["frames_recorded"], 1)
+
+        serialized_events = json.dumps([fields for _event, fields in events], sort_keys=True)
+        self.assertNotIn("SECRET_PROMPT", serialized_events)
+        self.assertNotIn("SECRET_TOOL_ARGUMENTS", serialized_events)
+        self.assertNotIn("secret-token", serialized_events)
+        self.assertNotIn("sid=secret", serialized_events)
+        self.assertNotIn("dGhlIHNhbXBsZSBub25jZQ==", serialized_events)
+
+    def test_websocket_recorder_completes_after_idle_timeout(self):
+        payload = json.dumps({"model": "openai/gpt-5.5"}, separators=(",", ":")).encode("utf-8")
+        handler, fake = websocket_get_handler("/v1/responses", b"")
+        handler.rfile = TimeoutAfterBytes(masked_client_ws_frame(payload))
+
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_PROXY_WEBSOCKET_RECORDER_ENABLED": "1",
+                "CODEX_PROXY_WEBSOCKET_RECORDER_MAX_FRAMES": "4",
+            },
+            clear=False,
+        ):
+            CodexProxyHandler.do_GET(handler)
+
+        self.assertEqual(fake.status, 101)
+        self.assertTrue(handler.close_connection)
+        events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
+        self.assertEqual([event for event, _fields in events], [
+            "websocket_probe_start",
+            "websocket_probe_frame",
+            "websocket_probe_complete",
+        ])
+        self.assertEqual(events[-1][1]["frames_recorded"], 1)
+        self.assertEqual(events[-1][1]["stop_reason"], "idle_timeout")
 
 
 if __name__ == "__main__":

@@ -759,6 +759,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             self.assertEqual(fields["request_kind"], "main_generation")
             self.assertEqual(fields["client_request_kind"], "turn")
             self.assertEqual(fields["turn_id"], "turn-meta")
+            self.assertEqual(fields["behavior_profile"], codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT)
 
     def test_post_chat_completions_retries_official_connect_error_before_relaying(self):
         body = json.dumps({
