@@ -1737,17 +1737,39 @@ fn gateway_client_provider_endpoint_selection(
     if provider_id == "openai" {
         return GatewayClientEndpointSelection::Responses;
     }
-    match providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .and_then(|provider| provider.upstream_format.as_ref())
-    {
+    let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) else {
+        return GatewayClientEndpointSelection::ChatCompletions;
+    };
+    match provider.upstream_format.as_ref() {
         Some(UpstreamFormat::Responses) => GatewayClientEndpointSelection::Responses,
         Some(UpstreamFormat::ChatCompletions) => GatewayClientEndpointSelection::ChatCompletions,
         Some(UpstreamFormat::AnthropicMessages) => {
             GatewayClientEndpointSelection::AnthropicMessages
         }
-        Some(UpstreamFormat::Auto) | None => GatewayClientEndpointSelection::ChatCompletions,
+        Some(UpstreamFormat::Auto) | None => provider
+            .available_upstream_formats
+            .as_ref()
+            .and_then(|formats| {
+                if formats
+                    .iter()
+                    .any(|format| matches!(format, UpstreamFormat::Responses))
+                {
+                    Some(GatewayClientEndpointSelection::Responses)
+                } else if formats
+                    .iter()
+                    .any(|format| matches!(format, UpstreamFormat::ChatCompletions))
+                {
+                    Some(GatewayClientEndpointSelection::ChatCompletions)
+                } else if formats
+                    .iter()
+                    .any(|format| matches!(format, UpstreamFormat::AnthropicMessages))
+                {
+                    Some(GatewayClientEndpointSelection::AnthropicMessages)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(GatewayClientEndpointSelection::ChatCompletions),
     }
 }
 
@@ -4752,6 +4774,9 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
         "name": model.display_name.clone(),
         "reasoning": true,
         "input": ["text", "image"],
+        "headers": {
+            "x-codex-client-id": "pi",
+        },
         "contextWindow": model.context_window,
         "maxTokens": 32768,
         "cost": {
@@ -4816,7 +4841,7 @@ fn omp_models_yml_text(
             let model_name = yaml_scalar(&gateway_model.display_name);
             let context_window = gateway_model.context_window;
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -6187,15 +6212,32 @@ mod tests {
             Some("openai-completions")
         );
         assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
+        let openai_model = openai_models
+            .iter()
+            .find(|model| model["id"] == "gpt-5.5")
+            .unwrap();
+        assert_eq!(
+            openai_model
+                .pointer("/headers/x-codex-client-id")
+                .and_then(serde_json::Value::as_str),
+            Some("pi")
+        );
         assert!(openai_models
             .iter()
             .any(|model| model["id"] == "gpt-5.5-fast"));
         assert!(openai_models
             .iter()
             .any(|model| model["id"] == "gpt-5.4-fast"));
-        assert!(minimax_models
+        let minimax_model = minimax_models
             .iter()
-            .any(|model| model["id"] == "minimax-m3"));
+            .find(|model| model["id"] == "minimax-m3")
+            .unwrap();
+        assert_eq!(
+            minimax_model
+                .pointer("/headers/x-codex-client-id")
+                .and_then(serde_json::Value::as_str),
+            Some("pi")
+        );
         assert!(!minimax_models
             .iter()
             .any(|model| model["id"] == "minimax-m3-lite"));
@@ -6258,6 +6300,7 @@ mod tests {
         assert!(text.contains("codexhub-openai:"));
         assert!(text.contains("api: openai-responses"));
         assert!(text.contains("id: gpt-5.5"));
+        assert!(text.contains("x-codex-client-id: omp"));
         assert!(text.contains("id: gpt-5.5-fast"));
         assert!(text.contains("id: gpt-5.4-fast"));
         assert!(text.contains("codexhub-minimax:"));
@@ -6351,6 +6394,70 @@ mod tests {
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/minimax/chat/completions")
+        );
+    }
+
+    #[test]
+    fn zcode_export_prefers_responses_when_provider_advertises_both_formats() {
+        let root = unique_temp_dir("codexhub-zcode-responses-preferred");
+        let settings = Settings::default();
+        let mut providers = case_sensitive_client_export_test_providers();
+        let volc = providers
+            .iter_mut()
+            .find(|provider| provider.id == "volc")
+            .unwrap();
+        volc.upstream_format = None;
+        volc.available_upstream_formats = Some(vec![
+            UpstreamFormat::Responses,
+            UpstreamFormat::ChatCompletions,
+        ]);
+
+        let catalog_text = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog_text).unwrap();
+        let catalog_provider = catalog
+            .pointer("/providers")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "codexhub-volc")
+            .unwrap();
+        assert_eq!(
+            catalog_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            catalog_provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/v1/providers/volc/responses")
+        );
+
+        let v2_text = super::zcode_v2_config_text(
+            &root.join("config.json"),
+            &settings,
+            &providers,
+            "volc/glm-5.2",
+        )
+        .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&v2_text).unwrap();
+        let v2_provider = v2.pointer("/provider/codexhub-volc").unwrap();
+        assert_eq!(
+            v2_provider.get("kind").and_then(serde_json::Value::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            v2_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            v2_provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
         );
     }
 

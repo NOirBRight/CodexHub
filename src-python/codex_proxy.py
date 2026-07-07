@@ -898,9 +898,18 @@ def _usage_observed_context(
     return context
 
 
-def _write_usage_observed_event(context: Mapping[str, Any], usage: Mapping[str, Any] | None) -> None:
+def _write_usage_observed_event(
+    context: Mapping[str, Any],
+    usage: Mapping[str, Any] | None,
+    *,
+    missing_reason: str | None = None,
+) -> None:
     if usage is None:
-        return
+        if missing_reason is None:
+            return
+        usage_fields = _normalize_usage_for_event(None, missing_reason=missing_reason)
+    else:
+        usage_fields = _normalize_usage_for_event(usage)
     write_proxy_event(
         "usage_observed",
         request_id=context.get("request_id"),
@@ -914,7 +923,16 @@ def _write_usage_observed_event(context: Mapping[str, Any], usage: Mapping[str, 
         route_mode=context.get("route_mode"),
         client_id=context.get("client_id"),
         client_inference_source=context.get("client_inference_source"),
-        **_normalize_usage_for_event(usage),
+        **usage_fields,
+    )
+
+
+def _write_usage_observed_body_event(context: Mapping[str, Any], body: bytes) -> None:
+    usage = _usage_from_json_body(body)
+    _write_usage_observed_event(
+        context,
+        usage,
+        missing_reason="upstream_missing_usage",
     )
 
 
@@ -1018,7 +1036,8 @@ def _usage_observed_worker() -> None:
         try:
             usage: Mapping[str, Any] | None = None
             if item_type == "body":
-                usage = _usage_from_json_body(payload_bytes)
+                _write_usage_observed_body_event(context, payload_bytes)
+                continue
             elif item_type == "sse":
                 payload = None
                 sse_payload_bytes = _sse_payload_bytes(payload_bytes)
@@ -3416,6 +3435,7 @@ def _events_to_responses_body(
     text_parts: list[str] = []
     current_item: dict[str, Any] | None = None
     usage: Mapping[str, Any] | None = None
+    response_payload: dict[str, Any] = {}
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -3424,6 +3444,7 @@ def _events_to_responses_body(
         if event_type == "response.created":
             resp = event.get("response")
             if isinstance(resp, Mapping):
+                response_payload.update(dict(resp))
                 response_id = resp.get("id") or response_id
                 model = resp.get("model") or model
         elif event_type == "response.output_item.added":
@@ -3447,6 +3468,7 @@ def _events_to_responses_body(
         elif event_type == "response.completed":
             resp = event.get("response")
             if isinstance(resp, Mapping):
+                response_payload.update(dict(resp))
                 response_id = resp.get("id") or response_id
                 model = resp.get("model") or model
                 usage = _usage_from_payload(resp) or usage
@@ -3463,13 +3485,14 @@ def _events_to_responses_body(
             "content": [{"type": "output_text", "text": "".join(text_parts), "annotations": []}],
         })
 
-    payload: dict[str, Any] = {
-        "id": response_id,
-        "object": "response",
-        "status": "completed",
-        "model": model,
-        "output": output,
-    }
+    payload: dict[str, Any] = dict(response_payload)
+    payload["id"] = response_id
+    payload.setdefault("object", "response")
+    payload.setdefault("status", "completed")
+    if model is not None or "model" not in payload:
+        payload["model"] = model
+    if output or not isinstance(payload.get("output"), list):
+        payload["output"] = output
     if usage is not None:
         payload["usage"] = dict(usage)
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -8850,32 +8873,60 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
         if is_event_stream:
-            try:
-                while True:
+            while True:
+                try:
                     line = response.readline()
-                    if not line:
-                        break
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "transparent_stream_closed",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    return 502
+                if not line:
+                    break
+                try:
                     self.wfile.write(line)
                     self.wfile.flush()
-                    _offer_usage_observed_sse_line(
-                        usage_context,
-                        line,
+                except OSError as exc:
+                    self.close_connection = True
+                    event_fields = dict(event_context or {})
+                    for key in (
+                        "request_id",
+                        "model",
+                        "upstream",
+                        "status",
+                        "upstream_format",
+                        "inbound_format",
+                        "error",
+                        "detail",
+                    ):
+                        event_fields.pop(key, None)
+                    write_proxy_event(
+                        "downstream_stream_closed",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=status,
                         upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                        **event_fields,
                     )
-            except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
-                self.close_connection = True
-                write_proxy_event(
-                    "transparent_stream_closed",
-                    request_id=request_id,
-                    model=model,
-                    upstream=upstream_name,
-                    status=502,
+                    return status
+                _offer_usage_observed_sse_line(
+                    usage_context,
+                    line,
                     upstream_format=upstream_format,
-                    inbound_format=inbound_format,
-                    error=type(exc).__name__,
-                    detail=safe_upstream_error_detail(exc),
                 )
-                return 502
             self.close_connection = True
             return status
 
@@ -9177,6 +9228,32 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 mark_downstream_sse_started()
 
         if is_event_stream:
+            def finish_downstream_stream_closed(exc: OSError) -> int:
+                self.close_connection = True
+                event_fields = dict(event_context or {})
+                for key in ("request_id", "model", "upstream", "status", "error", "detail"):
+                    event_fields.pop(key, None)
+                write_proxy_event(
+                    "downstream_stream_closed",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=status,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    error=type(exc).__name__,
+                    detail=safe_upstream_error_detail(exc),
+                    **event_fields,
+                )
+                _capture_usage(
+                    usage_capture,
+                    None,
+                    missing_reason="async_usage_pending"
+                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                    else "client_disconnected",
+                )
+                return status
+
             if (
                 behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
                 and want_chat_output
@@ -9362,8 +9439,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             )
                             events = converter.events_for_chunk(payload)
                         for event in events:
-                            self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
-                            self.wfile.flush()
+                            try:
+                                self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
+                                self.wfile.flush()
+                            except OSError as exc:
+                                return finish_downstream_stream_closed(exc)
                 except UpstreamStreamIdleTimeoutError as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -9425,8 +9505,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
+                try:
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except OSError as exc:
+                    return finish_downstream_stream_closed(exc)
                 self.close_connection = True
                 _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
                 return status

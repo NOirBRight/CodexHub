@@ -33,11 +33,14 @@ from codex_proxy import (
 
 
 class FakeWFile:
-    def __init__(self):
+    def __init__(self, fail_on_write=None):
         self.writes = []
         self.flush_count = 0
+        self.fail_on_write = fail_on_write
 
     def write(self, data):
+        if self.fail_on_write is not None and self.fail_on_write(data, len(self.writes)):
+            raise ConnectionResetError("socket reset")
         self.writes.append(data)
 
     def flush(self):
@@ -528,6 +531,8 @@ class RoutingTests(unittest.TestCase):
             "type": "response.completed",
             "response": {
                 "id": "resp_buffered",
+                "object": "response",
+                "created_at": 1783430000,
                 "model": "gpt-5.5",
                 "status": "completed",
                 "output": [
@@ -558,6 +563,8 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b"data:", written)
         result = json.loads(written)
         self.assertEqual(result["id"], "resp_buffered")
+        self.assertEqual(result["object"], "response")
+        self.assertEqual(result["created_at"], 1783430000)
         self.assertEqual(result["output"][0]["content"][0]["text"], "hello")
         self.assertEqual(dict(fake.headers).get("Content-Type"), "application/json")
 
@@ -1177,6 +1184,31 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["usage_source"], "upstream")
         self.assertEqual(fields["usage_input_tokens"], 2)
         self.assertEqual(fields["usage_output_tokens"], 3)
+
+    def test_usage_observed_body_without_usage_emits_terminal_missing_event(self):
+        context = {
+            "request_id": "req-body-missing-usage",
+            "model": "volc/glm-5.2",
+            "upstream": "volcengine",
+            "upstream_format": "responses",
+            "inbound_format": "responses",
+            "client_id": "zcode",
+            "client_inference_source": "user_agent",
+        }
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            codex_proxy._write_usage_observed_body_event(
+                context,
+                b'{"id":"resp_1","object":"response","output":[]}',
+            )
+
+        write_event.assert_called_once()
+        self.assertEqual(write_event.call_args.args[0], "usage_observed")
+        fields = write_event.call_args.kwargs
+        self.assertEqual(fields["request_id"], "req-body-missing-usage")
+        self.assertEqual(fields["client_id"], "zcode")
+        self.assertEqual(fields["usage_source"], "missing")
+        self.assertEqual(fields["usage_missing_reason"], "upstream_missing_usage")
 
     def test_official_http_passthrough_sse_interruption_closes_without_synthetic_error(self):
         fake = FakeHandler()
@@ -4495,6 +4527,78 @@ class RoutingTests(unittest.TestCase):
         output = completed["response"]["output"][0]
         self.assertEqual(output["type"], "message")
         self.assertEqual(output["content"][0]["text"], "hello")
+
+    def test_transparent_chat_to_responses_stream_treats_done_write_reset_as_downstream_close(self):
+        handler = FakeHandler()
+        handler.wfile = FakeWFile(
+            fail_on_write=lambda data, _index: data == b"data: [DONE]\n\n"
+        )
+        chunks = [
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_done_reset",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context={"client_id": "omp", "client_inference_source": "header"},
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("upstream_stream_interrupted", event_names)
+        downstream_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(downstream_event["client_id"], "omp")
+
+    def test_transparent_chat_passthrough_stream_treats_done_write_reset_as_downstream_close(self):
+        handler = FakeHandler()
+        handler.wfile = FakeWFile(
+            fail_on_write=lambda data, _index: data.startswith(b"data: [DONE]")
+        )
+        chunks = [
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_transparent_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_chat_passthrough_done_reset",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            event_context={"client_id": "omp", "client_inference_source": "header"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("transparent_stream_closed", event_names)
+        downstream_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(downstream_event["client_id"], "omp")
 
     def test_responses_sse_passthrough_without_terminal_writes_sse_error(self):
         handler = FakeHandler()
