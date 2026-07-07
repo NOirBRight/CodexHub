@@ -60,9 +60,11 @@ WorkflowNode:
   prompt
   dependencies
   assigned_agent_id
-  status
   metadata
+  terminal
 ```
+
+Node status is derived from `ProtocolState`; Level 3 does not persist a second workflow status field.
 
 Level 3 needs three additions to the current static scheduler:
 
@@ -152,7 +154,7 @@ Scheduler tests:
 - Runtime `append_node` rejects missing dependencies unless marked external.
 - Assigned nodes are not returned as ready again.
 - Multiple ready nodes produce multiple legal spawn actions.
-- Protocol wait/close actions take precedence for assigned open nodes.
+- Protocol wait/close actions are returned when no unassigned ready node remains, preserving parallel spawn behavior.
 - Final action appears only when terminal dynamic nodes are complete.
 
 Gateway tests:
