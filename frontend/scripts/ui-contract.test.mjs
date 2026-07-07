@@ -770,6 +770,8 @@ test("gateway recovery panel stays compact and labels actual observed requests",
   assert.match(gatewaySource, /<span>\{t\("gateway\.recoveryColumnClient"\)\}<\/span>/);
   assert.match(gatewaySource, /<span>\{t\("gateway\.recoveryColumnProvider"\)\}<\/span>/);
   assert.match(gatewaySource, /<span>\{t\("gateway\.recoveryColumnRequest"\)\}<\/span>/);
+  assert.match(gatewaySource, /className="sticky top-0 z-10 grid grid-cols-\[86px_92px_112px_142px_70px_62px_116px_60px_minmax\(0,1fr\)\] bg-panel/);
+  assert.match(gatewaySource, /\{formatRecoveryClient\(event\.client_id\) \?\? t\("common\.unknown"\)\}/);
   assert.doesNotMatch(gatewaySource, /main_generation/);
 });
 

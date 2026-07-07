@@ -843,7 +843,7 @@ function RecoveryOverviewModal({
         ) : (
           <div className="min-h-0 overflow-auto p-3">
             <div className="min-w-[980px] overflow-hidden rounded-panel border border-line">
-              <div className="grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
+              <div className="sticky top-0 z-10 grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
                 <span>{t("gateway.recoveryColumnTime")}</span>
                 <span>{t("gateway.recoveryColumnClient")}</span>
                 <span>{t("gateway.recoveryColumnProvider")}</span>
@@ -860,8 +860,8 @@ function RecoveryOverviewModal({
                   className="grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] items-start gap-0 border-t border-line px-3 py-2 text-xs"
                 >
                   <span className="truncate tabular-nums text-slate-500">{formatEventTime(event.ts)}</span>
-                  <span className="truncate font-medium text-ink" title={event.client_id ?? ""}>
-                    {formatRecoveryClient(event.client_id) ?? "-"}
+                  <span className="truncate font-medium text-ink" title={event.client_id ?? t("common.unknown")}>
+                    {formatRecoveryClient(event.client_id) ?? t("common.unknown")}
                   </span>
                   <span className="truncate font-medium text-ink" title={recoveryProviderRaw(event)}>
                     {recoveryProviderLabel(event)}
