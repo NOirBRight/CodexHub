@@ -1246,7 +1246,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
         self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
 
-    def test_provider_scoped_chat_transparent_vision_proxy_overlay_is_disabled_by_default(self):
+    def test_provider_scoped_chat_text_only_image_guard_uses_global_image_proxy_switch(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
@@ -1317,18 +1317,23 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy._image_proxy_description_for_part", side_effect=AssertionError("vision overlay ran")),
+            patch("codex_proxy._image_proxy_description_for_part", return_value="A boundary-guard chart description."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
         request = mock_urlopen.call_args.args[0]
         sent_payload = json.loads(request.data)
-        self.assertIn(image_url, json.dumps(sent_payload))
+        encoded = json.dumps(sent_payload)
+        self.assertNotIn(image_url, encoded)
+        self.assertIn("A boundary-guard chart description.", encoded)
+        image_text = sent_payload["messages"][0]["content"][1]["text"]
+        self.assertIn('<image path="codexhub://image/', image_text)
+        self.assertIn("</image>", image_text)
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_DISABLED)
+        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
 
     def test_transparent_vision_proxy_failure_still_records_request_start(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -2842,6 +2847,96 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(first_event["codexhub_status"]["status"], "reading")
         self.assertEqual(first_event["codexhub_status"]["image_count"], 1)
         self.assertIn(b"Main response", written)
+
+    def test_zcode_provider_scoped_responses_image_proxy_follows_image_proxy_setting(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        image_url = "data:image/png;base64,e3pjb2RlLXZpc2lvbi1wcm94eX0="
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Please inspect this attachment."},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/ollama-cloud/responses")
+        handler.headers["User-Agent"] = "zcode"
+
+        vision_responses_events = [
+            b'data: {"type":"response.output_text.delta","delta":"ZCode image description."}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_vision","model":"minimax-m3","status":"completed","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+        main_upstream_body = json.dumps({
+            "id": "resp_main",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Main response", "annotations": []}],
+            }],
+        }).encode("utf-8")
+        catalog = {
+            "gpt-5.5": {"slug": "gpt-5.5"},
+            "glm-5.2": {"slug": "glm-5.2", "input_modalities": ["text"]},
+            "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "input_modalities": ["text"]},
+            "minimax-m3": {"slug": "minimax-m3", "input_modalities": ["text", "image"]},
+            "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "OLLAMA_API_KEY": "ollama-test-token",
+                        "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
+                        "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
+                    },
+                    clear=False,
+                ),
+                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
+                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "codex_proxy.load_policy",
+                    return_value=replace(
+                        policy,
+                        allowed_provider_models=policy.allowed_provider_models
+                        + ("glm-5.2", "ollama-cloud/glm-5.2", "minimax-m3", "ollama-cloud/minimax-m3"),
+                    ),
+                ),
+                patch(
+                    "codex_proxy.urlopen",
+                    side_effect=[
+                        _FakeSseResponse(vision_responses_events),
+                        _FakeJsonResponse(main_upstream_body),
+                    ],
+                ) as mock_urlopen,
+            ):
+                CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        main_request = mock_urlopen.call_args_list[1].args[0]
+        main_payload = json.loads(main_request.data)
+        encoded_main = json.dumps(main_payload)
+        self.assertIn("ZCode image description.", encoded_main)
+        self.assertNotIn(image_url, encoded_main)
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["client_id"], "zcode")
+        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
 
     def test_provider_scoped_chat_completions_image_proxy_supports_chat_completions_vision(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)

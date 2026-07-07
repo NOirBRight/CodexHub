@@ -2467,6 +2467,8 @@ class RoutingTests(unittest.TestCase):
         content = payload["input"][0]["content"]
         self.assertEqual(content[1]["type"], "input_text")
         self.assertIn("A blue chart.", content[1]["text"])
+        self.assertIn('<image path="codexhub://image/', content[1]["text"])
+        self.assertIn("</image>", content[1]["text"])
         self.assertIn("The Gateway has already read the user's attached image", content[1]["text"])
         self.assertIn("Use the visual context below as the image content", content[1]["text"])
         self.assertIn("Do not mention the Gateway, preprocessing, replacement", content[1]["text"])
@@ -2587,6 +2589,45 @@ class RoutingTests(unittest.TestCase):
                 )
 
         self.assertIn("Vision model is not configured", str(context.exception))
+
+    def test_text_only_image_boundary_guard_rejects_raw_images_when_proxy_disabled(self):
+        payload = {
+            "model": "volc/glm-5.2",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}],
+                }
+            ],
+        }
+        upstream = choose_upstream("volc/glm-5.2")
+
+        with patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "0"}, clear=False):
+            with self.assertRaises(codex_proxy.ImageProxyError) as context:
+                codex_proxy.enforce_text_only_image_boundary(
+                    payload,
+                    inbound_format="responses",
+                    target_model="volc/glm-5.2",
+                    target_upstream=upstream,
+                    event_context={"request_id": "req_img"},
+                )
+
+        self.assertIn("does not support image input", str(context.exception))
+        self.assertIn("Image Proxy is disabled", str(context.exception))
+
+    def test_image_proxy_prompt_requests_ocr_ui_and_chart_detail(self):
+        prompt = codex_proxy.IMAGE_PROXY_PROMPT
+
+        self.assertIn("visible text", prompt)
+        self.assertIn("OCR", prompt)
+        self.assertIn("UI", prompt)
+        self.assertIn("buttons", prompt)
+        self.assertIn("errors", prompt)
+        self.assertIn("charts", prompt)
+        self.assertIn("tables", prompt)
+        self.assertIn("ambiguous", prompt)
+        self.assertIn("unreadable", prompt)
 
     def test_image_proxy_vision_request_does_not_inject_codex_tools(self):
         response_body = json.dumps(
