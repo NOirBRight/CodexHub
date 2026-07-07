@@ -1832,17 +1832,39 @@ fn gateway_client_provider_endpoint_selection(
     if provider_id == "openai" {
         return GatewayClientEndpointSelection::Responses;
     }
-    match providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .and_then(|provider| provider.upstream_format.as_ref())
-    {
+    let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) else {
+        return GatewayClientEndpointSelection::ChatCompletions;
+    };
+    match provider.upstream_format.as_ref() {
         Some(UpstreamFormat::Responses) => GatewayClientEndpointSelection::Responses,
         Some(UpstreamFormat::ChatCompletions) => GatewayClientEndpointSelection::ChatCompletions,
         Some(UpstreamFormat::AnthropicMessages) => {
             GatewayClientEndpointSelection::AnthropicMessages
         }
-        Some(UpstreamFormat::Auto) | None => GatewayClientEndpointSelection::ChatCompletions,
+        Some(UpstreamFormat::Auto) | None => provider
+            .available_upstream_formats
+            .as_ref()
+            .and_then(|formats| {
+                if formats
+                    .iter()
+                    .any(|format| matches!(format, UpstreamFormat::Responses))
+                {
+                    Some(GatewayClientEndpointSelection::Responses)
+                } else if formats
+                    .iter()
+                    .any(|format| matches!(format, UpstreamFormat::ChatCompletions))
+                {
+                    Some(GatewayClientEndpointSelection::ChatCompletions)
+                } else if formats
+                    .iter()
+                    .any(|format| matches!(format, UpstreamFormat::AnthropicMessages))
+                {
+                    Some(GatewayClientEndpointSelection::AnthropicMessages)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(GatewayClientEndpointSelection::ChatCompletions),
     }
 }
 
@@ -2555,7 +2577,11 @@ fn upsert_gateway_request_from_event(
         .get("event")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if event != "request_start" && event != "request_complete" && event != "request_error" {
+    if event != "request_start"
+        && event != "request_complete"
+        && event != "request_error"
+        && event != "usage_observed"
+    {
         return Ok(());
     }
     let Some(request_id) = string_field(value, "request_id") else {
@@ -2586,6 +2612,34 @@ fn upsert_gateway_request_from_event(
     let model_requested = string_field(value, "model_requested").or_else(|| model.clone());
     let route_mode =
         string_field(value, "route_mode").or_else(|| route_mode_from_upstream(upstream.as_deref()));
+    let mut usage_source = string_field(value, "usage_source");
+    let mut usage_missing_reason = string_field(value, "usage_missing_reason");
+    if usage_source.as_deref() == Some("missing") {
+        let existing_usage_source: Option<String> = connection
+            .query_row(
+                "SELECT usage_source FROM gateway_requests WHERE request_id = ?",
+                params![request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("failed to read existing usage source: {error}"))?
+            .flatten();
+        if existing_usage_source
+            .as_deref()
+            .is_some_and(|source| source != "missing")
+        {
+            usage_source = None;
+            usage_missing_reason = None;
+        }
+    }
+    let clear_usage_missing_reason: i64 = if usage_source
+        .as_deref()
+        .is_some_and(|source| source != "missing")
+    {
+        1
+    } else {
+        0
+    };
 
     connection
         .execute(
@@ -2629,7 +2683,7 @@ fn upsert_gateway_request_from_event(
                 prefix_bytes = COALESCE(?, prefix_bytes),
                 prompt_cache_key_hash = COALESCE(?, prompt_cache_key_hash),
                 usage_source = COALESCE(?, usage_source),
-                usage_missing_reason = COALESCE(?, usage_missing_reason),
+                usage_missing_reason = CASE WHEN ? THEN NULL ELSE COALESCE(?, usage_missing_reason) END,
                 usage_input_tokens = COALESCE(?, usage_input_tokens),
                 usage_cached_input_tokens = COALESCE(?, usage_cached_input_tokens),
                 usage_output_tokens = COALESCE(?, usage_output_tokens),
@@ -2681,8 +2735,9 @@ fn upsert_gateway_request_from_event(
                 string_field(value, "request_prefix_hmac"),
                 value.get("prefix_bytes").and_then(Value::as_i64),
                 string_field(value, "prompt_cache_key_hash"),
-                string_field(value, "usage_source"),
-                string_field(value, "usage_missing_reason"),
+                usage_source,
+                clear_usage_missing_reason,
+                usage_missing_reason,
                 value.get("usage_input_tokens").and_then(Value::as_i64),
                 value
                     .get("usage_cached_input_tokens")
@@ -4836,6 +4891,9 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
         "name": model.display_name.clone(),
         "reasoning": true,
         "input": ["text", "image"],
+        "headers": {
+            "x-codex-client-id": "pi",
+        },
         "contextWindow": model.context_window,
         "maxTokens": 32768,
         "cost": {
@@ -4900,7 +4958,7 @@ fn omp_models_yml_text(
             let model_name = yaml_scalar(&gateway_model.display_name);
             let context_window = gateway_model.context_window;
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -6303,15 +6361,32 @@ mod tests {
             Some("openai-completions")
         );
         assert!(openai_models.iter().any(|model| model["id"] == "gpt-5.5"));
+        let openai_model = openai_models
+            .iter()
+            .find(|model| model["id"] == "gpt-5.5")
+            .unwrap();
+        assert_eq!(
+            openai_model
+                .pointer("/headers/x-codex-client-id")
+                .and_then(serde_json::Value::as_str),
+            Some("pi")
+        );
         assert!(openai_models
             .iter()
             .any(|model| model["id"] == "gpt-5.5-fast"));
         assert!(openai_models
             .iter()
             .any(|model| model["id"] == "gpt-5.4-fast"));
-        assert!(minimax_models
+        let minimax_model = minimax_models
             .iter()
-            .any(|model| model["id"] == "minimax-m3"));
+            .find(|model| model["id"] == "minimax-m3")
+            .unwrap();
+        assert_eq!(
+            minimax_model
+                .pointer("/headers/x-codex-client-id")
+                .and_then(serde_json::Value::as_str),
+            Some("pi")
+        );
         assert!(!minimax_models
             .iter()
             .any(|model| model["id"] == "minimax-m3-lite"));
@@ -6374,6 +6449,7 @@ mod tests {
         assert!(text.contains("codexhub-openai:"));
         assert!(text.contains("api: openai-responses"));
         assert!(text.contains("id: gpt-5.5"));
+        assert!(text.contains("x-codex-client-id: omp"));
         assert!(text.contains("id: gpt-5.5-fast"));
         assert!(text.contains("id: gpt-5.4-fast"));
         assert!(text.contains("codexhub-minimax:"));
@@ -6467,6 +6543,70 @@ mod tests {
                 .pointer("/endpoints/paths/openai-compatible")
                 .and_then(serde_json::Value::as_str),
             Some("/v1/providers/minimax/chat/completions")
+        );
+    }
+
+    #[test]
+    fn zcode_export_prefers_responses_when_provider_advertises_both_formats() {
+        let root = unique_temp_dir("codexhub-zcode-responses-preferred");
+        let settings = Settings::default();
+        let mut providers = case_sensitive_client_export_test_providers();
+        let volc = providers
+            .iter_mut()
+            .find(|provider| provider.id == "volc")
+            .unwrap();
+        volc.upstream_format = None;
+        volc.available_upstream_formats = Some(vec![
+            UpstreamFormat::Responses,
+            UpstreamFormat::ChatCompletions,
+        ]);
+
+        let catalog_text = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog_text).unwrap();
+        let catalog_provider = catalog
+            .pointer("/providers")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "codexhub-volc")
+            .unwrap();
+        assert_eq!(
+            catalog_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            catalog_provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/v1/providers/volc/responses")
+        );
+
+        let v2_text = super::zcode_v2_config_text(
+            &root.join("config.json"),
+            &settings,
+            &providers,
+            "volc/glm-5.2",
+        )
+        .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&v2_text).unwrap();
+        let v2_provider = v2.pointer("/provider/codexhub-volc").unwrap();
+        assert_eq!(
+            v2_provider.get("kind").and_then(serde_json::Value::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            v2_provider
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai-responses")
+        );
+        assert_eq!(
+            v2_provider
+                .pointer("/endpoints/paths/openai")
+                .and_then(serde_json::Value::as_str),
+            Some("/responses")
         );
     }
 
@@ -6737,6 +6877,66 @@ mod tests {
             backfill_size,
             fs::metadata(&log_path).unwrap().len().to_string()
         );
+    }
+
+    #[test]
+    fn telemetry_backfill_projects_usage_observed_into_request_usage() {
+        let root = unique_temp_dir("codexhub-usage-observed-backfill");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        fs::write(
+            &log_path,
+            [
+                r#"{"ts":"2026-07-07T01:00:00Z","event":"request_complete","request_id":"req-usage-observed-rust","status":200,"usage_source":"missing","usage_missing_reason":"async_usage_pending","upstream":"official","model":"openai/gpt-5.5"}"#,
+                r#"{"ts":"2026-07-07T01:00:01Z","event":"usage_observed","request_id":"req-usage-observed-rust","usage_source":"upstream_async","usage_input_tokens":11,"usage_cached_input_tokens":3,"usage_output_tokens":5,"usage_total_tokens":16,"upstream":"official","model":"openai/gpt-5.5"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        super::backfill_event_log_to_sqlite_path(&log_path, &db_path).unwrap();
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let row: (String, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT usage_source, usage_input_tokens, usage_cached_input_tokens, usage_output_tokens, usage_total_tokens FROM gateway_requests WHERE request_id = 'req-usage-observed-rust'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row, ("upstream_async".to_string(), 11, 3, 5, 16));
+    }
+
+    #[test]
+    fn telemetry_backfill_does_not_downgrade_prior_usage_observed() {
+        let root = unique_temp_dir("codexhub-usage-observed-before-complete");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        fs::write(
+            &log_path,
+            [
+                r#"{"ts":"2026-07-07T01:00:00Z","event":"usage_observed","request_id":"req-usage-before-complete-rust","usage_source":"upstream_async","usage_input_tokens":11,"usage_cached_input_tokens":3,"usage_output_tokens":5,"usage_total_tokens":16,"upstream":"official","model":"openai/gpt-5.5"}"#,
+                r#"{"ts":"2026-07-07T01:00:01Z","event":"request_complete","request_id":"req-usage-before-complete-rust","status":200,"usage_source":"missing","usage_missing_reason":"async_usage_pending","upstream":"official","model":"openai/gpt-5.5"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        super::backfill_event_log_to_sqlite_path(&log_path, &db_path).unwrap();
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let row: (String, Option<String>, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT usage_source, usage_missing_reason, usage_input_tokens, usage_cached_input_tokens, usage_output_tokens, usage_total_tokens FROM gateway_requests WHERE request_id = 'req-usage-before-complete-rust'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row, ("upstream_async".to_string(), None, 11, 3, 5, 16));
     }
 
     #[test]

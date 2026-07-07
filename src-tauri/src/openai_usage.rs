@@ -1339,6 +1339,34 @@ mod tests {
     }
 
     #[test]
+    fn codex_account_usage_response_read_times_out() {
+        let mut command = if cfg!(target_os = "windows") {
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 200"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 0.2"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_no_window(&mut command);
+        let mut child = command.spawn().expect("slow child process starts");
+        let stdout = child.stdout.take().expect("slow child stdout is piped");
+
+        let started = Instant::now();
+        let error =
+            read_codex_app_server_response(&mut child, stdout, json!(2), Duration::from_millis(20))
+                .expect_err("slow account usage response should time out");
+
+        assert!(error.contains("Codex account usage timed out"));
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[test]
     fn parse_utc_date_start_rejects_invalid_dates() {
         assert_eq!(parse_utc_date_start("1970-01-01").unwrap(), 0);
         assert!(parse_utc_date_start("2026-02-30").is_err());

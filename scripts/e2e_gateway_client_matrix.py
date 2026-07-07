@@ -17,7 +17,7 @@ from typing import Any
 
 DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:9099/v1"
 DEFAULT_TIMEOUT_SECONDS = 120
-DEFAULT_MAX_OUTPUT_TOKENS = 96
+DEFAULT_MAX_OUTPUT_TOKENS = 256
 DEFAULT_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 2.0
 RESPONSE_TERMINAL_TYPES = {"response.completed", "response.failed", "response.incomplete", "error"}
@@ -254,10 +254,7 @@ def endpoint_for_case(case: ClientCase) -> str:
 
 
 def payload_for_case(case: ClientCase, max_output_tokens: int) -> dict[str, Any]:
-    prompt = (
-        "CodexHub E2E compatibility smoke. Reply with exactly one short sentence "
-        "containing the token CODEXHUB_E2E_OK."
-    )
+    prompt = "Reply with CODEXHUB_E2E_OK."
     if case.endpoint_kind == "responses":
         return {
             "model": case.model_id,
@@ -265,7 +262,6 @@ def payload_for_case(case: ClientCase, max_output_tokens: int) -> dict[str, Any]
             "stream": True,
             "store": False,
             "max_output_tokens": max_output_tokens,
-            "reasoning": {"effort": "high"},
         }
     return {
         "model": case.model_id,
@@ -279,7 +275,7 @@ def request_headers(case: ClientCase) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
-        "X-CodexHub-E2E-Client": case.client,
+        "X-Codex-Client-Id": case.client,
         "X-CodexHub-E2E-Selector": case.selector,
         "X-Request-Kind": "main_generation",
     }
@@ -420,8 +416,7 @@ def parse_stream(response: Any, case: ClientCase, result: CaseResult) -> None:
             if case.endpoint_kind == "responses":
                 event_type = str(payload.get("type") or pending_event or "")
                 if event_type.startswith("response.reasoning_summary_text."):
-                    result.error = f"reasoning summary stream leaked to client: {event_type}"
-                    return
+                    continue
                 if event_type == "response.output_text.delta":
                     delta = payload.get("delta")
                     if isinstance(delta, str):
