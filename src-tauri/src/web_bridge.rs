@@ -430,6 +430,7 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
             "enabled",
         )?)),
         "remove_autostart" => to_value(autostart::remove_autostart()),
+        "open_codex_app" => to_value(crate::open_codex_app()),
         command => Err(format!("unknown CodexHub command: {command}")),
     }
 }

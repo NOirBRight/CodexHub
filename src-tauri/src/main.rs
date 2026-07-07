@@ -496,6 +496,11 @@ fn remove_autostart() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_codex_app() -> Result<String, String> {
+    launch_codex_app()
+}
+
+#[tauri::command]
 fn window_minimize(window: Window) -> Result<(), String> {
     window
         .minimize()
@@ -560,6 +565,67 @@ fn run_tray_action(app: &AppHandle, id: &str) {
 }
 
 #[cfg(target_os = "windows")]
+fn run_codex_app_script(label: &str, script: &str) -> Result<String, String> {
+    let mut command = Command::new("powershell");
+    command.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run Codex App {label} command: {error}"))?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(if stdout.is_empty() {
+            format!("Codex App {label} command completed")
+        } else {
+            stdout
+        })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!(
+                "Codex App {label} failed with exit code {}",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            stderr
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn launch_codex_app() -> Result<String, String> {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$app = Get-StartApps |
+  Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } |
+  Select-Object -First 1
+if (-not $app) {
+  throw 'Codex App is not installed or does not expose a Start menu AppID.'
+}
+Start-Process ('shell:AppsFolder\' + $app.AppID)
+Write-Output ('Opened Codex App via ' + $app.AppID)
+"#;
+
+    run_codex_app_script("open", script)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launch_codex_app() -> Result<String, String> {
+    Err("Open Codex App is currently implemented on Windows only. Run `codex login` from a terminal to sign in.".to_string())
+}
+
+#[cfg(target_os = "windows")]
 fn restart_codex_app() -> Result<String, String> {
     let script = r#"
 $ErrorActionPreference = 'Stop'
@@ -575,42 +641,7 @@ Start-Process ('shell:AppsFolder\' + $app.AppID)
 Write-Output ('Restarted Codex App via ' + $app.AppID)
 "#;
 
-    let mut command = Command::new("powershell");
-    command.args([
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    ]);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to run Codex App restart command: {error}"))?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(if stdout.is_empty() {
-            "Restarted Codex App".to_string()
-        } else {
-            stdout
-        })
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!(
-                "Codex App restart failed with exit code {}",
-                output.status.code().unwrap_or(-1)
-            )
-        } else {
-            stderr
-        })
-    }
+    run_codex_app_script("restart", script)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -716,6 +747,7 @@ fn run_gui() {
             sync_catalog,
             set_autostart,
             remove_autostart,
+            open_codex_app,
             window_minimize,
             window_toggle_maximize,
             window_close_to_tray

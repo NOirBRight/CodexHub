@@ -38,6 +38,9 @@ interface BridgeResponse<T> {
   error?: string;
 }
 
+const DEFAULT_BRIDGE_URL = "http://127.0.0.1:1421/api/invoke";
+const LOCAL_DEV_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (window.__TAURI_INTERNALS__) {
     try {
@@ -89,7 +92,30 @@ function shouldFallbackToBridge(error: unknown) {
 }
 
 function bridgeUrl() {
-  return import.meta.env.VITE_CODEXHUB_BRIDGE_URL || "http://127.0.0.1:1421/api/invoke";
+  return (
+    import.meta.env.VITE_CODEXHUB_BRIDGE_URL ||
+    localBridgeUrlFromLocation(window.location) ||
+    DEFAULT_BRIDGE_URL
+  );
+}
+
+function localBridgeUrlFromLocation(location: Location) {
+  if (location.protocol !== "http:" || !LOCAL_DEV_HOSTS.has(location.hostname)) {
+    return null;
+  }
+
+  const frontendPort = Number(location.port);
+  if (!Number.isInteger(frontendPort) || frontendPort <= 0) {
+    return null;
+  }
+
+  const bridgePort = frontendPort + 1;
+  return `http://${formatHostnameForUrl(location.hostname)}:${bridgePort}/api/invoke`;
+}
+
+function formatHostnameForUrl(hostname: string) {
+  const normalized = hostname.replace(/^\[(.*)\]$/, "$1");
+  return normalized.includes(":") ? `[${normalized}]` : normalized;
 }
 
 function usageWindowArgs(window?: UsageQueryWindow | null) {
@@ -214,6 +240,7 @@ export const api = {
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),
+  openCodexApp: () => call<string>("open_codex_app"),
   windowMinimize: () => desktopCall<void>("window_minimize"),
   windowToggleMaximize: () => desktopCall<void>("window_toggle_maximize"),
   windowCloseToTray: () => desktopCall<void>("window_close_to_tray"),

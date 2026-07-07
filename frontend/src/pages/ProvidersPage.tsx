@@ -6,6 +6,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  ExternalLink,
   FlaskConical,
   Link2,
   Link2Off,
@@ -258,13 +259,14 @@ export function ProvidersPage({
   const tr = t as Translate;
   const { showToast, updateToast } = useToasts();
   const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
+  const [codexAuthPreviewState, setCodexAuthPreviewState] = useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(null);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(null);
-  const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>("unknown");
+  const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>([]);
   const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
@@ -299,19 +301,19 @@ export function ProvidersPage({
   }, [officialUsageSnapshot]);
 
   useEffect(() => {
-    if (selectedId !== OFFICIAL_ID) {
+    if (selectedId !== OFFICIAL_ID || codexAuthState !== "authorized") {
       return;
     }
     void primeOfficialOpenAIUsage();
     const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(true), OPENAI_USAGE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(usageRefreshTimer);
-  }, [selectedId]);
+  }, [codexAuthState, selectedId]);
 
   useEffect(() => {
     if (gatewayStatusSnapshot !== undefined) {
-      setCodexAuthState(codexAuthStateFromGatewayStatus(gatewayStatusSnapshot ?? null));
+      setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatusSnapshot ?? null));
     }
-  }, [gatewayStatusSnapshot]);
+  }, [codexAuthPreviewState, gatewayStatusSnapshot]);
 
   useEffect(() => {
     setProbeResult(null);
@@ -582,7 +584,7 @@ export function ProvidersPage({
       setCodexStatus(nextCodexStatus);
       setConnectionPendingMode(null);
       setLoadedGatewayStatus(gatewayStatus);
-      setCodexAuthState(codexAuthStateFromGatewayStatus(gatewayStatus));
+      setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatus));
       setProviders(nextProviders);
       setOfficialModels(
         sortOfficialModels(
@@ -652,6 +654,69 @@ export function ProvidersPage({
       if (showBusy) {
         setOfficialUsageBusy(false);
       }
+    }
+  }
+
+  async function openCodexAppForLogin() {
+    const toastId = showToast(t("providers.openingCodexApp"), "loading");
+    try {
+      await api.openCodexApp();
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.codexAppOpened"),
+        tone: "success",
+      });
+    } catch (err) {
+      const message = messageFromError(err);
+      if (isUnknownCodexHubCommand(message, "open_codex_app")) {
+        try {
+          await navigator.clipboard.writeText("codex login");
+          updateToast(toastId, {
+            action: null,
+            text: t("providers.openCodexAppUnsupportedCopied"),
+            tone: "message",
+          });
+        } catch {
+          updateToast(toastId, {
+            action: null,
+            text: t("providers.openCodexAppUnsupported"),
+            tone: "error",
+          });
+        }
+        return;
+      }
+      updateToast(toastId, {
+        action: null,
+        text: message,
+        tone: "error",
+      });
+    }
+  }
+
+  async function copyCodexLoginCommand() {
+    try {
+      await navigator.clipboard.writeText("codex login");
+      showToast(t("providers.codexLoginCommandCopied"), "message");
+    } catch (err) {
+      showToast(t("gateway.copyFailed", { message: messageFromError(err) }), "error");
+    }
+  }
+
+  async function refreshCodexAuthStatus() {
+    setBusy("auth-refresh");
+    try {
+      const gatewayStatus = await api.gatewayStatus();
+      const authState = codexAuthStateFromGatewayStatus(gatewayStatus);
+      setCodexAuthPreviewState(null);
+      clearCodexAuthPreviewParam();
+      setLoadedGatewayStatus(gatewayStatus);
+      setCodexAuthState(authState);
+      setError(null);
+      showToast(t("providers.codexAuthRefreshed"), "message");
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -1209,7 +1274,12 @@ export function ProvidersPage({
                 gatewayContextById={gatewayContextById}
                 models={officialModels}
                 officialDisabledModels={officialDisabledModels}
+                officialIncluded={settings?.include_official_models ?? false}
+                authIssue={gatewayStatus?.codex_auth?.issue ?? null}
+                onCopyLoginCommand={() => void copyCodexLoginCommand()}
+                onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={() => void refreshOfficialModels()}
+                onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
                 onReorder={(models) => void reorderOfficialModels(models)}
                 onToggleModel={toggleOfficialModel}
@@ -1368,6 +1438,7 @@ function ProviderSourceSidebar({
         modelCount={officialCount}
         onSelect={() => onSelect(OFFICIAL_ID)}
         onToggleInclude={onToggleOfficialInclude}
+        toggleDisabled={codexAuthState !== "authorized"}
       />
       <HubConnectionBridge
         connected={codexConnected}
@@ -1440,6 +1511,7 @@ function OfficialOpenAICard({
   modelCount,
   onSelect,
   onToggleInclude,
+  toggleDisabled,
 }: {
   active: boolean;
   authState: CodexAuthState;
@@ -1448,13 +1520,14 @@ function OfficialOpenAICard({
   modelCount: number;
   onSelect: () => void;
   onToggleInclude: (included: boolean) => void;
+  toggleDisabled: boolean;
 }) {
   const { t } = useTranslation();
   const authChip = codexAuthChip(authState, t as Translate);
 
   return (
     <section className="relative grid gap-3 overflow-hidden rounded-panel border border-line bg-surface p-3 shadow-card transition-[background-color,border-color,box-shadow] duration-150 ease-out">
-      <button type="button" className="focus-ring rounded-inner text-left" onClick={onSelect}>
+      <div className="rounded-inner text-left">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold">{t("providers.codexDesktop")}</h2>
@@ -1462,7 +1535,7 @@ function OfficialOpenAICard({
           </div>
           <SourceStatusChip {...authChip} />
         </div>
-      </button>
+      </div>
 
       <div className="rounded-inner bg-surface shadow-control">
         <ProviderNavButton
@@ -1473,9 +1546,11 @@ function OfficialOpenAICard({
           meta={t("providers.modelCount", { enabled: enabledModelCount, total: modelCount })}
           onClick={onSelect}
           onToggle={onToggleInclude}
+          toggleDisabled={toggleDisabled}
           toggleLabel={included ? t("providers.openaiSourceIncluded") : t("providers.openaiSourceExcluded")}
         />
       </div>
+      <p className="px-1 text-[11px] leading-4 text-slate-500">{t("providers.openaiExportHint")}</p>
     </section>
   );
 }
@@ -2066,6 +2141,7 @@ function ProviderNavButton({
   meta,
   onClick,
   onToggle,
+  toggleDisabled = false,
   toggleLabel,
 }: {
   active: boolean;
@@ -2076,6 +2152,7 @@ function ProviderNavButton({
   meta: string;
   onClick: () => void;
   onToggle: (enabled: boolean) => void;
+  toggleDisabled?: boolean;
   toggleLabel?: string;
 }) {
   const { t } = useTranslation();
@@ -2084,7 +2161,9 @@ function ProviderNavButton({
       className={cx(
         "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 text-sm transition-[box-shadow,background-color] duration-150 ease-out",
         highlightShape === "right" ? "rounded-r-inner" : "rounded-inner",
-        active
+        toggleDisabled
+          ? "bg-slate-50 text-slate-400 shadow-control ring-1 ring-slate-200"
+          : active
           ? activeTone === "neutral"
             ? "bg-panel-soft text-ink shadow-raised ring-1 ring-line"
             : "bg-blue-50 text-action shadow-raised"
@@ -2098,6 +2177,7 @@ function ProviderNavButton({
       <SwitchControl
         checked={enabled}
         label={toggleLabel ?? (enabled ? t("providers.providerEnabled") : t("providers.providerDisabled"))}
+        disabled={toggleDisabled}
         showLabel={false}
         onChange={onToggle}
       />
@@ -2106,12 +2186,17 @@ function ProviderNavButton({
 }
 
 function OfficialDetail({
+  authIssue,
   authState,
   busy,
   gatewayContextById,
   models,
   officialDisabledModels,
+  officialIncluded,
+  onCopyLoginCommand,
+  onOpenCodexApp,
   onRefresh,
+  onRefreshAuth,
   onRefreshUsage,
   onReorder,
   onToggleModel,
@@ -2120,12 +2205,17 @@ function OfficialDetail({
   usageHidden,
   usageSnapshot,
 }: {
+  authIssue: string | null;
   authState: CodexAuthState;
   busy: string | null;
   gatewayContextById: Map<string, number>;
   models: Model[];
   officialDisabledModels: string[];
+  officialIncluded: boolean;
+  onCopyLoginCommand: () => void;
+  onOpenCodexApp: () => void;
   onRefresh: () => void;
+  onRefreshAuth: () => void;
   onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
@@ -2136,6 +2226,8 @@ function OfficialDetail({
 }) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
+  const authorized = authState === "authorized";
+  const authRefreshBusy = busy === "auth-refresh";
 
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
@@ -2172,31 +2264,50 @@ function OfficialDetail({
             <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
           }
           actions={
-            <>
-              <OfficialOpenAIUsageLimitBars busy={usageBusy} limits={usageSnapshot?.limits ?? []} />
-              <button
-                type="button"
-                className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
-                disabled={usageBusy}
-                aria-label={t("providers.refreshOpenAIUsage")}
-                title={t("providers.refreshOpenAIUsage")}
-                onClick={onRefreshUsage}
-              >
-                <RefreshCcw size={14} className={usageBusy ? "animate-spin" : undefined} />
-              </button>
-            </>
+            authorized && (
+              <>
+                <OfficialOpenAIUsageLimitBars busy={usageBusy} limits={usageSnapshot?.limits ?? []} />
+                <button
+                  type="button"
+                  className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
+                  disabled={usageBusy}
+                  aria-label={t("providers.refreshOpenAIUsage")}
+                  title={t("providers.refreshOpenAIUsage")}
+                  onClick={onRefreshUsage}
+                >
+                  <RefreshCcw size={14} className={usageBusy ? "animate-spin" : undefined} />
+                </button>
+              </>
+            )
           }
         />
-        <OfficialOpenAIUsagePanel
-          busy={usageBusy}
-          error={usageError}
-          snapshot={usageSnapshot}
-          usageHidden={usageHidden}
-        />
+        {!officialIncluded && (
+          <div className="rounded-inner border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium leading-5 text-amber-800 shadow-hairline">
+            {t("providers.openaiSourceExcludedDetail")}
+          </div>
+        )}
+        {authorized ? (
+          <OfficialOpenAIUsagePanel
+            busy={usageBusy}
+            error={usageError}
+            snapshot={usageSnapshot}
+            usageHidden={usageHidden}
+          />
+        ) : (
+          <CodexAuthPrompt
+            authIssue={authIssue}
+            authState={authState}
+            busy={authRefreshBusy}
+            onCopyLoginCommand={onCopyLoginCommand}
+            onOpenCodexApp={onOpenCodexApp}
+            onRefreshAuth={onRefreshAuth}
+          />
+        )}
       </div>
       <ModelSection
         contextById={gatewayContextById}
         disabled
+        interactionDisabled={authState !== "authorized"}
         models={models}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
@@ -2208,6 +2319,68 @@ function OfficialDetail({
         modelTestDisabled={authState !== "authorized"}
       />
     </div>
+  );
+}
+
+function CodexAuthPrompt({
+  authIssue,
+  authState,
+  busy,
+  onCopyLoginCommand,
+  onOpenCodexApp,
+  onRefreshAuth,
+}: {
+  authIssue: string | null;
+  authState: CodexAuthState;
+  busy: boolean;
+  onCopyLoginCommand: () => void;
+  onOpenCodexApp: () => void;
+  onRefreshAuth: () => void;
+}) {
+  const { t } = useTranslation();
+  const title = authState === "unknown"
+    ? t("providers.codexAuthUnknownTitle")
+    : t("providers.codexAuthRequiredTitle");
+
+  return (
+    <section className="grid gap-3 rounded-inner bg-amber-50/70 p-3 text-sm shadow-hairline">
+      <div className="min-w-0">
+        <h3 className="truncate text-sm font-semibold text-ink">{title}</h3>
+        <p className="mt-1 text-xs leading-5 text-slate-700">{t("providers.codexAuthRequiredBody")}</p>
+        {authIssue && (
+          <p className="mt-1 truncate text-xs text-slate-500" title={authIssue}>
+            {authIssue}
+          </p>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control hover:bg-slate-800"
+          onClick={onOpenCodexApp}
+        >
+          <ExternalLink size={15} />
+          <span className="truncate">{t("providers.openCodexApp")}</span>
+        </button>
+        <button
+          type="button"
+          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white"
+          onClick={onCopyLoginCommand}
+        >
+          <Copy size={15} />
+          <span className="truncate">{t("providers.copyCodexLoginCommand")}</span>
+        </button>
+        <button
+          type="button"
+          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
+          disabled={busy}
+          onClick={onRefreshAuth}
+        >
+          <RefreshCcw size={15} className={busy ? "animate-spin" : undefined} />
+          <span className="truncate">{t("providers.refreshCodexAuth")}</span>
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -2429,6 +2602,7 @@ function ModelSection({
   discoverBusy,
   discoverDisabled,
   discoverError,
+  interactionDisabled = false,
   models,
   modelTestDisabled,
   onAdd,
@@ -2451,6 +2625,7 @@ function ModelSection({
   discoverBusy?: boolean;
   discoverDisabled?: boolean;
   discoverError?: string | null;
+  interactionDisabled?: boolean;
   models: Model[];
   modelTestDisabled?: boolean;
   onAdd?: () => string | undefined;
@@ -2481,6 +2656,7 @@ function ModelSection({
     models.length,
     providerId,
     reorderable,
+    interactionDisabled,
   ]);
 
   function addAndEdit() {
@@ -2523,8 +2699,11 @@ function ModelSection({
     const modelEnabled = disabled
       ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
       : model.enabled;
-    const rowInteractable = !disabled || Boolean(onToggleOfficialModel);
+    const rowInteractable = !interactionDisabled && (!disabled || Boolean(onToggleOfficialModel));
     function activateModelRow() {
+      if (interactionDisabled) {
+        return;
+      }
       if (disabled && onToggleOfficialModel) {
         onToggleOfficialModel(model.id, !modelEnabled);
         return;
@@ -2541,6 +2720,7 @@ function ModelSection({
           <SwitchControl
             checked={modelEnabled}
             label={modelEnabled ? t("providers.modelEnabled") : t("providers.modelDisabled")}
+            disabled={interactionDisabled}
             showLabel={false}
             onChange={(checked) => onToggleOfficialModel(model.id, checked)}
           />
@@ -2581,8 +2761,9 @@ function ModelSection({
       >
         <ModelIdentity
           model={model}
+          actionsDisabled={interactionDisabled}
           providerId={providerId}
-          testDisabled={modelTestDisabled || Boolean(testingModelId)}
+          testDisabled={interactionDisabled || modelTestDisabled || Boolean(testingModelId)}
           testState={modelTestStates[model.id] ?? "idle"}
           onTest={onTestModel ? () => void runModelTest(model) : undefined}
         />
@@ -2597,7 +2778,12 @@ function ModelSection({
   }
 
   return (
-    <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 p-5">
+    <div
+      className={cx(
+        "grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 p-5",
+        interactionDisabled && "text-slate-400",
+      )}
+    >
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{t("common.models")}</h3>
@@ -2616,7 +2802,7 @@ function ModelSection({
             <button
               type="button"
               className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
-              disabled={refreshBusy}
+              disabled={interactionDisabled || refreshBusy}
               onClick={onRefresh}
             >
               <RefreshCcw size={16} />
@@ -2648,7 +2834,11 @@ function ModelSection({
       </div>
       <div
         ref={modelListRef}
-        className={cx("min-h-0 overflow-auto", modelListHasOverflow && "-mr-5 pr-1")}
+        className={cx(
+          "min-h-0 overflow-auto",
+          interactionDisabled && "opacity-60 grayscale",
+          modelListHasOverflow && "-mr-5 pr-1",
+        )}
       >
         {models.length === 0 ? (
           <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
@@ -2700,12 +2890,14 @@ function providerQualifiedModelId(providerId: string, modelId: string) {
 }
 
 function ModelIdentity({
+  actionsDisabled = false,
   model,
   onTest,
   providerId,
   testDisabled,
   testState = "idle",
 }: {
+  actionsDisabled?: boolean;
   model: Model;
   onTest?: () => void;
   providerId?: string;
@@ -2740,6 +2932,7 @@ function ModelIdentity({
         <button
           type="button"
           className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-slate-500 transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
+          disabled={actionsDisabled}
           onClick={copyModelId}
           title={copied ? t("common.copied") : t("providers.copyModelIdTitle", { id: copyValue })}
           aria-label={copied ? t("providers.copiedModelId", { id: copyValue }) : t("providers.copyModelId", { id: copyValue })}
@@ -3009,11 +3202,13 @@ function ModelCapabilityChip({ tag }: { tag: "vision" | "thinking" }) {
 
 function SwitchControl({
   checked,
+  disabled = false,
   label,
   onChange,
   showLabel = true,
 }: {
   checked: boolean;
+  disabled?: boolean;
   label: string;
   onChange: (checked: boolean) => void;
   showLabel?: boolean;
@@ -3031,10 +3226,24 @@ function SwitchControl({
           type="checkbox"
           className="peer sr-only"
           checked={checked}
+          disabled={disabled}
           onChange={(event) => onChange(event.target.checked)}
         />
-        <span className="absolute inset-0 rounded-full border border-line bg-slate-200 transition-colors peer-checked:border-action peer-checked:bg-action" />
-        <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
+        <span
+          className={cx(
+            "absolute inset-0 rounded-full border transition-colors",
+            disabled
+              ? "border-slate-200 bg-slate-200"
+              : "border-line bg-slate-200 peer-checked:border-action peer-checked:bg-action",
+          )}
+        />
+        <span
+          className={cx(
+            "absolute left-0.5 h-4 w-4 rounded-full shadow-sm transition-transform",
+            checked && "translate-x-4",
+            disabled ? "bg-slate-100" : "bg-white",
+          )}
+        />
       </span>
     </label>
   );
@@ -4184,6 +4393,34 @@ function codexHubConnectionErrorMessage(err: unknown, t: Translate) {
 
 function codexHubConnectionSuccessMessage(mode: string, t: Translate) {
   return mode === "custom" ? t("providers.connectedToHub") : t("providers.disconnectedFromHub");
+}
+
+function readCodexAuthPreviewState(): CodexAuthState | null {
+  if (typeof window === "undefined" || (!import.meta.env.DEV && !isLocalHttpPreviewLocation(window.location))) {
+    return null;
+  }
+  const value = new URLSearchParams(window.location.search).get("codexAuth");
+  return value === "authorized" || value === "missing" || value === "unknown" ? value : null;
+}
+
+function clearCodexAuthPreviewParam() {
+  if (typeof window === "undefined" || !window.location.search.includes("codexAuth=")) {
+    return;
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.delete("codexAuth");
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function isLocalHttpPreviewLocation(location: Location) {
+  return (
+    location.protocol === "http:" &&
+    (location.hostname === "127.0.0.1" || location.hostname === "localhost" || location.hostname === "::1")
+  );
+}
+
+function isUnknownCodexHubCommand(message: string, command: string) {
+  return message.toLowerCase().includes(`unknown codexhub command: ${command}`.toLowerCase());
 }
 
 function codexAuthStateFromGatewayStatus(status: GatewayStatus | null): CodexAuthState {

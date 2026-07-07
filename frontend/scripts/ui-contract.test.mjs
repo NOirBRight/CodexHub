@@ -282,6 +282,17 @@ test("web preview falls back to the bridge when host Tauri IPC is unavailable", 
   assert.match(tauriSource, /unknown command|ipc|__TAURI_INTERNALS__/);
 });
 
+test("web preview infers the bridge port from alternate local dev ports", async () => {
+  const tauriSource = await readFile(tauriSourcePath, "utf8");
+
+  assert.match(tauriSource, /const DEFAULT_BRIDGE_URL = "http:\/\/127\.0\.0\.1:1421\/api\/invoke"/);
+  assert.match(tauriSource, /localBridgeUrlFromLocation\(window\.location\)/);
+  assert.match(tauriSource, /const LOCAL_DEV_HOSTS = new Set\(\["127\.0\.0\.1", "localhost", "::1", "\[::1\]"\]\)/);
+  assert.match(tauriSource, /const bridgePort = frontendPort \+ 1/);
+  assert.match(tauriSource, /formatHostnameForUrl\(location\.hostname\)/);
+  assert.match(tauriSource, /import\.meta\.env\.VITE_CODEXHUB_BRIDGE_URL \|\|/);
+});
+
 test("web bridge calls use simple POST requests that avoid CORS preflight", async () => {
   const tauriSource = await readFile(tauriSourcePath, "utf8");
   const bridgeInvoke =
@@ -434,6 +445,8 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(true\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
   assert.match(providersSource, /if \(officialUsageSnapshotRef\.current\) \{[\s\S]*setOfficialUsageError\(null\);[\s\S]*setOfficialUsageHidden\(false\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /selectedId === OFFICIAL_ID[\s\S]*loadOfficialOpenAIUsage/);
+  assert.match(providersSource, /if \(selectedId !== OFFICIAL_ID \|\| codexAuthState !== "authorized"\) \{/);
+  assert.match(providersSource, /\}, \[codexAuthState, selectedId\]\);/);
   assert.match(providersSource, /longest_running_turn_sec/);
   assert.match(providersSource, /formatUsageDuration/);
   assert.match(providersSource, /type OpenAIUsageMode = "day" \| "week";/);
@@ -1119,12 +1132,44 @@ test("official model rows remain pointer-interactive while editing is disabled",
   const providersSource = await readFile(providersPagePath, "utf8");
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
-  assert.match(modelSection, /const rowInteractable = !disabled \|\| Boolean\(onToggleOfficialModel\);/);
+  assert.match(modelSection, /const rowInteractable = !interactionDisabled && \(!disabled \|\| Boolean\(onToggleOfficialModel\)\);/);
+  assert.match(modelSection, /if \(interactionDisabled\) \{[\s\S]*return;[\s\S]*\}/);
   assert.match(modelSection, /function activateModelRow\(\)[\s\S]*onToggleOfficialModel\(model\.id, !modelEnabled\)/);
   assert.match(modelSection, /rowInteractable && "cursor-pointer"/);
   assert.match(modelSection, /role=\{rowInteractable \? "button" : undefined\}/);
   assert.match(modelSection, /tabIndex=\{rowInteractable \? 0 : undefined\}/);
   assert.match(modelSection, /onClick=\{rowInteractable \? activateModelRow : undefined\}/);
+});
+
+test("official OpenAI controls are locked while Codex auth is missing", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const sidebar = providersSource.match(/<OfficialOpenAICard[\s\S]*?\/>/)?.[0] ?? "";
+  const officialCard = providersSource.match(/function OfficialOpenAICard[\s\S]*?function HubConnectionBridge/)?.[0] ?? "";
+  const providerNavButton = providersSource.match(/function ProviderNavButton[\s\S]*?function OfficialDetail/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
+  const modelIdentity = providersSource.match(/function ModelIdentity[\s\S]*?function ModelEditorOverlay/)?.[0] ?? "";
+  const switchControl = providersSource.match(/function SwitchControl[\s\S]*?function isOfficialModelDisabled/)?.[0] ?? "";
+
+  assert.match(sidebar, /toggleDisabled=\{codexAuthState !== "authorized"\}/);
+  assert.match(officialCard, /toggleDisabled: boolean;/);
+  assert.match(officialCard, /toggleDisabled=\{toggleDisabled\}/);
+  assert.match(providerNavButton, /toggleDisabled[\s\S]*bg-slate-50 text-slate-400 shadow-control ring-1 ring-slate-200/);
+  assert.match(providerNavButton, /disabled=\{toggleDisabled\}/);
+  assert.match(officialDetail, /interactionDisabled=\{authState !== "authorized"\}/);
+  assert.match(modelSection, /interactionDisabled = false/);
+  assert.match(modelSection, /interactionDisabled\?: boolean;/);
+  assert.match(modelSection, /disabled=\{interactionDisabled\}/);
+  assert.match(modelSection, /testDisabled=\{interactionDisabled \|\| modelTestDisabled \|\| Boolean\(testingModelId\)\}/);
+  assert.match(modelSection, /actionsDisabled=\{interactionDisabled\}/);
+  assert.match(modelSection, /disabled=\{interactionDisabled \|\| refreshBusy\}/);
+  assert.match(modelSection, /interactionDisabled && "opacity-60 grayscale"/);
+  assert.match(modelIdentity, /actionsDisabled = false/);
+  assert.match(modelIdentity, /disabled=\{actionsDisabled\}/);
+  assert.match(switchControl, /disabled = false/);
+  assert.match(switchControl, /disabled\?: boolean;/);
+  assert.match(switchControl, /disabled=\{disabled\}/);
+  assert.match(switchControl, /disabled[\s\S]*border-slate-200 bg-slate-200/);
 });
 
 test("official OpenAI source uses the same row card and toggle pattern as providers", async () => {
@@ -1143,12 +1188,107 @@ test("official OpenAI source uses the same row card and toggle pattern as provid
   assert.match(officialCard, /onToggle=\{onToggleInclude\}/);
   assert.match(officialCard, /activeTone="neutral"/);
   assert.match(officialCard, /border border-line bg-surface p-3 shadow-card/);
+  assert.match(officialCard, /<div className="rounded-inner text-left">/);
+  assert.doesNotMatch(officialCard, /<button type="button" className="focus-ring rounded-inner text-left"/);
   assert.doesNotMatch(officialCard, /<ConnectedSurfaceFlow \/>/);
   assert.doesNotMatch(officialCard, /border-emerald-300\/70 bg-emerald-50\/55/);
   assert.doesNotMatch(officialCard, /border-transparent bg-surface/);
   assert.match(officialCard, /active=\{active\}/);
+  assert.match(officialCard, /t\("providers\.openaiExportHint"\)/);
   assert.doesNotMatch(officialCard, /<SourceMetric label="Official models"/);
   assert.doesNotMatch(officialCard, /active \? "border-action bg-blue-50\/70"/);
+});
+
+test("official OpenAI source explains export-only semantics", async () => {
+  const [providersSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+
+  assert.match(providersSource, /officialIncluded=\{settings\?\.include_official_models \?\? false\}/);
+  assert.match(officialDetail, /officialIncluded: boolean;/);
+  assert.match(officialDetail, /!officialIncluded && \(/);
+  assert.match(officialDetail, /t\("providers\.openaiSourceExcludedDetail"\)/);
+  assert.match(enSource, /openaiExportHint: "Only affects CodexHub\/Gateway export; Codex official direct access is unchanged\."/);
+  assert.match(zhSource, /openaiExportHint: "仅影响 CodexHub\/Gateway 导出，不影响 Codex 官方直连。"/);
+  assert.match(enSource, /openaiSourceExcludedDetail: "OpenAI is excluded from CodexHub\/Gateway export; Codex official direct access is unchanged\."/);
+  assert.match(zhSource, /openaiSourceExcludedDetail: "OpenAI 来源已从 CodexHub\/Gateway 导出中排除；Codex 官方直连不受影响。"/);
+});
+
+test("official OpenAI auth prompt guides login before showing usage", async () => {
+  const [providersSource, tauriSource, mainSource, webBridgeSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriWebBridgePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const authPrompt = providersSource.match(/function CodexAuthPrompt[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+
+  assert.match(providersSource, /async function openCodexAppForLogin\(\)/);
+  assert.match(providersSource, /await api\.openCodexApp\(\);/);
+  assert.match(providersSource, /text: t\("providers\.codexAppOpened"\)/);
+  assert.match(providersSource, /isUnknownCodexHubCommand\(message, "open_codex_app"\)/);
+  assert.match(providersSource, /text: t\("providers\.openCodexAppUnsupportedCopied"\)/);
+  assert.match(providersSource, /text: t\("providers\.openCodexAppUnsupported"\)/);
+  assert.match(providersSource, /navigator\.clipboard\.writeText\("codex login"\)/);
+  assert.match(providersSource, /async function refreshCodexAuthStatus\(\)/);
+  assert.match(providersSource, /setBusy\("auth-refresh"\)/);
+  assert.match(providersSource, /const authState = codexAuthStateFromGatewayStatus\(gatewayStatus\);/);
+  assert.match(providersSource, /setCodexAuthPreviewState\(null\);/);
+  assert.match(providersSource, /clearCodexAuthPreviewParam\(\);/);
+  assert.match(providersSource, /setCodexAuthState\(authState\);/);
+  assert.match(providersSource, /authIssue=\{gatewayStatus\?\.codex_auth\?\.issue \?\? null\}/);
+  assert.match(providersSource, /const \[codexAuthPreviewState, setCodexAuthPreviewState\] = useState<CodexAuthState \| null>\(\(\) => readCodexAuthPreviewState\(\)\);/);
+  assert.match(providersSource, /useState<CodexAuthState>\(\(\) => codexAuthPreviewState \?\? "unknown"\)/);
+  assert.match(providersSource, /setCodexAuthState\(codexAuthPreviewState \?\? codexAuthStateFromGatewayStatus\(gatewayStatus\)\)/);
+  assert.match(providersSource, /function readCodexAuthPreviewState\(\): CodexAuthState \| null/);
+  assert.match(providersSource, /function clearCodexAuthPreviewParam\(\)/);
+  assert.match(providersSource, /url\.searchParams\.delete\("codexAuth"\)/);
+  assert.match(providersSource, /window\.history\.replaceState/);
+  assert.match(providersSource, /!import\.meta\.env\.DEV && !isLocalHttpPreviewLocation\(window\.location\)/);
+  assert.match(providersSource, /new URLSearchParams\(window\.location\.search\)\.get\("codexAuth"\)/);
+  assert.match(providersSource, /value === "authorized" \|\| value === "missing" \|\| value === "unknown" \? value : null/);
+  assert.match(providersSource, /function isLocalHttpPreviewLocation\(location: Location\)/);
+  assert.match(providersSource, /location\.protocol === "http:"/);
+  assert.match(providersSource, /location\.hostname === "127\.0\.0\.1"/);
+  assert.match(providersSource, /location\.hostname === "localhost"/);
+  assert.match(providersSource, /function isUnknownCodexHubCommand\(message: string, command: string\)/);
+  assert.match(officialDetail, /const authorized = authState === "authorized";/);
+  assert.match(officialDetail, /authorized \? \([\s\S]*<OfficialOpenAIUsagePanel[\s\S]*\) : \([\s\S]*<CodexAuthPrompt/);
+  assert.match(officialDetail, /actions=\{[\s\S]*authorized && \([\s\S]*<OfficialOpenAIUsageLimitBars/);
+  assert.doesNotMatch(officialDetail, /actions=\{[\s\S]*t\("providers\.refreshCodexAuth"\)[\s\S]*\}\s*\/>/);
+  assert.match(officialDetail, /modelTestDisabled=\{authState !== "authorized"\}/);
+  assert.match(authPrompt, /authState === "unknown"[\s\S]*t\("providers\.codexAuthUnknownTitle"\)[\s\S]*t\("providers\.codexAuthRequiredTitle"\)/);
+  assert.match(authPrompt, /t\("providers\.codexAuthRequiredBody"\)/);
+  assert.match(authPrompt, /rounded-inner bg-amber-50\/70 p-3 text-sm shadow-hairline/);
+  assert.match(authPrompt, /text-sm font-semibold text-ink/);
+  assert.match(authPrompt, /text-xs leading-5 text-slate-700/);
+  assert.doesNotMatch(authPrompt, /absolute inset-y-3 left-0/);
+  assert.doesNotMatch(authPrompt, /bg-amber-400\/70/);
+  assert.doesNotMatch(authPrompt, /text-amber-900|text-amber-800|text-amber-700/);
+  assert.match(authPrompt, /<ExternalLink size=\{15\} \/>/);
+  assert.match(authPrompt, /<Copy size=\{15\} \/>/);
+  assert.match(authPrompt, /<RefreshCcw size=\{15\}/);
+  assert.match(tauriSource, /openCodexApp: \(\) => call<string>\("open_codex_app"\)/);
+  assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*launch_codex_app\(\)/);
+  assert.match(mainSource, /open_codex_app,/);
+  assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*Get-StartApps[\s\S]*Start-Process \('shell:AppsFolder\\' \+ \$app\.AppID\)/);
+  assert.match(webBridgeSource, /"open_codex_app" => to_value\(crate::open_codex_app\(\)\)/);
+  assert.match(enSource, /codexAuthRequiredTitle: "Sign in to Codex"/);
+  assert.match(zhSource, /codexAuthRequiredTitle: "需要登录 Codex"/);
+  assert.match(enSource, /openCodexApp: "Open Codex App to sign in"/);
+  assert.match(zhSource, /openCodexApp: "打开 Codex App 登录"/);
+  assert.match(enSource, /copyCodexLoginCommand: "Copy CLI login command"/);
+  assert.match(zhSource, /copyCodexLoginCommand: "复制 CLI 登录命令"/);
+  assert.match(enSource, /openCodexAppUnsupportedCopied/);
+  assert.match(zhSource, /openCodexAppUnsupportedCopied/);
+  assert.match(enSource, /paste it into PowerShell, Windows Terminal, or another shell, and run codex login/);
+  assert.match(zhSource, /再到 PowerShell、Windows Terminal 或其他终端里粘贴运行 codex login/);
 });
 
 test("official include toggle is removed from the detail header", async () => {
