@@ -79,6 +79,7 @@ export function RuntimeBar({
           type="button"
           className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
           onClick={onOpenSettings}
+          aria-label={t("common.settings")}
           title={t("common.settings")}
         >
           <SettingsIcon size={15} />
@@ -137,7 +138,7 @@ function startWindowDrag(event: MouseEvent<HTMLElement>) {
 }
 
 function isInteractiveWindowControl(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) {
+  if (!(target instanceof Element)) {
     return false;
   }
   return Boolean(target.closest("button,a,input,select,textarea,[role='button'],[data-window-control]"));

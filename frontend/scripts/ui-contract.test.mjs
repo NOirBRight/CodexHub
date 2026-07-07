@@ -165,6 +165,16 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
 });
 
+test("runtime header treats SVG icon clicks inside controls as interactive", async () => {
+  const runtimeSource = await readFile(runtimeBarPath, "utf8");
+  const interactiveGuard = runtimeSource.match(/function isInteractiveWindowControl[\s\S]*?^}/m)?.[0] ?? "";
+  const settingsButton = runtimeSource.match(/<button[\s\S]*onClick=\{onOpenSettings\}[\s\S]*?<\/button>/)?.[0] ?? "";
+
+  assert.match(interactiveGuard, /target instanceof Element/);
+  assert.match(interactiveGuard, /\.closest\("button,a,input,select,textarea,\[role='button'\],\[data-window-control\]"\)/);
+  assert.match(settingsButton, /aria-label=\{t\("common\.settings"\)\}/);
+});
+
 test("main desktop window opens tall enough for the primary dashboard", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
   const mainWindow = tauriConfig.app.windows[0];
