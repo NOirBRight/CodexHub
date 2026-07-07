@@ -1,6 +1,25 @@
+import json
 import unittest
 
 from subagent_protocol import ProtocolEvent, reduce_protocol_events
+
+
+def message(content):
+    return {"type": "message", "role": "user", "content": content}
+
+
+def call(call_id, name, arguments):
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "namespace": "multi_agent_v1",
+        "name": name,
+        "arguments": arguments,
+    }
+
+
+def output(call_id, value):
+    return {"type": "function_call_output", "call_id": call_id, "output": json.dumps(value)}
 
 
 class SubagentProtocolTests(unittest.TestCase):
@@ -59,6 +78,43 @@ class SubagentProtocolTests(unittest.TestCase):
         self.assertEqual([violation.code for violation in state.violations], ["close_unwaited_agent"])
         self.assertEqual(state.open_agent_ids, ["agent-1"])
         self.assertEqual(state.closed_agent_ids, [])
+
+    def test_protocol_state_from_responses_structured_items(self):
+        from subagent_protocol import protocol_state_from_input_items
+
+        state = protocol_state_from_input_items(
+            [
+                message("Run one child."),
+                call("call_spawn", "spawn_agent", {"message": "return ok", "nickname": "child"}),
+                output("call_spawn", {"agent_id": "agent-1", "nickname": "child"}),
+                call("call_wait", "wait_agent", {"targets": ["agent-1"], "timeout_ms": 60000}),
+                output("call_wait", {"timed_out": False, "status": {"agent-1": {"completed": "ok"}}}),
+                call("call_close", "close_agent", {"target": "agent-1"}),
+                output("call_close", {"previous_status": {"completed": "ok"}}),
+            ]
+        )
+
+        self.assertTrue(state.lifecycle_complete)
+        self.assertEqual(state.closed_agent_ids, ["agent-1"])
+
+    def test_protocol_parser_accepts_actual_status_message_shape(self):
+        from subagent_protocol import protocol_state_from_input_items
+
+        state = protocol_state_from_input_items(
+            [
+                call("call_spawn", "spawn_agent", {"message": "return ok"}),
+                output("call_spawn", {"agent_id": "agent-1"}),
+                call("call_wait", "wait_agent", {"targets": ["agent-1"], "timeout_ms": 60000}),
+                output(
+                    "call_wait",
+                    {"timed_out": False, "status": {"agent-1": {"status": "completed", "message": "ok"}}},
+                ),
+            ]
+        )
+
+        self.assertEqual(state.waitable_agent_ids, [])
+        self.assertEqual(state.closeable_agent_ids, ["agent-1"])
+        self.assertEqual(state.agents["agent-1"].result, "ok")
 
 
 if __name__ == "__main__":
