@@ -4216,7 +4216,7 @@ def _required_spawn_arguments_for_state(input_items: Any, subagent_state: Any | 
     text = _active_user_request_text(input_items)
     prompts = _exact_child_prompts_from_request_text(text)
     if not prompts:
-        return None
+        return _required_workflow_spawn_arguments(text, subagent_state)
     index = len(getattr(subagent_state, "agents", {}) or {})
     if index >= len(prompts):
         return None
@@ -4224,6 +4224,113 @@ def _required_spawn_arguments_for_state(input_items: Any, subagent_state: Any | 
     if not prompt:
         return None
     return {"message": prompt, "fork_context": False}
+
+
+def _required_workflow_spawn_arguments(text: str, subagent_state: Any) -> dict[str, Any] | None:
+    if not bool(getattr(subagent_state, "workflow_intent", False)):
+        return None
+    if not bool(getattr(subagent_state, "workflow_plan_read", False)):
+        return None
+    role = getattr(subagent_state, "next_expected_role", None)
+    if role not in {"implementer", "spec_reviewer", "code_quality_reviewer"}:
+        return None
+
+    output_path = _line_value(text, "OUTPUT_PATH=")
+    sentinel = _line_value(text, "SENTINEL=")
+    model = _line_value(text, "MODEL_UNDER_TEST=") or _line_value(text, "MODEL=")
+    endpoint = _line_value(text, "ENDPOINT_UNDER_TEST=") or _line_value(text, "ENDPOINT=")
+    case_name = _line_value(text, "CASE=")
+    if not all(isinstance(value, str) and value for value in (output_path, sentinel, model, endpoint, case_name)):
+        return None
+
+    artifact_text = "\n".join(
+        [
+            f"case: {case_name}",
+            f"model: {model}",
+            f"endpoint: {endpoint}",
+            sentinel,
+            "artifact: ok",
+        ]
+    )
+    run_dir = str(Path(output_path).parent)
+    if role == "implementer":
+        message = f"""You are the IMPLEMENTER subagent in a Subagent-Driven Development workflow.
+
+Your job is the single, minimal task described below. Do exactly this and nothing else.
+
+Create exactly one UTF-8 text artifact at this absolute path:
+  OUTPUT_PATH = {output_path}
+
+Required file content, exactly five lines plus a trailing newline:
+{artifact_text}
+
+Hard constraints:
+1. Create exactly one file: OUTPUT_PATH above.
+2. Do not modify product-source files and do not commit anything.
+3. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+4. After writing, read the file back and confirm it matches the required content exactly.
+
+Report back with only:
+Status: DONE
+Artifact path: {output_path}
+Bytes written: <integer>
+File ends with newline: <yes/no>
+Other files created: <none, list if any>
+"""
+        return {"message": message, "nickname": "implementer", "fork_context": False}
+
+    if role == "spec_reviewer":
+        message = f"""You are the SPEC REVIEWER subagent in a Subagent-Driven Development workflow.
+
+Your single job is to verify the diagnostic artifact matches its specification exactly. Do not modify or create files.
+
+Artifact path:
+  {output_path}
+
+Required file content, exactly five lines plus a trailing newline:
+{artifact_text}
+
+Verification steps:
+1. Read the artifact using native shell/file-read tools.
+2. Confirm the file exists, is UTF-8 text, and ends with a trailing newline.
+3. Confirm all five lines above are present in exact order with no extra content.
+4. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+
+Report back with only:
+Verdict: PASS | FAIL
+Checks: <one-line summary>
+Failures: <none, or specific failures>
+"""
+        return {"message": message, "nickname": "spec-reviewer", "fork_context": False}
+
+    message = f"""You are the CODE-QUALITY REVIEWER subagent in a Subagent-Driven Development workflow.
+
+Your single job is to verify the implementer's work is minimal. Do not modify or create files.
+
+Expected artifact:
+  {output_path}
+
+Runner-owned diagnostics scaffolding to ignore:
+  {run_dir}
+  diagnostics/subagent-e2e/level12-e2e-*/
+  diagnostics/subagent-e2e/level2-*.out.txt
+  diagnostics/subagent-e2e/level2-*.err.txt
+
+Verification steps:
+1. Run git status --porcelain=v1 -uall.
+2. Confirm the expected artifact exists and is non-empty.
+3. Ignore harness-owned diagnostics files under diagnostics/subagent-e2e.
+4. Fail only for implementer-owned extra files or product-source modifications.
+5. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+
+Report back with only:
+Verdict: PASS | FAIL
+Artifact present: <yes/no>
+Product-source modifications introduced: <none, or paths>
+Extra implementer-owned files: <none, or paths>
+Runner-owned scaffolding files observed: <short summary>
+"""
+    return {"message": message, "nickname": "quality-reviewer", "fork_context": False}
 
 
 def _line_value(text: str, prefix: str) -> str | None:
@@ -5012,6 +5119,10 @@ def _suppress_coordinator_forbidden_tool_calls(
         or bool(_string_list(context.get("subagent_close_agent_ids")))
         or bool(_string_list(context.get("subagent_closed_agent_ids")))
         or bool(context.get("subagent_lifecycle_complete"))
+        or (
+            bool(context.get("subagent_workflow_active"))
+            and bool(context.get("subagent_workflow_plan_read_complete"))
+        )
     )
     if not active and not plan_read_required:
         return value, False

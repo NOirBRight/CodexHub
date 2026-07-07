@@ -7166,7 +7166,8 @@ Execution constraints:
             "subagent_spawn_allowed": True,
             "subagent_lifecycle_complete": False,
             "subagent_workflow_active": True,
-            "subagent_workflow_plan_read_complete": True,
+            "subagent_workflow_plan_read_complete": False,
+            "subagent_workflow_plan_read_required": True,
         }
 
         transformed = compatible_response_body(body, "ollama_cloud", event_context=event_context)
@@ -7176,6 +7177,85 @@ Execution constraints:
         self.assertEqual(call["type"], "function_call")
         self.assertEqual(call["namespace"], "mcp__node_repl")
         self.assertEqual(call["name"], "js")
+
+    def test_coordinator_workflow_response_suppresses_node_repl_after_plan_read_and_repairs_spawn(self):
+        workflow_prompt = """
+Use the real subagent-driven-development skill and this short diagnostic plan:
+C:\\repo\\diagnostics\\subagent-e2e-cli\\short-subagent-development-plan.md
+
+Coordinator inputs:
+OUTPUT_PATH=C:\\repo\\diagnostics\\subagent-e2e\\level12-e2e-test\\level2-m3-responses.artifact-r01.txt
+SENTINEL=SENTINEL:level2-m3-responses-20260706
+MODEL_UNDER_TEST=minimax-m3
+ENDPOINT_UNDER_TEST=responses
+CASE=level2-m3-responses
+
+Execution constraints:
+1. Use real Codex native subagents for implementer, spec reviewer, and code-quality reviewer.
+2. The coordinator may read the plan once, but must not create, edit, inspect, or verify OUTPUT_PATH directly.
+6. Start with this ordered lifecycle: spawn one implementer, wait, close; then spawn one spec reviewer, wait, close; then spawn one code-quality reviewer, wait, close.
+"""
+        plan_text = """
+# Short Subagent Development E2E Plan
+
+## Task 1: Write The Diagnostic Artifact
+
+The coordinator prompt supplies OUTPUT_PATH and SENTINEL.
+Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
+"""
+        request_body = json.dumps(
+            {
+                "model": "minimax-m3",
+                "input": [
+                    {"type": "message", "role": "user", "content": workflow_prompt},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_node_plan",
+                        "name": "mcp__node_repl__js",
+                        "arguments": json.dumps({"code": "read plan"}),
+                    },
+                    {"type": "function_call_output", "call_id": "call_node_plan", "output": plan_text},
+                ],
+                "tools": [{"type": "function", "name": "mcp__node_repl__js", "parameters": {"type": "object"}}],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "assisted"}, clear=False):
+            compatible_request_body(
+                request_body,
+                {"name": "ollama_cloud", "upstream_format": "responses", "tool_protocol": "responses_structured"},
+                event_context=event_context,
+            )
+            response_body = json.dumps(
+                {
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "fc_node",
+                            "call_id": "call_node",
+                            "name": "mcp__node_repl__js",
+                            "arguments": json.dumps({"code": "check artifact exists"}),
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+            transformed = compatible_response_body(response_body, "ollama_cloud", event_context=event_context)
+
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=False)
+        call = payload["output"][0]
+        call_args = json.loads(call["arguments"])
+
+        self.assertTrue(event_context["subagent_workflow_plan_read_complete"])
+        self.assertEqual(call["type"], "function_call")
+        self.assertEqual(call["namespace"], "multi_agent_v1")
+        self.assertEqual(call["name"], "spawn_agent")
+        self.assertNotIn("mcp__node_repl", transcript)
+        self.assertEqual(call_args["nickname"], "implementer")
+        self.assertIn("You are the IMPLEMENTER subagent", call_args["message"])
+        self.assertIn("case: level2-m3-responses", call_args["message"])
+        self.assertIn("SENTINEL:level2-m3-responses-20260706", call_args["message"])
 
     def test_coordinator_workflow_response_suppresses_unknown_multi_agent_tool(self):
         body = json.dumps(
