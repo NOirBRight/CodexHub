@@ -49,7 +49,7 @@ class Level12E2EParserTests(unittest.TestCase):
                         "type": "agent_message",
                         "text": (
                             "RESULT: PASS\n"
-                            f"SENTINEL: {sentinel}\n"
+                            f"{sentinel}\n"
                             "SUBAGENT_CHAIN: implementer,spec-reviewer,quality-reviewer"
                         ),
                     },
@@ -79,18 +79,134 @@ class Level12E2EParserTests(unittest.TestCase):
                 output_path.read_text(encoding="utf-8-sig"),
             )
 
+    def test_level2_analyzer_accepts_final_sentinel_as_complete_line(self):
+        runner = load_runner_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout = root / "case.stdout.jsonl"
+            stderr = root / "case.stderr.txt"
+            output_path = root / "level2-k2_7-responses.artifact-r03.txt"
+            sentinel = "SENTINEL:level2-k2_7-responses-20260706"
+            output_path.write_text(
+                "case: level2-k2_7-responses\n"
+                "model: kimi-k2.7-code\n"
+                "endpoint: responses\n"
+                f"{sentinel}\n"
+                "artifact: ok\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            stderr.write_text("", encoding="utf-8")
+            events = [
+                completed_call("spawn_agent", "You are the implementer subagent."),
+                completed_call("wait", None),
+                completed_call("close_agent", None),
+                completed_call("spawn_agent", "You are the spec reviewer subagent."),
+                completed_call("wait", None),
+                completed_call("close_agent", None),
+                completed_call("spawn_agent", "You are the code-quality reviewer subagent."),
+                completed_call("wait", None),
+                completed_call("close_agent", None),
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": (
+                            "RESULT: PASS\n"
+                            f"{sentinel}\n"
+                            "SUBAGENT_CHAIN: implementer,spec-reviewer,quality-reviewer"
+                        ),
+                    },
+                },
+            ]
+            stdout.write_text(
+                "".join(json.dumps(event, ensure_ascii=True) + "\n" for event in events),
+                encoding="utf-8",
+                newline="\n",
+            )
+            case = {
+                "case": "level2-k2_7-responses-r03",
+                "model": "ollama-e2e-responses/kimi-k2.7-code",
+                "endpoint": "responses",
+                "stdout": str(stdout),
+                "stderr": str(stderr),
+                "exit_code": 0,
+                "timed_out": False,
+            }
 
-def completed_call(tool, prompt):
-    return {
-        "type": "item.completed",
-        "item": {
-            "type": "collab_tool_call",
-            "tool": tool,
-            "status": "completed",
-            "prompt": prompt,
-            "receiver_thread_ids": ["agent-1"] if tool == "spawn_agent" else [],
-        },
+            summary = runner.analyze_level2(case, output_path, sentinel)
+
+            self.assertTrue(summary["checks"]["artifact_exact"])
+            self.assertTrue(summary["checks"]["final_exact"])
+            self.assertTrue(summary["pass"])
+
+    def test_level3_analyzer_accepts_parallel_branch_order(self):
+        runner = load_runner_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout = root / "case.stdout.jsonl"
+            stderr = root / "case.stderr.txt"
+            stderr.write_text("", encoding="utf-8")
+            events = [
+                completed_call("spawn_agent", "Node: task-a-implementer"),
+                completed_call("wait", None, messages={"agent-a": "A_DONE"}),
+                completed_call("close_agent", None),
+                completed_call("spawn_agent", "Node: task-b-implementer"),
+                completed_call("spawn_agent", "Node: task-a-reviewer"),
+                completed_call("wait", None, messages={"agent-b": "B_DONE", "agent-review": "A_REVIEW_PASS"}),
+                completed_call("close_agent", None),
+                completed_call("close_agent", None),
+                completed_call("spawn_agent", "Node: final-summarizer"),
+                completed_call("wait", None, messages={"agent-final": "FINAL_READY"}),
+                completed_call("close_agent", None),
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": (
+                            "RESULT: PASS\n"
+                            "DYNAMIC_DAG_CHAIN: task-a-implementer,task-a-reviewer,task-b-implementer,final-summarizer\n"
+                            "DYNAMIC_DAG_STATUS: a-done,a-review-pass,b-done"
+                        ),
+                    },
+                },
+            ]
+            stdout.write_text(
+                "".join(json.dumps(event, ensure_ascii=True) + "\n" for event in events),
+                encoding="utf-8",
+                newline="\n",
+            )
+            case = {
+                "case": "level3-m3-responses-r01",
+                "model": "ollama-e2e-responses/minimax-m3",
+                "endpoint": "responses",
+                "stdout": str(stdout),
+                "stderr": str(stderr),
+                "exit_code": 0,
+                "timed_out": False,
+            }
+
+            summary = runner.analyze_level3_dynamic_dag(case)
+
+            self.assertTrue(summary["checks"]["branch_nodes_seen"])
+            self.assertTrue(summary["checks"]["final_exact"])
+            self.assertTrue(summary["pass"])
+
+
+def completed_call(tool, prompt, messages=None):
+    item = {
+        "type": "collab_tool_call",
+        "tool": tool,
+        "status": "completed",
+        "prompt": prompt,
+        "receiver_thread_ids": ["agent-1"] if tool == "spawn_agent" else [],
     }
+    if messages is not None:
+        item["agents_states"] = {
+            agent_id: {"status": "completed", "message": message}
+            for agent_id, message in messages.items()
+        }
+    return {"type": "item.completed", "item": item}
 
 
 if __name__ == "__main__":

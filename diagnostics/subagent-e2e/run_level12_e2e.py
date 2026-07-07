@@ -279,8 +279,40 @@ Execution constraints:
 8. Do not call local_tool_gateway or any mcp__codex_apps__local_tool_gateway* tool in the coordinator or subagent prompts. If the coordinator needs to read the plan, use node_repl or another visible native file-read-capable tool. Subagents should use shell/apply_patch-capable native tools, not local_tool_gateway.
 9. Final coordinator response must be exactly:
 RESULT: PASS|FAIL
-SENTINEL: {sentinel}
+{sentinel}
 SUBAGENT_CHAIN: implementer,spec-reviewer,quality-reviewer
+"""
+
+
+def level3_dynamic_dag_prompt(case_name: str) -> str:
+    return f"""Run LEVEL3_DYNAMIC_DAG using real Codex native subagents.
+
+Case: {case_name}
+
+Workflow:
+1. Spawn node task-a-implementer first. Set nickname exactly to task-a-implementer.
+2. Wait for task-a-implementer and close it after it returns A_DONE.
+3. After task-a-implementer is closed, spawn both ready nodes:
+   - task-a-reviewer, nickname task-a-reviewer, returns A_REVIEW_PASS
+   - task-b-implementer, nickname task-b-implementer, returns B_DONE
+   These two nodes may be spawned in either order or in the same turn.
+4. Wait for both branch nodes and close both after their expected outputs are returned.
+5. Spawn final-summarizer, nickname final-summarizer, after both branch nodes are closed.
+6. Wait for final-summarizer and close it after it returns FINAL_READY.
+
+Worker prompt rule:
+Every worker prompt must contain a line `Node: <node_id>`.
+Workers must not call multi_agent tools and must not create or modify files.
+
+Coordinator constraints:
+Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+Do not directly perform worker outputs yourself.
+Do not write final response until final-summarizer is closed.
+
+Final coordinator response must be exactly:
+RESULT: PASS
+DYNAMIC_DAG_CHAIN: task-a-implementer,task-a-reviewer,task-b-implementer,final-summarizer
+DYNAMIC_DAG_STATUS: a-done,a-review-pass,b-done
 """
 
 
@@ -845,7 +877,7 @@ def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> di
         "final_exact": final_lines
         == [
             "RESULT: PASS",
-            f"SENTINEL: {sentinel}",
+            sentinel,
             "SUBAGENT_CHAIN: implementer,spec-reviewer,quality-reviewer",
         ],
         "no_router_errors": not router and proxy_counts["native_router_error"] == 0,
@@ -877,6 +909,66 @@ def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> di
     return summary
 
 
+def level3_node_from_prompt(prompt: str | None) -> str | None:
+    if not isinstance(prompt, str):
+        return None
+    match = re.search(r"Node:\s*(task-a-implementer|task-a-reviewer|task-b-implementer|final-summarizer)", prompt)
+    return match.group(1) if match else None
+
+
+def analyze_level3_dynamic_dag(case: dict[str, Any]) -> dict[str, Any]:
+    stdout_path = Path(case["stdout"])
+    stderr_path = Path(case["stderr"])
+    parsed = parse_cli_events(stdout_path)
+    spawns = completed_tool_calls(parsed, {"spawn_agent"})
+    waits = completed_tool_calls(parsed, {"wait", "wait_agent"})
+    closes = completed_tool_calls(parsed, {"close_agent"})
+    nodes = [node for node in (level3_node_from_prompt(spawn.get("prompt")) for spawn in spawns) if node]
+    final_lines = [line.strip() for line in parsed["final_text"].splitlines() if line.strip()]
+    router = router_errors(parsed, stderr_path)
+    proxy_counts = proxy_event_counts_for_case(case, parsed)
+    expected_final = [
+        "RESULT: PASS",
+        "DYNAMIC_DAG_CHAIN: task-a-implementer,task-a-reviewer,task-b-implementer,final-summarizer",
+        "DYNAMIC_DAG_STATUS: a-done,a-review-pass,b-done",
+    ]
+    branch_positions = [nodes.index(node) for node in ("task-a-reviewer", "task-b-implementer") if node in nodes]
+    pass_checks = {
+        "exit_code_zero": case.get("exit_code") == 0,
+        "not_timed_out": not case.get("timed_out"),
+        "initial_node_first": nodes[:1] == ["task-a-implementer"],
+        "branch_nodes_seen": {"task-a-reviewer", "task-b-implementer"}.issubset(nodes),
+        "final_summarizer_last": nodes[-1:] == ["final-summarizer"],
+        "no_duplicate_nodes": len(nodes) == len(set(nodes)),
+        "branch_after_initial": bool(branch_positions) and all(position > 0 for position in branch_positions),
+        "has_waits": len(waits) >= 3,
+        "has_closes": len(closes) >= 4,
+        "final_exact": final_lines == expected_final,
+        "no_router_errors": not router and proxy_counts["native_router_error"] == 0,
+    }
+    summary = {
+        **case,
+        **proxy_counts,
+        "scenario": "level3_dynamic_dag",
+        "pass": all(pass_checks.values()),
+        "checks": pass_checks,
+        "nodes": nodes,
+        "router_errors": router,
+        "tool_counts": {
+            "completed_spawn": len(spawns),
+            "completed_wait": len(waits),
+            "completed_close": len(closes),
+        },
+        "final_text": parsed["final_text"],
+    }
+    summary["failure_classification"] = classify_failure(summary)
+    if not summary["pass"] and summary["failure_classification"] == "unclassified":
+        summary["failure_classification"] = "dynamic_scheduler_defect"
+    summary["protocol_lock_relevant"] = False
+    write_text(Path(case["stdout"]).with_suffix(".parsed.json"), json.dumps(summary, indent=2, ensure_ascii=True) + "\n")
+    return summary
+
+
 def write_markdown_summary(run_dir: Path, summaries: list[dict[str, Any]], gateway_source: Path) -> None:
     lines = [
         "# External Model Native Subagent Level 1 + Level 2 E2E",
@@ -889,7 +981,12 @@ def write_markdown_summary(run_dir: Path, summaries: list[dict[str, Any]], gatew
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for item in summaries:
-        level = "Level 2" if item.get("scenario") == "level2" else "Level 1"
+        if item.get("scenario") == "level3_dynamic_dag":
+            level = "Level 3"
+        elif item.get("scenario") == "level2":
+            level = "Level 2"
+        else:
+            level = "Level 1"
         name = item["case"]
         mode = item.get("subagent_mode", "")
         passed = "PASS" if item.get("pass") else "FAIL"
@@ -909,7 +1006,7 @@ def write_markdown_summary(run_dir: Path, summaries: list[dict[str, Any]], gatew
         )
         counts = item.get("tool_counts", {})
         count_text = ", ".join(f"{key}={value}" for key, value in counts.items())
-        ids_or_roles = ", ".join(item.get("agent_ids") or item.get("roles") or [])
+        ids_or_roles = ", ".join(item.get("agent_ids") or item.get("roles") or item.get("nodes") or [])
         failed = [key for key, value in (item.get("checks") or {}).items() if not value]
         reason = "ok" if not failed else ", ".join(failed)
         lines.append(
@@ -952,6 +1049,8 @@ def run_e2e_task(run_dir: Path, port: int, task: dict[str, Any], ephemeral_cli: 
     case["repeat_count"] = task.get("repeat_count")
     if task["scenario"] == "level2":
         summary = analyze_level2(case, task["output_path"], task["sentinel"])
+    elif task["scenario"] == "level3_dynamic_dag":
+        summary = analyze_level3_dynamic_dag(case)
     else:
         summary = analyze_level1(case, task["scenario"], task["sentinels"])
     append_progress(run_dir, case=task["case_name"], status="finished", passed=summary["pass"])
@@ -1005,12 +1104,14 @@ def run_e2e_tasks(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--level", choices=["level1", "level2", "all"], default="all")
+    parser.add_argument("--level", choices=["level1", "level2", "level3", "all"], default="all")
     parser.add_argument("--models", default="", help="Comma-separated short model names to run, e.g. glm52,k2_7,m3.")
     parser.add_argument("--endpoints", default="", help="Comma-separated endpoints to run: responses,chat.")
     parser.add_argument("--scenarios", default="", help="Comma-separated Level 1 scenarios to run: single,two.")
+    parser.add_argument("--workflow", choices=["dynamic-dag"], default="dynamic-dag")
     parser.add_argument("--level1-timeout", type=int, default=420)
     parser.add_argument("--level2-timeout", type=int, default=720)
+    parser.add_argument("--level3-timeout", type=int, default=720)
     parser.add_argument("--jobs", type=int, default=1, help="Maximum number of independent E2E cases to run concurrently.")
     parser.add_argument(
         "--subagent-mode",
@@ -1140,6 +1241,29 @@ def main() -> int:
             summaries.extend(run_e2e_tasks(run_dir, port, level2_tasks, args.jobs, args.ephemeral_cli))
         elif args.level == "all":
             write_text(run_dir / "level2.skipped.txt", "Level 2 skipped because Level 1 did not pass cleanly.\n")
+
+        level2_ok = all(item.get("pass") for item in summaries if item.get("scenario") == "level2")
+        if args.level == "level3" or (args.level == "all" and level1_ok and level2_ok):
+            level3_tasks: list[dict[str, Any]] = []
+            for short_model, _model, endpoint, _provider, model_id in cases:
+                case_name = f"level3-{short_model}-{endpoint}"
+                level3_tasks.append(
+                    {
+                        "case_name": case_name,
+                        "prompt": level3_dynamic_dag_prompt(case_name),
+                        "model_id": model_id,
+                        "endpoint": endpoint,
+                        "timeout": args.level3_timeout,
+                        "scenario": "level3_dynamic_dag",
+                        "preserve_cli_tools": not args.minimal_cli_tools,
+                        "subagent_mode": args.subagent_mode,
+                        "main_retry_attempts": args.main_retry_attempts,
+                    }
+                )
+            level3_tasks = repeated_tasks(level3_tasks, args.repeat)
+            summaries.extend(run_e2e_tasks(run_dir, port, level3_tasks, args.jobs, args.ephemeral_cli))
+        elif args.level == "all":
+            write_text(run_dir / "level3.skipped.txt", "Level 3 skipped because prior levels did not pass cleanly.\n")
 
         write_text(run_dir / "summary.json", json.dumps(summaries, indent=2, ensure_ascii=True) + "\n")
         write_markdown_summary(run_dir, summaries, gateway_source)
