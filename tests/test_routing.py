@@ -4248,6 +4248,84 @@ Do not modify any other files. Do not create any other files. Use a shell comman
         self.assertIn("worker_subagent_finalization_required", transcript)
         self.assertIn("ordinary assistant message content", transcript)
 
+    def test_responses_structured_exact_line_child_prompt_is_worker_context(self):
+        worker_prompt = "Return exactly this line: SENTINEL:level1-single-glm52-responses"
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": worker_prompt}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "mcp__codex_apps__local_tool_gateway___run_shell",
+                        "parameters": {"type": "object"},
+                    },
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+
+        self.assertTrue(event_context["subagent_worker_context"])
+        self.assertFalse(event_context["subagent_spawn_allowed"])
+        self.assertNotIn("mcp__codex_apps__local_tool_gateway___run_shell", tools_by_name)
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("tool_choice", payload)
+
+    def test_responses_structured_dynamic_dag_node_prompt_is_worker_context(self):
+        worker_prompt = (
+            "You are a Level 3 Dynamic DAG worker.\n"
+            "Node: task-a-implementer\n"
+            "Return exactly one line:\n"
+            "A_DONE\n"
+            "Do not call multi_agent tools. Do not create or modify files."
+        )
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": worker_prompt}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "mcp__codex_apps__local_tool_gateway___run_shell",
+                        "parameters": {"type": "object"},
+                    },
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+
+        self.assertTrue(event_context["subagent_worker_context"])
+        self.assertFalse(event_context["subagent_spawn_allowed"])
+        self.assertNotIn("mcp__codex_apps__local_tool_gateway___run_shell", tools_by_name)
+        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("tool_choice", payload)
+
     def test_responses_structured_task_worker_prompt_does_not_force_spawn(self):
         worker_prompt = r"""
 You are implementing Task 1: Write The Diagnostic Artifact

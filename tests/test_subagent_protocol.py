@@ -80,6 +80,34 @@ class SubagentProtocolTests(unittest.TestCase):
         self.assertEqual(state.waitable_agent_ids, ["agent-1"])
         self.assertEqual(state.closeable_agent_ids, [])
 
+    def test_send_input_to_closed_agent_is_protocol_defect_signal(self):
+        state = reduce_protocol_events(
+            [
+                ProtocolEvent.spawn(call_id="call_spawn", agent_id="agent-1", prompt="return ok"),
+                ProtocolEvent.wait(call_id="call_wait", targets=("agent-1",), results={"agent-1": "ok"}),
+                ProtocolEvent.close(call_id="call_close", target="agent-1"),
+                ProtocolEvent.send_input(call_id="call_send", target="agent-1", message="try again"),
+            ]
+        )
+
+        self.assertEqual([violation.code for violation in state.violations], ["send_input_closed_agent"])
+        self.assertEqual(state.closed_agent_ids, ["agent-1"])
+        self.assertFalse(state.lifecycle_complete)
+
+    def test_resume_closed_agent_is_protocol_defect_signal(self):
+        state = reduce_protocol_events(
+            [
+                ProtocolEvent.spawn(call_id="call_spawn", agent_id="agent-1", prompt="return ok"),
+                ProtocolEvent.wait(call_id="call_wait", targets=("agent-1",), results={"agent-1": "ok"}),
+                ProtocolEvent.close(call_id="call_close", target="agent-1"),
+                ProtocolEvent.resume(call_id="call_resume", target="agent-1", message="try again"),
+            ]
+        )
+
+        self.assertEqual([violation.code for violation in state.violations], ["resume_closed_agent"])
+        self.assertEqual(state.closed_agent_ids, ["agent-1"])
+        self.assertFalse(state.lifecycle_complete)
+
     def test_close_before_successful_wait_is_violation(self):
         state = reduce_protocol_events(
             [

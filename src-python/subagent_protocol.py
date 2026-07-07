@@ -151,6 +151,9 @@ def reduce_protocol_events(events: Iterable[ProtocolEvent]) -> ProtocolState:
             if agent is None:
                 state.violations.append(ProtocolViolation(f"{event.kind}_unknown_agent", agent_id=agent_id or None))
                 continue
+            if agent.closed:
+                state.violations.append(ProtocolViolation(f"{event.kind}_closed_agent", agent_id=agent_id))
+                continue
             agent.waited = False
             agent.result = ""
             agent.needs_input = False

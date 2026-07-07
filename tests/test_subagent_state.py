@@ -350,6 +350,28 @@ The overall chain is implementer, spec reviewer, and code quality reviewer.
 
         self.assertFalse(state.workflow_intent)
 
+    def test_exact_line_child_prompt_is_worker_request(self):
+        worker_prompt = "Return exactly this line: SENTINEL:level1-single-glm52-responses"
+
+        self.assertTrue(is_worker_subagent_request([message(worker_prompt)]))
+        state = build_subagent_state([message(worker_prompt)])
+
+        self.assertFalse(state.workflow_intent)
+
+    def test_dynamic_dag_node_prompt_is_worker_request(self):
+        worker_prompt = (
+            "You are a Level 3 Dynamic DAG worker.\n"
+            "Node: task-a-implementer\n"
+            "Return exactly one line:\n"
+            "A_DONE\n"
+            "Do not call multi_agent tools. Do not create or modify files."
+        )
+
+        self.assertTrue(is_worker_subagent_request([message(worker_prompt)]))
+        state = build_subagent_state([message(worker_prompt)])
+
+        self.assertFalse(state.workflow_intent)
+
     def test_worker_implementer_prompt_does_not_request_child_from_artifact_count(self):
         worker_prompt = r"""
 You are an implementer subagent. Your task is to create exactly one diagnostic artifact file.

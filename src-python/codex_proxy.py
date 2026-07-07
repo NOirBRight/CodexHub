@@ -29,7 +29,12 @@ from catalog import canonical_model_id, deny_match_model_id, load_catalog_models
 from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias
-from subagent_policy import deterministic_required_action
+from subagent_policy import (
+    deterministic_required_action,
+    guidance_enabled as _subagent_policy_guidance_enabled,
+    semantic_repair_enabled as _subagent_policy_semantic_repair_enabled,
+    subagent_assist_mode as _subagent_policy_assist_mode,
+)
 from subagent_dynamic_dag import build_dynamic_dag_workflow, dynamic_dag_guidance_message, is_dynamic_dag_request
 from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions, workflow_complete
 from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
@@ -532,25 +537,16 @@ def gateway_auto_retry_max_attempts() -> int:
     return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
 
 
-SUBAGENT_ASSIST_MODES = {"strict", "guided", "assisted"}
-
-
 def subagent_assist_mode() -> str:
-    raw = os.environ.get("CODEXHUB_SUBAGENT_ASSIST_MODE", "assisted")
-    value = raw.strip().lower() if isinstance(raw, str) else "assisted"
-    return value if value in SUBAGENT_ASSIST_MODES else "assisted"
+    return _subagent_policy_assist_mode()
 
 
 def subagent_guidance_enabled(event_context: Mapping[str, Any] | None) -> bool:
-    if _is_raw_provider_probe_context(event_context or {}):
-        return False
-    return subagent_assist_mode() in {"guided", "assisted"}
+    return _subagent_policy_guidance_enabled(event_context)
 
 
 def subagent_semantic_repair_enabled(event_context: Mapping[str, Any] | None) -> bool:
-    if _is_raw_provider_probe_context(event_context or {}):
-        return False
-    return subagent_assist_mode() == "assisted"
+    return _subagent_policy_semantic_repair_enabled(event_context)
 
 
 def lifecycle_empty_final_resample_enabled(

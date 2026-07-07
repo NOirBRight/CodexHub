@@ -1033,6 +1033,20 @@ def _workflow_expected_artifact_text(value: Any) -> str | None:
 
 
 def _looks_like_worker_subagent_prompt(text: str) -> bool:
+    stripped = text.strip()
+    if re.fullmatch(r"return exactly this line:\s*\S(?:.*\S)?", stripped):
+        return True
+    if (
+        "level 3 dynamic dag worker" in text
+        and re.search(r"(?m)^\s*node:\s*(?:task-a-implementer|task-a-reviewer|task-b-implementer|final-summarizer)\b", text)
+    ):
+        return True
+    if (
+        re.search(r"(?m)^\s*node:\s*(?:task-a-implementer|task-a-reviewer|task-b-implementer|final-summarizer)\b", text)
+        and "return exactly one line:" in text
+        and "multi_agent" in text
+    ):
+        return True
     if re.search(
         r"\byou are (?:a |an |the )?(?:codex native )?(?:implementer|spec[-_\s]*reviewer|spec compliance reviewer|code[-_\s]*quality reviewer|quality[-_\s]*reviewer)[\w\s_-]{0,80}subagent\b",
         text,

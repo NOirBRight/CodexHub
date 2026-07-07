@@ -539,6 +539,51 @@ def completed_tool_calls(parsed: dict[str, Any], tool_names: set[str]) -> list[d
     ]
 
 
+def completed_collab_events(parsed: dict[str, Any]) -> list[tuple[int, dict[str, Any]]]:
+    return [
+        (index, event)
+        for index, event in enumerate(parsed["collab"])
+        if event.get("event") == "item.completed" and event.get("status") == "completed"
+    ]
+
+
+def event_agent_ids(event: dict[str, Any]) -> set[str]:
+    ids = {receiver for receiver in (event.get("receivers") or []) if isinstance(receiver, str)}
+    for key in ("messages", "agent_messages"):
+        value = event.get(key)
+        if isinstance(value, dict):
+            ids.update(str(agent_id) for agent_id in value if isinstance(agent_id, str) and agent_id)
+    return ids
+
+
+def lifecycle_completed_between(
+    ordered_events: list[tuple[int, dict[str, Any]]],
+    spawn_event: dict[str, Any],
+    start_index: int,
+    end_index: int | None,
+) -> bool:
+    agent_ids = event_agent_ids(spawn_event)
+    if not agent_ids:
+        return False
+
+    wait_positions: list[int] = []
+    close_positions: list[int] = []
+    for index, event in ordered_events:
+        if index <= start_index:
+            continue
+        if end_index is not None and index >= end_index:
+            continue
+        event_ids = event_agent_ids(event)
+        if not agent_ids.intersection(event_ids):
+            continue
+        tool = event.get("tool")
+        if tool in {"wait", "wait_agent"}:
+            wait_positions.append(index)
+        elif tool == "close_agent":
+            close_positions.append(index)
+    return any(wait_index < close_index for wait_index in wait_positions for close_index in close_positions)
+
+
 def all_message_text(parsed: dict[str, Any]) -> str:
     parts = [parsed.get("final_text") or ""]
     for event in parsed["collab"]:
@@ -665,7 +710,11 @@ def classify_failure(summary: dict[str, Any]) -> str:
         return "model_choice"
     if not checks.get("wait_covers_agents", True) or not checks.get("close_covers_agents", True):
         return "protocol_or_policy_defect"
+    if not checks.get("role_lifecycle_order", True) or not checks.get("dependency_order", True):
+        return "scheduler_or_model_prompt_defect"
     if not checks.get("sentinels_seen", True):
+        return "scheduler_or_model_prompt_defect"
+    if not checks.get("worker_outputs_seen", True):
         return "scheduler_or_model_prompt_defect"
     if not checks.get("final_exact", True) or not checks.get("artifact_exact", True):
         return "workflow_output_defect"
@@ -787,6 +836,38 @@ def level2_role_order_valid(roles: list[str]) -> bool:
     return True
 
 
+def level2_role_lifecycle_order_valid(parsed: dict[str, Any]) -> bool:
+    ordered = completed_collab_events(parsed)
+    role_spawns: list[tuple[int, str, dict[str, Any]]] = []
+    for index, event in ordered:
+        if event.get("tool") != "spawn_agent":
+            continue
+        role = role_from_prompt(event.get("prompt"))
+        if role:
+            role_spawns.append((index, role, event))
+
+    chain: list[tuple[int, str, dict[str, Any]]] = []
+    cursor = -1
+    for expected_role in ("implementer", "spec-reviewer", "quality-reviewer"):
+        match = next(
+            (
+                (index, role, event)
+                for index, role, event in role_spawns
+                if index > cursor and role == expected_role
+            ),
+            None,
+        )
+        if match is None:
+            return False
+        chain.append(match)
+        cursor = match[0]
+
+    for current, next_item in zip(chain, chain[1:]):
+        if not lifecycle_completed_between(ordered, current[2], current[0], next_item[0]):
+            return False
+    return lifecycle_completed_between(ordered, chain[-1][2], chain[-1][0], None)
+
+
 def contains_path_reference(value: Any, path: Path) -> bool:
     needle = str(path)
     slash_needle = re.sub(r"/+", "/", needle.replace("\\", "/"))
@@ -870,6 +951,7 @@ def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> di
         "has_spec_reviewer": "spec-reviewer" in roles,
         "has_quality_reviewer": "quality-reviewer" in roles,
         "role_order": level2_role_order_valid(roles),
+        "role_lifecycle_order": level2_role_lifecycle_order_valid(parsed),
         "has_waits": len(waits) >= 3,
         "has_closes": len(closes) >= 3,
         "no_direct_artifact_workaround": not direct_artifact_commands and not direct_artifact_mcp_calls,
@@ -916,6 +998,36 @@ def level3_node_from_prompt(prompt: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def level3_dynamic_dependency_order_valid(parsed: dict[str, Any]) -> bool:
+    ordered = completed_collab_events(parsed)
+    spawns: dict[str, tuple[int, dict[str, Any]]] = {}
+    for index, event in ordered:
+        if event.get("tool") != "spawn_agent":
+            continue
+        node = level3_node_from_prompt(event.get("prompt"))
+        if node and node not in spawns:
+            spawns[node] = (index, event)
+
+    required = {"task-a-implementer", "task-a-reviewer", "task-b-implementer", "final-summarizer"}
+    if not required.issubset(spawns):
+        return False
+
+    initial_index, initial_event = spawns["task-a-implementer"]
+    reviewer_index, reviewer_event = spawns["task-a-reviewer"]
+    task_b_index, task_b_event = spawns["task-b-implementer"]
+    final_index, final_event = spawns["final-summarizer"]
+    first_branch_index = min(reviewer_index, task_b_index)
+    if not (initial_index < first_branch_index and reviewer_index < final_index and task_b_index < final_index):
+        return False
+    if not lifecycle_completed_between(ordered, initial_event, initial_index, first_branch_index):
+        return False
+    if not lifecycle_completed_between(ordered, reviewer_event, reviewer_index, final_index):
+        return False
+    if not lifecycle_completed_between(ordered, task_b_event, task_b_index, final_index):
+        return False
+    return lifecycle_completed_between(ordered, final_event, final_index, None)
+
+
 def analyze_level3_dynamic_dag(case: dict[str, Any]) -> dict[str, Any]:
     stdout_path = Path(case["stdout"])
     stderr_path = Path(case["stderr"])
@@ -927,6 +1039,7 @@ def analyze_level3_dynamic_dag(case: dict[str, Any]) -> dict[str, Any]:
     final_lines = [line.strip() for line in parsed["final_text"].splitlines() if line.strip()]
     router = router_errors(parsed, stderr_path)
     proxy_counts = proxy_event_counts_for_case(case, parsed)
+    transcript = all_message_text(parsed)
     expected_final = [
         "RESULT: PASS",
         "DYNAMIC_DAG_CHAIN: task-a-implementer,task-a-reviewer,task-b-implementer,final-summarizer",
@@ -941,6 +1054,8 @@ def analyze_level3_dynamic_dag(case: dict[str, Any]) -> dict[str, Any]:
         "final_summarizer_last": nodes[-1:] == ["final-summarizer"],
         "no_duplicate_nodes": len(nodes) == len(set(nodes)),
         "branch_after_initial": bool(branch_positions) and all(position > 0 for position in branch_positions),
+        "dependency_order": level3_dynamic_dependency_order_valid(parsed),
+        "worker_outputs_seen": all(token in transcript for token in ("A_DONE", "A_REVIEW_PASS", "B_DONE", "FINAL_READY")),
         "has_waits": len(waits) >= 3,
         "has_closes": len(closes) >= 4,
         "final_exact": final_lines == expected_final,
