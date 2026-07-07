@@ -116,6 +116,30 @@ class SubagentProtocolTests(unittest.TestCase):
         self.assertEqual(state.closeable_agent_ids, ["agent-1"])
         self.assertEqual(state.agents["agent-1"].result, "ok")
 
+    def test_wait_unknown_agent_is_protocol_defect_signal(self):
+        state = reduce_protocol_events(
+            [ProtocolEvent.wait(call_id="call_wait", targets=("missing",), results={"missing": "ok"})]
+        )
+
+        self.assertEqual([violation.code for violation in state.violations], ["wait_unknown_agent"])
+
+    def test_close_unknown_agent_is_protocol_defect_signal(self):
+        state = reduce_protocol_events([ProtocolEvent.close(call_id="call_close", target="missing")])
+
+        self.assertEqual([violation.code for violation in state.violations], ["close_unknown_agent"])
+
+    def test_wait_closed_agent_is_protocol_defect_signal(self):
+        state = reduce_protocol_events(
+            [
+                ProtocolEvent.spawn(call_id="call_spawn", agent_id="agent-1", prompt="return ok"),
+                ProtocolEvent.wait(call_id="call_wait", targets=("agent-1",), results={"agent-1": "ok"}),
+                ProtocolEvent.close(call_id="call_close", target="agent-1"),
+                ProtocolEvent.wait(call_id="call_wait_again", targets=("agent-1",), results={"agent-1": "ok"}),
+            ]
+        )
+
+        self.assertEqual([violation.code for violation in state.violations], ["wait_closed_agent"])
+
 
 if __name__ == "__main__":
     unittest.main()
