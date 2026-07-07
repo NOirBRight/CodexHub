@@ -120,6 +120,8 @@ def reduce_protocol_events(events: Iterable[ProtocolEvent]) -> ProtocolState:
                 if agent.closed:
                     state.violations.append(ProtocolViolation("wait_closed_agent", agent_id=agent_id))
                     continue
+                if agent_id not in event.results:
+                    continue
                 result = str(event.results.get(agent_id, "") or "")
                 if result.strip():
                     agent.waited = True

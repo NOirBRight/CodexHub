@@ -52,6 +52,19 @@ class SubagentProtocolTests(unittest.TestCase):
         self.assertEqual(state.closeable_agent_ids, [])
         self.assertFalse(state.lifecycle_complete)
 
+    def test_missing_wait_result_keeps_agent_waitable(self):
+        state = reduce_protocol_events(
+            [
+                ProtocolEvent.spawn(call_id="call_spawn", agent_id="agent-1", prompt="return exact line", nickname=None),
+                ProtocolEvent.wait(call_id="call_wait", targets=("agent-1",), results={}),
+            ]
+        )
+
+        self.assertEqual(state.waitable_agent_ids, ["agent-1"])
+        self.assertEqual(state.needs_input_agent_ids, [])
+        self.assertEqual(state.closeable_agent_ids, [])
+        self.assertFalse(state.lifecycle_complete)
+
     def test_send_input_reopens_empty_wait_agent_for_wait(self):
         state = reduce_protocol_events(
             [

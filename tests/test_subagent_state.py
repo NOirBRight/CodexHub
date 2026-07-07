@@ -607,6 +607,20 @@ Required sequence:
         self.assertEqual(state.wait_agent_ids, ["impl-1"])
         self.assertEqual(state.close_agent_ids, [])
 
+    def test_bounded_missing_wait_status_requires_wait_not_final(self):
+        state = build_subagent_state(
+            [
+                message("Spawn one subagent, then wait for it and close it."),
+                *spawn("call_a", "agent-a", "Return exactly this line: SENTINEL:A", "child-a"),
+                *wait_output("call_wait", ["agent-a"], {"timed_out": False, "status": {}}),
+            ]
+        )
+
+        self.assertEqual(state.next_action, "wait")
+        self.assertEqual(state.wait_agent_ids, ["agent-a"])
+        self.assertEqual(state.close_agent_ids, [])
+        self.assertFalse(state.lifecycle_complete)
+
     def test_bounded_empty_completed_wait_result_requires_send_input_before_close(self):
         state = build_subagent_state(
             [
