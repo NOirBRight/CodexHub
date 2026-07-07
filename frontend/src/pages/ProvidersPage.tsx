@@ -48,7 +48,7 @@ const DEFAULT_OFFICIAL_MODEL_ORDER = [
 const OPENAI_USAGE_DAY_SECONDS = 86_400;
 const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
 const OPENAI_USAGE_QUERY_WINDOW_DAYS = 730;
-const OPENAI_USAGE_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const OPENAI_USAGE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const OFFICIAL_USAGE_CELL_GAP = 2;
 const OFFICIAL_USAGE_CELL_SIZE = 8;
 const OFFICIAL_USAGE_COLOR_STOPS = ["#eff2f5", "#d8ebff", "#acd7ff", "#7cc1ff", "#48a7fb", "#1687e8"];
@@ -253,8 +253,8 @@ export function ProvidersPage({
     if (selectedId !== OFFICIAL_ID) {
       return;
     }
-    void loadOfficialOpenAIUsage(false);
-    const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(false), OPENAI_USAGE_REFRESH_INTERVAL_MS);
+    void loadOfficialOpenAIUsage(true);
+    const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(true), OPENAI_USAGE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(usageRefreshTimer);
   }, [selectedId]);
 
@@ -553,7 +553,8 @@ export function ProvidersPage({
     }
   }
 
-  async function loadOfficialOpenAIUsage(forceRefresh = false) {
+  async function loadOfficialOpenAIUsage(forceRefresh = true, notify = false, toastId?: string) {
+    const activeToastId = toastId ?? (notify ? showToast(t("providers.refreshingOpenAIUsage"), "loading") : null);
     setOfficialUsageBusy(true);
     try {
       const snapshot = await api.openaiUsageCompletions({
@@ -564,7 +565,17 @@ export function ProvidersPage({
       setOfficialUsageSnapshot(snapshot);
       setOfficialUsageError(null);
       setOfficialUsageHidden(false);
+      if (activeToastId) {
+        updateToast(activeToastId, {
+          action: null,
+          text: t("providers.openaiUsageRefreshed"),
+          tone: "success",
+        });
+      }
     } catch (err) {
+      if (activeToastId) {
+        updateToastWithError(activeToastId, err);
+      }
       if (officialUsageSnapshotRef.current) {
         setOfficialUsageError(null);
         setOfficialUsageHidden(false);
@@ -1132,7 +1143,7 @@ export function ProvidersPage({
                 models={officialModels}
                 officialDisabledModels={officialDisabledModels}
                 onRefresh={() => void refreshOfficialModels()}
-                onRefreshUsage={() => void loadOfficialOpenAIUsage(true)}
+                onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
                 onReorder={(models) => void reorderOfficialModels(models)}
                 onToggleModel={toggleOfficialModel}
                 usageBusy={officialUsageBusy}
@@ -1950,12 +1961,10 @@ function OfficialDetail({
     const endpointLabel = upstreamFormatLabel("responses", t as Translate);
     const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
     try {
-      const result = await api.testModelEndpoint(
-        "https://api.openai.com/v1",
-        "{env:OPENAI_API_KEY}",
-        officialModelProbeId(model),
-        "responses",
-      );
+      const result = await api.gatewayTestRequest("responses_stream", model.id);
+      if (!result.ok) {
+        throw new Error(result.error || result.sanitized_body || `HTTP ${result.status ?? "unknown"}`);
+      }
       updateToast(toastId, {
         action: null,
         text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
@@ -3822,11 +3831,6 @@ function probeResultSummary(result: UpstreamFormatProbeResult) {
 
 function modelProbeId(model: Model) {
   return model.upstream_model?.trim() || model.id;
-}
-
-function officialModelProbeId(model: Model) {
-  const modelId = modelProbeId(model);
-  return modelId.startsWith("openai/") ? modelId.slice("openai/".length) : modelId;
 }
 
 function shortProviderDiscoveryError(err: unknown, t: Translate) {

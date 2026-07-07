@@ -412,11 +412,12 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
 
   assert.match(providersSource, /openaiUsageCompletions/);
   assert.match(providersSource, /OfficialOpenAIUsagePanel/);
-  assert.match(providersSource, /const OPENAI_USAGE_REFRESH_INTERVAL_MS = 12 \* 60 \* 60 \* 1000;/);
+  assert.match(providersSource, /const OPENAI_USAGE_REFRESH_INTERVAL_MS = 60 \* 60 \* 1000;/);
   assert.match(providersSource, /const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot \| null>\(null\);/);
-  assert.match(providersSource, /async function loadOfficialOpenAIUsage\(forceRefresh = false\)/);
+  assert.match(providersSource, /async function loadOfficialOpenAIUsage\(forceRefresh = true, notify = false, toastId\?: string\)/);
   assert.match(providersSource, /api\.openaiUsageCompletions\(\{[\s\S]*forceRefresh[\s\S]*\}\)/);
-  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(false\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
+  assert.match(providersSource, /void loadOfficialOpenAIUsage\(true\)/);
+  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(true\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
   assert.match(providersSource, /if \(officialUsageSnapshotRef\.current\) \{[\s\S]*setOfficialUsageError\(null\);[\s\S]*setOfficialUsageHidden\(false\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /selectedId === OFFICIAL_ID[\s\S]*loadOfficialOpenAIUsage/);
   assert.match(providersSource, /longest_running_turn_sec/);
@@ -483,6 +484,29 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(enSource, /longestTaskDuration/);
   assert.match(zhSource, /openaiUsage/);
   assert.match(zhSource, /longestTaskDuration/);
+});
+
+test("manual OpenAI usage refresh uses a persistent toast", async () => {
+  const [providersSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  const loadUsage = providersSource.match(/async function loadOfficialOpenAIUsage[\s\S]*?async function saveProviders/)?.[0] ?? "";
+  assert.match(loadUsage, /toastId\?: string/);
+  assert.match(loadUsage, /notify = false/);
+  assert.match(
+    loadUsage,
+    /const activeToastId = toastId \?\? \(notify \? showToast\(t\("providers\.refreshingOpenAIUsage"\), "loading"\) : null\)/,
+  );
+  assert.match(loadUsage, /if \(activeToastId\) \{[\s\S]*text: t\("providers\.openaiUsageRefreshed"\),[\s\S]*tone: "success"/);
+  assert.match(loadUsage, /if \(activeToastId\) \{[\s\S]*updateToastWithError\(activeToastId, err\)/);
+  assert.match(providersSource, /onRefreshUsage=\{\(\) => void loadOfficialOpenAIUsage\(true, true\)\}/);
+  assert.match(enSource, /refreshingOpenAIUsage: "Refreshing OpenAI usage\.\.\."/);
+  assert.match(enSource, /openaiUsageRefreshed: "OpenAI usage refreshed"/);
+  assert.match(zhSource, /refreshingOpenAIUsage: "正在刷新 OpenAI 用量\.\.\."/);
+  assert.match(zhSource, /openaiUsageRefreshed: "OpenAI 用量已刷新"/);
 });
 
 test("usage custom date popover closes on outside click", async () => {
@@ -1004,12 +1028,13 @@ test("model test buttons use the selected endpoint connectivity check", async ()
     assert.doesNotMatch(block, /probeResultSummary/);
   }
   assert.match(officialDetail, /async function testOfficialModel\(model: Model\)/);
-  assert.match(officialDetail, /api\.testModelEndpoint\([\s\S]*"https:\/\/api\.openai\.com\/v1"[\s\S]*"\{env:OPENAI_API_KEY\}"[\s\S]*officialModelProbeId\(model\)[\s\S]*"responses"/);
+  assert.match(officialDetail, /api\.gatewayTestRequest\("responses_stream", model\.id\)/);
+  assert.doesNotMatch(officialDetail, /OPENAI_API_KEY/);
   assert.match(officialDetail, /onTestModel=\{testOfficialModel\}/);
   assert.match(officialDetail, /modelTestDisabled=\{authState !== "authorized"\}/);
   assert.match(providerDetail, /onTestModel=\{testModel\}/);
   assert.match(addProviderPanel, /onTestModel=\{testModel\}/);
-  assert.match(providersSource, /function officialModelProbeId\(model: Model\)/);
+  assert.doesNotMatch(providersSource, /function officialModelProbeId\(model: Model\)/);
 });
 
 test("add provider only prompts and saves when a name is present", async () => {

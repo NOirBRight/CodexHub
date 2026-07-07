@@ -1365,22 +1365,29 @@ fn codex_home() -> PathBuf {
 }
 
 fn official_models(settings: &Settings) -> Vec<GatewayModel> {
-    let mut models: Vec<GatewayModel> = OFFICIAL_MODELS
-        .iter()
-        .filter(|(id, _, _)| !official_model_disabled(settings, id))
-        .map(|(id, display_name, context_window)| GatewayModel {
-            id: (*id).to_string(),
-            display_name: (*display_name).to_string(),
-            source: "Official Codex subscription".to_string(),
-            source_kind: "official".to_string(),
-            supports_responses: true,
-            supports_chat_completions: true,
-            context_window: *context_window,
-        })
-        .collect();
+    let cached_models = models::list_cached_official_subscription_models().ok();
+    official_models_from_metadata(settings, cached_models)
+}
 
+fn official_models_from_metadata(
+    settings: &Settings,
+    subscription_models: Option<Vec<crate::Model>>,
+) -> Vec<GatewayModel> {
+    let mut models: Vec<GatewayModel> =
+        match subscription_models.filter(|models| !models.is_empty()) {
+            Some(models) => models
+                .into_iter()
+                .filter_map(|model| official_gateway_model_from_metadata(settings, model))
+                .collect(),
+            None => fallback_official_gateway_models(settings),
+        };
+
+    let base_ids = models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<HashSet<_>>();
     for (base_id, id, display_name, context_window) in OFFICIAL_FAST_VARIANTS {
-        if official_model_disabled(settings, base_id) {
+        if !base_ids.contains(*base_id) || official_model_disabled(settings, base_id) {
             continue;
         }
         if settings
@@ -1401,6 +1408,61 @@ fn official_models(settings: &Settings) -> Vec<GatewayModel> {
     }
 
     models
+}
+
+fn official_gateway_model_from_metadata(
+    settings: &Settings,
+    model: crate::Model,
+) -> Option<GatewayModel> {
+    let id = official_gateway_model_id(&model.id)?;
+    if official_model_disabled(settings, &id) || is_gateway_fast_variant_id(&id) {
+        return None;
+    }
+    Some(GatewayModel {
+        id: id.clone(),
+        display_name: model.display_name.unwrap_or_else(|| id.clone()),
+        source: "Official Codex subscription".to_string(),
+        source_kind: "official".to_string(),
+        supports_responses: true,
+        supports_chat_completions: true,
+        context_window: model
+            .context_window
+            .unwrap_or_else(|| gateway_model_context_window(&id)),
+    })
+}
+
+fn fallback_official_gateway_models(settings: &Settings) -> Vec<GatewayModel> {
+    OFFICIAL_MODELS
+        .iter()
+        .filter(|(id, _, _)| !official_model_disabled(settings, id))
+        .map(|(id, display_name, context_window)| GatewayModel {
+            id: (*id).to_string(),
+            display_name: (*display_name).to_string(),
+            source: "Official Codex subscription".to_string(),
+            source_kind: "official".to_string(),
+            supports_responses: true,
+            supports_chat_completions: true,
+            context_window: *context_window,
+        })
+        .collect()
+}
+
+fn official_gateway_model_id(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.starts_with("openai/gpt-") {
+        Some(id.to_string())
+    } else if id.starts_with("gpt-") {
+        Some(format!("openai/{id}"))
+    } else {
+        None
+    }
+}
+
+fn is_gateway_fast_variant_id(id: &str) -> bool {
+    matches!(
+        id.strip_prefix("openai/").unwrap_or(id),
+        "gpt-5.5-fast" | "gpt-5.4-fast"
+    )
 }
 
 fn official_model_disabled(settings: &Settings, id: &str) -> bool {
@@ -5387,12 +5449,12 @@ fn has_nonempty_payload(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_opencode_config_with_paths, gateway_models_from_config, omp_models_yml_text,
-        opencode_config_text, pi_models_text, pi_settings_text, read_usage_events_from_sqlite_path,
-        read_usage_events_from_text, read_usage_summary_from_sqlite_path_with_pricing,
-        read_usage_summary_from_text, read_usage_summary_from_text_with_pricing,
-        restore_latest_backup, sanitize_event, sanitize_text, usage_pricing_by_model,
-        zcode_catalog_text, UsagePricing,
+        apply_opencode_config_with_paths, gateway_models_from_config,
+        official_models_from_metadata, omp_models_yml_text, opencode_config_text, pi_models_text,
+        pi_settings_text, read_usage_events_from_sqlite_path, read_usage_events_from_text,
+        read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
+        read_usage_summary_from_text_with_pricing, restore_latest_backup, sanitize_event,
+        sanitize_text, usage_pricing_by_model, zcode_catalog_text, UsagePricing,
     };
     use crate::{Model, Provider, Settings, UpstreamFormat};
     use serde_json::json;
@@ -5773,6 +5835,25 @@ mod tests {
         assert!(models.iter().any(|model| model.id == "openai/gpt-5.5-fast"));
         assert!(!models.iter().any(|model| model.id == "openai/gpt-5.4"));
         assert!(!models.iter().any(|model| model.id == "openai/gpt-5.4-fast"));
+    }
+
+    #[test]
+    fn official_gateway_models_use_subscription_metadata_when_available() {
+        let settings = Settings::default();
+        let models = official_models_from_metadata(
+            &settings,
+            Some(vec![Model {
+                id: "openai/gpt-5.6".to_string(),
+                display_name: Some("OpenAI GPT-5.6".to_string()),
+                context_window: Some(300_000),
+                ..Model::default()
+            }]),
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "openai/gpt-5.6");
+        assert_eq!(models[0].display_name, "OpenAI GPT-5.6");
+        assert_eq!(models[0].context_window, 300_000);
     }
 
     #[test]

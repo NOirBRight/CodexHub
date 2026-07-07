@@ -257,9 +257,9 @@ def official_seed_catalog_paths(
     path: Path = OFFICIAL_SEED_PATH,
     runtime_path: Path = RUNTIME_OFFICIAL_SEED_PATH,
 ) -> list[Path]:
-    paths = [path]
-    if runtime_path not in paths:
-        paths.append(runtime_path)
+    paths = [runtime_path]
+    if path not in paths:
+        paths.append(path)
     return paths
 
 
@@ -545,11 +545,23 @@ def sort_official_slugs(slugs: Iterable[str], sort_order: Iterable[str]) -> list
     return [slug for _, slug in sorted(enumerate(ordered_slugs), key=sort_key)]
 
 
+def official_proxy_display_name(slug: str, model: dict[str, Any], policy: CatalogPolicy) -> str:
+    policy_name = display_name_for(slug, policy)
+    raw_name = model.get("display_name")
+    if canonical_model_id(slug) in policy.display_names:
+        display_name = policy_name
+    elif isinstance(raw_name, str) and raw_name.strip():
+        display_name = raw_name.strip()
+    else:
+        display_name = policy_name
+    return display_name if display_name.startswith("OpenAI ") else f"OpenAI {display_name}"
+
+
 def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
     model = deepcopy(official_by_slug.get(slug) or build_minimal_official_model(slug, policy))
     alias = official_proxy_alias(slug)
     model["slug"] = alias
-    model["display_name"] = f"OpenAI {display_name_for(slug, policy)}"
+    model["display_name"] = official_proxy_display_name(slug, model, policy)
     model.setdefault("description", MINIMAL_OFFICIAL_MODEL["description"])
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
@@ -739,10 +751,11 @@ def build_codex_catalog(
     seen_slugs: set[str] = set()
     official_by_slug = official_model_index(official_models)
     disabled_official_slugs = {official_model_disable_key(str(model_id)) for model_id in disabled_official_model_ids or []}
+    official_source_slugs = list(official_by_slug.keys()) or list(policy.official_models)
     official_slugs = sort_official_slugs(
         [
             slug
-            for slug in (list(policy.official_models) or list(official_by_slug.keys()))
+            for slug in official_source_slugs
             if official_model_disable_key(str(slug)) not in disabled_official_slugs
             and not is_official_gateway_fast_variant_slug(str(slug))
         ],

@@ -4,11 +4,11 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const OFFICIAL_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
@@ -23,14 +23,9 @@ const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
 ];
 
 pub fn refresh_official_models() -> Result<Vec<Model>, String> {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .map_err(|_| "OPENAI_API_KEY is required to refresh official OpenAI models".to_string())?;
-    let api_key = api_key.trim();
-    if api_key.is_empty() {
-        return Err("OPENAI_API_KEY is required to refresh official OpenAI models".to_string());
-    }
-
-    refresh_official_models_from_endpoint(OFFICIAL_MODELS_URL, api_key, DISCOVERY_TIMEOUT)
+    let paths = ModelPaths::runtime()?;
+    let runner = ProcessAppServerModelListRunner;
+    refresh_official_models_with_runner(&paths, &runner)
 }
 
 pub fn discover_provider_models(base_url: &str, api_key: &str) -> Result<Vec<Model>, String> {
@@ -221,6 +216,11 @@ pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     Ok(merge_metadata_with_overrides(cached, overrides))
 }
 
+pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    read_official_subscription_models_from_cache(&paths)
+}
+
 pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
     let metadata = builtin_model_metadata();
@@ -240,6 +240,7 @@ pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
     Ok(model)
 }
 
+#[cfg(test)]
 fn refresh_official_models_from_endpoint(
     endpoint: &str,
     api_key: &str,
@@ -252,6 +253,481 @@ fn refresh_official_models_from_endpoint(
         DiscoveryKind::Official,
         "official OpenAI models",
     )
+}
+
+trait AppServerModelListRunner {
+    fn read_model_list(&self) -> Result<Value, String>;
+}
+
+struct ProcessAppServerModelListRunner;
+
+impl AppServerModelListRunner for ProcessAppServerModelListRunner {
+    fn read_model_list(&self) -> Result<Value, String> {
+        read_codex_app_server_model_list()
+    }
+}
+
+fn refresh_official_models_with_runner(
+    paths: &ModelPaths,
+    runner: &dyn AppServerModelListRunner,
+) -> Result<Vec<Model>, String> {
+    match runner
+        .read_model_list()
+        .and_then(|payload| subscription_models_from_app_server_payload(&payload))
+    {
+        Ok(subscription_models) => {
+            let models = subscription_models_to_metadata_models(&subscription_models);
+            write_official_subscription_caches(paths, &subscription_models, &models)?;
+            Ok(models)
+        }
+        Err(error) => read_official_subscription_models_from_cache(paths).map_err(|cache_error| {
+            format!(
+                "Codex subscription model list unavailable: {error}; cached official models unavailable: {cache_error}"
+            )
+        }),
+    }
+}
+
+fn read_codex_app_server_model_list() -> Result<Value, String> {
+    let codex = find_codex_executable()?;
+    let mut child = Command::new(&codex)
+        .args(["app-server", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to start codex app-server for model list: {error}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to open codex app-server stdin".to_string())?;
+    write_app_server_json_line(
+        &mut stdin,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "codexhub",
+                    "title": "CodexHub",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true,
+                    "requestAttestation": false,
+                    "optOutNotificationMethods": []
+                }
+            }
+        }),
+    )?;
+    write_app_server_json_line(&mut stdin, &json!({ "method": "initialized" }))?;
+    write_app_server_json_line(
+        &mut stdin,
+        &json!({
+            "id": 2,
+            "method": "model/list",
+            "params": {}
+        }),
+    )?;
+    stdin
+        .flush()
+        .map_err(|error| format!("failed to flush codex app-server model list request: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to open codex app-server stdout".to_string())?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).map_err(|error| {
+            format!("failed to read codex app-server model list response: {error}")
+        })?;
+        if bytes == 0 {
+            let _ = child.wait();
+            return Err("codex app-server model list did not return a response".to_string());
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let message: Value = match serde_json::from_str(trimmed) {
+            Ok(message) => message,
+            Err(_) => continue,
+        };
+        if message.get("id") != Some(&json!(2)) {
+            continue;
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(error) = message.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed");
+            return Err(format!("codex app-server model list failed: {message}"));
+        }
+        return message.get("result").cloned().ok_or_else(|| {
+            "codex app-server model list response did not include a result".to_string()
+        });
+    }
+}
+
+fn write_app_server_json_line(stdin: &mut impl Write, value: &Value) -> Result<(), String> {
+    serde_json::to_writer(&mut *stdin, value)
+        .map_err(|error| format!("failed to encode codex app-server request: {error}"))?;
+    stdin
+        .write_all(b"\n")
+        .map_err(|error| format!("failed to write codex app-server request: {error}"))
+}
+
+#[derive(Debug, Clone)]
+struct OfficialSubscriptionModel {
+    slug: String,
+    display_name: String,
+    description: Option<String>,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+    input_modalities: Vec<String>,
+    reasoning_levels: Vec<ReasoningLevelEntry>,
+    default_reasoning_level: Option<String>,
+    additional_speed_tiers: Vec<String>,
+    service_tiers: Vec<Value>,
+    is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ReasoningLevelEntry {
+    effort: String,
+    description: Option<String>,
+}
+
+fn subscription_models_from_app_server_payload(
+    payload: &Value,
+) -> Result<Vec<OfficialSubscriptionModel>, String> {
+    let models = subscription_models_from_payload(payload)?;
+    if models.is_empty() {
+        return Err("Codex subscription model list did not include visible GPT models".to_string());
+    }
+    Ok(models)
+}
+
+fn subscription_models_from_payload(
+    payload: &Value,
+) -> Result<Vec<OfficialSubscriptionModel>, String> {
+    let items = payload
+        .get("data")
+        .or_else(|| payload.get("models"))
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array())
+        .ok_or_else(|| {
+            "Codex subscription model list response did not contain a model array".to_string()
+        })?;
+    let mut seen = HashSet::new();
+    let mut output = Vec::new();
+    for item in items {
+        let Some(model) = subscription_model_from_item(item) else {
+            continue;
+        };
+        if seen.insert(model.slug.clone()) {
+            output.push(model);
+        }
+    }
+    Ok(output)
+}
+
+fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionModel> {
+    let object = item.as_object()?;
+    if object
+        .get("hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let raw_slug = first_string(object, &["model", "slug", "id"])?;
+    let slug = raw_slug
+        .strip_prefix("openai/")
+        .unwrap_or(&raw_slug)
+        .to_string();
+    if !slug.starts_with("gpt-") {
+        return None;
+    }
+    let display_name = first_string(
+        object,
+        &["displayName", "display_name", "name", "model", "slug", "id"],
+    )
+    .unwrap_or_else(|| slug.clone());
+
+    Some(OfficialSubscriptionModel {
+        slug,
+        display_name,
+        description: first_string(object, &["description"]),
+        context_window: numeric_limit(item, &["context_window", "max_context_window"], "context"),
+        max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
+        input_modalities: first_string_array(object, &["inputModalities", "input_modalities"])
+            .unwrap_or_else(|| vec!["text".to_string()]),
+        reasoning_levels: reasoning_level_entries(
+            object
+                .get("supportedReasoningEfforts")
+                .or_else(|| object.get("supported_reasoning_levels")),
+        ),
+        default_reasoning_level: first_string(
+            object,
+            &["defaultReasoningEffort", "default_reasoning_level"],
+        ),
+        additional_speed_tiers: first_string_array(
+            object,
+            &["additionalSpeedTiers", "additional_speed_tiers"],
+        )
+        .unwrap_or_default(),
+        service_tiers: object
+            .get("serviceTiers")
+            .or_else(|| object.get("service_tiers"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.is_object())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
+        is_default: object
+            .get("isDefault")
+            .or_else(|| object.get("is_default"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn subscription_models_to_metadata_models(
+    subscription_models: &[OfficialSubscriptionModel],
+) -> Vec<Model> {
+    let builtin = builtin_model_metadata();
+    let mut output = Vec::new();
+    for subscription_model in subscription_models {
+        let id = format!("openai/{}", subscription_model.slug);
+        let defaults = builtin.iter().find(|model| model.id == id);
+        output.push(Model {
+            id,
+            display_name: Some(subscription_model_display_name(
+                subscription_model,
+                defaults,
+            )),
+            upstream_model: Some(subscription_model.slug.clone()),
+            aliases: Vec::new(),
+            source_kind: Some("official".to_string()),
+            locked: true,
+            codex_enabled: true,
+            gateway_exported: true,
+            context_window: subscription_model
+                .context_window
+                .or_else(|| defaults.and_then(|model| model.context_window)),
+            max_output_tokens: subscription_model
+                .max_output_tokens
+                .or_else(|| defaults.and_then(|model| model.max_output_tokens)),
+            input_modalities: Some(subscription_model.input_modalities.clone()),
+            supported_reasoning_levels: Some(
+                subscription_model
+                    .reasoning_levels
+                    .iter()
+                    .map(|level| level.effort.clone())
+                    .collect(),
+            ),
+            default_reasoning_level: subscription_model
+                .default_reasoning_level
+                .clone()
+                .or_else(|| defaults.and_then(|model| model.default_reasoning_level.clone())),
+            pricing: defaults.and_then(|model| model.pricing.clone()),
+            metadata_provenance: Some(MetadataProvenance {
+                source: "codex_subscription".to_string(),
+                source_url: None,
+                fetched_at: Some(current_unix_timestamp().to_string()),
+                confidence: "high".to_string(),
+            }),
+            sort_order: defaults.and_then(|model| model.sort_order),
+            enabled: true,
+        });
+    }
+    output
+}
+
+fn subscription_model_display_name(
+    subscription_model: &OfficialSubscriptionModel,
+    defaults: Option<&Model>,
+) -> String {
+    let raw = subscription_model.display_name.trim();
+    if let Some(default_name) = defaults.and_then(|model| model.display_name.as_deref()) {
+        if raw.eq_ignore_ascii_case(&subscription_model.slug)
+            || raw.eq_ignore_ascii_case(&format!("openai/{}", subscription_model.slug))
+        {
+            return official_display_name(default_name);
+        }
+    }
+    official_display_name(raw)
+}
+
+fn write_official_subscription_caches(
+    paths: &ModelPaths,
+    subscription_models: &[OfficialSubscriptionModel],
+    metadata_models: &[Model],
+) -> Result<(), String> {
+    write_models_json(&paths.metadata_cache_path(), metadata_models)?;
+    write_official_subscription_seed(
+        &paths.official_subscription_cache_path(),
+        subscription_models,
+    )
+}
+
+fn read_official_subscription_models_from_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    let payload = load_json_file(&paths.official_subscription_cache_path())?;
+    let subscription_models = subscription_models_from_payload(&payload)?;
+    if subscription_models.is_empty() {
+        return Err(
+            "cached Codex subscription model list did not include visible GPT models".to_string(),
+        );
+    }
+    Ok(subscription_models_to_metadata_models(&subscription_models))
+}
+
+fn write_official_subscription_seed(
+    path: &Path,
+    subscription_models: &[OfficialSubscriptionModel],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create official model cache directory: {error}"))?;
+    }
+    let models: Vec<Value> = subscription_models
+        .iter()
+        .map(official_subscription_seed_model)
+        .collect();
+    let payload = json!({
+        "client_version": env!("CARGO_PKG_VERSION"),
+        "fetched_at": current_unix_timestamp(),
+        "models": models,
+    });
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to serialize official model cache: {error}"))?;
+    fs::write(path, format!("{text}\n")).map_err(|error| {
+        format!(
+            "failed to write official model cache {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("slug".to_string(), json!(model.slug));
+    payload.insert("display_name".to_string(), json!(model.display_name));
+    if let Some(description) = model.description.as_ref() {
+        payload.insert("description".to_string(), json!(description));
+    }
+    if let Some(context_window) = model.context_window {
+        payload.insert("context_window".to_string(), json!(context_window));
+        payload.insert("max_context_window".to_string(), json!(context_window));
+    }
+    if let Some(max_output_tokens) = model.max_output_tokens {
+        payload.insert("max_output_tokens".to_string(), json!(max_output_tokens));
+    }
+    payload.insert(
+        "input_modalities".to_string(),
+        json!(model.input_modalities),
+    );
+    if !model.reasoning_levels.is_empty() {
+        payload.insert(
+            "supported_reasoning_levels".to_string(),
+            json!(model
+                .reasoning_levels
+                .iter()
+                .map(|level| {
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("effort".to_string(), json!(level.effort));
+                    if let Some(description) = level.description.as_ref() {
+                        entry.insert("description".to_string(), json!(description));
+                    }
+                    Value::Object(entry)
+                })
+                .collect::<Vec<_>>()),
+        );
+    }
+    if let Some(default_reasoning_level) = model.default_reasoning_level.as_ref() {
+        payload.insert(
+            "default_reasoning_level".to_string(),
+            json!(default_reasoning_level),
+        );
+    }
+    payload.insert(
+        "additional_speed_tiers".to_string(),
+        json!(model.additional_speed_tiers),
+    );
+    payload.insert("service_tiers".to_string(), json!(model.service_tiers));
+    payload.insert("is_default".to_string(), json!(model.is_default));
+    Value::Object(payload)
+}
+
+fn load_json_file(path: &Path) -> Result<Value, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read JSON file {}: {error}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|error| format!("failed to parse JSON file {}: {error}", path.display()))
+}
+
+fn first_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str).and_then(nonblank))
+}
+
+fn first_string_array(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<Vec<String>> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(string_array))
+        .filter(|values| !values.is_empty())
+}
+
+fn reasoning_level_entries(value: Option<&Value>) -> Vec<ReasoningLevelEntry> {
+    let Some(values) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|item| {
+            if let Some(text) = item.as_str().and_then(nonblank) {
+                return Some(ReasoningLevelEntry {
+                    effort: text,
+                    description: None,
+                });
+            }
+            let object = item.as_object()?;
+            let effort = first_string(object, &["reasoningEffort", "effort"])?;
+            Some(ReasoningLevelEntry {
+                effort,
+                description: first_string(object, &["description"]),
+            })
+        })
+        .collect()
+}
+
+fn official_display_name(display_name: &str) -> String {
+    let display_name = display_name.trim();
+    if display_name.starts_with("OpenAI ") {
+        display_name.to_string()
+    } else {
+        format!("OpenAI {display_name}")
+    }
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn discover_provider_models_with_timeout(
@@ -608,6 +1084,7 @@ fn truncate_for_status(value: &str, max_chars: usize) -> String {
 
 #[derive(Debug, Clone, Copy)]
 enum DiscoveryKind {
+    #[cfg(test)]
     Official,
     Provider,
 }
@@ -620,7 +1097,7 @@ fn parse_discovered_models(payload: &Value, kind: DiscoveryKind) -> Vec<Model> {
         let Some(id) = discovered_model_id(item) else {
             continue;
         };
-        if matches!(kind, DiscoveryKind::Official) && !id.starts_with("gpt-") {
+        if !discovery_allows_model(&id, kind) {
             continue;
         }
         if !seen.insert(id.clone()) {
@@ -630,11 +1107,25 @@ fn parse_discovered_models(payload: &Value, kind: DiscoveryKind) -> Vec<Model> {
         models.push(model_from_discovered_item(id, item));
     }
 
-    if matches!(kind, DiscoveryKind::Official) {
-        models.sort_by(|left, right| left.id.cmp(&right.id));
-    }
+    sort_discovered_models(&mut models, kind);
 
     models
+}
+
+fn discovery_allows_model(id: &str, kind: DiscoveryKind) -> bool {
+    match kind {
+        #[cfg(test)]
+        DiscoveryKind::Official => id.starts_with("gpt-"),
+        DiscoveryKind::Provider => true,
+    }
+}
+
+fn sort_discovered_models(models: &mut [Model], kind: DiscoveryKind) {
+    match kind {
+        #[cfg(test)]
+        DiscoveryKind::Official => models.sort_by(|left, right| left.id.cmp(&right.id)),
+        DiscoveryKind::Provider => {}
+    }
 }
 
 fn payload_model_items(payload: &Value) -> Vec<&Value> {
@@ -773,6 +1264,12 @@ impl ModelPaths {
         self.codex_dir
             .join("model-catalogs")
             .join(LEGACY_GENERATED_CATALOG_FILE)
+    }
+
+    fn official_subscription_cache_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json")
     }
 
     fn existing_generated_catalog_path(&self) -> PathBuf {
@@ -1275,17 +1772,61 @@ fn find_python() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("python"))
 }
 
+fn find_codex_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("CODEXHUB_CODEX_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        return Ok(path);
+    }
+    if let Some(path) = npm_codex_vendor_exe() {
+        return Ok(path);
+    }
+    for candidate in codex_executable_candidates() {
+        if let Ok(path) = which::which(candidate) {
+            return Ok(path);
+        }
+    }
+    Err(
+        "Codex subscription model refresh requires the Codex CLI to be installed and on PATH."
+            .to_string(),
+    )
+}
+
+fn npm_codex_vendor_exe() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    let path = PathBuf::from(appdata)
+        .join("npm")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex-win32-x64")
+        .join("vendor")
+        .join("x86_64-pc-windows-msvc")
+        .join("codex")
+        .join("codex.exe");
+    path.exists().then_some(path)
+}
+
+fn codex_executable_candidates() -> Vec<&'static str> {
+    vec!["codex.cmd", "codex", "codex.exe"]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         discover_provider_models_with_timeout, enrich_models_with_ollama_show,
         generate_catalog_with_runner, list_model_metadata, list_models,
         merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
-        provider_models_endpoint, refresh_official_models_from_endpoint,
-        test_model_endpoint_with_timeout, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
+        provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
+        refresh_official_models_with_runner, test_model_endpoint_with_timeout,
+        AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
     use crate::{MetadataProvenance, Model, UpstreamFormat};
     use reqwest::blocking::Client;
+    use serde_json::{json, Value};
     use std::cell::RefCell;
     use std::fs;
     use std::io::{Read, Write};
@@ -1297,6 +1838,161 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct StaticAppServerModelListRunner {
+        result: Result<Value, String>,
+    }
+
+    impl StaticAppServerModelListRunner {
+        fn ok(value: Value) -> Self {
+            Self { result: Ok(value) }
+        }
+
+        fn err(message: &str) -> Self {
+            Self {
+                result: Err(message.to_string()),
+            }
+        }
+    }
+
+    impl AppServerModelListRunner for StaticAppServerModelListRunner {
+        fn read_model_list(&self) -> Result<Value, String> {
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn subscription_refresh_converts_visible_codex_models_and_writes_caches() {
+        let root = temp_root("subscription-refresh");
+        let paths = test_paths(&root);
+        let runner = StaticAppServerModelListRunner::ok(json!({
+            "data": [
+                {
+                    "id": "gpt-subscription-live",
+                    "model": "gpt-subscription-live",
+                    "displayName": "GPT Subscription Live",
+                    "description": "Subscription model from Codex.",
+                    "hidden": false,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Fast"},
+                        {"reasoningEffort": "xhigh", "description": "Deep"}
+                    ],
+                    "defaultReasoningEffort": "xhigh",
+                    "inputModalities": ["text", "image"],
+                    "additionalSpeedTiers": ["fast"],
+                    "serviceTiers": [{"id": "priority", "name": "Fast"}],
+                    "isDefault": true
+                },
+                {
+                    "id": "gpt-hidden",
+                    "model": "gpt-hidden",
+                    "displayName": "Hidden",
+                    "hidden": true
+                },
+                {
+                    "id": "gpt-5.4",
+                    "model": "gpt-5.4",
+                    "displayName": "gpt-5.4",
+                    "hidden": false
+                },
+                {
+                    "id": "not-gpt",
+                    "model": "not-gpt",
+                    "displayName": "Not GPT",
+                    "hidden": false
+                }
+            ]
+        }));
+
+        let models =
+            refresh_official_models_with_runner(&paths, &runner).expect("subscription refresh");
+
+        assert_eq!(
+            model_ids(&models),
+            ["openai/gpt-subscription-live", "openai/gpt-5.4"]
+        );
+        assert_eq!(
+            models[0].display_name.as_deref(),
+            Some("OpenAI GPT Subscription Live")
+        );
+        assert_eq!(
+            models[0].upstream_model.as_deref(),
+            Some("gpt-subscription-live")
+        );
+        assert_eq!(
+            models[0].supported_reasoning_levels.as_deref(),
+            Some(&["low".to_string(), "xhigh".to_string()][..])
+        );
+        assert_eq!(models[0].default_reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(
+            models[0].input_modalities.as_deref(),
+            Some(&["text".to_string(), "image".to_string()][..])
+        );
+        let known_model = models
+            .iter()
+            .find(|model| model.id == "openai/gpt-5.4")
+            .expect("known subscription model");
+        assert_eq!(known_model.display_name.as_deref(), Some("OpenAI GPT-5.4"));
+
+        let cached_metadata =
+            read_models_json(&paths.metadata_cache_path()).expect("metadata cache");
+        assert_eq!(
+            model_ids(&cached_metadata),
+            ["openai/gpt-subscription-live", "openai/gpt-5.4"]
+        );
+
+        let seed: Value = serde_json::from_str(
+            &fs::read_to_string(paths.official_subscription_cache_path()).expect("runtime seed"),
+        )
+        .expect("runtime seed json");
+        let cached_model = &seed["models"][0];
+        assert_eq!(cached_model["slug"], "gpt-subscription-live");
+        assert_eq!(cached_model["display_name"], "GPT Subscription Live");
+        assert_eq!(cached_model["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(cached_model["service_tiers"][0]["id"], "priority");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subscription_refresh_uses_cached_subscription_models_when_app_server_fails() {
+        let root = temp_root("subscription-cache-fallback");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.official_subscription_cache_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.official_subscription_cache_path(),
+            json!({
+                "models": [
+                    {
+                        "slug": "gpt-cached-subscription",
+                        "display_name": "GPT Cached Subscription",
+                        "input_modalities": ["text"],
+                        "supported_reasoning_levels": [
+                            {"effort": "medium", "description": "Balanced"}
+                        ],
+                        "default_reasoning_level": "medium"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let runner = StaticAppServerModelListRunner::err("codex app-server unavailable");
+
+        let models = refresh_official_models_with_runner(&paths, &runner)
+            .expect("cached subscription refresh");
+
+        assert_eq!(model_ids(&models), ["openai/gpt-cached-subscription"]);
+        assert_eq!(
+            models[0].display_name.as_deref(),
+            Some("OpenAI GPT Cached Subscription")
+        );
+        assert_eq!(
+            models[0].upstream_model.as_deref(),
+            Some("gpt-cached-subscription")
+        );
+        assert_eq!(models[0].default_reasoning_level.as_deref(), Some("medium"));
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn official_discovery_uses_expected_url_headers_and_timeout() {
@@ -1661,16 +2357,18 @@ mod tests {
     }
 
     #[test]
-    fn refresh_official_models_requires_openai_api_key_without_leaking_values() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os("OPENAI_API_KEY");
-        std::env::remove_var("OPENAI_API_KEY");
+    fn subscription_refresh_failure_does_not_ask_for_openai_api_key() {
+        let root = temp_root("subscription-no-cache");
+        let paths = test_paths(&root);
+        let runner = StaticAppServerModelListRunner::err("codex auth unavailable");
 
-        let error = super::refresh_official_models().expect_err("missing key should fail");
+        let error = refresh_official_models_with_runner(&paths, &runner)
+            .expect_err("missing subscription and cache should fail");
 
-        restore_env("OPENAI_API_KEY", previous);
-        assert!(error.contains("OPENAI_API_KEY"));
+        assert!(error.contains("Codex subscription model list unavailable"));
+        assert!(!error.contains("OPENAI_API_KEY"));
         assert!(!error.contains("sk-"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -50,14 +50,11 @@ class CatalogSyncTests(unittest.TestCase):
             slugs,
             [
                 "openai/gpt-5.5",
-                "openai/gpt-5.4",
-                "openai/gpt-5.4-mini",
-                "openai/gpt-5.3-codex-spark",
                 "glm-5.2",
                 "kimi-k2.7-code",
             ],
         )
-        self.assertEqual(catalog["models"][3]["display_name"], "OpenAI GPT-5.3-Codex-Spark")
+        self.assertNotIn("openai/gpt-5.4", slugs)
         self.assertNotIn("glm-5.1", slugs)
 
     def test_build_catalog_keeps_only_official_and_allowed_cloud_models(self):
@@ -85,8 +82,6 @@ class CatalogSyncTests(unittest.TestCase):
             [
                 "openai/gpt-5.5",
                 "openai/gpt-5.4",
-                "openai/gpt-5.4-mini",
-                "openai/gpt-5.3-codex-spark",
                 "minimax-m3",
                 "glm-5.2",
                 "kimi-k2.7-code",
@@ -98,7 +93,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertNotIn("gemma3:12b", slugs)
         self.assertNotIn("gpt-oss:20b", slugs)
         self.assertEqual(
-            [model["priority"] for model in catalog["models"][4:]],
+            [model["priority"] for model in catalog["models"][2:]],
             [100, 101, 102, 103, 104, 105],
         )
         by_slug = {model["slug"]: model for model in catalog["models"]}
@@ -167,10 +162,8 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(
             [model["slug"] for model in catalog["models"]],
             [
-                "openai/gpt-5.4-mini",
                 "openai/gpt-5.5",
                 "openai/gpt-5.4",
-                "openai/gpt-5.3-codex-spark",
             ],
         )
 
@@ -192,8 +185,6 @@ class CatalogSyncTests(unittest.TestCase):
             [model["slug"] for model in catalog["models"]],
             [
                 "openai/gpt-5.5",
-                "openai/gpt-5.4-mini",
-                "openai/gpt-5.3-codex-spark",
             ],
         )
 
@@ -212,6 +203,11 @@ class CatalogSyncTests(unittest.TestCase):
                 "visibility": "list",
                 "additional_speed_tiers": ["fast"],
                 "service_tiers": [{"id": "priority", "name": "Fast"}],
+            },
+            {
+                "slug": "gpt-5.4-mini",
+                "display_name": "GPT-5.4-Mini",
+                "visibility": "list",
             },
         ]
 
@@ -258,6 +254,34 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual([model["slug"] for model in models], ["gpt-5.5"])
         self.assertEqual(models[0]["context_window"], 272000)
         self.assertEqual(models[0]["additional_speed_tiers"], ["fast"])
+
+    def test_load_official_seed_models_prefers_runtime_subscription_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled_seed = root / "bundled" / "openai-plus-ollama-cloud.json"
+            runtime_seed = root / "runtime" / "openai-plus-ollama-cloud.json"
+            bundled_seed.parent.mkdir(parents=True)
+            runtime_seed.parent.mkdir(parents=True)
+            bundled_seed.write_text(
+                json.dumps({"models": [{"slug": "gpt-5.5", "display_name": "GPT-5.5"}]}),
+                encoding="utf-8",
+            )
+            runtime_seed.write_text(
+                json.dumps({"models": [{"slug": "gpt-5.6", "display_name": "GPT-5.6"}]}),
+                encoding="utf-8",
+            )
+
+            models = catalog_sync.load_official_seed_models(bundled_seed, runtime_path=runtime_seed)
+
+        self.assertEqual([model["slug"] for model in models], ["gpt-5.6"])
+
+    def test_build_catalog_uses_subscription_official_models_before_policy_allowlist(self):
+        official = [{"slug": "gpt-5.6", "display_name": "GPT-5.6", "visibility": "list"}]
+
+        catalog = build_codex_catalog(official, [], self.policy, "0.142.0")
+
+        self.assertEqual([model["slug"] for model in catalog["models"]], ["openai/gpt-5.6"])
+        self.assertEqual(catalog["models"][0]["display_name"], "OpenAI GPT-5.6")
 
     def test_minimal_official_models_use_codex_defaults(self):
         policy = CatalogPolicy(
