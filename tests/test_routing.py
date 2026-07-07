@@ -6,7 +6,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 import codex_proxy
@@ -380,6 +380,251 @@ class RoutingTests(unittest.TestCase):
             codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
         )
 
+    def test_route_decision_codex_app_third_party_chat_upstream_uses_codex_adapter_and_wire_conversion(self):
+        upstream = {"name": "volcengine", "upstream_format": "chat_completions"}
+        decision = codex_proxy.route_decision_for_request(
+            upstream,
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+        )
+
+        self.assertEqual(decision.behavior_profile, codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER)
+        self.assertEqual(decision.codex_semantic_adapter, codex_proxy.CODEX_SEMANTIC_EXTERNAL_ADAPTER)
+        self.assertEqual(decision.wire_format_adapter, codex_proxy.WIRE_RESPONSES_TO_CHAT)
+        self.assertEqual(decision.retry_policy, codex_proxy.RETRY_GATEWAY_FULL)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
+
+    def test_route_decision_third_party_app_provider_same_format_is_transparent_metered(self):
+        upstream = {"name": "volcengine", "upstream_format": "chat_completions"}
+        decision = codex_proxy.route_decision_for_request(
+            upstream,
+            {"client_id": "zcode"},
+            inbound_format="chat_completions",
+            provider_hint="volc",
+        )
+
+        self.assertEqual(decision.behavior_profile, codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(decision.codex_semantic_adapter, codex_proxy.CODEX_SEMANTIC_NONE)
+        self.assertEqual(decision.wire_format_adapter, codex_proxy.WIRE_TRANSPARENT)
+        self.assertEqual(decision.retry_policy, codex_proxy.RETRY_CONSERVATIVE_PRE_OUTPUT)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_ASYNC_TAP)
+
+    def test_route_decision_third_party_app_official_responses_is_transparent_metered(self):
+        upstream = {"name": "official", "upstream_format": "responses"}
+        decision = codex_proxy.route_decision_for_request(
+            upstream,
+            {"client_id": "opencode"},
+            inbound_format="responses",
+        )
+
+        self.assertEqual(decision.behavior_profile, codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(decision.wire_format_adapter, codex_proxy.WIRE_TRANSPARENT)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_ASYNC_TAP)
+
+    def test_route_decision_official_unknown_client_is_gateway_compat(self):
+        upstream = {"name": "official", "upstream_format": "responses"}
+        decision = codex_proxy.route_decision_for_request(
+            upstream,
+            {"client_id": "unknown"},
+            inbound_format="responses",
+        )
+
+        self.assertEqual(decision.behavior_profile, codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT)
+        self.assertEqual(decision.codex_semantic_adapter, codex_proxy.CODEX_SEMANTIC_NONE)
+        self.assertEqual(decision.request_kind_policy, codex_proxy.REQUEST_KIND_GATEWAY)
+        self.assertEqual(decision.retry_policy, codex_proxy.RETRY_GATEWAY_FULL)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
+
+    def test_route_decision_third_party_standard_unknown_client_uses_gateway_profile(self):
+        upstream = {"name": "volcengine", "upstream_format": "chat_completions"}
+        decision = codex_proxy.route_decision_for_request(
+            upstream,
+            {"client_id": "unknown"},
+            inbound_format="chat_completions",
+        )
+
+        self.assertEqual(decision.behavior_profile, codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY)
+        self.assertEqual(decision.codex_semantic_adapter, codex_proxy.CODEX_SEMANTIC_EXTERNAL_ADAPTER)
+        self.assertEqual(decision.request_kind_policy, codex_proxy.REQUEST_KIND_GATEWAY)
+        self.assertEqual(decision.retry_policy, codex_proxy.RETRY_GATEWAY_FULL)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
+
+    def test_third_party_app_official_responses_uses_transparent_metered_runtime_path(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        response_body = b'{"id":"resp_transparent","object":"response","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "gpt-5.5")
+        self.assertIs(sent_payload["store"], False)
+        self.assertIs(sent_payload["stream"], True)
+        self.assertEqual(b"".join(handler.wfile.writes), response_body)
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        request_complete = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
+        )
+        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        for fields in (request_start, request_complete):
+            self.assertEqual(fields["wire_format_adapter"], codex_proxy.WIRE_TRANSPARENT)
+            self.assertEqual(fields["codex_semantic_adapter"], codex_proxy.CODEX_SEMANTIC_NONE)
+            self.assertEqual(fields["request_kind_policy"], codex_proxy.REQUEST_KIND_TRANSPARENT)
+            self.assertEqual(fields["retry_policy"], codex_proxy.RETRY_CONSERVATIVE_PRE_OUTPUT)
+            self.assertEqual(fields["usage_policy"], codex_proxy.USAGE_ASYNC_TAP)
+            self.assertEqual(fields["repair_policy"], codex_proxy.REPAIR_NONE)
+
+    def test_third_party_app_official_responses_nonstream_buffers_forced_sse(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        completed = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_buffered",
+                "model": "gpt-5.5",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            },
+        }
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch(
+                "codex_proxy.urlopen",
+                return_value=FakeSseResponse([f"data: {json.dumps(completed)}\n\n".encode("utf-8"), b""]),
+            ) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertIs(sent_payload["stream"], True)
+        written = b"".join(handler.wfile.writes)
+        self.assertNotIn(b"data:", written)
+        result = json.loads(written)
+        self.assertEqual(result["id"], "resp_buffered")
+        self.assertEqual(result["output"][0]["content"][0]["text"], "hello")
+        self.assertEqual(dict(fake.headers).get("Content-Type"), "application/json")
+
+    def test_third_party_app_official_chat_completions_uses_lightweight_responses_fallback(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/chat/completions"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        response_body = json.dumps(
+            {
+                "id": "resp_official_chat_fallback",
+                "object": "response",
+                "status": "completed",
+                "model": "openai/gpt-5.5",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            }
+        ).encode("utf-8")
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/responses"))
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "gpt-5.5")
+        self.assertIn("input", sent_payload)
+        self.assertNotIn("messages", sent_payload)
+        self.assertIs(sent_payload["store"], False)
+        self.assertIs(sent_payload["stream"], True)
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["object"], "chat.completion")
+        self.assertEqual(result["choices"][0]["message"]["content"], "hello")
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(request_start["request_kind"], codex_proxy.RETRY_REQUEST_MAIN_GENERATION)
+
     def test_official_codex_app_compact_request_does_not_strip_tools_before_passthrough_profile(self):
         body = json.dumps(
             {
@@ -545,7 +790,7 @@ class RoutingTests(unittest.TestCase):
         request_error = next(fields for event, fields in events if event == "request_error")
         self.assertEqual(
             request_error["behavior_profile"],
-            codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
+            codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
         )
 
     def test_official_http_passthrough_uses_single_open_attempt_and_no_stream_retry_deferral(self):
@@ -827,6 +1072,112 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(usage_offers), 3)
         self.assertEqual(usage_offers[0][0]["request_id"], "req-1")
 
+    def test_official_http_passthrough_raw_relay_even_when_caller_stream_false(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "official",
+            request_id="req-1",
+            model="gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=False,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b'data: {"type":"response.created"', body)
+        self.assertIn(b'data: {"type":"response.output_text.delta"', body)
+        self.assertNotIn(b'"output"', body)
+
+    def test_official_http_passthrough_http_error_event_stream_relay_is_raw(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        error_line = b'data: {"type":"response.failed","response":{"id":"resp_error","status":"failed"}}\n\n'
+        error = HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            503,
+            "Service Unavailable",
+            {"Content-Type": "text/event-stream; charset=utf-8"},
+            io.BytesIO(error_line),
+        )
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._normalize_third_party_tool_call",
+                side_effect=AssertionError("official passthrough HTTPError parsed SSE"),
+            ),
+            patch("codex_proxy.urlopen", side_effect=error),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertEqual(fake.status, 503)
+        self.assertEqual(written, error_line)
+        self.assertNotIn(b"event: response.failed", written)
+        self.assert_no_official_passthrough_gateway_events()
+
+    def test_official_passthrough_usage_worker_emits_usage_observed(self):
+        context = {
+            "request_id": "req-async-usage",
+            "model": "openai/gpt-5.5",
+            "upstream": "official",
+            "upstream_format": "responses",
+            "inbound_format": "responses",
+            "client_id": "zcode",
+            "client_inference_source": "header",
+        }
+        line = b'data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}\n\n'
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            payload_bytes = codex_proxy._sse_payload_bytes(line)
+            payload = json.loads(payload_bytes.decode("utf-8"))
+            usage = codex_proxy._usage_from_response_event(payload)
+            codex_proxy._write_usage_observed_event(context, usage)
+
+        write_event.assert_called_once()
+        self.assertEqual(write_event.call_args.args[0], "usage_observed")
+        fields = write_event.call_args.kwargs
+        self.assertEqual(fields["request_id"], "req-async-usage")
+        self.assertEqual(fields["client_id"], "zcode")
+        self.assertEqual(fields["client_inference_source"], "header")
+        self.assertEqual(fields["usage_source"], "upstream")
+        self.assertEqual(fields["usage_input_tokens"], 2)
+        self.assertEqual(fields["usage_output_tokens"], 3)
+
     def test_official_http_passthrough_sse_interruption_closes_without_synthetic_error(self):
         fake = FakeHandler()
         status = CodexProxyHandler._relay_upstream_response(
@@ -1071,6 +1422,39 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["attempt"], 1)
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 10000)
+
+    def test_transparent_retry_retries_open_failure_without_downstream_notice(self):
+        request = codex_proxy.Request("https://example.test/v1/chat/completions", data=b"{}", method="POST")
+        error = URLError(TimeoutError("connect timed out"))
+        success = FakeResponse(b'{"id":"ok","choices":[{"message":{"content":"done"}}]}')
+        downstream_retry = Mock()
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="volcengine",
+                upstream_format="chat_completions",
+                timeout=1,
+                event_context={"request_id": "req-transparent-retry"},
+                downstream_retry_callback=downstream_retry,
+                request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                retry_policy=codex_proxy.RETRY_CONSERVATIVE_PRE_OUTPUT,
+            )
+
+        self.assertIs(response, success)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        downstream_retry.assert_not_called()
 
     def test_open_upstream_response_does_not_retry_permanent_http_errors(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
@@ -2494,6 +2878,36 @@ class RoutingTests(unittest.TestCase):
             ],
         )
 
+    def test_responses_to_chat_completion_body_accepts_role_content_items_without_type(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Reply with E2EOK03 only."}],
+                    }
+                ],
+                "stream": False,
+            }
+        ).encode("utf-8")
+
+        payload = json.loads(_responses_request_to_chat_completion_body(body))
+
+        self.assertEqual(
+            payload["messages"],
+            [{"role": "user", "content": "Reply with E2EOK03 only."}],
+        )
+
+    def test_responses_error_detail_converts_to_chat_error_instead_of_empty_message(self):
+        body = json.dumps({"detail": "Store must be set to false"}).encode("utf-8")
+
+        payload = json.loads(codex_proxy._response_body_to_chat_completion_body(body))
+
+        self.assertIn("error", payload)
+        self.assertEqual(payload["error"]["message"], "Store must be set to false")
+        self.assertNotIn("choices", payload)
+
     def test_denied_openai_alias_is_rejected_even_when_bare_model_allowed(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         policy = replace(
@@ -3058,6 +3472,71 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["max_output_tokens"], 123)
         self.assertNotIn("Codex browser context detected.", json.dumps(payload))
         self.assertEqual(payload["tools"], [{"type": "function", "name": "multi_agent_v1__spawn_agent"}])
+
+    def test_official_transparent_request_body_removes_unsupported_max_output_tokens(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": True,
+                "max_output_tokens": 16,
+            }
+        ).encode("utf-8")
+        upstream = {"name": "official", "upstream_model": "gpt-5.5"}
+
+        transformed = codex_proxy.transparent_request_body(
+            body,
+            json.loads(body),
+            upstream,
+            model_id="openai/gpt-5.5",
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["model"], "gpt-5.5")
+        self.assertNotIn("max_output_tokens", payload)
+
+    def test_official_transparent_request_body_normalizes_string_input_for_codex_backend(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": "hi",
+                "stream": True,
+            }
+        ).encode("utf-8")
+        upstream = {"name": "official", "upstream_model": "gpt-5.5"}
+
+        transformed = codex_proxy.transparent_request_body(
+            body,
+            json.loads(body),
+            upstream,
+            model_id="openai/gpt-5.5",
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            payload["input"],
+            [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        )
+
+    def test_official_transparent_request_body_sets_store_false_for_codex_backend(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        upstream = {"name": "official", "upstream_model": "gpt-5.5"}
+
+        transformed = codex_proxy.transparent_request_body(
+            body,
+            json.loads(body),
+            upstream,
+            model_id="openai/gpt-5.5",
+        )
+        payload = json.loads(transformed)
+
+        self.assertIs(payload["store"], False)
 
     def test_official_gateway_compat_keeps_existing_official_mutations(self):
         upstream = choose_upstream("gpt-5.5")

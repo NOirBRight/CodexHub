@@ -127,6 +127,88 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 connection.close()
 
+    def test_usage_observed_updates_existing_gateway_request_usage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import proxy_telemetry
+
+            db_path = Path(tmpdir) / "codex-proxy-telemetry.sqlite"
+            proxy_telemetry.write_event_to_sqlite(
+                db_path,
+                {
+                    "ts": "2026-07-07T01:00:00Z",
+                    "event": "request_complete",
+                    "request_id": "req-usage-observed",
+                    "status": 200,
+                    "usage_source": "missing",
+                    "usage_missing_reason": "async_usage_pending",
+                },
+            )
+            proxy_telemetry.write_event_to_sqlite(
+                db_path,
+                {
+                    "ts": "2026-07-07T01:00:01Z",
+                    "event": "usage_observed",
+                    "request_id": "req-usage-observed",
+                    "usage_source": "upstream_async",
+                    "usage_input_tokens": 11,
+                    "usage_cached_input_tokens": 3,
+                    "usage_output_tokens": 5,
+                    "usage_total_tokens": 16,
+                },
+            )
+
+            connection = sqlite3.connect(db_path)
+            try:
+                row = connection.execute(
+                    "SELECT usage_source, usage_input_tokens, usage_cached_input_tokens, usage_output_tokens, usage_total_tokens FROM gateway_requests WHERE request_id = ?",
+                    ("req-usage-observed",),
+                ).fetchone()
+            finally:
+                connection.close()
+
+        self.assertEqual(row, ("upstream_async", 11, 3, 5, 16))
+
+    def test_request_complete_does_not_downgrade_prior_usage_observed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import proxy_telemetry
+
+            db_path = Path(tmpdir) / "codex-proxy-telemetry.sqlite"
+            proxy_telemetry.write_event_to_sqlite(
+                db_path,
+                {
+                    "ts": "2026-07-07T01:00:00Z",
+                    "event": "usage_observed",
+                    "request_id": "req-usage-before-complete",
+                    "usage_source": "upstream_async",
+                    "usage_input_tokens": 11,
+                    "usage_cached_input_tokens": 3,
+                    "usage_output_tokens": 5,
+                    "usage_total_tokens": 16,
+                },
+            )
+            proxy_telemetry.write_event_to_sqlite(
+                db_path,
+                {
+                    "ts": "2026-07-07T01:00:01Z",
+                    "event": "request_complete",
+                    "request_id": "req-usage-before-complete",
+                    "status": 200,
+                    "usage_source": "missing",
+                    "usage_missing_reason": "async_usage_pending",
+                },
+            )
+
+            connection = sqlite3.connect(db_path)
+            try:
+                row = connection.execute(
+                    "SELECT usage_source, usage_missing_reason, usage_input_tokens, usage_cached_input_tokens, usage_output_tokens, usage_total_tokens FROM gateway_requests WHERE request_id = ?",
+                    ("req-usage-before-complete",),
+                ).fetchone()
+            finally:
+                connection.close()
+
+        self.assertEqual(row, ("upstream_async", None, 11, 3, 5, 16))
+
     def test_request_context_ignores_client_route_mode_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
@@ -157,6 +239,16 @@ class ProxyEventLoggingTests(TestCase):
                     )
             finally:
                 importlib.reload(codex_proxy)
+
+    def test_request_context_does_not_infer_codex_app_from_generic_codex_user_agent(self):
+        context = codex_proxy.request_context_from_headers(
+            {
+                "User-Agent": "my-codex-client/1.0",
+            }
+        )
+
+        self.assertEqual(context["client_id"], "unknown")
+        self.assertEqual(context["client_inference_source"], "unknown")
 
     def test_backfill_jsonl_to_sqlite_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:

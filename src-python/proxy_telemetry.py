@@ -387,7 +387,7 @@ def _ensure_gateway_request_columns(connection: sqlite3.Connection) -> None:
 def _upsert_request(connection: sqlite3.Connection, payload: Mapping[str, Any], payload_json: str) -> None:
     request_id = _string(payload.get("request_id"))
     event = _string(payload.get("event"))
-    if not request_id or event not in {"request_start", "request_complete", "request_error"}:
+    if not request_id or event not in {"request_start", "request_complete", "request_error", "usage_observed"}:
         return
 
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -402,14 +402,29 @@ def _upsert_request(connection: sqlite3.Connection, payload: Mapping[str, Any], 
     values = _request_values(payload, payload_json)
     if event == "request_start":
         values["first_ts"] = _string(payload.get("ts"))
-    else:
+    elif event in {"request_complete", "request_error"}:
         values["completed_ts"] = _string(payload.get("ts"))
+    incoming_usage_source = _string(payload.get("usage_source"))
+    if incoming_usage_source == "missing":
+        existing_usage_source = _string(
+            connection.execute(
+                "SELECT usage_source FROM gateway_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()[0]
+        )
+        if existing_usage_source and existing_usage_source != "missing":
+            values.pop("usage_source", None)
+            values.pop("usage_missing_reason", None)
+    clear_usage_missing_reason = bool(incoming_usage_source and incoming_usage_source != "missing")
     values["updated_at"] = now
 
     assignments = []
     parameters: list[Any] = []
     for column in REQUEST_COLUMNS:
         if column == "created_at" or column not in values:
+            continue
+        if column == "usage_missing_reason" and clear_usage_missing_reason:
+            assignments.append("usage_missing_reason = NULL")
             continue
         value = values[column]
         if value is None:

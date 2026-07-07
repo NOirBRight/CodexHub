@@ -2,16 +2,19 @@ use crate::config;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CODEX_ACCOUNT_USAGE_METHOD: &str = "account/usage/read";
 const CACHE_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
 const DAY_SECONDS: u64 = 86_400;
 const DEFAULT_WINDOW_DAYS: u64 = 365;
 const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;
+const CODEX_ACCOUNT_USAGE_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OpenAiUsageSnapshot {
@@ -227,7 +230,38 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
         .stdout
         .take()
         .ok_or_else(|| "Failed to open codex app-server stdout.".to_string())?;
-    let mut reader = BufReader::new(stdout);
+    let result =
+        read_codex_account_usage_response_with_timeout(stdout, CODEX_ACCOUNT_USAGE_TIMEOUT);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn read_codex_account_usage_response_with_timeout<R>(
+    stdout: R,
+    timeout: Duration,
+) -> Result<CodexAccountUsageResponse, String>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let _ = sender.send(read_codex_account_usage_response(&mut reader));
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("Codex account usage timed out.".to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("Codex account usage did not return a response.".to_string())
+        }
+    }
+}
+
+fn read_codex_account_usage_response<R>(reader: &mut R) -> Result<CodexAccountUsageResponse, String>
+where
+    R: BufRead,
+{
     let mut line = String::new();
     loop {
         line.clear();
@@ -235,7 +269,6 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
             .read_line(&mut line)
             .map_err(|error| format!("Failed to read codex app-server usage response: {error}"))?;
         if bytes == 0 {
-            let _ = child.wait();
             return Err("Codex account usage did not return a response.".to_string());
         }
         let trimmed = line.trim();
@@ -249,8 +282,6 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
         if message.id != Some(json!(2)) {
             continue;
         }
-        let _ = child.kill();
-        let _ = child.wait();
         if let Some(error) = message.error {
             return Err(codex_app_server_error_message(
                 error.message.as_deref().unwrap_or("request failed"),
@@ -433,7 +464,9 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::fs;
+    use std::io::{self, Read};
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn codex_account_usage_response_maps_subscription_summary_and_daily_buckets() {
@@ -603,6 +636,33 @@ mod tests {
         assert!(message.contains("Codex account usage"));
         assert!(!message.contains(&admin_key_name));
         assert!(!message.contains("token secret"));
+    }
+
+    #[test]
+    fn codex_account_usage_response_read_times_out() {
+        struct SlowEmptyReader {
+            slept: bool,
+        }
+
+        impl Read for SlowEmptyReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                if !self.slept {
+                    self.slept = true;
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Ok(0)
+            }
+        }
+
+        let started = Instant::now();
+        let error = read_codex_account_usage_response_with_timeout(
+            SlowEmptyReader { slept: false },
+            Duration::from_millis(20),
+        )
+        .expect_err("slow account usage response should time out");
+
+        assert!(error.contains("Codex account usage timed out"));
+        assert!(started.elapsed() < Duration::from_millis(150));
     }
 
     #[test]

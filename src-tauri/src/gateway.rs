@@ -2460,7 +2460,11 @@ fn upsert_gateway_request_from_event(
         .get("event")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if event != "request_start" && event != "request_complete" && event != "request_error" {
+    if event != "request_start"
+        && event != "request_complete"
+        && event != "request_error"
+        && event != "usage_observed"
+    {
         return Ok(());
     }
     let Some(request_id) = string_field(value, "request_id") else {
@@ -2491,6 +2495,34 @@ fn upsert_gateway_request_from_event(
     let model_requested = string_field(value, "model_requested").or_else(|| model.clone());
     let route_mode =
         string_field(value, "route_mode").or_else(|| route_mode_from_upstream(upstream.as_deref()));
+    let mut usage_source = string_field(value, "usage_source");
+    let mut usage_missing_reason = string_field(value, "usage_missing_reason");
+    if usage_source.as_deref() == Some("missing") {
+        let existing_usage_source: Option<String> = connection
+            .query_row(
+                "SELECT usage_source FROM gateway_requests WHERE request_id = ?",
+                params![request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("failed to read existing usage source: {error}"))?
+            .flatten();
+        if existing_usage_source
+            .as_deref()
+            .is_some_and(|source| source != "missing")
+        {
+            usage_source = None;
+            usage_missing_reason = None;
+        }
+    }
+    let clear_usage_missing_reason: i64 = if usage_source
+        .as_deref()
+        .is_some_and(|source| source != "missing")
+    {
+        1
+    } else {
+        0
+    };
 
     connection
         .execute(
@@ -2534,7 +2566,7 @@ fn upsert_gateway_request_from_event(
                 prefix_bytes = COALESCE(?, prefix_bytes),
                 prompt_cache_key_hash = COALESCE(?, prompt_cache_key_hash),
                 usage_source = COALESCE(?, usage_source),
-                usage_missing_reason = COALESCE(?, usage_missing_reason),
+                usage_missing_reason = CASE WHEN ? THEN NULL ELSE COALESCE(?, usage_missing_reason) END,
                 usage_input_tokens = COALESCE(?, usage_input_tokens),
                 usage_cached_input_tokens = COALESCE(?, usage_cached_input_tokens),
                 usage_output_tokens = COALESCE(?, usage_output_tokens),
@@ -2586,8 +2618,9 @@ fn upsert_gateway_request_from_event(
                 string_field(value, "request_prefix_hmac"),
                 value.get("prefix_bytes").and_then(Value::as_i64),
                 string_field(value, "prompt_cache_key_hash"),
-                string_field(value, "usage_source"),
-                string_field(value, "usage_missing_reason"),
+                usage_source,
+                clear_usage_missing_reason,
+                usage_missing_reason,
                 value.get("usage_input_tokens").and_then(Value::as_i64),
                 value
                     .get("usage_cached_input_tokens")
@@ -6588,6 +6621,66 @@ mod tests {
             backfill_size,
             fs::metadata(&log_path).unwrap().len().to_string()
         );
+    }
+
+    #[test]
+    fn telemetry_backfill_projects_usage_observed_into_request_usage() {
+        let root = unique_temp_dir("codexhub-usage-observed-backfill");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        fs::write(
+            &log_path,
+            [
+                r#"{"ts":"2026-07-07T01:00:00Z","event":"request_complete","request_id":"req-usage-observed-rust","status":200,"usage_source":"missing","usage_missing_reason":"async_usage_pending","upstream":"official","model":"openai/gpt-5.5"}"#,
+                r#"{"ts":"2026-07-07T01:00:01Z","event":"usage_observed","request_id":"req-usage-observed-rust","usage_source":"upstream_async","usage_input_tokens":11,"usage_cached_input_tokens":3,"usage_output_tokens":5,"usage_total_tokens":16,"upstream":"official","model":"openai/gpt-5.5"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        super::backfill_event_log_to_sqlite_path(&log_path, &db_path).unwrap();
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let row: (String, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT usage_source, usage_input_tokens, usage_cached_input_tokens, usage_output_tokens, usage_total_tokens FROM gateway_requests WHERE request_id = 'req-usage-observed-rust'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row, ("upstream_async".to_string(), 11, 3, 5, 16));
+    }
+
+    #[test]
+    fn telemetry_backfill_does_not_downgrade_prior_usage_observed() {
+        let root = unique_temp_dir("codexhub-usage-observed-before-complete");
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("codex-proxy-events.jsonl");
+        let db_path = root.join("codex-proxy-telemetry.sqlite");
+        fs::write(
+            &log_path,
+            [
+                r#"{"ts":"2026-07-07T01:00:00Z","event":"usage_observed","request_id":"req-usage-before-complete-rust","usage_source":"upstream_async","usage_input_tokens":11,"usage_cached_input_tokens":3,"usage_output_tokens":5,"usage_total_tokens":16,"upstream":"official","model":"openai/gpt-5.5"}"#,
+                r#"{"ts":"2026-07-07T01:00:01Z","event":"request_complete","request_id":"req-usage-before-complete-rust","status":200,"usage_source":"missing","usage_missing_reason":"async_usage_pending","upstream":"official","model":"openai/gpt-5.5"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        super::backfill_event_log_to_sqlite_path(&log_path, &db_path).unwrap();
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let row: (String, Option<String>, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT usage_source, usage_missing_reason, usage_input_tokens, usage_cached_input_tokens, usage_output_tokens, usage_total_tokens FROM gateway_requests WHERE request_id = 'req-usage-before-complete-rust'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row, ("upstream_async".to_string(), None, 11, 3, 5, 16));
     }
 
     #[test]

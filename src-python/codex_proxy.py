@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 import gzip
@@ -322,6 +323,32 @@ RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
 BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH = "official_codex_app_http_passthrough"
 BEHAVIOR_OFFICIAL_GATEWAY_COMPAT = "official_gateway_compat"
 BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY = "external_provider_gateway"
+BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER = "codex_app_external_adapter"
+BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED = "third_party_app_transparent_metered"
+
+WIRE_TRANSPARENT = "transparent"
+WIRE_RESPONSES_TO_CHAT = "responses_to_chat"
+WIRE_CHAT_TO_RESPONSES = "chat_to_responses"
+
+CODEX_SEMANTIC_EXTERNAL_ADAPTER = "codex_app_external_adapter"
+CODEX_SEMANTIC_NONE = "none"
+
+REQUEST_KIND_GATEWAY = "gateway"
+REQUEST_KIND_TRANSPARENT = "transparent"
+
+RETRY_GATEWAY_FULL = "gateway_full"
+RETRY_CONSERVATIVE_PRE_OUTPUT = "conservative_pre_output"
+
+USAGE_SYNC_CAPTURE = "sync_capture"
+USAGE_ASYNC_TAP = "async_tap"
+
+REPAIR_CODEX_SUBAGENT = "codex_subagent_repair"
+REPAIR_NONE = "none"
+
+VISION_PROXY_DISABLED = "disabled"
+VISION_PROXY_CODEX_APP_ADAPTER = "codex_app_adapter"
+VISION_PROXY_TRANSPARENT_OVERLAY = "transparent_overlay"
+
 RETRY_FAILURE_QUICK_TRANSIENT = "quick_transient"
 RETRY_FAILURE_PROVIDER_THROTTLE = "provider_throttle"
 RETRY_FAILURE_PROVIDER_OVERLOADED = "provider_overloaded"
@@ -727,6 +754,14 @@ def gateway_image_proxy_model() -> str:
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
 
 
+def gateway_transparent_vision_proxy_enabled() -> bool:
+    return _env_or_settings_flag(
+        "CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED",
+        "gateway_transparent_vision_proxy_enabled",
+        False,
+    )
+
+
 def write_proxy_event(event: str, **fields: Any) -> None:
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
     line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
@@ -837,9 +872,58 @@ def _capture_usage(
     usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
 
 
+def _usage_observed_context(
+    event_context: Mapping[str, Any] | None,
+    *,
+    request_id: str | None,
+    model: str | None,
+    upstream: str,
+    upstream_format: str,
+    inbound_format: str,
+) -> dict[str, Any]:
+    context = {
+        key: value
+        for key, value in (event_context or {}).items()
+        if not str(key).startswith("_")
+    }
+    context.update(
+        {
+            "request_id": request_id,
+            "model": model,
+            "upstream": upstream,
+            "upstream_format": upstream_format,
+            "inbound_format": inbound_format,
+        }
+    )
+    return context
+
+
+def _write_usage_observed_event(context: Mapping[str, Any], usage: Mapping[str, Any] | None) -> None:
+    if usage is None:
+        return
+    write_proxy_event(
+        "usage_observed",
+        request_id=context.get("request_id"),
+        model=context.get("model"),
+        model_requested=context.get("model_requested"),
+        model_canonical=context.get("model_canonical"),
+        upstream=context.get("upstream"),
+        provider_id=context.get("provider_id") or context.get("upstream"),
+        upstream_format=context.get("upstream_format"),
+        inbound_format=context.get("inbound_format"),
+        route_mode=context.get("route_mode"),
+        client_id=context.get("client_id"),
+        client_inference_source=context.get("client_inference_source"),
+        **_normalize_usage_for_event(usage),
+    )
+
+
 OFFICIAL_PASSTHROUGH_USAGE_QUEUE: queue.Queue[tuple[dict[str, Any], bytes]] = queue.Queue(maxsize=2048)
 _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED = False
 _OFFICIAL_PASSTHROUGH_USAGE_WORKER_LOCK = threading.Lock()
+USAGE_OBSERVED_QUEUE: queue.Queue[tuple[str, dict[str, Any], bytes, str | None]] = queue.Queue(maxsize=2048)
+_USAGE_OBSERVED_WORKER_STARTED = False
+_USAGE_OBSERVED_WORKER_LOCK = threading.Lock()
 
 
 def _start_official_passthrough_usage_worker() -> None:
@@ -883,17 +967,75 @@ def _official_passthrough_usage_worker() -> None:
             usage = _usage_from_response_event(payload)
             if usage is None:
                 continue
-            write_proxy_event(
-                "official_passthrough_usage_observed",
-                request_id=context.get("request_id"),
-                model=context.get("model"),
-                upstream=context.get("upstream"),
-                upstream_format=context.get("upstream_format"),
-                inbound_format=context.get("inbound_format"),
-                **_normalize_usage_for_event(usage),
-            )
+            _write_usage_observed_event(context, usage)
         finally:
             OFFICIAL_PASSTHROUGH_USAGE_QUEUE.task_done()
+
+
+def _start_usage_observed_worker() -> None:
+    global _USAGE_OBSERVED_WORKER_STARTED
+    if _USAGE_OBSERVED_WORKER_STARTED:
+        return
+    with _USAGE_OBSERVED_WORKER_LOCK:
+        if _USAGE_OBSERVED_WORKER_STARTED:
+            return
+        threading.Thread(
+            target=_usage_observed_worker,
+            name="codex-proxy-usage-observed",
+            daemon=True,
+        ).start()
+        _USAGE_OBSERVED_WORKER_STARTED = True
+
+
+def _offer_usage_observed_body(context: Mapping[str, Any], body: bytes) -> None:
+    if not body:
+        return
+    _start_usage_observed_worker()
+    try:
+        USAGE_OBSERVED_QUEUE.put_nowait(("body", dict(context), body, None))
+    except queue.Full:
+        return
+
+
+def _offer_usage_observed_sse_line(
+    context: Mapping[str, Any],
+    line: bytes,
+    *,
+    upstream_format: str,
+) -> None:
+    if not line.startswith(b"data:"):
+        return
+    _start_usage_observed_worker()
+    try:
+        USAGE_OBSERVED_QUEUE.put_nowait(("sse", dict(context), line, upstream_format))
+    except queue.Full:
+        return
+
+
+def _usage_observed_worker() -> None:
+    while True:
+        item_type, context, payload_bytes, upstream_format = USAGE_OBSERVED_QUEUE.get()
+        try:
+            usage: Mapping[str, Any] | None = None
+            if item_type == "body":
+                usage = _usage_from_json_body(payload_bytes)
+            elif item_type == "sse":
+                payload = None
+                sse_payload_bytes = _sse_payload_bytes(payload_bytes)
+                if sse_payload_bytes is not None and sse_payload_bytes != b"[DONE]":
+                    try:
+                        payload = json.loads(sse_payload_bytes.decode("utf-8-sig"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        payload = None
+                if isinstance(payload, Mapping):
+                    usage = (
+                        _usage_from_payload(payload)
+                        if upstream_format == "chat_completions"
+                        else _usage_from_response_event(payload)
+                    )
+            _write_usage_observed_event(context, usage)
+        finally:
+            USAGE_OBSERVED_QUEUE.task_done()
 
 
 def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
@@ -1625,6 +1767,32 @@ def _stream_error_event_detail(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))[:300]
 
 
+def _responses_stream_error_detail(event: Mapping[str, Any]) -> str:
+    response = event.get("response")
+    if isinstance(response, Mapping):
+        error = response.get("error")
+        if isinstance(error, Mapping):
+            message = error.get("message")
+            code = error.get("code")
+            if isinstance(message, str) and message:
+                return f"{code}: {message}" if code is not None else message
+            return json.dumps(error, ensure_ascii=True, separators=(",", ":"))[:300]
+        if isinstance(error, str) and error:
+            return error[:300]
+    return _stream_error_event_detail(event)
+
+
+def _responses_stream_error_type(event: Mapping[str, Any]) -> str | None:
+    event_type = event.get("type")
+    return event_type if event_type in {"error", "response.failed", "response.incomplete"} else None
+
+
+def _chat_stream_error_detail(payload: Mapping[str, Any]) -> str | None:
+    if "error" not in payload:
+        return None
+    return _stream_error_event_detail(payload)
+
+
 def _chat_stream_chunk_has_finish(chunk: Mapping[str, Any]) -> bool:
     choices = chunk.get("choices")
     if not isinstance(choices, list):
@@ -1936,9 +2104,12 @@ def _responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
-        if item_type == "message":
+        if item_type == "message" or (item_type is None and ("role" in item or "content" in item)):
             role = item.get("role")
-            role = role if role in {"system", "user", "assistant"} else "user"
+            if role == "developer":
+                role = "system"
+            else:
+                role = role if role in {"system", "user", "assistant"} else "user"
             content = _responses_content_to_chat_content(item.get("content"))
             messages.append({"role": role, "content": content})
             continue
@@ -2090,7 +2261,7 @@ def _chat_completion_tool_outputs(message: Mapping[str, Any]) -> list[dict[str, 
     return output
 
 
-def _chat_completion_to_response_body(body: bytes) -> bytes:
+def _chat_completion_to_response_body(body: bytes, *, repair: bool = True) -> bytes:
     payload = json.loads(body.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         return body
@@ -2122,9 +2293,10 @@ def _chat_completion_to_response_body(body: bytes) -> bytes:
     if "usage" in payload:
         response_payload["usage"] = payload["usage"]
 
-    _hide_reasoning_text(response_payload)
-    response_payload, _ = _normalize_third_party_tool_call(response_payload)
-    response_payload, _ = _downgrade_invalid_third_party_tool_calls(response_payload)
+    if repair:
+        _hide_reasoning_text(response_payload)
+        response_payload, _ = _normalize_third_party_tool_call(response_payload)
+        response_payload, _ = _downgrade_invalid_third_party_tool_calls(response_payload)
     return json.dumps(response_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -2545,12 +2717,17 @@ def _response_body_to_chat_completion_body(body: bytes) -> bytes:
     payload = json.loads(body.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         return body
-    if "error" in payload and not isinstance(payload.get("output"), list):
+    output = payload.get("output")
+    has_error_signal = (
+        payload.get("error") is not None
+        or isinstance(payload.get("detail"), str)
+        or payload.get("status") in {"failed", "incomplete"}
+    )
+    if has_error_signal and (not isinstance(output, list) or not output):
         return _chat_completion_error_body(payload)
 
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
-    output = payload.get("output")
     if isinstance(output, list):
         for item in output:
             if not isinstance(item, dict):
@@ -2854,6 +3031,359 @@ def _response_events_to_chat_stream_chunks(
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
     })
     return chunks
+
+
+class _ResponsesToChatStreamConverter:
+    def __init__(self) -> None:
+        self.tool_states: dict[str, dict[str, Any]] = {}
+        self.model: str | None = None
+        self.response_id: str | None = None
+        self.completed = False
+
+    def _tool_state(self, item_id: str) -> dict[str, Any]:
+        if item_id not in self.tool_states:
+            index = len(self.tool_states)
+            self.tool_states[item_id] = {
+                "index": index,
+                "id": "",
+                "name": "",
+                "arguments": "",
+                "emitted_header": False,
+            }
+        return self.tool_states[item_id]
+
+    def _chunk(self, delta: Mapping[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        return {
+            "id": self.response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": self.model,
+            "choices": [{"index": 0, "delta": dict(delta), "finish_reason": finish_reason}],
+        }
+
+    def chunks_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        event_type = event.get("type")
+        if event_type == "response.created":
+            response_obj = event.get("response")
+            if isinstance(response_obj, Mapping):
+                self.response_id = response_obj.get("id") or self.response_id
+                self.model = response_obj.get("model") or self.model
+            return [self._chunk({"role": "assistant"})]
+        if event_type == "response.output_text.delta":
+            delta_text = event.get("delta")
+            if isinstance(delta_text, str) and delta_text:
+                return [self._chunk({"content": delta_text})]
+            return []
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if not (isinstance(item, Mapping) and item.get("type") == "function_call"):
+                return []
+            item_id = item.get("id") or item.get("call_id") or ""
+            state = self._tool_state(str(item_id))
+            state["id"] = item.get("call_id") or state["id"]
+            state["name"] = item.get("name") or state["name"]
+            if not (state["id"] and state["name"] and not state["emitted_header"]):
+                return []
+            state["emitted_header"] = True
+            return [
+                self._chunk(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": state["index"],
+                                "id": state["id"],
+                                "type": "function",
+                                "function": {"name": state["name"], "arguments": ""},
+                            }
+                        ]
+                    }
+                )
+            ]
+        if event_type == "response.function_call_arguments.delta":
+            item_id = str(event.get("item_id") or "")
+            state = self._tool_state(item_id)
+            delta_args = event.get("delta")
+            if not (isinstance(delta_args, str) and delta_args):
+                return []
+            if not state["emitted_header"]:
+                state["emitted_header"] = True
+                call_id = state["id"] or f"call_{uuid.uuid4().hex[:12]}"
+                return [
+                    self._chunk(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": state["index"],
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {"name": state["name"], "arguments": delta_args},
+                                }
+                            ]
+                        }
+                    )
+                ]
+            return [
+                self._chunk(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": state["index"],
+                                "function": {"arguments": delta_args},
+                            }
+                        ]
+                    }
+                )
+            ]
+        if event_type == "response.completed":
+            self.completed = True
+            finish_reason = "stop"
+            response_obj = event.get("response")
+            if isinstance(response_obj, Mapping):
+                output = response_obj.get("output")
+                if isinstance(output, list) and any(
+                    isinstance(item, Mapping) and item.get("type") == "function_call"
+                    for item in output
+                ):
+                    finish_reason = "tool_calls"
+            return [self._chunk({}, finish_reason=finish_reason)]
+        return []
+
+
+class _ChatToResponsesStreamConverter:
+    def __init__(self) -> None:
+        self.response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        self.model: str | None = None
+        self.item_id = f"msg_{uuid.uuid4().hex[:12]}"
+        self.text_parts: list[str] = []
+        self.message_output_index: int | None = None
+        self.next_output_index = 0
+        self.tool_states: dict[int, dict[str, Any]] = {}
+        self.created = False
+        self.message_started = False
+        self.completed = False
+
+    def _allocate_output_index(self) -> int:
+        output_index = self.next_output_index
+        self.next_output_index += 1
+        return output_index
+
+    def _created_events(self) -> list[dict[str, Any]]:
+        if self.created:
+            return []
+        self.created = True
+        response = {
+            "id": self.response_id,
+            "object": "response",
+            "status": "in_progress",
+            "model": self.model,
+            "output": [],
+        }
+        return [
+            {"type": "response.created", "response": response},
+            {"type": "response.in_progress", "response": response},
+        ]
+
+    def _message_start_events(self) -> list[dict[str, Any]]:
+        events = self._created_events()
+        if self.message_started:
+            return events
+        if self.message_output_index is None:
+            self.message_output_index = self._allocate_output_index()
+        self.message_started = True
+        events.extend(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": self.message_output_index,
+                    "item": {
+                        "id": self.item_id,
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": [],
+                    },
+                },
+                {
+                    "type": "response.content_part.added",
+                    "output_index": self.message_output_index,
+                    "item_id": self.item_id,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": "", "annotations": []},
+                },
+            ]
+        )
+        return events
+
+    def _tool_state(self, index: int) -> dict[str, Any]:
+        if index not in self.tool_states:
+            self.tool_states[index] = {
+                "output_index": self._allocate_output_index(),
+                "item_id": "",
+                "call_id": "",
+                "name": "",
+                "arguments": [],
+                "added": False,
+                "done": False,
+            }
+        return self.tool_states[index]
+
+    def _tool_added_events(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        if state["added"] or not state["call_id"] or not state["name"]:
+            return []
+        events = self._created_events()
+        state["item_id"] = f"fc_{state['call_id']}"
+        events.append(
+            {
+                "type": "response.output_item.added",
+                "output_index": state["output_index"],
+                "item": {
+                    "id": state["item_id"],
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": state["call_id"],
+                    "name": state["name"],
+                    "arguments": "",
+                },
+            }
+        )
+        state["added"] = True
+        return events
+
+    def _complete_events(self) -> list[dict[str, Any]]:
+        if self.completed:
+            return []
+        self.completed = True
+        events = self._created_events()
+        output_by_index: dict[int, dict[str, Any]] = {}
+        for state in sorted(self.tool_states.values(), key=lambda item: item["output_index"]):
+            events.extend(self._tool_added_events(state))
+            if not state["added"] or state["done"]:
+                continue
+            arguments = "".join(state["arguments"])
+            item = {
+                "id": state["item_id"],
+                "type": "function_call",
+                "status": "completed",
+                "call_id": state["call_id"],
+                "name": state["name"],
+                "arguments": arguments,
+            }
+            events.extend(
+                [
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "item_id": state["item_id"],
+                        "output_index": state["output_index"],
+                        "arguments": arguments,
+                    },
+                    {"type": "response.output_item.done", "output_index": state["output_index"], "item": item},
+                ]
+            )
+            state["done"] = True
+            output_by_index[state["output_index"]] = item
+        if self.message_started:
+            text = "".join(self.text_parts)
+            output_index = self.message_output_index if self.message_output_index is not None else 0
+            item = {
+                "id": self.item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+            events.extend(
+                [
+                    {
+                        "type": "response.output_text.done",
+                        "item_id": self.item_id,
+                        "output_index": output_index,
+                        "content_index": 0,
+                        "text": text,
+                    },
+                    {"type": "response.output_item.done", "output_index": output_index, "item": item},
+                ]
+            )
+            output_by_index[output_index] = item
+        output = [
+            item
+            for _, item in sorted(output_by_index.items(), key=lambda pair: pair[0])
+        ]
+        events.append(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "model": self.model,
+                    "output": output,
+                },
+            }
+        )
+        return events
+
+    def events_for_done(self) -> list[dict[str, Any]]:
+        return self._complete_events()
+
+    def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if isinstance(chunk.get("model"), str):
+            self.model = chunk.get("model")
+        events: list[dict[str, Any]] = []
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            return events
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, Mapping):
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    self.text_parts.append(content)
+                    events.extend(self._message_start_events())
+                    events.append(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": self.item_id,
+                            "output_index": self.message_output_index if self.message_output_index is not None else 0,
+                            "content_index": 0,
+                            "delta": content,
+                        }
+                    )
+                tool_calls = delta.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for fallback_index, tool_call in enumerate(tool_calls):
+                        if not isinstance(tool_call, Mapping):
+                            continue
+                        raw_index = tool_call.get("index", fallback_index)
+                        index = raw_index if isinstance(raw_index, int) else fallback_index
+                        state = self._tool_state(index)
+                        call_id = tool_call.get("id")
+                        if isinstance(call_id, str) and call_id and not state["call_id"]:
+                            state["call_id"] = call_id
+                        function = tool_call.get("function")
+                        argument_delta: str | None = None
+                        if isinstance(function, Mapping):
+                            name = function.get("name")
+                            if isinstance(name, str) and name and not state["name"]:
+                                state["name"] = name
+                            arguments = function.get("arguments")
+                            if isinstance(arguments, str) and arguments:
+                                state["arguments"].append(arguments)
+                                argument_delta = arguments
+                        events.extend(self._tool_added_events(state))
+                        if state["added"] and argument_delta:
+                            events.append(
+                                {
+                                    "type": "response.function_call_arguments.delta",
+                                    "item_id": state["item_id"],
+                                    "output_index": state["output_index"],
+                                    "delta": argument_delta,
+                                }
+                            )
+            if choice.get("finish_reason") is not None:
+                events.extend(self._complete_events())
+        return events
 
 
 def _is_reasoning_sse_payload(payload: Mapping[str, Any] | None) -> bool:
@@ -4771,6 +5301,67 @@ def official_passthrough_request_body(
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+def _safe_json_mapping(body: bytes) -> Mapping[str, Any] | None:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def transparent_request_body(
+    body: bytes,
+    payload: Mapping[str, Any] | None,
+    upstream: Mapping[str, Any],
+    model_id: str | None = None,
+) -> bytes:
+    upstream_name = upstream.get("name")
+    upstream_model = upstream.get("upstream_model")
+    official_responses_backend = upstream_name == "official"
+    if not isinstance(upstream_model, str) or not upstream_model:
+        if official_responses_backend and isinstance(payload, Mapping):
+            next_payload = dict(payload)
+            changed = False
+            if "max_output_tokens" in next_payload:
+                del next_payload["max_output_tokens"]
+                changed = True
+            if next_payload.get("store") is not False:
+                next_payload["store"] = False
+                changed = True
+            if next_payload.get("stream") is not True:
+                next_payload["stream"] = True
+                changed = True
+            if _normalize_responses_string_input(next_payload):
+                changed = True
+            if changed:
+                return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        return body
+    if not isinstance(payload, Mapping):
+        if isinstance(model_id, str) and model_id != upstream_model:
+            return _replace_embedded_model(body, model_id, upstream_model)
+        return body
+
+    next_payload = dict(payload)
+    changed = False
+    if next_payload.get("model") != upstream_model:
+        next_payload["model"] = upstream_model
+        changed = True
+    if official_responses_backend and "max_output_tokens" in next_payload:
+        del next_payload["max_output_tokens"]
+        changed = True
+    if official_responses_backend and next_payload.get("store") is not False:
+        next_payload["store"] = False
+        changed = True
+    if official_responses_backend and next_payload.get("stream") is not True:
+        next_payload["stream"] = True
+        changed = True
+    if official_responses_backend and _normalize_responses_string_input(next_payload):
+        changed = True
+    if not changed:
+        return body
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -5224,13 +5815,30 @@ def _infer_client_id(user_agent: str | None) -> str | None:
         return "zcode"
     if "omp" in value:
         return "omp"
-    if "codex" in value:
+    if "codex desktop/" in value or "codex-app" in value:
         return "codex-app"
     return None
 
 
 def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
     return request_context.get("client_id") == "codex-app"
+
+
+def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]) -> bool:
+    client_id = str(request_context.get("client_id") or "").strip().lower()
+    return bool(client_id and client_id not in {"unknown", "codex-app"})
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    behavior_profile: str
+    selected_upstream_format: str
+    wire_format_adapter: str
+    codex_semantic_adapter: str
+    request_kind_policy: str
+    retry_policy: str
+    usage_policy: str
+    repair_policy: str
 
 
 def behavior_profile_for_request(
@@ -5248,6 +5856,145 @@ def behavior_profile_for_request(
     ):
         return BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
     return BEHAVIOR_OFFICIAL_GATEWAY_COMPAT
+
+
+def _wire_format_adapter(inbound_format: str, upstream_format: str) -> str:
+    if inbound_format == upstream_format:
+        return WIRE_TRANSPARENT
+    if inbound_format == "responses" and upstream_format == "chat_completions":
+        return WIRE_RESPONSES_TO_CHAT
+    if inbound_format == "chat_completions" and upstream_format == "responses":
+        return WIRE_CHAT_TO_RESPONSES
+    return WIRE_TRANSPARENT
+
+
+def route_decision_for_request(
+    upstream: Mapping[str, Any],
+    request_context: Mapping[str, str],
+    *,
+    inbound_format: str,
+    provider_hint: str | None = None,
+) -> RouteDecision:
+    upstream_name = str(upstream.get("name") or "")
+    upstream_format = str(upstream.get("upstream_format") or "responses")
+    if upstream_format == "auto":
+        upstream_format = "responses"
+    wire_adapter = _wire_format_adapter(inbound_format, upstream_format)
+
+    if upstream_name != "official" and _is_codex_app_context(request_context):
+        return RouteDecision(
+            behavior_profile=BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+            selected_upstream_format=upstream_format,
+            wire_format_adapter=wire_adapter,
+            codex_semantic_adapter=CODEX_SEMANTIC_EXTERNAL_ADAPTER,
+            request_kind_policy=REQUEST_KIND_GATEWAY,
+            retry_policy=RETRY_GATEWAY_FULL,
+            usage_policy=USAGE_SYNC_CAPTURE,
+            repair_policy=REPAIR_CODEX_SUBAGENT,
+        )
+
+    if upstream_name == "official" and request_context.get("client_id") == "unknown":
+        return RouteDecision(
+            behavior_profile=behavior_profile_for_request(
+                upstream,
+                request_context,
+                inbound_format=inbound_format,
+            ),
+            selected_upstream_format=upstream_format,
+            wire_format_adapter=wire_adapter,
+            codex_semantic_adapter=CODEX_SEMANTIC_NONE,
+            request_kind_policy=REQUEST_KIND_GATEWAY,
+            retry_policy=RETRY_GATEWAY_FULL,
+            usage_policy=USAGE_SYNC_CAPTURE,
+            repair_policy=REPAIR_NONE,
+        )
+
+    if (
+        upstream_name != "official"
+        and provider_hint is None
+        and not _is_codex_app_context(request_context)
+        and not _has_explicit_third_party_client_identity(request_context)
+    ):
+        return RouteDecision(
+            behavior_profile=BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
+            selected_upstream_format=upstream_format,
+            wire_format_adapter=wire_adapter,
+            codex_semantic_adapter=CODEX_SEMANTIC_EXTERNAL_ADAPTER,
+            request_kind_policy=REQUEST_KIND_GATEWAY,
+            retry_policy=RETRY_GATEWAY_FULL,
+            usage_policy=USAGE_SYNC_CAPTURE,
+            repair_policy=REPAIR_CODEX_SUBAGENT,
+        )
+
+    if not _is_codex_app_context(request_context):
+        return RouteDecision(
+            behavior_profile=BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            selected_upstream_format=upstream_format,
+            wire_format_adapter=wire_adapter,
+            codex_semantic_adapter=CODEX_SEMANTIC_NONE,
+            request_kind_policy=REQUEST_KIND_TRANSPARENT,
+            retry_policy=RETRY_CONSERVATIVE_PRE_OUTPUT,
+            usage_policy=USAGE_ASYNC_TAP,
+            repair_policy=REPAIR_NONE,
+        )
+
+    behavior_profile = behavior_profile_for_request(
+        upstream,
+        request_context,
+        inbound_format=inbound_format,
+    )
+    return RouteDecision(
+        behavior_profile=behavior_profile,
+        selected_upstream_format=upstream_format,
+        wire_format_adapter=wire_adapter,
+        codex_semantic_adapter=CODEX_SEMANTIC_NONE,
+        request_kind_policy=REQUEST_KIND_GATEWAY,
+        retry_policy=RETRY_GATEWAY_FULL,
+        usage_policy=USAGE_SYNC_CAPTURE,
+        repair_policy=REPAIR_NONE,
+    )
+
+
+def _route_decision_event_fields(decision: RouteDecision) -> dict[str, str]:
+    return {
+        "wire_format_adapter": decision.wire_format_adapter,
+        "codex_semantic_adapter": decision.codex_semantic_adapter,
+        "request_kind_policy": decision.request_kind_policy,
+        "retry_policy": decision.retry_policy,
+        "usage_policy": decision.usage_policy,
+        "repair_policy": decision.repair_policy,
+    }
+
+
+def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+    renamed: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key == "request_body_hmac":
+            renamed[f"{prefix}_request_body_hmac"] = value
+        elif key == "request_body_hmac_skipped":
+            renamed[f"{prefix}_request_body_hmac_skipped"] = value
+        elif key == "request_prefix_hmac":
+            renamed[f"{prefix}_request_prefix_hmac"] = value
+        elif key == "prefix_bytes":
+            renamed[f"{prefix}_prefix_bytes"] = value
+        elif key == "prompt_cache_key_hash":
+            renamed[f"{prefix}_prompt_cache_key_hash"] = value
+    return renamed
+
+
+def vision_proxy_policy_for_route(decision: RouteDecision, behavior_profile: str | None = None) -> str:
+    active_behavior_profile = behavior_profile or decision.behavior_profile
+    if (
+        active_behavior_profile == BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
+        and decision.codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER
+    ):
+        return VISION_PROXY_CODEX_APP_ADAPTER
+    if (
+        active_behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+        and gateway_transparent_vision_proxy_enabled()
+    ):
+        return VISION_PROXY_TRANSPARENT_OVERLAY
+    return VISION_PROXY_DISABLED
 
 
 def _is_event_stream(headers: Mapping[str, str] | Any) -> bool:
@@ -5855,6 +6602,13 @@ def _image_description_part(description: str) -> dict[str, str]:
     }
 
 
+def _chat_image_description_part(description: str) -> dict[str, str]:
+    return {
+        "type": "text",
+        "text": _image_description_part(description)["text"],
+    }
+
+
 def _replace_image_parts(value: Any, describe: Any) -> tuple[Any, bool]:
     if _is_image_part(value):
         return _image_description_part(describe(value)), True
@@ -5878,6 +6632,53 @@ def _replace_image_parts(value: Any, describe: Any) -> tuple[Any, bool]:
     return value, False
 
 
+def _replace_chat_image_parts(value: Any, describe: Any) -> tuple[Any, bool]:
+    if _is_image_part(value):
+        return _chat_image_description_part(describe(value)), True
+    if isinstance(value, list):
+        changed = False
+        output = []
+        for item in value:
+            replacement, item_changed = _replace_chat_image_parts(item, describe)
+            changed = changed or item_changed
+            output.append(replacement)
+        return output, changed
+    if isinstance(value, dict):
+        changed = False
+        output = dict(value)
+        for key, item in value.items():
+            replacement, item_changed = _replace_chat_image_parts(item, describe)
+            if item_changed:
+                output[key] = replacement
+                changed = True
+        return output, changed
+    return value, False
+
+
+def _vision_proxy_context(
+    event_context: Mapping[str, Any] | None,
+    vision_proxy_policy: str,
+) -> dict[str, Any] | None:
+    if event_context is None:
+        return None
+    context = dict(event_context)
+    context["vision_proxy_policy"] = vision_proxy_policy
+    return context
+
+
+def _image_proxy_vision_upstream() -> tuple[str, Mapping[str, Any]]:
+    vision_model = gateway_image_proxy_model()
+    if not vision_model:
+        raise ImageProxyError("Vision model is not configured for Image Proxy")
+    try:
+        vision_upstream = choose_upstream(vision_model)
+    except ValueError as exc:
+        raise ImageProxyError(f"Vision model is not available: {vision_model}: {exc}") from exc
+    if not model_supports_image(vision_model, vision_upstream):
+        raise ImageProxyError(f"Vision model does not support image input: {vision_model}")
+    return vision_model, vision_upstream
+
+
 def apply_image_proxy_to_responses_payload(
     payload: dict[str, Any],
     target_model: str | None,
@@ -5892,15 +6693,7 @@ def apply_image_proxy_to_responses_payload(
     if not _value_contains_image(payload.get("input")):
         return False
 
-    vision_model = gateway_image_proxy_model()
-    if not vision_model:
-        raise ImageProxyError("Vision model is not configured for Image Proxy")
-    try:
-        vision_upstream = choose_upstream(vision_model)
-    except ValueError as exc:
-        raise ImageProxyError(f"Vision model is not available: {vision_model}: {exc}") from exc
-    if not model_supports_image(vision_model, vision_upstream):
-        raise ImageProxyError(f"Vision model does not support image input: {vision_model}")
+    vision_model, vision_upstream = _image_proxy_vision_upstream()
 
     descriptions: dict[str, str] = {}
     progress_sent = False
@@ -5944,6 +6737,95 @@ def apply_image_proxy_to_responses_payload(
             image_count=len(descriptions),
         )
     return changed
+
+
+def apply_image_proxy_to_chat_payload(
+    payload: dict[str, Any],
+    target_model: str | None,
+    target_upstream: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+) -> bool:
+    if not gateway_image_proxy_enabled():
+        return False
+    if target_model and model_supports_image(target_model, target_upstream):
+        return False
+    if not _value_contains_image(payload.get("messages")):
+        return False
+
+    vision_model, vision_upstream = _image_proxy_vision_upstream()
+    descriptions: dict[str, str] = {}
+    progress_sent = False
+    image_count = _image_proxy_unique_image_count(payload.get("messages"), vision_model)
+
+    def emit_progress_once() -> None:
+        nonlocal progress_sent
+        if progress_sent or progress_callback is None:
+            return
+        progress_callback(
+            {
+                "type": "image_proxy",
+                "status": "reading",
+                "image_count": image_count,
+                "vision_model": canonical_model_id(vision_model),
+            }
+        )
+        progress_sent = True
+
+    def describe(part: Mapping[str, Any]) -> str:
+        cache_key = _image_proxy_cache_key(part, vision_model)
+        if cache_key not in descriptions:
+            if _image_proxy_cache_lookup(cache_key) is None:
+                emit_progress_once()
+            descriptions[cache_key] = _image_proxy_description_for_part(
+                part,
+                vision_model,
+                vision_upstream,
+                event_context=event_context,
+            )
+        return descriptions[cache_key]
+
+    replacement, changed = _replace_chat_image_parts(payload.get("messages"), describe)
+    if changed:
+        payload["messages"] = replacement
+        _write_adapter_event(
+            event_context,
+            "image_proxy_applied",
+            vision_model=canonical_model_id(vision_model),
+            target_model=canonical_model_id(target_model) if target_model else None,
+            image_count=len(descriptions),
+        )
+    return changed
+
+
+def apply_vision_proxy_adapter(
+    payload: dict[str, Any],
+    *,
+    inbound_format: str,
+    target_model: str | None,
+    target_upstream: Mapping[str, Any],
+    vision_proxy_policy: str,
+    event_context: Mapping[str, Any] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+) -> bool:
+    if vision_proxy_policy == VISION_PROXY_DISABLED:
+        return False
+    proxy_context = _vision_proxy_context(event_context, vision_proxy_policy)
+    if inbound_format == "chat_completions":
+        return apply_image_proxy_to_chat_payload(
+            payload,
+            target_model,
+            target_upstream,
+            event_context=proxy_context,
+            progress_callback=progress_callback,
+        )
+    return apply_image_proxy_to_responses_payload(
+        payload,
+        target_model,
+        target_upstream,
+        event_context=proxy_context,
+        progress_callback=progress_callback,
+    )
 
 
 def _upstream_retry_status(exc: BaseException) -> int | None:
@@ -6396,6 +7278,7 @@ def _open_upstream_response(
     downstream_retry_callback: Any = None,
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
     max_attempts: int | None = None,
+    retry_policy: str = RETRY_GATEWAY_FULL,
 ) -> Any:
     explicit_max_attempts = max_attempts is not None
     base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
@@ -6431,7 +7314,7 @@ def _open_upstream_response(
                 delay_seconds=delay_seconds,
                 failure_class=failure_class,
             )
-            if downstream_retry_callback is not None:
+            if downstream_retry_callback is not None and retry_policy != RETRY_CONSERVATIVE_PRE_OUTPUT:
                 downstream_retry_callback(
                     _downstream_retry_payload(
                         upstream_name=upstream_name,
@@ -6525,7 +7408,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         upstream_format = "responses"
         reports_cached_input_tokens = False
         behavior_profile = None
+        route_decision: RouteDecision | None = None
+        route_policy_event_fields: dict[str, Any] = {}
+        vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
+        caller_body = b""
+        caller_request_observability: dict[str, Any] = {}
+        request_observability: dict[str, Any] = {}
+        request_start_written = False
+        write_request_start_once: Callable[[Mapping[str, Any]], None] | None = None
 
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -6535,6 +7426,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             body, content_decoded, decode_error = decoded_request_body(body, content_encoding)
             if decode_error:
                 raise ValueError(f"request body content-encoding decode failed: {decode_error}")
+            caller_body = body
             try:
                 inbound_payload = json.loads(body.decode("utf-8-sig"))
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -6554,15 +7446,132 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
-            behavior_profile = behavior_profile_for_request(
+            route_decision = route_decision_for_request(
                 upstream,
                 request_context,
                 inbound_format=inbound_format,
+                provider_hint=provider_hint,
             )
+            configured_upstream_format_for_route = str(upstream.get("upstream_format", "responses"))
+            is_provider_transparent_metered = (
+                provider_hint is not None
+                and not _is_codex_app_context(request_context)
+                and route_decision.behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                and (
+                    (
+                        inbound_format == "chat_completions"
+                        and route_decision.selected_upstream_format == "chat_completions"
+                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
+                    )
+                    or (
+                        inbound_format == "chat_completions"
+                        and configured_upstream_format_for_route == "responses"
+                        and route_decision.selected_upstream_format == "responses"
+                        and route_decision.wire_format_adapter == WIRE_CHAT_TO_RESPONSES
+                    )
+                    or (
+                        inbound_format == "responses"
+                        and route_decision.selected_upstream_format == "responses"
+                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
+                    )
+                    or (
+                        inbound_format == "responses"
+                        and configured_upstream_format_for_route == "chat_completions"
+                        and route_decision.selected_upstream_format == "chat_completions"
+                        and route_decision.wire_format_adapter == WIRE_RESPONSES_TO_CHAT
+                    )
+                )
+            )
+            is_standard_third_party_transparent_metered = (
+                provider_hint is None
+                and upstream_name != "official"
+                and not _is_codex_app_context(request_context)
+                and _has_explicit_third_party_client_identity(request_context)
+                and route_decision.behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                and (
+                    (
+                        inbound_format == "chat_completions"
+                        and route_decision.selected_upstream_format == "chat_completions"
+                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
+                    )
+                    or (
+                        inbound_format == "chat_completions"
+                        and configured_upstream_format_for_route == "responses"
+                        and route_decision.selected_upstream_format == "responses"
+                        and route_decision.wire_format_adapter == WIRE_CHAT_TO_RESPONSES
+                    )
+                    or (
+                        inbound_format == "responses"
+                        and route_decision.selected_upstream_format == "responses"
+                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
+                    )
+                    or (
+                        inbound_format == "responses"
+                        and configured_upstream_format_for_route == "chat_completions"
+                        and route_decision.selected_upstream_format == "chat_completions"
+                        and route_decision.wire_format_adapter == WIRE_RESPONSES_TO_CHAT
+                    )
+                )
+            )
+            is_official_responses_transparent_metered = (
+                provider_hint is None
+                and upstream_name == "official"
+                and not _is_codex_app_context(request_context)
+                and request_context.get("client_id") != "unknown"
+                and route_decision.behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                and route_decision.selected_upstream_format == "responses"
+                and (
+                    (
+                        inbound_format == "responses"
+                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
+                    )
+                    or (
+                        inbound_format == "chat_completions"
+                        and route_decision.wire_format_adapter == WIRE_CHAT_TO_RESPONSES
+                    )
+                )
+            )
+            enable_transparent_metered = (
+                is_provider_transparent_metered
+                or is_standard_third_party_transparent_metered
+                or is_official_responses_transparent_metered
+            )
+            enable_codex_app_external_adapter = (
+                route_decision.codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER
+            )
+            behavior_profile = (
+                route_decision.behavior_profile
+                if enable_transparent_metered or enable_codex_app_external_adapter
+                else behavior_profile_for_request(
+                    upstream,
+                    request_context,
+                    inbound_format=inbound_format,
+                )
+            )
+            upstream_format = route_decision.selected_upstream_format if enable_transparent_metered else upstream_format
             is_official_http_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+            is_transparent_metered = behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+            is_transparent_same_format = is_transparent_metered and route_decision.wire_format_adapter == WIRE_TRANSPARENT
+            is_transparent_lightweight_fallback = (
+                is_transparent_metered
+                and route_decision.wire_format_adapter in {WIRE_CHAT_TO_RESPONSES, WIRE_RESPONSES_TO_CHAT}
+            )
+            if is_transparent_metered:
+                request_kind = RETRY_REQUEST_MAIN_GENERATION
+                proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+            vision_proxy_policy = vision_proxy_policy_for_route(route_decision, behavior_profile)
+            route_policy_event_fields = {
+                **_route_decision_event_fields(route_decision),
+                "vision_proxy_policy": vision_proxy_policy,
+            }
+            proxy_request_context = {
+                **proxy_request_context,
+                **route_policy_event_fields,
+            }
             model_canonical = canonical_model_id(model) if model else None
             if (
                 request_kind == RETRY_REQUEST_COMPACT
+                and not is_transparent_metered
                 and behavior_profile != BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
                 and isinstance(inbound_payload, dict)
                 and _strip_tools_for_compact_payload(
@@ -6575,11 +7584,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
             ):
                 body = json.dumps(inbound_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            # Convert inbound Chat Completions request to Responses format before routing.
-            if inbound_format == "chat_completions":
-                body = _chat_completions_request_to_responses_body(body)
-            # Capture the caller's desired stream mode before compatibility
-            # helpers can force stream=true for some upstreams.
+            # Capture the caller's desired stream mode and prompt cache key
+            # before compatibility helpers can force stream=true or reshape the
+            # body for the selected upstream.
             if isinstance(inbound_payload, Mapping):
                 caller_stream = inbound_payload.get("stream") is True
             else:
@@ -6587,41 +7594,54 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             prompt_cache_key = None
             if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("prompt_cache_key"), str):
                 prompt_cache_key = inbound_payload["prompt_cache_key"]
-            request_observability = proxy_telemetry.enrich_request_observability(
-                body=body,
+            caller_request_observability = proxy_telemetry.enrich_request_observability(
+                body=caller_body,
                 codex_home=RUNTIME_CODEX_DIR,
                 upstream=upstream,
                 include_body_hmac=not is_official_http_passthrough,
                 prompt_cache_key=prompt_cache_key,
                 extract_prompt_cache_key=not is_official_http_passthrough,
             )
-            write_proxy_event(
-                "request_start",
-                request_id=request_id,
-                path=self.path,
-                method="POST",
-                model=model_canonical,
-                model_requested=model_requested,
-                model_canonical=model_canonical,
-                upstream=upstream_name,
-                provider_id=upstream_name,
-                provider_hint=provider_hint,
-                upstream_format=upstream_format,
-                reports_cached_input_tokens=reports_cached_input_tokens,
-                behavior_profile=behavior_profile,
-                route_reason=route_reason,
-                route_mode="official" if upstream_name == "official" else "codexhub",
-                inbound_format=inbound_format,
-                is_stream=caller_stream,
-                content_length=content_length,
-                decoded_content_length=len(body) if content_decoded else None,
-                content_type=content_type[:120] if content_type else None,
-                content_encoding=content_encoding[:80] if content_encoding else None,
-                content_decoded=content_decoded,
-                decode_error=decode_error[:160] if decode_error else None,
-                **request_observability,
-                **proxy_request_context,
-            )
+
+            def emit_request_start_once(observability_fields: Mapping[str, Any]) -> None:
+                nonlocal request_start_written
+                if request_start_written:
+                    return
+                write_proxy_event(
+                    "request_start",
+                    request_id=request_id,
+                    path=self.path,
+                    method="POST",
+                    model=model_canonical,
+                    model_requested=model_requested,
+                    model_canonical=model_canonical,
+                    upstream=upstream_name,
+                    provider_id=upstream_name,
+                    provider_hint=provider_hint,
+                    upstream_format=upstream_format,
+                    reports_cached_input_tokens=reports_cached_input_tokens,
+                    behavior_profile=behavior_profile,
+                    route_reason=route_reason,
+                    route_mode="official" if upstream_name == "official" else "codexhub",
+                    inbound_format=inbound_format,
+                    is_stream=caller_stream,
+                    content_length=content_length,
+                    decoded_content_length=len(caller_body) if content_decoded else None,
+                    content_type=content_type[:120] if content_type else None,
+                    content_encoding=content_encoding[:80] if content_encoding else None,
+                    content_decoded=content_decoded,
+                    decode_error=decode_error[:160] if decode_error else None,
+                    **dict(observability_fields),
+                    **proxy_request_context,
+                )
+                request_start_written = True
+
+            write_request_start_once = emit_request_start_once
+            # Convert inbound Chat Completions request to Responses format before routing
+            # only for Gateway compatibility paths. Same-format transparent traffic
+            # must stay in the caller's wire format.
+            if inbound_format == "chat_completions" and not is_transparent_same_format:
+                body = _chat_completions_request_to_responses_body(body)
             adapter_event_context = {
                 "request_id": request_id,
                 "model": model_canonical,
@@ -6648,6 +7668,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream,
                     model_id=model,
                 )
+            elif is_transparent_same_format or is_transparent_lightweight_fallback:
+                body = transparent_request_body(
+                    body,
+                    _safe_json_mapping(body),
+                    upstream,
+                    model_id=model,
+                )
             else:
                 body = compatible_request_body(
                     body,
@@ -6657,14 +7684,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT,
                     behavior_profile=behavior_profile,
                 )
+            if vision_proxy_policy != VISION_PROXY_DISABLED:
                 try:
                     image_proxy_payload = json.loads(body.decode("utf-8-sig"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     image_proxy_payload = None
-                if isinstance(image_proxy_payload, dict) and apply_image_proxy_to_responses_payload(
+                vision_proxy_payload_format = (
+                    "chat_completions"
+                    if inbound_format == "chat_completions" and is_transparent_same_format
+                    else "responses"
+                )
+                if isinstance(image_proxy_payload, dict) and apply_vision_proxy_adapter(
                     image_proxy_payload,
-                    model,
-                    upstream,
+                    inbound_format=vision_proxy_payload_format,
+                    target_model=model,
+                    target_upstream=upstream,
+                    vision_proxy_policy=vision_proxy_policy,
                     event_context=adapter_event_context,
                     progress_callback=emit_downstream_status if caller_stream else None,
                 ):
@@ -6676,6 +7711,28 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 drop_content_encoding=content_decoded,
                 behavior_profile=behavior_profile,
             )
+
+            def upstream_body_for_format(selected_format: str) -> bytes:
+                if is_transparent_same_format:
+                    return body
+                if selected_format == "chat_completions":
+                    return _responses_request_to_chat_completion_body(responses_body)
+                return responses_body
+
+            upstream_request_observability = proxy_telemetry.enrich_request_observability(
+                body=upstream_body_for_format(upstream_format),
+                codex_home=RUNTIME_CODEX_DIR,
+                upstream=upstream,
+                include_body_hmac=not is_official_http_passthrough,
+                prompt_cache_key=prompt_cache_key,
+                extract_prompt_cache_key=not is_official_http_passthrough,
+            )
+            request_observability = {
+                **upstream_request_observability,
+                **_request_observability_with_prefix(caller_request_observability, "caller"),
+                **_request_observability_with_prefix(upstream_request_observability, "upstream"),
+            }
+            emit_request_start_once(request_observability)
             emit_retry_to_downstream = (
                 not is_official_http_passthrough
                 and caller_stream
@@ -6684,10 +7741,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
 
             def upstream_request_for_format(selected_format: str) -> Request:
+                if is_transparent_same_format:
+                    url = (
+                        _chat_completions_url(upstream)
+                        if selected_format == "chat_completions"
+                        else _responses_url(upstream, "/v1/responses")
+                    )
+                    return Request(
+                        url,
+                        data=body,
+                        headers=headers,
+                        method="POST",
+                    )
                 if selected_format == "chat_completions":
                     return Request(
                         _chat_completions_url(upstream),
-                        data=_responses_request_to_chat_completion_body(responses_body),
+                        data=upstream_body_for_format(selected_format),
                         headers=headers,
                         method="POST",
                     )
@@ -6752,6 +7821,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
                                 request_kind=request_kind,
                                 max_attempts=1 if is_official_http_passthrough else None,
+                                retry_policy=route_decision.retry_policy
+                                if enable_transparent_metered
+                                else RETRY_GATEWAY_FULL,
                             ) as response:
                                 status = self._relay_upstream_response(
                                     response,
@@ -6766,7 +7838,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
                                     defer_stream_errors=False
-                                    if is_official_http_passthrough
+                                    if is_official_http_passthrough or is_transparent_metered
                                     else relay_attempt < gateway_auto_retry_max_attempts(),
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                     behavior_profile=behavior_profile,
@@ -6939,6 +8011,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="compact_empty_response",
             )
         except ImageProxyError as exc:
+            if not request_start_written and callable(write_request_start_once):
+                fallback_request_observability = {
+                    **caller_request_observability,
+                    **_request_observability_with_prefix(caller_request_observability, "caller"),
+                }
+                write_request_start_once(fallback_request_observability)
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -6955,6 +8033,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **proxy_request_context,
             )
+            if downstream_sse_started:
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    status=502,
+                    exc=exc,
+                    error="image_proxy_error",
+                    detail=str(exc),
+                )
+                return
             self._safe_send_downstream_json_error(
                 502,
                 inbound_format=inbound_format,
@@ -7023,12 +8111,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 }
                 status = self._relay_upstream_response(
                     exc,
-                    "upstream_error",
+                    upstream_name or "upstream_error",
                     request_id=request_id,
                     model=canonical_model_id(model) if model else None,
                     upstream_format=upstream_format,
                     inbound_format=inbound_format,
+                    caller_stream=caller_stream,
                     event_context=adapter_event_context,
+                    usage_capture=usage_capture,
+                    behavior_profile=behavior_profile,
                 )
             except OSError as relay_exc:
                 self.close_connection = True
@@ -7675,6 +8766,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         usage_capture: dict[str, Any] | None = None,
         headers_already_sent: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
+        event_context: Mapping[str, Any] | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         if not headers_already_sent:
@@ -7721,6 +8813,100 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         return status
 
+    def _relay_transparent_upstream_response(
+        self,
+        response: Any,
+        upstream_name: str,
+        *,
+        request_id: str | None = None,
+        model: str | None = None,
+        upstream_format: str = "responses",
+        inbound_format: str = "responses",
+        usage_capture: dict[str, Any] | None = None,
+        headers_already_sent: bool = False,
+        mark_downstream_sse_started: Callable[[], None] | None = None,
+        event_context: Mapping[str, Any] | None = None,
+    ) -> int:
+        status = getattr(response, "status", None) or getattr(response, "code", 502)
+        is_event_stream = _is_event_stream(response.headers)
+        usage_context = _usage_observed_context(
+            event_context,
+            request_id=request_id,
+            model=model,
+            upstream=upstream_name,
+            upstream_format=upstream_format,
+            inbound_format=inbound_format,
+        )
+
+        if not headers_already_sent:
+            self.send_response(status)
+            for key, value in _filtered_response_headers(response.headers, is_event_stream):
+                self.send_header(key, value)
+            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if is_event_stream and mark_downstream_sse_started is not None:
+                mark_downstream_sse_started()
+
+        _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+        if is_event_stream:
+            try:
+                while True:
+                    line = response.readline()
+                    if not line:
+                        break
+                    self.wfile.write(line)
+                    self.wfile.flush()
+                    _offer_usage_observed_sse_line(
+                        usage_context,
+                        line,
+                        upstream_format=upstream_format,
+                    )
+            except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                self.close_connection = True
+                write_proxy_event(
+                    "transparent_stream_closed",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=502,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    error=type(exc).__name__,
+                    detail=safe_upstream_error_detail(exc),
+                )
+                return 502
+            self.close_connection = True
+            return status
+
+        body = b""
+        try:
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                body += chunk
+        except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+            self.close_connection = True
+            write_proxy_event(
+                "transparent_body_read_failed",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=502,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+            )
+            return 502
+
+        self.wfile.write(body)
+        self.wfile.flush()
+        _offer_usage_observed_body(usage_context, body)
+        self.close_connection = True
+        return status
+
     def _relay_upstream_response(
         self,
         response: Any,
@@ -7748,14 +8934,37 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # SSE into a single JSON response body.
         buffer_sse_to_json = is_event_stream and not caller_stream
         buffered_json_response = False
+        usage_context = _usage_observed_context(
+            event_context,
+            request_id=request_id,
+            model=model,
+            upstream=upstream_name,
+            upstream_format=upstream_format,
+            inbound_format=inbound_format,
+        )
+        if (
+            behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+            and upstream_format == inbound_format
+            and not (is_event_stream and not caller_stream and upstream_format == "responses")
+        ):
+            return self._relay_transparent_upstream_response(
+                response,
+                upstream_name,
+                request_id=request_id,
+                model=model,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                usage_capture=usage_capture,
+                headers_already_sent=headers_already_sent,
+                mark_downstream_sse_started=mark_downstream_sse_started,
+                event_context=event_context,
+            )
         if (
             behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
             and is_event_stream
-            and caller_stream
             and inbound_format == "responses"
             and upstream_format == "responses"
             and not want_chat_output
-            and not buffer_sse_to_json
         ):
             return self._relay_official_passthrough_sse_response(
                 response,
@@ -7767,6 +8976,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 usage_capture=usage_capture,
                 headers_already_sent=headers_already_sent,
                 mark_downstream_sse_started=mark_downstream_sse_started,
+                event_context=event_context,
             )
         if not is_event_stream or buffer_sse_to_json:
             if buffer_sse_to_json:
@@ -7807,7 +9017,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
-                _capture_usage(usage_capture, _usage_from_json_body(body))
                 is_event_stream = False
                 buffered_json_response = True
             else:
@@ -7822,6 +9031,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if defer_stream_errors:
                         raise UpstreamStreamInterruptedError(exc) from exc
                     raise
+            upstream_body_for_usage = body
             if want_chat_output:
                 if upstream_format == "chat_completions":
                     # Upstream already returned Chat Completions; pass through.
@@ -7830,14 +9040,25 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     # Upstream returned Responses format; convert to Chat Completions.
                     body = _response_body_to_chat_completion_body(body)
             elif upstream_format == "chat_completions":
-                body = compatible_response_body(
-                    _chat_completion_to_response_body(body),
-                    upstream_name,
-                    event_context=event_context,
+                converted_body = _chat_completion_to_response_body(
+                    body,
+                    repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
                 )
+                if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                    body = converted_body
+                else:
+                    body = compatible_response_body(
+                        converted_body,
+                        upstream_name,
+                        event_context=event_context,
+                    )
             else:
                 body = compatible_response_body(body, upstream_name, event_context=event_context)
-            _capture_usage(usage_capture, _usage_from_json_body(body))
+            if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+                _offer_usage_observed_body(usage_context, upstream_body_for_usage)
+            else:
+                _capture_usage(usage_capture, _usage_from_json_body(body))
             if (
                 status < 400
                 and request_kind == RETRY_REQUEST_COMPACT
@@ -7910,14 +9131,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         if mark_downstream_sse_started is not None:
                             mark_downstream_sse_started()
                     for event in response_events:
-                        event, _ = _normalize_third_party_tool_call(event)
-                        event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                        event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
+                        if behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                            event, _ = _normalize_third_party_tool_call(event)
+                            event, _ = _downgrade_invalid_third_party_tool_calls(event)
+                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
                         event_type = event.get("type")
                         if isinstance(event_type, str) and event_type:
                             self._write_sse_event(event_type, event)
                     self.close_connection = True
-                    _capture_usage(usage_capture, None)
+                    _capture_usage(
+                        usage_capture,
+                        None,
+                        missing_reason="async_usage_pending"
+                        if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                        else "upstream_missing_usage",
+                    )
                     return status
             if headers_already_sent:
                 self._write_downstream_sse_error(
@@ -7949,6 +9177,260 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 mark_downstream_sse_started()
 
         if is_event_stream:
+            if (
+                behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                and want_chat_output
+                and upstream_format != "chat_completions"
+            ):
+                line_ending = b"\n"
+                converter = _ResponsesToChatStreamConverter()
+                try:
+                    for line in self._iter_upstream_sse_lines(
+                        response,
+                        line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                    ):
+                        if not line:
+                            break
+                        line_ending = _sse_line_ending(line)
+                        payload_bytes = _sse_payload_bytes(line)
+                        if payload_bytes is None:
+                            continue
+                        if payload_bytes == b"[DONE]":
+                            continue
+                        try:
+                            event = json.loads(payload_bytes.decode("utf-8-sig"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if not isinstance(event, Mapping):
+                            continue
+                        _offer_usage_observed_sse_line(
+                            usage_context,
+                            line,
+                            upstream_format=upstream_format,
+                        )
+                        error_type = _responses_stream_error_type(event)
+                        if error_type is not None:
+                            detail = _responses_stream_error_detail(event)
+                            write_proxy_event(
+                                "upstream_stream_error_event",
+                                request_id=request_id,
+                                model=model,
+                                upstream=upstream_name,
+                                status=502,
+                                upstream_format=upstream_format,
+                                inbound_format=inbound_format,
+                                error=error_type,
+                                detail=detail,
+                            )
+                            self._write_downstream_sse_error(
+                                inbound_format=inbound_format,
+                                upstream_name=upstream_name,
+                                status=502,
+                                error=error_type,
+                                detail=detail,
+                            )
+                            _capture_usage(usage_capture, None, missing_reason="stream_error_event")
+                            return 502
+                        for chunk in converter.chunks_for_event(event):
+                            self.wfile.write(
+                                b"data: "
+                                + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                                + b"\n\n"
+                            )
+                            self.wfile.flush()
+                except UpstreamStreamIdleTimeoutError as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_idle_timeout",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        stream_idle_timeout_seconds=exc.timeout_seconds,
+                        stream_idle_phase=exc.phase,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_idle_timeout",
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                    return 502
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_interrupted",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        exc=exc,
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                    return 502
+                if not converter.completed:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_incomplete",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_incomplete",
+                        detail="Upstream stream ended before response.completed.",
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                    return 502
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                self.close_connection = True
+                _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+                return status
+
+            if (
+                behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                and upstream_format == "chat_completions"
+                and not want_chat_output
+            ):
+                line_ending = b"\n"
+                converter = _ChatToResponsesStreamConverter()
+                try:
+                    for line in self._iter_upstream_sse_lines(
+                        response,
+                        line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                    ):
+                        if not line:
+                            break
+                        line_ending = _sse_line_ending(line)
+                        payload_bytes = _sse_payload_bytes(line)
+                        if payload_bytes is None:
+                            continue
+                        events: list[dict[str, Any]] = []
+                        if payload_bytes == b"[DONE]":
+                            events = converter.events_for_done()
+                        else:
+                            try:
+                                payload = json.loads(payload_bytes.decode("utf-8-sig"))
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                continue
+                            if not isinstance(payload, Mapping):
+                                continue
+                            chat_error_detail = _chat_stream_error_detail(payload)
+                            if chat_error_detail is not None:
+                                write_proxy_event(
+                                    "upstream_stream_error_event",
+                                    request_id=request_id,
+                                    model=model,
+                                    upstream=upstream_name,
+                                    status=502,
+                                    upstream_format=upstream_format,
+                                    inbound_format=inbound_format,
+                                    error="chat_completions_error",
+                                    detail=chat_error_detail,
+                                )
+                                self._write_downstream_sse_error(
+                                    inbound_format=inbound_format,
+                                    upstream_name=upstream_name,
+                                    status=502,
+                                    error="chat_completions_error",
+                                    detail=chat_error_detail,
+                                )
+                                _capture_usage(usage_capture, None, missing_reason="stream_error_event")
+                                return 502
+                            _offer_usage_observed_sse_line(
+                                usage_context,
+                                line,
+                                upstream_format=upstream_format,
+                            )
+                            events = converter.events_for_chunk(payload)
+                        for event in events:
+                            self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
+                            self.wfile.flush()
+                except UpstreamStreamIdleTimeoutError as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_idle_timeout",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        stream_idle_timeout_seconds=exc.timeout_seconds,
+                        stream_idle_phase=exc.phase,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_idle_timeout",
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                    return 502
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_interrupted",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        exc=exc,
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                    return 502
+                if not converter.completed:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_incomplete",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                    )
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_incomplete",
+                        detail="Upstream Chat Completions stream ended without finish_reason or [DONE].",
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                    return 502
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                self.close_connection = True
+                _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+                return status
+
             if want_chat_output and upstream_format != "chat_completions":
                 # Upstream returns Responses SSE; convert to Chat Completions SSE.
                 line_ending = b"\n"
@@ -7970,7 +9452,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             continue
                         if isinstance(event, dict):
                             events.append(event)
-                            _capture_usage(usage_capture, _usage_from_response_event(event))
+                            if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                                _offer_usage_observed_sse_line(
+                                    usage_context,
+                                    line,
+                                    upstream_format=upstream_format,
+                                )
+                            else:
+                                _capture_usage(usage_capture, _usage_from_response_event(event))
                 except UpstreamStreamIdleTimeoutError as exc:
                     if defer_stream_errors:
                         raise
@@ -8047,7 +9536,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 self.close_connection = True
-                _capture_usage(usage_capture, None)
+                _capture_usage(
+                    usage_capture,
+                    None,
+                    missing_reason="async_usage_pending"
+                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                    else "upstream_missing_usage",
+                )
                 return status
 
             if upstream_format == "chat_completions":
@@ -8073,7 +9568,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             continue
                         if isinstance(payload, dict):
                             chunks.append(payload)
-                            _capture_usage(usage_capture, _usage_from_payload(payload))
+                            if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                                _offer_usage_observed_sse_line(
+                                    usage_context,
+                                    line,
+                                    upstream_format=upstream_format,
+                                )
+                            else:
+                                _capture_usage(usage_capture, _usage_from_payload(payload))
                 except UpstreamStreamIdleTimeoutError as exc:
                     if defer_stream_errors:
                         raise
@@ -8152,15 +9654,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                 else:
                     for event in _chat_stream_chunks_to_response_events(chunks):
-                        event, _ = _normalize_third_party_tool_call(event)
-                        event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                        event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
+                        if behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                            event, _ = _normalize_third_party_tool_call(event)
+                            event, _ = _downgrade_invalid_third_party_tool_calls(event)
+                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
                         self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 self.close_connection = True
-                _capture_usage(usage_capture, None)
+                _capture_usage(
+                    usage_capture,
+                    None,
+                    missing_reason="async_usage_pending"
+                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                    else "upstream_missing_usage",
+                )
                 return status
 
             reasoning_stats: dict[str, Any] = {
@@ -8454,13 +9963,25 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     delta_chars=reasoning_stats["delta_chars"],
                 )
             self.close_connection = True
-            _capture_usage(usage_capture, None)
+            _capture_usage(
+                usage_capture,
+                None,
+                missing_reason="async_usage_pending"
+                if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                else "upstream_missing_usage",
+            )
             return status
 
         self.wfile.write(body)
         self.wfile.flush()
         self.close_connection = True
-        _capture_usage(usage_capture, None)
+        _capture_usage(
+            usage_capture,
+            None,
+            missing_reason="async_usage_pending"
+            if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+            else "upstream_missing_usage",
+        )
         return status
 
     def log_message(self, format: str, *args: Any) -> None:

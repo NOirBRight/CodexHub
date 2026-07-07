@@ -1,6 +1,7 @@
 import io
 import json
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -618,6 +619,19 @@ class _FakeSseResponse:
         return False
 
 
+class _ObservingSseResponse(_FakeSseResponse):
+    def __init__(self, lines, observations):
+        super().__init__(lines)
+        self._observations = dict(observations)
+        self._read_count = 0
+
+    def readline(self):
+        if self._read_count in self._observations:
+            self._observations[self._read_count]()
+        self._read_count += 1
+        return super().readline()
+
+
 def _http_error(status, body=None):
     body = body or json.dumps({"error": "upstream protocol unsupported"}).encode("utf-8")
     return HTTPError(
@@ -864,6 +878,1559 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi")
         self.assertEqual(handler._fake.status, 200)
 
+    def test_provider_scoped_chat_to_chat_transparent_path_does_not_convert_through_responses(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_transparent",
+            "object": "chat.completion",
+            "model": "glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch(
+                "codex_proxy._chat_completions_request_to_responses_body",
+                side_effect=AssertionError("chat request converted to responses"),
+            ),
+            patch(
+                "codex_proxy._responses_request_to_chat_completion_body",
+                side_effect=AssertionError("responses request converted back to chat"),
+            ),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://ark.example.test/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2")
+        self.assertIn("messages", sent_payload)
+        self.assertNotIn("input", sent_payload)
+        self.assertEqual(handler._fake.status, 200)
+        self.assertIn(b"chatcmpl_transparent", b"".join(handler.wfile.writes))
+
+    def test_explicit_third_party_standard_chat_route_is_transparent_metered(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        handler.headers["X-Codex-Client-Id"] = "opencode"
+        upstream_body = json.dumps({
+            "id": "chatcmpl_standard_transparent",
+            "object": "chat.completion",
+            "model": "glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch(
+                "codex_proxy._chat_completions_request_to_responses_body",
+                side_effect=AssertionError("standard transparent chat route converted to responses"),
+            ),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://ark.example.test/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2")
+        self.assertIn("messages", sent_payload)
+        self.assertNotIn("input", sent_payload)
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(request_start["wire_format_adapter"], codex_proxy.WIRE_TRANSPARENT)
+        self.assertEqual(request_start["codex_semantic_adapter"], codex_proxy.CODEX_SEMANTIC_NONE)
+
+    def test_provider_scoped_transparent_http_error_keeps_real_upstream_header(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        error_body = json.dumps({"error": {"message": "bad request", "type": "invalid_request_error"}}).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", side_effect=_http_error(400, error_body)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 400)
+        self.assertEqual(dict(handler._fake.headers).get("X-Codex-Proxy-Upstream"), "volcengine")
+
+    def test_provider_scoped_chat_transparent_path_does_not_apply_compact_tool_stripping(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "Create a detailed summary of the conversation so far. "
+                    "Do not call any tools. The summary should include <summary>."
+                ),
+            }],
+            "tools": [{"type": "function", "function": {"name": "Bash", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_summary",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "summary"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._strip_tools_for_compact_payload", side_effect=AssertionError("compact stripping ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["request_kind"], codex_proxy.RETRY_REQUEST_MAIN_GENERATION)
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_provider_scoped_chat_transparent_vision_proxy_overlay_replaces_images_when_enabled(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        image_url = "data:image/png;base64,e2NoYXJ0fQ=="
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_image_overlay",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Chart read."},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "vision-chat/m3",
+                    "CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+                    "vision-chat/m3": {"slug": "vision-chat/m3", "input_modalities": ["text", "image"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._image_proxy_description_for_part", return_value="A chart with rising revenue."),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        sent_payload = json.loads(request.data)
+        encoded = json.dumps(sent_payload)
+        self.assertNotIn(image_url, encoded)
+        self.assertIn("A chart with rising revenue.", encoded)
+        self.assertIn("messages", sent_payload)
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+
+    def test_provider_scoped_chat_transparent_vision_proxy_overlay_is_disabled_by_default(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        image_url = "data:image/png;base64,e2NoYXJ0fQ=="
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_image_overlay_disabled",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "No overlay."},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "vision-chat/m3",
+                    "CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED": "0",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+                    "vision-chat/m3": {"slug": "vision-chat/m3", "input_modalities": ["text", "image"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._image_proxy_description_for_part", side_effect=AssertionError("vision overlay ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        sent_payload = json.loads(request.data)
+        self.assertIn(image_url, json.dumps(sent_payload))
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_DISABLED)
+
+    def test_transparent_vision_proxy_failure_still_records_request_start(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,e2NoYXJ0fQ=="}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "vision-chat/m3",
+                    "CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+                    "vision-chat/m3": {"slug": "vision-chat/m3", "input_modalities": ["text", "image"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("codex_proxy.urlopen") as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        mock_urlopen.assert_not_called()
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("request_start", event_names)
+        self.assertIn("request_error", event_names)
+        self.assertLess(event_names.index("request_start"), event_names.index("request_error"))
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertIn("caller_request_body_hmac", request_start)
+        self.assertEqual(handler._fake.status, 502)
+
+    def test_transparent_streaming_vision_proxy_failure_writes_sse_error_after_progress(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,e3N0cmVhbS1mYWlsfQ=="}},
+                ],
+            }],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "vision-chat/m3",
+                    "CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+                    "vision-chat/m3": {"slug": "vision-chat/m3", "input_modalities": ["text", "image"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._image_proxy_cache_lookup", return_value=None),
+            patch("codex_proxy._image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("codex_proxy.urlopen") as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        mock_urlopen.assert_not_called()
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b'"codexhub_status":{"type":"image_proxy"', written)
+        self.assertIn(b'data: {"error"', written)
+        self.assertIn(b"image_proxy_error", written)
+        self.assertNotIn(b'\n{"error"', written)
+
+    def test_transparent_fallback_vision_proxy_telemetry_distinguishes_caller_and_upstream_body(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        image_url = "data:image/png;base64,e2NoYXJ0fQ=="
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_image_fallback",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2-responses",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Chart read."}],
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                    "CODEX_PROXY_IMAGE_PROXY_MODEL": "vision-chat/m3",
+                    "CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2", "vision-chat/m3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2", "input_modalities": ["text"]},
+                    "vision-chat/m3": {"slug": "vision-chat/m3", "input_modalities": ["text", "image"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2", "vision-chat/m3"),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._image_proxy_description_for_part", return_value="A chart with rising revenue."),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        request_complete = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
+        )
+        for fields in (request_start, request_complete):
+            self.assertIn("caller_request_body_hmac", fields)
+            self.assertIn("upstream_request_body_hmac", fields)
+            self.assertNotEqual(fields["caller_request_body_hmac"], fields["upstream_request_body_hmac"])
+            self.assertEqual(fields["request_body_hmac"], fields["upstream_request_body_hmac"])
+
+    def test_provider_scoped_responses_to_responses_transparent_path_does_not_run_codex_adapter(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Hello",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/responses")
+        upstream_body = json.dumps({
+            "id": "resp_transparent_provider",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2-responses",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi from responses", "annotations": []}],
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://responses-only.example.test/v1/responses")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2-responses")
+        self.assertIn("input", sent_payload)
+        self.assertNotIn("messages", sent_payload)
+        self.assertEqual(b"".join(handler.wfile.writes), upstream_body)
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+
+    def test_provider_scoped_chat_to_responses_upstream_uses_lightweight_fallback_without_codex_adapter(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_lightweight",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2-responses",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi from responses"}],
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://responses-only.example.test/v1/responses")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2-responses")
+        self.assertIn("input", sent_payload)
+        self.assertNotIn("messages", sent_payload)
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["object"], "chat.completion")
+        self.assertEqual(result["choices"][0]["message"]["content"], "Hi from responses")
+
+    def test_provider_scoped_responses_to_chat_non_streaming_fallback_skips_codex_response_repairs(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Call the tool",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_tool",
+            "object": "chat.completion",
+            "model": "glm-5.2-chat",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_raw",
+                        "type": "function",
+                        "function": {"name": "raw_tool", "arguments": "{\"x\":1}"},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("codex_proxy._normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
+            patch("codex_proxy._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
+            patch("codex_proxy._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["object"], "response")
+        self.assertEqual(result["output"][0]["type"], "function_call")
+        self.assertEqual(result["output"][0]["call_id"], "call_raw")
+        self.assertEqual(result["output"][0]["name"], "raw_tool")
+
+    def test_provider_scoped_chat_to_responses_fallback_records_usage_as_async_pending(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_lightweight_usage",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2-responses",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi from responses"}],
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12},
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request_complete = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
+        )
+        self.assertEqual(request_complete["usage_policy"], codex_proxy.USAGE_ASYNC_TAP)
+        self.assertEqual(request_complete["usage_source"], "missing")
+        self.assertEqual(request_complete["usage_missing_reason"], "async_usage_pending")
+        self.assertNotIn("usage_input_tokens", request_complete)
+
+    def test_provider_scoped_responses_to_chat_upstream_uses_lightweight_fallback_without_codex_adapter(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Hello",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_lightweight",
+            "object": "chat.completion",
+            "model": "glm-5.2-chat",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi from chat"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://chat-only.example.test/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2-chat")
+        self.assertIn("messages", sent_payload)
+        self.assertNotIn("input", sent_payload)
+        request_start = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
+        )
+        expected_upstream_hmac = codex_proxy.proxy_telemetry.telemetry_hmac(
+            codex_proxy.RUNTIME_CODEX_DIR,
+            b"body",
+            request.data,
+        )
+        self.assertEqual(request_start["upstream_request_body_hmac"], expected_upstream_hmac)
+        self.assertEqual(request_start["request_body_hmac"], expected_upstream_hmac)
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["object"], "response")
+        self.assertEqual(result["output"][0]["content"][0]["text"], "Hi from chat")
+
+    def test_provider_scoped_responses_to_chat_streaming_fallback_skips_codex_response_repairs(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Hello",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        chat_stream = [
+            b'data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n',
+            b'\n',
+            b'data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n',
+            b'\n',
+            b'data: [DONE]\n',
+            b'\n',
+            b'',
+        ]
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy._normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
+            patch("codex_proxy._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
+            patch("codex_proxy._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"response.output_text.delta", written)
+        self.assertIn(b"Hi", written)
+        self.assertIn(b"data: [DONE]", written)
+
+    def test_provider_scoped_responses_to_chat_streaming_fallback_does_not_retry_after_headers(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Hello",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        failed_stream = _FakeSseResponse([
+            b'data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}\n',
+            b'\n',
+            OSError("chat stream reset after headers"),
+        ])
+        successful_stream = _FakeSseResponse([
+            b'data: {"id":"chatcmpl_stream_retry","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"retry-success"},"finish_reason":null}]}\n',
+            b'\n',
+            b'data: {"id":"chatcmpl_stream_retry","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n',
+            b'\n',
+            b'data: [DONE]\n',
+            b'\n',
+            b'',
+        ])
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                    "CODEX_PROXY_DOWNSTREAM_RETRY_NOTICE_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        written = b"".join(handler.wfile.writes)
+        self.assertNotIn(b"retry-success", written)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("upstream_retry", event_names)
+        self.assertNotIn("sse_retry_notice", event_names)
+
+    def test_provider_scoped_chat_to_responses_streaming_fallback_emits_chat_delta_incrementally(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        sse_lines = [
+            b'data: {"type":"response.created","response":{"id":"resp_stream","model":"glm-5.2-responses"}}\n',
+            b'\n',
+            b'data: {"type":"response.output_text.delta","delta":"Hello"}\n',
+            b'\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_stream","model":"glm-5.2-responses","output":[]}}\n',
+            b'\n',
+            b'',
+        ]
+
+        def assert_delta_written_before_completion():
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                written = b"".join(handler.wfile.writes)
+                if b'"content":"Hello"' in written:
+                    self.assertNotIn(b"data: [DONE]", written)
+                    return
+                time.sleep(0.005)
+            self.fail(f"chat delta was not written before completion; wrote {b''.join(handler.wfile.writes)!r}")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch(
+                "codex_proxy.urlopen",
+                return_value=_ObservingSseResponse(sse_lines, {4: assert_delta_written_before_completion}),
+            ),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"data: [DONE]", written)
+
+    def test_provider_scoped_responses_to_chat_streaming_fallback_emits_response_delta_incrementally(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Hello",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        chat_stream = [
+            b'data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n',
+            b'\n',
+            b'data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n',
+            b'\n',
+            b'data: [DONE]\n',
+            b'\n',
+            b'',
+        ]
+
+        def assert_delta_written_before_completion():
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                written = b"".join(handler.wfile.writes)
+                if b"response.output_text.delta" in written and b'"delta":"Hi"' in written:
+                    self.assertNotIn(b"response.completed", written)
+                    return
+                time.sleep(0.005)
+            self.fail(f"response delta was not written before completion; wrote {b''.join(handler.wfile.writes)!r}")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch(
+                "codex_proxy.urlopen",
+                return_value=_ObservingSseResponse(chat_stream, {2: assert_delta_written_before_completion}),
+            ),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"response.completed", written)
+
+    def test_provider_scoped_responses_to_chat_streaming_fallback_preserves_tool_calls(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Call the tool",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        chat_stream = [
+            b'data: {"id":"chatcmpl_tool","object":"chat.completion.chunk","model":"glm-5.2-chat","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_tool","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}\n',
+            b'\n',
+            b'data: {"id":"chatcmpl_tool","object":"chat.completion.chunk","model":"glm-5.2-chat","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"q\\":"}}]},"finish_reason":null}]}\n',
+            b'\n',
+            b'data: {"id":"chatcmpl_tool","object":"chat.completion.chunk","model":"glm-5.2-chat","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"codex\\"}"}}]},"finish_reason":"tool_calls"}]}\n',
+            b'\n',
+            b'data: [DONE]\n',
+            b'\n',
+            b'',
+        ]
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"response.output_item.added", written)
+        self.assertIn(b"response.function_call_arguments.delta", written)
+        self.assertIn(b"response.function_call_arguments.done", written)
+        self.assertIn(b"response.output_item.done", written)
+        self.assertIn(b'"call_id":"call_tool"', written)
+        self.assertIn(b'"name":"lookup"', written)
+        self.assertIn(b'"arguments":"{\\"q\\":\\"codex\\"}"', written)
+        self.assertIn(b"data: [DONE]", written)
+
+    def test_provider_scoped_responses_to_chat_streaming_fallback_converts_chat_error_payload(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "input": "Hello",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        chat_stream = [
+            b'data: {"error":{"message":"provider busy","code":"busy"}}\n',
+            b'\n',
+            b'',
+        ]
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"event: error", written)
+        self.assertIn(b"provider busy", written)
+        self.assertNotIn(b"stream_incomplete", written)
+
+    def test_provider_scoped_chat_to_responses_streaming_fallback_converts_responses_failure(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        responses_stream = [
+            b'data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"busy","message":"provider busy"}}}\n',
+            b'\n',
+            b'',
+        ]
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(responses_stream)),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b'"error"', written)
+        self.assertIn(b"provider busy", written)
+        self.assertNotIn(b"stream_incomplete", written)
+        self.assertNotIn(b"data: [DONE]", written)
+
     def test_provider_scoped_chat_completions_requires_model(self):
         body = json.dumps({
             "messages": [{"role": "user", "content": "Hello"}],
@@ -1008,6 +2575,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "stream": False,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/ollama-cloud/chat/completions")
+        handler.headers["X-Codex-Client-Id"] = "codex-app"
 
         vision_responses_events = [
             b'data: {"type":"response.created","response":{"id":"resp_vision","model":"minimax-m3","output":[]}}\n',
@@ -1113,6 +2681,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "stream": True,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/ollama-cloud/chat/completions")
+        handler.headers["X-Codex-Client-Id"] = "codex-app"
 
         vision_responses_events = [
             b'data: {"type":"response.output_text.delta","delta":"Streaming image description."}\n',
@@ -1203,6 +2772,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "stream": True,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/ollama-cloud/responses")
+        handler.headers["X-Codex-Client-Id"] = "codex-app"
 
         vision_responses_events = [
             b'data: {"type":"response.output_text.delta","delta":"Streaming image description."}\n',
@@ -1288,6 +2858,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "stream": False,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+        handler.headers["X-Codex-Client-Id"] = "codex-app"
 
         target_model = {
             "alias": "volc/glm-5.2",
@@ -1604,7 +3175,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list]
         self.assertIn("upstream_retry", event_names)
 
-    def test_provider_chat_streaming_reports_chat_upstream_read_errors_as_chat_sse_error(self):
+    def test_provider_chat_streaming_transparent_read_error_closes_without_synthetic_error(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
@@ -1638,15 +3209,18 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch("codex_proxy.load_policy", return_value=policy),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_sse_lines)),
+            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_sse_lines)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
-        error = self._chat_sse_error(written)
-        self.assertEqual(error["type"], "upstream_stream_error")
-        self.assertEqual(error["code"], "OSError")
-        self.assertEqual(error["upstream"], "volcengine")
+        self.assertIn(b"chatcmpl_s", written)
+        self.assertNotIn(b'"error"', written)
+        self.assertNotIn(b"data: [DONE]", written)
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("transparent_stream_closed", event_names)
 
     def test_post_chat_completions_non_streaming_open_failure_returns_chat_error_object(self):
         body = json.dumps({
