@@ -69,6 +69,28 @@ def bounded_workflow_from_exact_prompts(
     return WorkflowState(nodes=nodes)
 
 
+def workflow_from_role_sequence(
+    tasks: list[str],
+    roles: list[str],
+    assigned: Mapping[str, str] | None = None,
+) -> WorkflowState:
+    assigned = assigned or {}
+    nodes: dict[str, WorkflowNode] = {}
+    previous_node_id: str | None = None
+    for task in tasks:
+        for role in roles:
+            node_id = f"{task}:{role}"
+            nodes[node_id] = WorkflowNode(
+                node_id=node_id,
+                prompt=f"You are the {role} subagent for {task}. Return DONE when complete.",
+                dependencies=(previous_node_id,) if previous_node_id else (),
+                assigned_agent_id=assigned.get(node_id),
+                metadata={"task": task, "role": role, "adapter": "role_sequence"},
+            )
+            previous_node_id = node_id
+    return WorkflowState(nodes=nodes)
+
+
 def _protocol_actions(protocol: ProtocolState) -> list[WorkflowAction]:
     if protocol.needs_input_agent_ids:
         agent_id = protocol.needs_input_agent_ids[0]

@@ -69,6 +69,28 @@ class SubagentSchedulerTests(unittest.TestCase):
         self.assertEqual(actions[0].tool_name, "spawn_agent")
         self.assertEqual(actions[0].arguments["message"], "Return B")
 
+    def test_role_sequence_releases_spec_reviewer_after_implementer_closed(self):
+        from subagent_scheduler import workflow_from_role_sequence
+
+        workflow = workflow_from_role_sequence(
+            tasks=["task-1"],
+            roles=["implementer", "spec_reviewer", "code_quality_reviewer"],
+            assigned={"task-1:implementer": "impl-1"},
+        )
+        protocol = reduce_protocol_events(
+            [
+                ProtocolEvent.spawn("call_impl", "impl-1", "implement task-1"),
+                ProtocolEvent.wait("call_wait", ("impl-1",), {"impl-1": "DONE"}),
+                ProtocolEvent.close("call_close", "impl-1"),
+            ]
+        )
+
+        actions = compute_allowed_actions(workflow, protocol)
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].tool_name, "spawn_agent")
+        self.assertIn("spec_reviewer", actions[0].arguments["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

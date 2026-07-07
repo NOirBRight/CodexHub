@@ -403,6 +403,9 @@ def _compute_next_action(state: SubagentState) -> None:
         state.next_action = "spawn"
         return
 
+    # Compatibility path for existing Level 2 workflow gates.
+    # New workflow behavior should be modeled in subagent_scheduler.py first,
+    # then wired here after scheduler tests cover it.
     if state.workflow_intent and state.wait_agent_ids:
         state.next_action = "wait"
         return
