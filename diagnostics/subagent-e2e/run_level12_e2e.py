@@ -797,6 +797,18 @@ def direct_artifact_tool_calls(parsed: dict[str, Any], output_path: Path) -> lis
     return calls
 
 
+def expected_level2_artifact_text(case: dict[str, Any], output_path: Path, sentinel: str) -> str:
+    artifact_stem = output_path.stem
+    case_name = re.sub(r"\.artifact(?:-r\d+)?$", "", artifact_stem)
+    return (
+        f"case: {case_name}\n"
+        f"model: {case['model'].split('/', 1)[-1]}\n"
+        f"endpoint: {case['endpoint']}\n"
+        f"{sentinel}\n"
+        "artifact: ok\n"
+    )
+
+
 def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> dict[str, Any]:
     stdout_path = Path(case["stdout"])
     stderr_path = Path(case["stderr"])
@@ -813,12 +825,7 @@ def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> di
             if isinstance(command, str) and str(output_path) in command:
                 direct_artifact_commands.append(command)
     direct_artifact_mcp_calls = direct_artifact_tool_calls(parsed, output_path)
-    expected_content = (
-        f"SENTINEL={sentinel}\n"
-        f"MODEL={case['model'].split('/', 1)[-1]}\n"
-        f"ENDPOINT={case['endpoint']}\n"
-        "IMPLEMENTER=done\n"
-    )
+    expected_content = expected_level2_artifact_text(case, output_path, sentinel)
     artifact_text = output_path.read_text(encoding="utf-8", errors="replace") if output_path.exists() else ""
     final_lines = [line.strip() for line in parsed["final_text"].splitlines() if line.strip()]
     router = router_errors(parsed, stderr_path)
