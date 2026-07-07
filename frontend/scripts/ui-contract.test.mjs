@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { test } from "node:test";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
@@ -19,6 +19,7 @@ const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx",
 const tauriSourcePath = new URL("../src/lib/tauri.ts", import.meta.url);
 const tailwindConfigPath = new URL("../tailwind.config.js", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
+const viteConfigPath = new URL("../vite.config.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
@@ -29,6 +30,13 @@ const tauriWebBridgePath = new URL("../../src-tauri/src/web_bridge.rs", import.m
 const i18nIndexPath = new URL("../src/i18n/index.ts", import.meta.url);
 const enLocalePath = new URL("../src/i18n/locales/en-US.ts", import.meta.url);
 const zhLocalePath = new URL("../src/i18n/locales/zh-CN.ts", import.meta.url);
+const desktopIconAssetPaths = [
+  new URL("../src/assets/codex-logo.svg", import.meta.url),
+  new URL("../src/assets/omp-icon.png", import.meta.url),
+  new URL("../src/assets/opencode-icon.png", import.meta.url),
+  new URL("../src/assets/pi-icon.png", import.meta.url),
+  new URL("../src/assets/zcode-icon.png", import.meta.url),
+];
 
 async function readContract() {
   return JSON.parse(await readFile(contractPath, "utf8"));
@@ -280,6 +288,24 @@ test("gateway client rail shows active managed config paths", async () => {
   );
 });
 
+test("frontend asset imports are emitted as files for the desktop shell", async () => {
+  const viteConfigSource = await readFile(viteConfigPath, "utf8");
+
+  assert.match(viteConfigSource, /build:\s*\{[\s\S]*assetsInlineLimit:\s*0/);
+});
+
+test("desktop icon source assets stay compact", async () => {
+  const maxIconBytes = 4096;
+  const sizes = await Promise.all(desktopIconAssetPaths.map(async (assetPath) => ({
+    name: assetPath.pathname.split("/").at(-1),
+    size: (await stat(assetPath)).size,
+  })));
+
+  for (const { name, size } of sizes) {
+    assert.ok(size <= maxIconBytes, `${name} should be <= ${maxIconBytes} bytes, got ${size}`);
+  }
+});
+
 test("gateway empty states are localized outside the static contract", async () => {
   const contract = await readContract();
   const [gatewaySource, usageSource] = await Promise.all([
@@ -389,6 +415,31 @@ test("usage summary and chart use the same global time window", async () => {
   assert.doesNotMatch(usageSource, /function filterEventsByRange/);
   assert.match(tauriSource, /startTs/);
   assert.match(tauriSource, /endTs/);
+});
+
+test("stacked usage chart uses neutral separators instead of misleading series outlines", async () => {
+  const usageSource = await readFile(stackedUsagePath, "utf8");
+  const svgSection = usageSource.match(/<svg[\s\S]*?<\/svg>/)?.[0] ?? "";
+  const seriesBuilder = usageSource.match(/const series = seriesKeys\.map[\s\S]*?const buckets = rawBuckets\.map/)?.[0] ?? "";
+
+  assert.match(usageSource, /const STACK_AREA_OPACITY = 0\.24/);
+  assert.match(seriesBuilder, /const color = key === OTHER_SERIES_KEY \? OTHER_SERIES_COLOR : STACK_COLORS\[index % STACK_COLORS\.length\]/);
+  assert.match(seriesBuilder, /fillColor:\s*stackAreaColor\(color\)/);
+  assert.match(svgSection, /fill=\{layer\.fillColor\}/);
+  assert.doesNotMatch(svgSection, /fillOpacity=/);
+  assert.match(usageSource, /style=\{\{ backgroundColor: segment\.fillColor \}\}/);
+  assert.doesNotMatch(usageSource, /backgroundColor: segment\.color/);
+  assert.match(usageSource, /style=\{\{ backgroundColor: item\.fillColor \}\}/);
+  assert.doesNotMatch(svgSection, /`\$\{metric\}:\$\{breakdown\}:\$\{layer\.key\}:line`/);
+  assert.match(usageSource, /const STACK_SEPARATOR_COLOR = "rgba\(255, 255, 255, 0\.78\)"/);
+  assert.match(svgSection, /`\$\{metric\}:\$\{breakdown\}:\$\{layer\.key\}:separator`/);
+  assert.match(svgSection, /d=\{linePath\(layer\.topPoints\)\}/);
+  assert.match(svgSection, /stroke=\{STACK_SEPARATOR_COLOR\}/);
+  assert.match(svgSection, /strokeWidth="1\.15"/);
+  assert.match(svgSection, /strokeLinecap="round"/);
+  assert.doesNotMatch(svgSection, /stroke=\{layer\.color\}/);
+  assert.doesNotMatch(usageSource, /activeTopPoints/);
+  assert.match(usageSource, /activeSegments[\s\S]*\.sort\(\(left, right\) => right\.value - left\.value\)/);
 });
 
 test("usage telemetry uses a single snapshot call and keeps usage errors out of runtime banner", async () => {

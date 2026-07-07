@@ -33,6 +33,7 @@ interface BucketSpec {
 
 interface StackSegment {
   color: string;
+  fillColor: string;
   key: string;
   label: string;
   value: number;
@@ -45,6 +46,7 @@ interface StackBucket extends BucketSpec {
 
 interface StackSeries {
   color: string;
+  fillColor: string;
   key: string;
   label: string;
   total: number;
@@ -70,11 +72,25 @@ interface ChartHover {
   y: number;
 }
 
-const STACK_COLORS = ["#3941ff", "#00a8a8", "#7c3aed", "#0ea5e9", "#b1a7ff", "#10b981", "#1e293b"];
+const STACK_COLORS = ["#3941ff", "#00a8a8", "#7c3aed", "#0ea5e9", "#b1a7ff", "#10b981"];
+const OTHER_SERIES_COLOR = "#cbd5e1";
+const STACK_AREA_OPACITY = 0.24;
+const STACK_SEPARATOR_COLOR = "rgba(255, 255, 255, 0.78)";
 const TOOLTIP_GAP = 16;
 const TOOLTIP_WIDTH = 250;
 const TOOLTIP_EDGE_MARGIN = 12;
 const OTHER_SERIES_KEY = "__other__";
+
+function stackAreaColor(color: string) {
+  const hex = color.match(/^#([0-9a-f]{6})$/i)?.[1];
+  if (!hex) {
+    return color;
+  }
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${STACK_AREA_OPACITY})`;
+}
 
 export function StackedUsageChartShell({
   events,
@@ -530,13 +546,13 @@ function StackedUsageChart({
   const tooltipWidth = isModelBreakdown ? 300 : TOOLTIP_WIDTH;
   const activeIndex = hover?.index ?? Math.max(0, visibleBuckets.findIndex((bucket) => bucket.total > 0));
   const activeBucket = visibleBuckets[activeIndex];
-  const activeSegments = activeBucket?.segments.filter((segment) => segment.value > 0) ?? [];
+  const activeSegments =
+    activeBucket?.segments
+      .filter((segment) => segment.value > 0)
+      .sort((left, right) => right.value - left.value) ?? [];
   const activeSegmentSignature = activeSegments
     .map((segment) => `${segment.key}:${segment.label}:${segment.value}`)
     .join("|");
-  const activeTopPoints = layers
-    .map((layer) => ({ color: layer.color, point: layer.topPoints[activeIndex] }))
-    .filter((item) => item.point && item.point.value > 0);
   const tooltipOnLeft = hover ? hover.x + tooltipWidth + TOOLTIP_GAP + 8 > hover.hostWidth : false;
   const measuredTooltipHeight = tooltipHeight || 86;
   const tooltipFitsAbove = hover
@@ -645,17 +661,18 @@ function StackedUsageChart({
                 <path
                   key={`${metric}:${breakdown}:${layer.key}:area`}
                   d={areaPath(layer.topPoints, layer.basePoints)}
-                  fill={layer.color}
-                  fillOpacity="0.18"
+                  fill={layer.fillColor}
                 />
               ))}
               {hasData && layers.map((layer) => (
                 <path
-                  key={`${metric}:${breakdown}:${layer.key}:line`}
+                  key={`${metric}:${breakdown}:${layer.key}:separator`}
                   d={linePath(layer.topPoints)}
                   fill="none"
-                  stroke={layer.color}
-                  strokeWidth="2"
+                  stroke={STACK_SEPARATOR_COLOR}
+                  strokeWidth="1.15"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                   vectorEffect="non-scaling-stroke"
                 />
               ))}
@@ -672,18 +689,6 @@ function StackedUsageChart({
                 />
               )}
             </svg>
-            {hasData && hover && activeTopPoints.map(({ color, point }) => (
-              <span
-                key={`${metric}:${breakdown}:${color}:${point.x}-${point.y}-${point.value}`}
-                className="pointer-events-none absolute h-2 w-2 rounded-full border-2 border-white shadow-sm"
-                style={{
-                  backgroundColor: color,
-                  left: `${point.x}%`,
-                  top: `${point.y}%`,
-                  transform: "translate(-50%, -50%)",
-                }}
-              />
-            ))}
             {hasData ? (
               <div
                 className="pointer-events-none absolute inset-x-0 bottom-0 grid h-2 items-end gap-1 opacity-0"
@@ -754,7 +759,7 @@ function StackedUsageChart({
                     key={segment.key}
                     className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2"
                   >
-                    <i className="mt-[3px] h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />
+                    <i className="mt-[3px] h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.fillColor }} />
                     <span className="min-w-0 whitespace-normal break-words leading-4 text-slate-600">
                       {segment.label}
                     </span>
@@ -784,7 +789,7 @@ function StackedUsageChart({
                 >
                   <i
                     className="h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: item.color }}
+                    style={{ backgroundColor: item.fillColor }}
                   />
                   <span
                     className={cx(
@@ -934,8 +939,10 @@ function buildStackedBuckets(
             .filter(([candidate]) => !topKeySet.has(candidate))
             .reduce((sum, [, value]) => sum + value, 0)
         : seriesTotals.get(key) ?? 0;
+    const color = key === OTHER_SERIES_KEY ? OTHER_SERIES_COLOR : STACK_COLORS[index % STACK_COLORS.length];
     return {
-      color: STACK_COLORS[index % STACK_COLORS.length],
+      color,
+      fillColor: stackAreaColor(color),
       key,
       label: key === OTHER_SERIES_KEY ? t("usage.other") : labels.get(key) ?? key,
       total,
