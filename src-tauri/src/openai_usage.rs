@@ -1,6 +1,6 @@
 use crate::config;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -11,9 +11,11 @@ const CODEX_ACCOUNT_USAGE_METHOD: &str = "account/usage/read";
 const CACHE_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
 const DAY_SECONDS: u64 = 86_400;
 const DEFAULT_WINDOW_DAYS: u64 = 365;
+const RATE_LIMIT_LOG_FILE_LIMIT: usize = 64;
+const RATE_LIMIT_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct OpenAiUsageSnapshot {
     pub start_time: u64,
     pub end_time: u64,
@@ -26,7 +28,19 @@ pub struct OpenAiUsageSnapshot {
     pub longest_running_turn_sec: Option<u64>,
     pub current_streak_days: Option<u64>,
     pub longest_streak_days: Option<u64>,
+    pub limits: Vec<OpenAiUsageLimit>,
     pub buckets: Vec<OpenAiUsageBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OpenAiUsageLimit {
+    pub key: String,
+    pub name: String,
+    pub period: String,
+    pub limit: Option<f64>,
+    pub used: Option<f64>,
+    pub remaining: Option<f64>,
+    pub resets_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -45,6 +59,19 @@ pub struct OpenAiUsageBucket {
 #[serde(rename_all = "camelCase")]
 struct CodexAccountUsageResponse {
     daily_usage_buckets: Option<Vec<CodexAccountUsageDailyBucket>>,
+    #[serde(
+        default,
+        alias = "limits",
+        alias = "usage_limits",
+        alias = "subscriptionLimits",
+        alias = "subscription_limits",
+        alias = "rateLimits",
+        alias = "rate_limits",
+        alias = "limitStatus",
+        alias = "limit_status",
+        deserialize_with = "deserialize_optional_usage_limits"
+    )]
+    usage_limits: Option<Vec<CodexAccountUsageLimit>>,
     summary: CodexAccountUsageSummary,
 }
 
@@ -63,6 +90,80 @@ struct CodexAccountUsageSummary {
     longest_running_turn_sec: Option<u64>,
     longest_streak_days: Option<u64>,
     peak_daily_tokens: Option<u64>,
+    #[serde(
+        default,
+        alias = "limits",
+        alias = "usage_limits",
+        alias = "usageLimits",
+        alias = "subscriptionLimits",
+        alias = "subscription_limits",
+        alias = "rateLimits",
+        alias = "rate_limits",
+        alias = "limitStatus",
+        alias = "limit_status",
+        deserialize_with = "deserialize_optional_usage_limits"
+    )]
+    usage_limits: Option<Vec<CodexAccountUsageLimit>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexAccountUsageLimit {
+    #[serde(default, deserialize_with = "deserialize_optional_stringish")]
+    id: Option<String>,
+    #[serde(
+        default,
+        alias = "type",
+        alias = "kind",
+        alias = "window",
+        deserialize_with = "deserialize_optional_stringish"
+    )]
+    period: Option<String>,
+    #[serde(
+        default,
+        alias = "label",
+        alias = "title",
+        alias = "periodName",
+        alias = "displayName",
+        deserialize_with = "deserialize_optional_stringish"
+    )]
+    name: Option<String>,
+    #[serde(
+        default,
+        alias = "cap",
+        alias = "max",
+        alias = "maximum",
+        alias = "total",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    limit: Option<f64>,
+    #[serde(
+        default,
+        alias = "usage",
+        alias = "current",
+        alias = "consumed",
+        alias = "usedAmount",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    used: Option<f64>,
+    #[serde(
+        default,
+        alias = "available",
+        alias = "remainingAmount",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    remaining: Option<f64>,
+    #[serde(
+        default,
+        alias = "resetAt",
+        alias = "expiresAt",
+        alias = "endsAt",
+        alias = "endTime",
+        alias = "periodEnd",
+        alias = "periodEndTime",
+        deserialize_with = "deserialize_optional_stringish"
+    )]
+    resets_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -89,22 +190,48 @@ pub fn openai_usage_completions(
     force_refresh: Option<bool>,
 ) -> Result<OpenAiUsageSnapshot, String> {
     let (start_time, end_time) = usage_window(start_time, end_time)?;
-    let cache_path = openai_usage_cache_path()?;
-    openai_usage_completions_with_cache(
+    let paths = config::ConfigPaths::runtime()?;
+    let cache_path = openai_usage_cache_path(&paths);
+    openai_usage_completions_with_cache_and_rate_limit_dir(
         start_time,
         end_time,
         force_refresh.unwrap_or(false),
         &cache_path,
+        Some(paths.codex_dir()),
         current_unix_time(),
         read_codex_account_usage,
     )
 }
 
+#[cfg(test)]
 fn openai_usage_completions_with_cache<F>(
     start_time: u64,
     end_time: u64,
     force_refresh: bool,
     cache_path: &Path,
+    now: u64,
+    fetch_usage: F,
+) -> Result<OpenAiUsageSnapshot, String>
+where
+    F: FnMut() -> Result<CodexAccountUsageResponse, String>,
+{
+    openai_usage_completions_with_cache_and_rate_limit_dir(
+        start_time,
+        end_time,
+        force_refresh,
+        cache_path,
+        None,
+        now,
+        fetch_usage,
+    )
+}
+
+fn openai_usage_completions_with_cache_and_rate_limit_dir<F>(
+    start_time: u64,
+    end_time: u64,
+    force_refresh: bool,
+    cache_path: &Path,
+    rate_limit_dir: Option<&Path>,
     now: u64,
     mut fetch_usage: F,
 ) -> Result<OpenAiUsageSnapshot, String>
@@ -117,7 +244,7 @@ where
             .as_ref()
             .map(|cache| now.saturating_sub(cache.fetched_at) >= CACHE_REFRESH_INTERVAL_SECONDS)
             .unwrap_or(true);
-    let usage = if should_refresh {
+    let mut usage = if should_refresh {
         match read_codex_account_usage_with_retries(&mut fetch_usage) {
             Ok(usage) => {
                 let cache = CodexAccountUsageCache {
@@ -134,13 +261,12 @@ where
             .map(|cache| cache.usage)
             .ok_or_else(|| "OpenAI usage cache was unexpectedly unavailable.".to_string())?
     };
+    enrich_usage_with_local_rate_limits(&mut usage, rate_limit_dir);
     snapshot_from_codex_account_usage(start_time, end_time, usage)
 }
 
-fn openai_usage_cache_path() -> Result<PathBuf, String> {
-    Ok(config::ConfigPaths::runtime()?
-        .proxy_dir()
-        .join("openai-usage-cache.json"))
+fn openai_usage_cache_path(paths: &config::ConfigPaths) -> PathBuf {
+    paths.proxy_dir().join("openai-usage-cache.json")
 }
 
 fn read_usage_cache(path: &Path) -> Result<CodexAccountUsageCache, String> {
@@ -158,6 +284,113 @@ fn write_usage_cache(path: &Path, cache: &CodexAccountUsageCache) -> Result<(), 
     let body = serde_json::to_string(cache)
         .map_err(|error| format!("Failed to encode OpenAI usage cache: {error}"))?;
     fs::write(path, body).map_err(|error| format!("Failed to write OpenAI usage cache: {error}"))
+}
+
+fn enrich_usage_with_local_rate_limits(
+    usage: &mut CodexAccountUsageResponse,
+    rate_limit_dir: Option<&Path>,
+) {
+    if response_has_usage_limits(usage) {
+        return;
+    }
+    let Some(codex_dir) = rate_limit_dir else {
+        return;
+    };
+    if let Some(limits) = latest_local_rate_limit_usage_limits(codex_dir) {
+        usage.usage_limits = Some(limits);
+    }
+}
+
+fn response_has_usage_limits(usage: &CodexAccountUsageResponse) -> bool {
+    usage
+        .usage_limits
+        .as_ref()
+        .is_some_and(|limits| !limits.is_empty())
+        || usage
+            .summary
+            .usage_limits
+            .as_ref()
+            .is_some_and(|limits| !limits.is_empty())
+}
+
+#[derive(Debug)]
+struct RateLimitLogFile {
+    path: PathBuf,
+    modified: SystemTime,
+    len: u64,
+}
+
+fn latest_local_rate_limit_usage_limits(codex_dir: &Path) -> Option<Vec<CodexAccountUsageLimit>> {
+    let mut files = Vec::new();
+    collect_rate_limit_log_files(&codex_dir.join("sessions"), &mut files);
+    collect_rate_limit_log_files(&codex_dir.join("archived_sessions"), &mut files);
+    files.sort_by(|left, right| right.modified.cmp(&left.modified));
+    files.truncate(RATE_LIMIT_LOG_FILE_LIMIT);
+
+    let mut latest: Option<(String, Vec<CodexAccountUsageLimit>)> = None;
+    for file in files {
+        if file.len > RATE_LIMIT_LOG_MAX_BYTES {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&file.path) else {
+            continue;
+        };
+        for line in body.lines() {
+            if !line.contains("\"rate_limits\"") || line.contains("\"rate_limits\":null") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(rate_limits) = value.pointer("/payload/rate_limits") else {
+                continue;
+            };
+            if rate_limits.is_null() {
+                continue;
+            }
+            let limits = json_value_as_usage_limits(rate_limits.clone());
+            if limits.is_empty() {
+                continue;
+            }
+            let timestamp = value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if latest
+                .as_ref()
+                .map(|(seen_timestamp, _)| timestamp > *seen_timestamp)
+                .unwrap_or(true)
+            {
+                latest = Some((timestamp, limits));
+            }
+        }
+    }
+    latest.map(|(_, limits)| limits)
+}
+
+fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            collect_rate_limit_log_files(&path, files);
+            continue;
+        }
+        if !metadata.is_file() || path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        files.push(RateLimitLogFile {
+            path,
+            modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+            len: metadata.len(),
+        });
+    }
 }
 
 fn read_codex_account_usage_with_retries<F>(
@@ -339,6 +572,7 @@ fn snapshot_from_codex_account_usage(
     buckets.sort_by_key(|bucket| bucket.start_time);
     let bucket_tokens = buckets.iter().map(|bucket| bucket.total_tokens).sum();
     let summary = response.summary;
+    let limits = response.usage_limits.or_else(|| summary.usage_limits.clone());
     Ok(OpenAiUsageSnapshot {
         start_time,
         end_time,
@@ -351,8 +585,60 @@ fn snapshot_from_codex_account_usage(
         longest_running_turn_sec: summary.longest_running_turn_sec,
         current_streak_days: summary.current_streak_days,
         longest_streak_days: summary.longest_streak_days,
+        limits: codex_usage_limits(limits),
         buckets,
     })
+}
+
+fn codex_usage_limits(limits: Option<Vec<CodexAccountUsageLimit>>) -> Vec<OpenAiUsageLimit> {
+    limits
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, limit)| {
+            if limit.limit.is_none()
+                && limit.used.is_none()
+                && limit.remaining.is_none()
+                && limit.resets_at.is_none()
+            {
+                return None;
+            }
+            let fallback = format!("limit-{}", index + 1);
+            let period = limit
+                .period
+                .clone()
+                .or_else(|| limit.id.clone())
+                .or_else(|| limit.name.clone())
+                .unwrap_or_else(|| fallback.clone());
+            let key = limit.id.clone().unwrap_or_else(|| period.clone());
+            let name = limit
+                .name
+                .clone()
+                .unwrap_or_else(|| default_usage_limit_name(&period));
+            Some(OpenAiUsageLimit {
+                key,
+                name,
+                period,
+                limit: limit.limit,
+                used: limit.used,
+                remaining: limit.remaining,
+                resets_at: limit.resets_at,
+            })
+        })
+        .collect()
+}
+
+fn default_usage_limit_name(period: &str) -> String {
+    let normalized = period.trim().to_ascii_lowercase();
+    if (normalized.contains('5') || normalized.contains("five"))
+        && (normalized.contains('h') || normalized.contains("hour"))
+    {
+        return "5 hours".to_string();
+    }
+    if normalized.contains("week") {
+        return "Weekly".to_string();
+    }
+    period.trim().to_string()
 }
 
 fn codex_app_server_error_message(message: &str) -> String {
@@ -378,6 +664,197 @@ fn current_unix_time() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn deserialize_optional_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(json_value_as_f64))
+}
+
+fn deserialize_optional_stringish<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(json_value_as_string))
+}
+
+fn deserialize_optional_usage_limits<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<CodexAccountUsageLimit>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let limits = value.map(json_value_as_usage_limits).unwrap_or_default();
+    Ok((!limits.is_empty()).then_some(limits))
+}
+
+fn json_value_as_usage_limits(value: Value) -> Vec<CodexAccountUsageLimit> {
+    match value {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| decode_usage_limit_value(item, None))
+            .collect(),
+        Value::Object(mut map) => {
+            for key in [
+                "usageLimits",
+                "usage_limits",
+                "limits",
+                "data",
+                "items",
+                "subscriptionLimits",
+                "rateLimits",
+                "limitStatus",
+            ] {
+                if let Some(nested) = map.remove(key) {
+                    let limits = json_value_as_usage_limits(nested);
+                    if !limits.is_empty() {
+                        return limits;
+                    }
+                }
+            }
+
+            let mut limits = Vec::new();
+            for (key, item) in map {
+                match item {
+                    Value::Array(items) => {
+                        limits.extend(
+                            items
+                                .into_iter()
+                                .filter_map(|entry| decode_usage_limit_value(entry, Some(&key))),
+                        );
+                    }
+                    value => {
+                        if let Some(limit) = decode_usage_limit_value(value, Some(&key)) {
+                            limits.push(limit);
+                        }
+                    }
+                }
+            }
+            limits
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn decode_usage_limit_value(
+    mut value: Value,
+    fallback_key: Option<&str>,
+) -> Option<CodexAccountUsageLimit> {
+    if let Value::Object(map) = &mut value {
+        normalize_usage_limit_object(map, fallback_key);
+    }
+    serde_json::from_value(value).ok()
+}
+
+fn normalize_usage_limit_object(map: &mut Map<String, Value>, fallback_key: Option<&str>) {
+    if let Some(key) = fallback_key {
+        if !map.contains_key("id") {
+            map.insert("id".to_string(), Value::String(key.to_string()));
+        }
+    }
+
+    let window_minutes = object_f64(map, &["windowMinutes", "window_minutes"]);
+    let normalized_period = window_minutes.and_then(rate_limit_period_from_window_minutes);
+    if !contains_any(map, &["period", "type", "kind", "window"]) {
+        let period = normalized_period
+            .or(fallback_key)
+            .map(str::to_string)
+            .unwrap_or_else(|| "limit".to_string());
+        map.insert("period".to_string(), Value::String(period));
+    }
+    if !contains_any(map, &["name", "label", "title", "periodName", "displayName"]) {
+        if let Some(period) = normalized_period {
+            map.insert(
+                "name".to_string(),
+                Value::String(default_usage_limit_name(period)),
+            );
+        }
+    }
+
+    if !contains_any(
+        map,
+        &[
+            "resetsAt",
+            "resetAt",
+            "expiresAt",
+            "endsAt",
+            "endTime",
+            "periodEnd",
+            "periodEndTime",
+        ],
+    ) {
+        if let Some(value) = object_value(map, &["resets_at", "reset_at", "resetAt"]) {
+            map.insert("resetsAt".to_string(), value);
+        }
+    }
+
+    let used_percent = object_f64(map, &["usedPercent", "used_percent"]);
+    if let Some(used_percent) = used_percent {
+        if !contains_any(map, &["used", "current", "consumed", "usedAmount"]) {
+            map.insert("used".to_string(), json!(used_percent));
+        }
+        if !contains_any(map, &["limit", "cap", "max", "maximum", "total"]) {
+            map.insert("limit".to_string(), json!(100.0));
+        }
+        if !contains_any(map, &["remaining", "available", "remainingAmount"]) {
+            map.insert(
+                "remaining".to_string(),
+                json!((100.0 - used_percent).clamp(0.0, 100.0)),
+            );
+        }
+    }
+}
+
+fn rate_limit_period_from_window_minutes(window_minutes: f64) -> Option<&'static str> {
+    if (window_minutes - 300.0).abs() < f64::EPSILON {
+        return Some("five_hours");
+    }
+    if (window_minutes - 10_080.0).abs() < f64::EPSILON {
+        return Some("week");
+    }
+    None
+}
+
+fn contains_any(map: &Map<String, Value>, keys: &[&str]) -> bool {
+    keys.iter().any(|key| map.contains_key(*key))
+}
+
+fn object_value(map: &Map<String, Value>, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| map.get(*key).cloned())
+}
+
+fn object_f64(map: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    object_value(map, keys).and_then(json_value_as_f64)
+}
+
+fn json_value_as_f64(value: Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64().filter(|value| value.is_finite()),
+        Value::String(text) => text
+            .trim()
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite()),
+        _ => None,
+    }
+}
+
+fn json_value_as_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn parse_utc_date_start(value: &str) -> Result<u64, String> {
@@ -469,6 +946,169 @@ mod tests {
         assert_eq!(snapshot.buckets[0].total_tokens, 100);
         assert_eq!(snapshot.buckets[1].date, "2026-07-06");
         assert_eq!(snapshot.buckets[1].total_tokens, 250);
+    }
+
+    #[test]
+    fn codex_account_usage_response_maps_usage_limits() {
+        let response: CodexAccountUsageResponse = serde_json::from_str(
+            r#"{
+              "summary": { "lifetimeTokens": 123 },
+              "usageLimits": [
+                {
+                  "period": "five_hours",
+                  "periodName": "5 hours",
+                  "limit": 300,
+                  "used": 120,
+                  "remaining": 180,
+                  "resetsAt": "2026-07-07T15:00:00Z"
+                },
+                {
+                  "period": "week",
+                  "name": "Weekly",
+                  "limit": 1000,
+                  "used": 250,
+                  "remaining": 750,
+                  "resetAt": "2026-07-13T00:00:00Z"
+                }
+              ]
+            }"#,
+        )
+        .expect("codex usage response parses");
+
+        let snapshot = snapshot_from_codex_account_usage(1_783_296_000, 1_783_382_400, response)
+            .expect("codex usage maps");
+
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].name, "5 hours");
+        assert_eq!(snapshot.limits[0].limit, Some(300.0));
+        assert_eq!(snapshot.limits[0].used, Some(120.0));
+        assert_eq!(snapshot.limits[0].remaining, Some(180.0));
+        assert_eq!(
+            snapshot.limits[0].resets_at.as_deref(),
+            Some("2026-07-07T15:00:00Z"),
+        );
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(
+            snapshot.limits[1].resets_at.as_deref(),
+            Some("2026-07-13T00:00:00Z"),
+        );
+    }
+
+    #[test]
+    fn codex_account_usage_response_maps_usage_limit_objects() {
+        let response: CodexAccountUsageResponse = serde_json::from_str(
+            r#"{
+              "summary": { "lifetimeTokens": 123 },
+              "usageLimits": {
+                "five_hours": {
+                  "limit": "300",
+                  "used": "120",
+                  "remaining": "180",
+                  "resetsAt": 1783436400
+                },
+                "weekly": {
+                  "limit": 1000,
+                  "used": 250,
+                  "remaining": 750,
+                  "resetsAt": "2026-07-13T00:00:00Z"
+                }
+              }
+            }"#,
+        )
+        .expect("codex usage object response parses");
+
+        let snapshot = snapshot_from_codex_account_usage(1_783_296_000, 1_783_382_400, response)
+            .expect("codex usage maps");
+
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].limit, Some(300.0));
+        assert_eq!(
+            snapshot.limits[0].resets_at.as_deref(),
+            Some("1783436400"),
+        );
+        assert_eq!(snapshot.limits[1].period, "weekly");
+    }
+
+    #[test]
+    fn codex_account_usage_response_maps_rate_limit_windows() {
+        let response: CodexAccountUsageResponse = serde_json::from_str(
+            r#"{
+              "summary": { "lifetimeTokens": 123 },
+              "rate_limits": {
+                "limit_id": "codex",
+                "primary": {
+                  "used_percent": 26,
+                  "window_minutes": 300,
+                  "resets_at": 1783406493
+                },
+                "secondary": {
+                  "used_percent": 4,
+                  "window_minutes": 10080,
+                  "resets_at": 1783993293
+                }
+              }
+            }"#,
+        )
+        .expect("codex rate limits response parses");
+
+        let snapshot = snapshot_from_codex_account_usage(1_783_296_000, 1_783_382_400, response)
+            .expect("codex usage maps");
+
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].name, "5 hours");
+        assert_eq!(snapshot.limits[0].limit, Some(100.0));
+        assert_eq!(snapshot.limits[0].used, Some(26.0));
+        assert_eq!(snapshot.limits[0].remaining, Some(74.0));
+        assert_eq!(snapshot.limits[0].resets_at.as_deref(), Some("1783406493"));
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(snapshot.limits[1].name, "Weekly");
+        assert_eq!(snapshot.limits[1].used, Some(4.0));
+        assert_eq!(snapshot.limits[1].remaining, Some(96.0));
+        assert_eq!(snapshot.limits[1].resets_at.as_deref(), Some("1783993293"));
+    }
+
+    #[test]
+    fn local_codex_rate_limits_enrich_cached_account_usage() {
+        let root = temp_root("openai-usage-local-rate-limits");
+        let cache_path = root.join("proxy").join("usage-cache.json");
+        let sessions_dir = root.join("sessions").join("2026").join("07").join("07");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            r#"{"timestamp":"2026-07-07T03:55:58.964Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26,"window_minutes":300,"resets_at":1783406493},"secondary":{"used_percent":4,"window_minutes":10080,"resets_at":1783993293},"plan_type":"pro"}}}"#,
+        )
+        .unwrap();
+        write_test_cache(
+            &cache_path,
+            10_000,
+            r#"{
+              "summary": { "lifetimeTokens": 41 },
+              "dailyUsageBuckets": [
+                {"startDate": "2026-07-06", "tokens": 41}
+              ]
+            }"#,
+        );
+
+        let snapshot = openai_usage_completions_with_cache_and_rate_limit_dir(
+            1_783_296_000,
+            1_783_382_400,
+            false,
+            &cache_path,
+            Some(&root),
+            10_000,
+            || panic!("fresh cache should not refresh"),
+        )
+        .expect("fresh cached usage with local rate limits");
+
+        assert_eq!(snapshot.total_tokens, 41);
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].used, Some(26.0));
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(snapshot.limits[1].remaining, Some(96.0));
     }
 
     #[test]

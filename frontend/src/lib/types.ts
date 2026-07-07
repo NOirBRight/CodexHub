@@ -193,6 +193,16 @@ export interface OpenAIUsageBucket {
   num_model_requests: number;
 }
 
+export interface OpenAIUsageLimit {
+  key: string;
+  name: string;
+  period: string;
+  limit?: number | null;
+  used?: number | null;
+  remaining?: number | null;
+  resets_at?: string | null;
+}
+
 export interface OpenAIUsageSnapshot {
   start_time: number;
   end_time: number;
@@ -205,6 +215,7 @@ export interface OpenAIUsageSnapshot {
   longest_running_turn_sec?: number | null;
   current_streak_days?: number | null;
   longest_streak_days?: number | null;
+  limits: OpenAIUsageLimit[];
   buckets: OpenAIUsageBucket[];
 }
 

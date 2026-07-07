@@ -28,6 +28,7 @@ import type {
   GatewayStatus,
   GatewayClientSyncSummary,
   Model,
+  OpenAIUsageLimit,
   OpenAIUsageSnapshot,
   Provider,
   Settings,
@@ -48,10 +49,16 @@ const DEFAULT_OFFICIAL_MODEL_ORDER = [
 const OPENAI_USAGE_DAY_SECONDS = 86_400;
 const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
 const OPENAI_USAGE_QUERY_WINDOW_DAYS = 730;
-const OPENAI_USAGE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+const OPENAI_USAGE_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
+const OFFICIAL_OPENAI_USAGE_STORAGE_KEY = "codexhub.officialOpenAIUsageSnapshot.v1";
 const OFFICIAL_USAGE_CELL_GAP = 2;
 const OFFICIAL_USAGE_CELL_SIZE = 8;
+const USAGE_MONTH_LABEL_MIN_GAP_PX = 36;
 const OFFICIAL_USAGE_COLOR_STOPS = ["#eff2f5", "#d8ebff", "#acd7ff", "#7cc1ff", "#48a7fb", "#1687e8"];
+const OPENAI_USAGE_LIMIT_PLACEHOLDERS: OpenAIUsageLimit[] = [
+  { key: "five_hours", name: "5 hours", period: "five_hours" },
+  { key: "week", name: "Week", period: "week" },
+];
 
 function useVerticalOverflow<T extends HTMLElement>(dependencies: ReadonlyArray<unknown>) {
   const ref = useRef<T | null>(null);
@@ -112,6 +119,47 @@ function useElementContentWidth<T extends HTMLElement>(dependencies: ReadonlyArr
   }, dependencies);
 
   return [ref, contentWidth] as const;
+}
+
+function readStoredOfficialOpenAIUsageSnapshot(): OpenAIUsageSnapshot | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(OFFICIAL_OPENAI_USAGE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const snapshot = JSON.parse(raw) as unknown;
+    return isOpenAIUsageSnapshot(snapshot) ? snapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeOfficialOpenAIUsageSnapshot(snapshot: OpenAIUsageSnapshot) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(OFFICIAL_OPENAI_USAGE_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage quota or privacy-mode failures; backend cache still works.
+  }
+}
+
+function isOpenAIUsageSnapshot(value: unknown): value is OpenAIUsageSnapshot {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const snapshot = value as Partial<OpenAIUsageSnapshot>;
+  return (
+    typeof snapshot.start_time === "number" &&
+    typeof snapshot.end_time === "number" &&
+    typeof snapshot.total_tokens === "number" &&
+    Array.isArray(snapshot.buckets) &&
+    Array.isArray(snapshot.limits)
+  );
 }
 
 const emptyProvider = {
@@ -209,6 +257,7 @@ export function ProvidersPage({
   const { t } = useTranslation();
   const tr = t as Translate;
   const { showToast, updateToast } = useToasts();
+  const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
@@ -217,10 +266,10 @@ export function ProvidersPage({
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>("unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>([]);
-  const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(null);
+  const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
-  const [officialUsageHidden, setOfficialUsageHidden] = useState(true);
+  const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState<string>(OFFICIAL_ID);
   const [form, setForm] = useState(emptyProvider);
@@ -253,7 +302,7 @@ export function ProvidersPage({
     if (selectedId !== OFFICIAL_ID) {
       return;
     }
-    void loadOfficialOpenAIUsage(true);
+    void primeOfficialOpenAIUsage();
     const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(true), OPENAI_USAGE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(usageRefreshTimer);
   }, [selectedId]);
@@ -553,9 +602,24 @@ export function ProvidersPage({
     }
   }
 
-  async function loadOfficialOpenAIUsage(forceRefresh = true, notify = false, toastId?: string) {
+  async function primeOfficialOpenAIUsage() {
+    if (!officialUsageSnapshotRef.current) {
+      await loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false });
+    }
+    void loadOfficialOpenAIUsage(true);
+  }
+
+  async function loadOfficialOpenAIUsage(
+    forceRefresh = true,
+    notify = false,
+    toastId?: string,
+    options?: { showBusy?: boolean },
+  ) {
+    const showBusy = options?.showBusy ?? true;
     const activeToastId = toastId ?? (notify ? showToast(t("providers.refreshingOpenAIUsage"), "loading") : null);
-    setOfficialUsageBusy(true);
+    if (showBusy) {
+      setOfficialUsageBusy(true);
+    }
     try {
       const snapshot = await api.openaiUsageCompletions({
         ...defaultOfficialOpenAIUsageWindow(),
@@ -563,6 +627,7 @@ export function ProvidersPage({
       });
       officialUsageSnapshotRef.current = snapshot;
       setOfficialUsageSnapshot(snapshot);
+      storeOfficialOpenAIUsageSnapshot(snapshot);
       setOfficialUsageError(null);
       setOfficialUsageHidden(false);
       if (activeToastId) {
@@ -584,7 +649,9 @@ export function ProvidersPage({
       setOfficialUsageError(messageFromError(err));
       setOfficialUsageHidden(false);
     } finally {
-      setOfficialUsageBusy(false);
+      if (showBusy) {
+        setOfficialUsageBusy(false);
+      }
     }
   }
 
@@ -1618,16 +1685,87 @@ function SourceMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function OfficialOpenAIUsageLimitBars({
+  busy,
+  limits,
+}: {
+  busy: boolean;
+  limits: OpenAIUsageLimit[];
+}) {
+  const { i18n, t } = useTranslation();
+  const locale = resolvedUsageLocale(i18n.language || "en-US");
+  const visibleLimits = preferredOpenAIUsageLimits(limits);
+  const renderedLimits = visibleLimits.length ? visibleLimits : OPENAI_USAGE_LIMIT_PLACEHOLDERS;
+  const usingPlaceholders = !visibleLimits.length;
+
+  return (
+    <div className="grid w-[252px] shrink-0 grid-cols-2 gap-2">
+      {renderedLimits.map((limit) => {
+        const label = usageLimitPeriodLabel(limit, t as Translate);
+        const endTime = usingPlaceholders
+          ? busy
+            ? t("providers.limitRefreshing")
+            : t("providers.limitEndUnknown")
+          : formatUsageLimitEnd(limit.resets_at, locale, t as Translate);
+        const percent = usingPlaceholders ? null : remainingPercent(limit);
+        const value =
+          percent === null
+            ? busy
+              ? t("providers.limitRefreshing")
+              : t("providers.limitEndUnknown")
+            : t("providers.limitRemainingPercent", { percent: Math.round(percent) });
+        return (
+          <div
+            key={limit.key}
+            className="min-w-0 rounded-control bg-surface px-2 py-1.5 shadow-control"
+            title={`${label} · ${value} · ${endTime}`}
+            aria-label={
+              percent === null
+                ? t("providers.limitPendingAria", { label, endTime })
+                : t("providers.limitRemainingAria", {
+                    label,
+                    percent: Math.round(percent),
+                    endTime,
+                  })
+            }
+          >
+            <div className="flex min-w-0 items-baseline justify-between gap-2">
+              <span className="whitespace-nowrap text-[10px] font-semibold leading-3 text-ink">{label}</span>
+              <span
+                className={cx(
+                  "shrink-0 whitespace-nowrap text-[11px] font-bold leading-3",
+                  percent === null ? "text-slate-400" : "text-emerald-700",
+                )}
+              >
+                {value}
+              </span>
+            </div>
+            <div className="mt-0.5 whitespace-nowrap text-[9px] font-medium leading-3 text-slate-400">{endTime}</div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-200">
+              <div
+                className={cx(
+                  "h-full rounded-full transition-[width] duration-200 ease-out",
+                  percent === null ? "w-full bg-slate-300/70" : "bg-emerald-500",
+                  percent === null && busy && "animate-pulse",
+                )}
+                style={percent === null ? undefined : { width: `${percent}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function OfficialOpenAIUsagePanel({
   busy,
   error,
-  onRefresh,
   snapshot,
   usageHidden,
 }: {
   busy: boolean;
   error: string | null;
-  onRefresh: () => void;
   snapshot: OpenAIUsageSnapshot | null;
   usageHidden: boolean;
 }) {
@@ -1701,16 +1839,6 @@ function OfficialOpenAIUsagePanel({
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <h3 className="truncate text-sm font-semibold text-ink">{t("providers.openaiUsage")}</h3>
-          <button
-            type="button"
-            className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
-            disabled={busy}
-            aria-label={t("providers.refreshOpenAIUsage")}
-            title={t("providers.refreshOpenAIUsage")}
-            onClick={onRefresh}
-          >
-            <RefreshCcw size={14} className={busy ? "animate-spin" : undefined} />
-          </button>
         </div>
         <div className="flex shrink-0 rounded-full bg-surface p-0.5 shadow-control">
           {modeOptions.map((option) => (
@@ -1733,6 +1861,8 @@ function OfficialOpenAIUsagePanel({
         <div className="rounded-inner bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 shadow-hairline">
           {error}
         </div>
+      ) : busy && !snapshot ? (
+        <OfficialOpenAIUsageSkeleton label={t("providers.loadingOpenAIUsage")} />
       ) : (
         <>
           <div className="grid grid-cols-5 gap-2 text-xs">
@@ -1810,9 +1940,10 @@ function OfficialOpenAIUsagePanel({
                   className="relative mt-1 h-4 text-[10px] text-slate-400"
                   style={{ width: usageGridWidth(chart.columns.length) }}
                 >
-                  {usageMonthLabels(chart.columns, locale).map((label) => (
+                  {usageMonthLabels(chart.columns, locale, usageGridWidth(chart.columns.length)).map((label) => (
                     <span
                       key={label.key}
+                      data-openai-usage-month-label
                       className={cx(
                         "absolute top-0 truncate",
                         label.align === "start" && "translate-x-0",
@@ -1836,6 +1967,56 @@ function OfficialOpenAIUsagePanel({
         </>
       )}
     </section>
+  );
+}
+
+function OfficialOpenAIUsageSkeleton({ label }: { label: string }) {
+  const columns = 42;
+  const cells = Array.from({ length: columns * 7 }, (_, index) => index);
+
+  return (
+    <div className="grid gap-3 animate-pulse" role="status" aria-label={label}>
+      <div className="grid grid-cols-5 gap-2 text-xs" aria-hidden="true">
+        {Array.from({ length: 5 }, (_, index) => (
+          <div
+            key={`metric-${index}`}
+            className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1.5 shadow-control"
+          >
+            <span className="h-2 w-10 rounded-full bg-slate-200" />
+            <span className={cx("mt-2 h-3 rounded-full bg-slate-200", index === 0 ? "w-12" : "w-9")} />
+          </div>
+        ))}
+      </div>
+      <div className="min-w-0 overflow-hidden rounded-inner bg-surface px-3 py-2 shadow-control" aria-hidden="true">
+        <div
+          className="grid"
+          style={{
+            gridAutoFlow: "column",
+            gridTemplateColumns: `repeat(${columns}, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+            gridTemplateRows: `repeat(7, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+            gap: `${OFFICIAL_USAGE_CELL_GAP}px`,
+            height: usageGridHeight(),
+            width: usageGridWidth(columns),
+          }}
+        >
+          {cells.map((index) => (
+            <span
+              key={`cell-${index}`}
+              className={cx(
+                "h-full w-full rounded-[3px] bg-slate-200",
+                index % 11 === 0 && "bg-slate-300/80",
+                index % 17 === 0 && "bg-slate-300",
+              )}
+            />
+          ))}
+        </div>
+        <div className="mt-2 flex gap-5">
+          {Array.from({ length: 6 }, (_, index) => (
+            <span key={`month-${index}`} className="h-2 w-7 rounded-full bg-slate-200" />
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1987,16 +2168,28 @@ function OfficialDetail({
         <HeaderRow
           title={t("common.codex")}
           subtitle={t("providers.openaiSubscriptionCatalog")}
+          titleAccessory={
+            <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
+          }
           actions={
             <>
-              <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
+              <OfficialOpenAIUsageLimitBars busy={usageBusy} limits={usageSnapshot?.limits ?? []} />
+              <button
+                type="button"
+                className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
+                disabled={usageBusy}
+                aria-label={t("providers.refreshOpenAIUsage")}
+                title={t("providers.refreshOpenAIUsage")}
+                onClick={onRefreshUsage}
+              >
+                <RefreshCcw size={14} className={usageBusy ? "animate-spin" : undefined} />
+              </button>
             </>
           }
         />
         <OfficialOpenAIUsagePanel
           busy={usageBusy}
           error={usageError}
-          onRefresh={onRefreshUsage}
           snapshot={usageSnapshot}
           usageHidden={usageHidden}
         />
@@ -3010,6 +3203,105 @@ function pendingProviderName(pending: PendingProviderNavigation, t: Translate) {
   return pending.form.name.trim() || t("providers.newProvider");
 }
 
+function preferredOpenAIUsageLimits(limits: OpenAIUsageLimit[]) {
+  const usable = limits.filter(limitHasUsageData);
+  const fiveHour = usable.find(isFiveHourUsageLimit);
+  const weekly = usable.find(isWeeklyUsageLimit);
+  const selected = [fiveHour, weekly].filter((limit): limit is OpenAIUsageLimit => Boolean(limit));
+  for (const limit of usable) {
+    if (selected.length >= 2) {
+      break;
+    }
+    if (!selected.some((item) => item.key === limit.key)) {
+      selected.push(limit);
+    }
+  }
+  return selected.slice(0, 2);
+}
+
+function limitHasUsageData(limit: OpenAIUsageLimit) {
+  return (
+    finiteUsageNumber(limit.limit) !== null ||
+    finiteUsageNumber(limit.used) !== null ||
+    finiteUsageNumber(limit.remaining) !== null ||
+    Boolean(limit.resets_at?.trim())
+  );
+}
+
+function isFiveHourUsageLimit(limit: OpenAIUsageLimit) {
+  const value = usageLimitSearchText(limit);
+  return (
+    /\b5\s*h(?:our)?s?\b/.test(value) ||
+    /\bfive[-_\s]?h(?:our)?s?\b/.test(value) ||
+    ((value.includes("5") || value.includes("five")) && value.includes("hour"))
+  );
+}
+
+function isWeeklyUsageLimit(limit: OpenAIUsageLimit) {
+  const value = usageLimitSearchText(limit);
+  return value.includes("week") || value.includes("weekly");
+}
+
+function usageLimitSearchText(limit: OpenAIUsageLimit) {
+  return `${limit.key} ${limit.period} ${limit.name}`.trim().toLowerCase().replace(/_/g, " ");
+}
+
+function usageLimitPeriodLabel(limit: OpenAIUsageLimit, t: Translate) {
+  if (isFiveHourUsageLimit(limit)) {
+    return t("providers.fiveHourLimit");
+  }
+  if (isWeeklyUsageLimit(limit)) {
+    return t("providers.weeklyLimit");
+  }
+  return limit.name?.trim() || limit.period?.trim() || limit.key;
+}
+
+function remainingPercent(limit: OpenAIUsageLimit) {
+  const total = finiteUsageNumber(limit.limit);
+  const used = finiteUsageNumber(limit.used);
+  const explicitRemaining = finiteUsageNumber(limit.remaining);
+  const remaining =
+    explicitRemaining !== null
+      ? explicitRemaining
+      : total !== null && used !== null
+        ? total - used
+        : null;
+  if (total === null || total <= 0 || remaining === null) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, (remaining / total) * 100));
+}
+
+function finiteUsageNumber(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatUsageLimitEnd(value: string | null | undefined, locale: string, t: Translate) {
+  const date = parseUsageLimitEnd(value);
+  if (!date) {
+    return value?.trim() || t("providers.limitEndUnknown");
+  }
+  return new Intl.DateTimeFormat(resolvedUsageLocale(locale), {
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short",
+  }).format(date);
+}
+
+function parseUsageLimitEnd(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric) && /^\d+(?:\.\d+)?$/.test(trimmed)) {
+    return new Date(numeric < 10_000_000_000 ? numeric * 1000 : numeric);
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : new Date(parsed);
+}
+
 function defaultOfficialOpenAIUsageWindow() {
   const endTime = Math.floor(Date.now() / 1000);
   return {
@@ -3218,7 +3510,7 @@ function usageStreaks(days: OfficialOpenAIUsageDay[]) {
   return { current: currentRun, longest };
 }
 
-function usageMonthLabels(columns: OfficialOpenAIUsageChartColumn[], locale: string) {
+function usageMonthLabels(columns: OfficialOpenAIUsageChartColumn[], locale: string, gridWidth: number) {
   const timeZone = localUsageTimeZone();
   const formatter = new Intl.DateTimeFormat(resolvedUsageLocale(locale), {
     month: "short",
@@ -3245,7 +3537,37 @@ function usageMonthLabels(columns: OfficialOpenAIUsageChartColumn[], locale: str
       });
     }
   }
-  return labels;
+  return filterCrowdedUsageMonthLabels(labels, gridWidth);
+}
+
+function filterCrowdedUsageMonthLabels<
+  TLabel extends { leftPercent: number },
+>(labels: TLabel[], gridWidth: number) {
+  if (labels.length <= 1 || gridWidth <= 0) {
+    return labels;
+  }
+
+  const filtered: TLabel[] = [];
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index];
+    const currentLeftPx = (label.leftPercent / 100) * gridWidth;
+    const next = labels[index + 1];
+    if (next) {
+      const nextLeftPx = (next.leftPercent / 100) * gridWidth;
+      if (nextLeftPx - currentLeftPx < USAGE_MONTH_LABEL_MIN_GAP_PX) {
+        continue;
+      }
+    }
+    const previous = filtered[filtered.length - 1];
+    if (previous) {
+      const previousLeftPx = (previous.leftPercent / 100) * gridWidth;
+      if (currentLeftPx - previousLeftPx < USAGE_MONTH_LABEL_MIN_GAP_PX) {
+        continue;
+      }
+    }
+    filtered.push(label);
+  }
+  return filtered;
 }
 
 function usageCellColor(intensity: number, filled = true) {
@@ -3879,15 +4201,20 @@ function HeaderRow({
   actions,
   subtitle,
   title,
+  titleAccessory,
 }: {
   actions?: React.ReactNode;
   subtitle?: string;
   title: string;
+  titleAccessory?: React.ReactNode;
 }) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
       <div className="min-w-0">
-        <h2 className="truncate text-base font-semibold">{title}</h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="min-w-0 truncate text-base font-semibold">{title}</h2>
+          {titleAccessory && <div className="shrink-0">{titleAccessory}</div>}
+        </div>
         {subtitle && <p className="mt-1 truncate text-sm text-slate-500">{subtitle}</p>}
       </div>
       {actions && <div className="flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap">{actions}</div>}
