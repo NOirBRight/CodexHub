@@ -67,19 +67,19 @@ class SubagentState:
 
     @property
     def closed_agent_ids(self) -> list[str]:
-        if self.protocol_state is not None and not self.workflow_intent:
+        if self.protocol_state is not None and not self.workflow_intent and not self.protocol_state.violations:
             return self.protocol_state.closed_agent_ids
         return [agent.agent_id for agent in self.agents.values() if agent.closed]
 
     @property
     def open_agent_ids(self) -> list[str]:
-        if self.protocol_state is not None and not self.workflow_intent:
+        if self.protocol_state is not None and not self.workflow_intent and not self.protocol_state.violations:
             return self.protocol_state.open_agent_ids
         return [agent.agent_id for agent in self.agents.values() if not agent.closed]
 
     @property
     def wait_agent_ids(self) -> list[str]:
-        if self.protocol_state is not None and not self.workflow_intent:
+        if self.protocol_state is not None and not self.workflow_intent and not self.protocol_state.violations:
             ids = list(self.protocol_state.waitable_agent_ids)
             if self.next_action == "send_input":
                 ids.extend(agent_id for agent_id in self.protocol_state.needs_input_agent_ids if agent_id not in ids)
@@ -88,7 +88,7 @@ class SubagentState:
 
     @property
     def close_agent_ids(self) -> list[str]:
-        if self.protocol_state is not None and not self.workflow_intent:
+        if self.protocol_state is not None and not self.workflow_intent and not self.protocol_state.violations:
             return self.protocol_state.closeable_agent_ids if self.close_waited_agents else []
         if not self.close_waited_agents:
             return []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
@@ -167,9 +168,21 @@ def protocol_events_from_input_items(input_items: Any) -> list[ProtocolEvent]:
     if not isinstance(input_items, list):
         return []
     calls: dict[str, MappingABC[str, Any]] = {}
+    text_calls: dict[str, tuple[str, MappingABC[str, Any]]] = {}
     events: list[ProtocolEvent] = []
     for item in input_items:
         if not isinstance(item, MappingABC):
+            continue
+        if item.get("type") == "message":
+            text = _joined_text(item.get("content"))
+            previous = _previous_call_from_text(text)
+            if previous is not None:
+                call_id, tool_name, arguments = previous
+                text_calls[call_id] = (tool_name, arguments)
+                continue
+            event = _event_from_result_text(text, text_calls)
+            if event is not None:
+                events.append(event)
             continue
         if item.get("type") == "function_call":
             call_id = _string(item.get("call_id"))
@@ -186,6 +199,70 @@ def protocol_events_from_input_items(input_items: Any) -> list[ProtocolEvent]:
         if event is not None:
             events.append(event)
     return events
+
+
+def _previous_call_from_text(text: str) -> tuple[str, str, MappingABC[str, Any]] | None:
+    first = _first_nonempty_line(text)
+    prefix = "Previous real Codex native multi_agent_v1."
+    suffix = " call transcript"
+    if not first.startswith(prefix) or not first.endswith(suffix):
+        return None
+    tool_name = first[len(prefix) : -len(suffix)]
+    if tool_name not in MULTI_AGENT_TOOL_NAMES:
+        return None
+    call_id = _line_value(text, "call_id:")
+    if not call_id:
+        return None
+    return call_id, tool_name, _json_block_after(text, "arguments:")
+
+
+def _event_from_result_text(
+    text: str, previous_calls: MappingABC[str, tuple[str, MappingABC[str, Any]]]
+) -> ProtocolEvent | None:
+    first = _first_nonempty_line(text)
+    prefix = "Codex native multi_agent_v1."
+    suffix = " result"
+    if not first.startswith(prefix) or not first.endswith(suffix):
+        return None
+    tool_name = first[len(prefix) : -len(suffix)]
+    if tool_name not in MULTI_AGENT_TOOL_NAMES:
+        return None
+    call_id = _line_value(text, "call_id:") or ""
+    previous_tool, arguments = previous_calls.get(call_id, (tool_name, {}))
+    if previous_tool != tool_name:
+        arguments = {}
+    raw_output = _json_block_after(text, "raw_output:")
+    if tool_name == "spawn_agent":
+        agent_id = _line_value(text, "agent_id:") or _string(raw_output.get("agent_id"))
+        if not agent_id:
+            return None
+        return ProtocolEvent.spawn(
+            call_id=call_id,
+            agent_id=agent_id,
+            prompt=_string(arguments.get("message") or arguments.get("prompt") or arguments.get("input")),
+            nickname=_string(arguments.get("nickname")) or None,
+        )
+    if tool_name == "wait_agent":
+        targets = tuple(_target_list(arguments.get("targets") or arguments.get("target")))
+        if not targets:
+            targets = tuple(_split_agent_ids(_line_value(text, "completed_agent_ids:")))
+        return ProtocolEvent.wait(call_id=call_id, targets=targets, results=_wait_results(raw_output))
+    if tool_name == "close_agent":
+        target = _string(arguments.get("target")) or (_line_value(text, "closed_agent_id:") or "")
+        return ProtocolEvent.close(call_id=call_id, target=target)
+    if tool_name == "send_input":
+        return ProtocolEvent.send_input(
+            call_id=call_id,
+            target=_string(arguments.get("target")),
+            message=_string(arguments.get("message")),
+        )
+    if tool_name == "resume_agent":
+        return ProtocolEvent.resume(
+            call_id=call_id,
+            target=_string(arguments.get("target")),
+            message=_string(arguments.get("message")),
+        )
+    return None
 
 
 def _event_from_call_output(
@@ -291,3 +368,46 @@ def _wait_results(output: MappingABC[str, Any]) -> dict[str, str]:
 
 def _string(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _joined_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, MappingABC):
+        return "\n".join(_joined_text(child) for child in value.values())
+    if isinstance(value, list):
+        return "\n".join(_joined_text(child) for child in value)
+    return ""
+
+
+def _first_nonempty_line(text: str) -> str:
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+def _line_value(text: str, prefix: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            value = stripped[len(prefix) :].strip()
+            return value or None
+    return None
+
+
+def _json_block_after(text: str, marker: str) -> MappingABC[str, Any]:
+    index = text.find(marker)
+    if index < 0:
+        return {}
+    raw = text[index + len(marker) :].strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, MappingABC) else {}
+
+
+def _split_agent_ids(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part for part in re.split(r"[\s,]+", value.strip()) if part]

@@ -140,6 +140,83 @@ class SubagentProtocolTests(unittest.TestCase):
 
         self.assertEqual([violation.code for violation in state.violations], ["wait_closed_agent"])
 
+    def test_protocol_parser_accepts_developer_text_transcript(self):
+        from subagent_protocol import protocol_state_from_input_items
+
+        state = protocol_state_from_input_items(
+            [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Previous real Codex native multi_agent_v1.spawn_agent call transcript\n"
+                        "call_id: call_spawn\n"
+                        "arguments:\n"
+                        '{"message":"return child-ok"}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Codex native multi_agent_v1.spawn_agent result\n"
+                        "call_id: call_spawn\n"
+                        "status: succeeded\n"
+                        "agent_id: agent-1\n"
+                        "raw_output:\n"
+                        '{"agent_id":"agent-1"}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Previous real Codex native multi_agent_v1.wait_agent call transcript\n"
+                        "call_id: call_wait\n"
+                        "arguments:\n"
+                        '{"targets":["agent-1"],"timeout_ms":60000}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Codex native multi_agent_v1.wait_agent result\n"
+                        "call_id: call_wait\n"
+                        "status: completed\n"
+                        "completed_agent_ids: agent-1\n"
+                        "raw_output:\n"
+                        '{"timed_out":false,"status":{"agent-1":{"completed":"child-ok"}}}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Previous real Codex native multi_agent_v1.close_agent call transcript\n"
+                        "call_id: call_close\n"
+                        "arguments:\n"
+                        '{"target":"agent-1"}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Codex native multi_agent_v1.close_agent result\n"
+                        "call_id: call_close\n"
+                        "status: closed\n"
+                        "closed_agent_id: agent-1\n"
+                        "raw_output:\n"
+                        '{"previous_status":{"completed":"child-ok"}}'
+                    ),
+                },
+            ]
+        )
+
+        self.assertTrue(state.lifecycle_complete)
+        self.assertEqual(state.closed_agent_ids, ["agent-1"])
+
 
 if __name__ == "__main__":
     unittest.main()
