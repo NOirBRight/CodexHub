@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod autostart;
 mod catalog;
 mod cli;
@@ -243,6 +245,16 @@ fn default_gateway_auto_retry_max_attempts() -> u8 {
     30
 }
 
+async fn run_blocking<T, F>(name: &'static str, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("{name} task failed: {error}"))?
+}
+
 #[tauri::command]
 fn get_status() -> Result<AppStatus, String> {
     proxy::status()
@@ -289,17 +301,20 @@ fn save_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-fn refresh_official_models() -> Result<Vec<Model>, String> {
-    models::refresh_official_models()
+async fn refresh_official_models() -> Result<Vec<Model>, String> {
+    run_blocking("refresh_official_models", models::refresh_official_models).await
 }
 
 #[tauri::command]
-fn openai_usage_completions(
+async fn openai_usage_completions(
     start_time: Option<u64>,
     end_time: Option<u64>,
     force_refresh: Option<bool>,
 ) -> Result<openai_usage::OpenAiUsageSnapshot, String> {
-    openai_usage::openai_usage_completions(start_time, end_time, force_refresh)
+    run_blocking("openai_usage_completions", move || {
+        openai_usage::openai_usage_completions(start_time, end_time, force_refresh)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -390,10 +405,13 @@ fn gateway_copy_client_config(
 }
 
 #[tauri::command]
-fn list_gateway_clients(
+async fn list_gateway_clients(
     include_versions: Option<bool>,
 ) -> Result<Vec<gateway::GatewayClientInfo>, String> {
-    gateway::list_gateway_clients(include_versions.unwrap_or(false))
+    run_blocking("list_gateway_clients", move || {
+        gateway::list_gateway_clients(include_versions.unwrap_or(false))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -429,10 +447,13 @@ fn switch_gateway_client_route(
 }
 
 #[tauri::command]
-fn sync_gateway_clients(
+async fn sync_gateway_clients(
     model: Option<String>,
 ) -> Result<gateway::GatewayClientSyncSummary, String> {
-    gateway::sync_gateway_clients(model)
+    run_blocking("sync_gateway_clients", move || {
+        gateway::sync_gateway_clients(model)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -441,8 +462,8 @@ fn subagent_matrix_status() -> Result<gateway::SubagentMatrixStatus, String> {
 }
 
 #[tauri::command]
-fn generate_catalog() -> Result<Vec<Model>, String> {
-    catalog::generate_catalog()
+async fn generate_catalog() -> Result<Vec<Model>, String> {
+    run_blocking("generate_catalog", catalog::generate_catalog).await
 }
 
 #[tauri::command]

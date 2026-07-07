@@ -116,8 +116,10 @@ pub(crate) struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
-        let output = Command::new(program)
-            .args(args)
+        let mut command = Command::new(program);
+        command.args(args);
+        configure_no_window(&mut command);
+        let output = command
             .output()
             .map_err(|error| format!("failed to start {}: {error}", program.display()))?;
 
@@ -126,6 +128,19 @@ impl CommandRunner for ProcessCommandRunner {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
+    }
+}
+
+pub(crate) fn configure_no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
     }
 }
 

@@ -12,9 +12,9 @@
       {
         "title": "CodexHub",
         "width": 1280,
-        "height": 800,
+        "height": 900,
         "minWidth": 1024,
-        "minHeight": 768,
+        "minHeight": 800,
         "decorations": false,
         "resizable": true
       }

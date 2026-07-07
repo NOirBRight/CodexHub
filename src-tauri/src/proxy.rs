@@ -1319,6 +1319,18 @@ fn configure_detached(command: &mut Command) {
 #[cfg(not(windows))]
 fn configure_detached(_command: &mut Command) {}
 
+fn configure_no_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
 #[cfg(windows)]
 fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
     let script = format!(
@@ -1326,8 +1338,10 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
          if ($null -eq $p) {{ exit 3 }}; \
          [Console]::Out.Write([string]$p.CommandLine)"
     );
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-Command", &script]);
+    configure_no_window(&mut command);
+    let output = command
         .output()
         .map_err(|error| format!("failed to inspect PID {pid} with PowerShell/CIM: {error}"))?;
 
@@ -1381,8 +1395,10 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
 #[cfg(windows)]
 fn kill_process(pid: u32) -> Result<(), String> {
     let pid_text = pid.to_string();
-    let output = Command::new("taskkill")
-        .args(["/PID", &pid_text, "/T", "/F"])
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid_text, "/T", "/F"]);
+    configure_no_window(&mut command);
+    let output = command
         .output()
         .map_err(|error| format!("failed to run taskkill for PID {pid}: {error}"))?;
     if output.status.success() {

@@ -21,8 +21,10 @@ const tailwindConfigPath = new URL("../tailwind.config.js", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
+const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
+const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
 const tauriWebBridgePath = new URL("../../src-tauri/src/web_bridge.rs", import.meta.url);
 const i18nIndexPath = new URL("../src/i18n/index.ts", import.meta.url);
 const enLocalePath = new URL("../src/i18n/locales/en-US.ts", import.meta.url);
@@ -117,10 +119,12 @@ test("gateway request timeout defaults to 300 seconds across UI and runtime", as
 });
 
 test("runtime header removes flow chips and exposes desktop window controls", async () => {
-  const [runtimeSource, tauriSource, tauriConfig] = await Promise.all([
+  const [runtimeSource, tauriSource, tauriConfig, tauriDefaultCapability, css] = await Promise.all([
     readFile(runtimeBarPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
     readFile(tauriConfigPath, "utf8"),
+    readFile(tauriDefaultCapabilityPath, "utf8"),
+    readFile(indexCssPath, "utf8"),
   ]);
 
   assert.doesNotMatch(runtimeSource, /FlowChip/);
@@ -129,6 +133,20 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(runtimeSource, /windowMinimize/);
   assert.match(runtimeSource, /windowToggleMaximize/);
   assert.match(runtimeSource, /windowCloseToTray/);
+  assert.match(runtimeSource, /getCurrentWindow/);
+  assert.match(runtimeSource, /startDragging/);
+  assert.match(runtimeSource, /MouseEvent/);
+  assert.match(runtimeSource, /onMouseDownCapture=\{startWindowDrag\}/);
+  assert.doesNotMatch(runtimeSource, /onPointerDown=\{startWindowDrag\}/);
+  assert.ok((runtimeSource.match(/data-tauri-drag-region/g) ?? []).length >= 4);
+  assert.match(css, /\[data-tauri-drag-region\][\s\S]*-webkit-app-region:\s*drag/);
+  assert.match(css, /\[data-tauri-drag-region\][\s\S]*user-select:\s*none/);
+  assert.match(css, /\[data-tauri-drag-region\]\s+button[\s\S]*-webkit-app-region:\s*no-drag/);
+  const capability = JSON.parse(tauriDefaultCapability);
+  assert.deepEqual(capability.windows, ["main"]);
+  assert.ok(capability.permissions.includes("core:default"));
+  assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
+  assert.ok(capability.permissions.includes("core:window:allow-internal-toggle-maximize"));
   assert.match(runtimeSource, /t\("runtime\.closeToTray"\)/);
   assert.match(tauriSource, /WindowEvent::CloseRequested/);
   assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
@@ -137,6 +155,22 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(tauriSource, /Get-StartApps/);
   assert.doesNotMatch(tauriSource, /Restart CodexHub/);
   assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
+});
+
+test("main desktop window opens tall enough for the primary dashboard", async () => {
+  const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
+  const mainWindow = tauriConfig.app.windows[0];
+
+  assert.equal(mainWindow.width, 1280);
+  assert.ok(mainWindow.height >= 900);
+  assert.ok(mainWindow.minHeight >= 800);
+});
+
+test("release desktop binary does not allocate a Windows console", async () => {
+  const mainSource = await readFile(tauriMainPath, "utf8");
+
+  assert.match(mainSource, /windows_subsystem\s*=\s*"windows"/);
+  assert.match(mainSource, /not\(debug_assertions\)/);
 });
 
 test("global cursor contract marks interactive controls as pointer and disabled controls as unavailable", async () => {
@@ -538,6 +572,38 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(zhSource, /longestTaskDuration/);
 });
 
+test("slow desktop commands run off the Tauri invoke thread", async () => {
+  const mainSource = await readFile(tauriMainPath, "utf8");
+
+  assert.match(mainSource, /tauri::async_runtime::spawn_blocking/);
+  for (const command of [
+    "refresh_official_models",
+    "openai_usage_completions",
+    "list_gateway_clients",
+    "sync_gateway_clients",
+    "generate_catalog",
+  ]) {
+    assert.match(mainSource, new RegExp(`async fn ${command}\\(`));
+    assert.match(mainSource, new RegExp(`run_blocking\\("${command}"`));
+  }
+});
+
+test("Codex app-server probes time out and avoid visible Windows consoles", async () => {
+  const [openAiUsageSource, modelsSource] = await Promise.all([
+    readFile(tauriOpenAiUsagePath, "utf8"),
+    readFile(tauriModelsPath, "utf8"),
+  ]);
+
+  for (const source of [openAiUsageSource, modelsSource]) {
+    assert.match(source, /CREATE_NO_WINDOW/);
+    assert.match(source, /configure_no_window/);
+    assert.match(source, /recv_timeout/);
+    assert.match(source, /kill_child/);
+  }
+  assert.match(openAiUsageSource, /CODEX_APP_SERVER_RESPONSE_TIMEOUT/);
+  assert.match(modelsSource, /CODEX_APP_SERVER_MODEL_LIST_TIMEOUT/);
+});
+
 test("manual OpenAI usage refresh uses a persistent toast", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
@@ -714,14 +780,16 @@ test("gateway client route switching refreshes without version probes", async ()
 
   assert.match(gatewaySource, /await onRefreshClients\(\)/);
   assert.doesNotMatch(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)[\s\S]*setMessage\(`\$\{clientName\} switched/);
-  assert.match(appSource, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
+  assert.match(appSource, /void loadGatewayClients\(\);/);
   assert.match(appSource, /const clientTimer = window\.setInterval\(\(\) => void loadGatewayClients\(\), 12 \* 60 \* 60 \* 1000\)/);
 });
 
-test("gateway client versions are checked on first load and cached", async () => {
+test("gateway client versions are cached and refreshed after startup or manually", async () => {
   const appSource = await readFile(appPath, "utf8");
+  const startupEffect = appSource.match(/useEffect\(\(\) => \{[\s\S]*?return \(\) => \{[\s\S]*?\};/)?.[0] ?? "";
 
   assert.match(appSource, /GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub\.gatewayClientVersions\.v1"/);
+  assert.match(appSource, /BACKGROUND_VERSION_PROBE_DELAY_MS = 1000/);
   assert.match(appSource, /function readGatewayClientVersionCache/);
   assert.match(appSource, /function applyGatewayClientVersionCache/);
   assert.match(appSource, /function writeGatewayClientVersionCache/);
@@ -729,7 +797,13 @@ test("gateway client versions are checked on first load and cached", async () =>
   assert.match(appSource, /window\.localStorage\.setItem\(/);
   assert.match(appSource, /const cachedClients = applyGatewayClientVersionCache\(clients\)/);
   assert.match(appSource, /client\.id === "generic"/);
-  assert.match(appSource, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
+  assert.match(startupEffect, /void loadGatewayClients\(\);/);
+  assert.match(startupEffect, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
+  assert.ok(
+    startupEffect.indexOf("void loadGatewayClients();") <
+      startupEffect.indexOf("void loadGatewayClients({ includeClientVersions: true })"),
+  );
+  assert.match(startupEffect, /window\.clearTimeout\(versionProbeTimer\)/);
 });
 
 test("gateway toast uses the shared dismissible page toast", async () => {

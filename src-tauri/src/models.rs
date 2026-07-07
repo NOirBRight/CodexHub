@@ -6,11 +6,14 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
+const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 const RESPONSE_ENDPOINT_SUFFIXES: &[&str] = &["/responses", "/response"];
@@ -57,6 +60,7 @@ pub fn probe_upstream_format(
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         command.arg("--model").arg(model);
     }
+    configure_no_window(&mut command);
 
     let output = command
         .output()
@@ -290,11 +294,14 @@ fn refresh_official_models_with_runner(
 
 fn read_codex_app_server_model_list() -> Result<Value, String> {
     let codex = find_codex_executable()?;
-    let mut child = Command::new(&codex)
+    let mut command = Command::new(&codex);
+    command
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    configure_no_window(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start codex app-server for model list: {error}"))?;
 
@@ -338,40 +345,129 @@ fn read_codex_app_server_model_list() -> Result<Value, String> {
         .stdout
         .take()
         .ok_or_else(|| "failed to open codex app-server stdout".to_string())?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
+    let message = read_codex_app_server_value_response(
+        &mut child,
+        stdout,
+        json!(2),
+        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
+    )?;
+    kill_child(&mut child);
+    if let Some(error) = message.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("request failed");
+        return Err(format!("codex app-server model list failed: {message}"));
+    }
+    message
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "codex app-server model list response did not include a result".to_string())
+}
+
+fn read_codex_app_server_value_response(
+    child: &mut Child,
+    stdout: ChildStdout,
+    expected_id: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let receiver = spawn_app_server_line_reader(stdout);
+    let deadline = Instant::now() + timeout;
     loop {
-        line.clear();
-        let bytes = reader.read_line(&mut line).map_err(|error| {
-            format!("failed to read codex app-server model list response: {error}")
-        })?;
-        if bytes == 0 {
-            let _ = child.wait();
-            return Err("codex app-server model list did not return a response".to_string());
+        let now = Instant::now();
+        if now >= deadline {
+            kill_child(child);
+            return Err(format!(
+                "codex app-server model list timed out after {} seconds",
+                timeout.as_secs()
+            ));
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        let remaining = deadline.saturating_duration_since(now);
+        match receiver.recv_timeout(remaining) {
+            Ok(Ok(Some(line))) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let message: Value = match serde_json::from_str(trimmed) {
+                    Ok(message) => message,
+                    Err(_) => continue,
+                };
+                if message.get("id") == Some(&expected_id) {
+                    return Ok(message);
+                }
+            }
+            Ok(Ok(None)) => {
+                let _ = child.wait();
+                return Err("codex app-server model list did not return a response".to_string());
+            }
+            Ok(Err(error)) => {
+                kill_child(child);
+                return Err(format!(
+                    "failed to read codex app-server model list response: {error}"
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                kill_child(child);
+                return Err(format!(
+                    "codex app-server model list timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = child.wait();
+                return Err(
+                    "codex app-server model list reader stopped before a response".to_string(),
+                );
+            }
         }
-        let message: Value = match serde_json::from_str(trimmed) {
-            Ok(message) => message,
-            Err(_) => continue,
-        };
-        if message.get("id") != Some(&json!(2)) {
-            continue;
+    }
+}
+
+fn spawn_app_server_line_reader(
+    stdout: ChildStdout,
+) -> mpsc::Receiver<Result<Option<String>, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(None));
+                    break;
+                }
+                Ok(_) => {
+                    if sender.send(Ok(Some(line.clone()))).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                    break;
+                }
+            }
         }
-        let _ = child.kill();
-        let _ = child.wait();
-        if let Some(error) = message.get("error") {
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("request failed");
-            return Err(format!("codex app-server model list failed: {message}"));
-        }
-        return message.get("result").cloned().ok_or_else(|| {
-            "codex app-server model list response did not include a result".to_string()
-        });
+    });
+    receiver
+}
+
+fn kill_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn configure_no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
     }
 }
 
@@ -1112,18 +1208,18 @@ fn parse_discovered_models(payload: &Value, kind: DiscoveryKind) -> Vec<Model> {
     models
 }
 
-fn discovery_allows_model(id: &str, kind: DiscoveryKind) -> bool {
+fn discovery_allows_model(_id: &str, kind: DiscoveryKind) -> bool {
     match kind {
         #[cfg(test)]
-        DiscoveryKind::Official => id.starts_with("gpt-"),
+        DiscoveryKind::Official => _id.starts_with("gpt-"),
         DiscoveryKind::Provider => true,
     }
 }
 
-fn sort_discovered_models(models: &mut [Model], kind: DiscoveryKind) {
+fn sort_discovered_models(_models: &mut [Model], kind: DiscoveryKind) {
     match kind {
         #[cfg(test)]
-        DiscoveryKind::Official => models.sort_by(|left, right| left.id.cmp(&right.id)),
+        DiscoveryKind::Official => _models.sort_by(|left, right| left.id.cmp(&right.id)),
         DiscoveryKind::Provider => {}
     }
 }
@@ -1322,10 +1418,13 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
         script: &Path,
         codex_dir: &Path,
     ) -> Result<CatalogCommandOutcome, String> {
-        let output = Command::new(python)
+        let mut command = Command::new(python);
+        command
             .arg(script)
             .arg("--sync")
-            .env("CODEX_HOME", codex_dir)
+            .env("CODEX_HOME", codex_dir);
+        configure_no_window(&mut command);
+        let output = command
             .output()
             .map_err(|error| format!("failed to start catalog sync: {error}"))?;
 

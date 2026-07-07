@@ -52,6 +52,7 @@ type GatewayClientVersionCacheEntry = {
 };
 
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
+const BACKGROUND_VERSION_PROBE_DELAY_MS = 1000;
 
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
@@ -333,10 +334,15 @@ export default function App() {
 
   useEffect(() => {
     void loadRuntime();
-    void loadGatewayClients({ includeClientVersions: true });
+    void loadGatewayClients();
+    const versionProbeTimer = window.setTimeout(
+      () => void loadGatewayClients({ includeClientVersions: true }),
+      BACKGROUND_VERSION_PROBE_DELAY_MS,
+    );
     const timer = window.setInterval(() => void loadRuntime(), 5000);
     const clientTimer = window.setInterval(() => void loadGatewayClients(), 12 * 60 * 60 * 1000);
     return () => {
+      window.clearTimeout(versionProbeTimer);
       window.clearInterval(timer);
       window.clearInterval(clientTimer);
     };

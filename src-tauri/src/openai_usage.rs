@@ -4,8 +4,10 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CODEX_ACCOUNT_USAGE_METHOD: &str = "account/usage/read";
 const CACHE_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
@@ -14,6 +16,7 @@ const DEFAULT_WINDOW_DAYS: u64 = 365;
 const RATE_LIMIT_LOG_FILE_LIMIT: usize = 64;
 const RATE_LIMIT_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;
+const CODEX_APP_SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct OpenAiUsageSnapshot {
@@ -382,7 +385,8 @@ fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) 
             collect_rate_limit_log_files(&path, files);
             continue;
         }
-        if !metadata.is_file() || path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+        if !metadata.is_file() || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
             continue;
         }
         files.push(RateLimitLogFile {
@@ -411,15 +415,16 @@ where
 
 fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
     let codex = find_codex_executable()?;
-    let mut child = Command::new(&codex)
+    let mut command = Command::new(&codex);
+    command
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            format!("Failed to start codex app-server for Codex account usage: {error}")
-        })?;
+        .stderr(Stdio::null());
+    configure_no_window(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        format!("Failed to start codex app-server for Codex account usage: {error}")
+    })?;
 
     let mut stdin = child
         .stdin
@@ -460,40 +465,126 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
         .stdout
         .take()
         .ok_or_else(|| "Failed to open codex app-server stdout.".to_string())?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
+    let message = read_codex_app_server_response(
+        &mut child,
+        stdout,
+        json!(2),
+        CODEX_APP_SERVER_RESPONSE_TIMEOUT,
+    )?;
+    kill_child(&mut child);
+    if let Some(error) = message.error {
+        return Err(codex_app_server_error_message(
+            error.message.as_deref().unwrap_or("request failed"),
+        ));
+    }
+    let result = message
+        .result
+        .ok_or_else(|| "Codex account usage response did not include a result.".to_string())?;
+    serde_json::from_value(result)
+        .map_err(|error| format!("Codex account usage response had unexpected JSON: {error}"))
+}
+
+fn read_codex_app_server_response(
+    child: &mut Child,
+    stdout: ChildStdout,
+    expected_id: Value,
+    timeout: Duration,
+) -> Result<CodexAppServerResponse, String> {
+    let receiver = spawn_app_server_line_reader(stdout);
+    let deadline = Instant::now() + timeout;
     loop {
-        line.clear();
-        let bytes = reader
-            .read_line(&mut line)
-            .map_err(|error| format!("Failed to read codex app-server usage response: {error}"))?;
-        if bytes == 0 {
-            let _ = child.wait();
-            return Err("Codex account usage did not return a response.".to_string());
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let message: CodexAppServerResponse = match serde_json::from_str(trimmed) {
-            Ok(message) => message,
-            Err(_) => continue,
-        };
-        if message.id != Some(json!(2)) {
-            continue;
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        if let Some(error) = message.error {
-            return Err(codex_app_server_error_message(
-                error.message.as_deref().unwrap_or("request failed"),
+        let now = Instant::now();
+        if now >= deadline {
+            kill_child(child);
+            return Err(format!(
+                "Codex account usage timed out after {} seconds.",
+                timeout.as_secs()
             ));
         }
-        let result = message
-            .result
-            .ok_or_else(|| "Codex account usage response did not include a result.".to_string())?;
-        return serde_json::from_value(result)
-            .map_err(|error| format!("Codex account usage response had unexpected JSON: {error}"));
+        let remaining = deadline.saturating_duration_since(now);
+        match receiver.recv_timeout(remaining) {
+            Ok(Ok(Some(line))) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let message: CodexAppServerResponse = match serde_json::from_str(trimmed) {
+                    Ok(message) => message,
+                    Err(_) => continue,
+                };
+                if message.id == Some(expected_id.clone()) {
+                    return Ok(message);
+                }
+            }
+            Ok(Ok(None)) => {
+                let _ = child.wait();
+                return Err("Codex account usage did not return a response.".to_string());
+            }
+            Ok(Err(error)) => {
+                kill_child(child);
+                return Err(format!(
+                    "Failed to read codex app-server usage response: {error}"
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                kill_child(child);
+                return Err(format!(
+                    "Codex account usage timed out after {} seconds.",
+                    timeout.as_secs()
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = child.wait();
+                return Err("Codex account usage reader stopped before a response.".to_string());
+            }
+        }
+    }
+}
+
+fn spawn_app_server_line_reader(
+    stdout: ChildStdout,
+) -> mpsc::Receiver<Result<Option<String>, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(None));
+                    break;
+                }
+                Ok(_) => {
+                    if sender.send(Ok(Some(line.clone()))).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+    receiver
+}
+
+fn kill_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn configure_no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
     }
 }
 
@@ -572,7 +663,9 @@ fn snapshot_from_codex_account_usage(
     buckets.sort_by_key(|bucket| bucket.start_time);
     let bucket_tokens = buckets.iter().map(|bucket| bucket.total_tokens).sum();
     let summary = response.summary;
-    let limits = response.usage_limits.or_else(|| summary.usage_limits.clone());
+    let limits = response
+        .usage_limits
+        .or_else(|| summary.usage_limits.clone());
     Ok(OpenAiUsageSnapshot {
         start_time,
         end_time,
@@ -767,7 +860,10 @@ fn normalize_usage_limit_object(map: &mut Map<String, Value>, fallback_key: Opti
             .unwrap_or_else(|| "limit".to_string());
         map.insert("period".to_string(), Value::String(period));
     }
-    if !contains_any(map, &["name", "label", "title", "periodName", "displayName"]) {
+    if !contains_any(
+        map,
+        &["name", "label", "title", "periodName", "displayName"],
+    ) {
         if let Some(period) = normalized_period {
             map.insert(
                 "name".to_string(),
@@ -1024,10 +1120,7 @@ mod tests {
         assert_eq!(snapshot.limits.len(), 2);
         assert_eq!(snapshot.limits[0].period, "five_hours");
         assert_eq!(snapshot.limits[0].limit, Some(300.0));
-        assert_eq!(
-            snapshot.limits[0].resets_at.as_deref(),
-            Some("1783436400"),
-        );
+        assert_eq!(snapshot.limits[0].resets_at.as_deref(), Some("1783436400"),);
         assert_eq!(snapshot.limits[1].period, "weekly");
     }
 

@@ -1,5 +1,6 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Play, Settings as SettingsIcon, Square, X } from "lucide-react";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import codexLogo from "../assets/codex-logo.svg";
 import { cx } from "../lib/format";
@@ -35,19 +36,24 @@ export function RuntimeBar({
     <header
       className="flex min-h-[56px] items-center gap-3 overflow-hidden bg-surface pl-4 shadow-hairline"
       data-tauri-drag-region
+      onMouseDownCapture={startWindowDrag}
     >
-      <div className="flex shrink-0 items-center gap-2">
+      <div
+        className="flex shrink-0 select-none items-center gap-2 [&_*]:pointer-events-none"
+        data-tauri-drag-region
+      >
         <span className="grid h-8 w-8 place-items-center rounded-full bg-surface shadow-control">
           <img src={codexLogo} alt="" className="h-5 w-5" aria-hidden="true" />
         </span>
         <span className="truncate text-base font-semibold text-ink">CodexHub</span>
       </div>
 
-      <div className="min-w-0 flex-1" data-tauri-drag-region />
+      <div className="min-w-0 flex-1 self-stretch" data-tauri-drag-region />
 
       <div className="flex shrink-0 items-center gap-2">
         <div
-          className="flex h-8 max-w-[360px] items-center gap-2 rounded-control bg-panel px-2 text-xs shadow-control"
+          className="flex h-8 max-w-[360px] select-none items-center gap-2 rounded-control bg-panel px-2 text-xs shadow-control [&_*]:pointer-events-none"
+          data-tauri-drag-region
           title={message ?? `${address} ${running ? t("runtime.running") : t("runtime.stopped")}`}
         >
           <span className={cx("h-2 w-2 rounded-full", running ? "bg-ok" : "bg-danger")} />
@@ -117,6 +123,26 @@ function formatRuntimeHint(message?: string | null) {
   return message;
 }
 
+function startWindowDrag(event: MouseEvent<HTMLElement>) {
+  if (event.button !== 0 || isInteractiveWindowControl(event.target)) {
+    return;
+  }
+
+  event.preventDefault();
+  try {
+    void getCurrentWindow().startDragging().catch(() => undefined);
+  } catch {
+    // Browser preview has no Tauri window to drag.
+  }
+}
+
+function isInteractiveWindowControl(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return Boolean(target.closest("button,a,input,select,textarea,[role='button'],[data-window-control]"));
+}
+
 function WindowControlButton({
   children,
   danger = false,
@@ -138,6 +164,7 @@ function WindowControlButton({
         danger && "hover:bg-red-50 hover:text-danger",
       )}
       aria-label={label}
+      data-window-control
       title={title}
       onClick={onClick}
     >

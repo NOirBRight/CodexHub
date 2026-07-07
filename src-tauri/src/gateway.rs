@@ -937,6 +937,9 @@ pub fn switch_gateway_client_route(
 }
 
 pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSummary, String> {
+    let settings = config::get_settings()?;
+    let providers = config::get_providers()?;
+    let model = Some(gateway_client_sync_model_arg(model, &settings, &providers)?);
     let clients = list_gateway_clients(false)?;
     Ok(sync_gateway_clients_from_infos(
         clients,
@@ -1034,6 +1037,36 @@ where
         results,
         message,
     }
+}
+
+fn gateway_client_sync_model_arg(
+    model: Option<String>,
+    settings: &Settings,
+    providers: &[Provider],
+) -> Result<String, String> {
+    if let Some(requested) = model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return resolve_gateway_client_model_id(settings, providers, requested);
+    }
+    default_gateway_client_sync_model(settings, providers)
+}
+
+fn default_gateway_client_sync_model(
+    settings: &Settings,
+    providers: &[Provider],
+) -> Result<String, String> {
+    let models = gateway_models_from_config(settings, providers);
+    if models.iter().any(|model| model.id == DEFAULT_MODEL) {
+        return Ok(DEFAULT_MODEL.to_string());
+    }
+    models
+        .into_iter()
+        .map(|model| model.id)
+        .find(|model| !model.trim().is_empty())
+        .ok_or_else(|| "No Gateway models are exported.".to_string())
 }
 
 fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String> {
@@ -3984,22 +4017,46 @@ fn version_output_for_path(path: &Path) -> Option<std::process::Output> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "ps1" => Command::new("powershell")
-            .args([
+        "ps1" => {
+            let mut command = Command::new("powershell");
+            command.args([
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
                 path.to_string_lossy().as_ref(),
                 "--version",
-            ])
-            .output()
-            .ok(),
-        "cmd" | "bat" => Command::new("cmd")
-            .args(["/C", path.to_string_lossy().as_ref(), "--version"])
-            .output()
-            .ok(),
-        _ => Command::new(path).arg("--version").output().ok(),
+            ]);
+            command_output_no_window(command)
+        }
+        "cmd" | "bat" => {
+            let mut command = Command::new("cmd");
+            command.args(["/C", path.to_string_lossy().as_ref(), "--version"]);
+            command_output_no_window(command)
+        }
+        _ => {
+            let mut command = Command::new(path);
+            command.arg("--version");
+            command_output_no_window(command)
+        }
+    }
+}
+
+fn command_output_no_window(mut command: Command) -> Option<std::process::Output> {
+    configure_no_window(&mut command);
+    command.output().ok()
+}
+
+fn configure_no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
     }
 }
 
@@ -4102,10 +4159,9 @@ fn windows_app_path(exe_name: &str) -> Option<PathBuf> {
     ]
     .into_iter()
     .find_map(|key| {
-        let output = Command::new("reg")
-            .args(["query", &key, "/ve"])
-            .output()
-            .ok()?;
+        let mut command = Command::new("reg");
+        command.args(["query", &key, "/ve"]);
+        let output = command_output_no_window(command)?;
         if !output.status.success() {
             return None;
         }
@@ -4130,10 +4186,9 @@ fn windows_file_version(path: &Path) -> Option<String> {
     }
     let escaped = path.to_string_lossy().replace('\'', "''");
     let script = format!("(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion");
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-Command", &script]);
+    let output = command_output_no_window(command)?;
     if !output.status.success() {
         return None;
     }
@@ -5695,6 +5750,19 @@ mod tests {
         assert_eq!(summary.results[4].status, "applied");
         assert_eq!(summary.results[5].status, "failed");
         assert!(summary.message.contains("1 failed"));
+    }
+
+    #[test]
+    fn gateway_client_sync_default_model_skips_disabled_default_model() {
+        let settings = Settings {
+            official_disabled_models: vec!["openai/gpt-5.5".to_string()],
+            ..Settings::default()
+        };
+
+        let model = super::default_gateway_client_sync_model(&settings, &[])
+            .expect("enabled fallback model");
+
+        assert_eq!(model, "openai/gpt-5.4");
     }
 
     #[test]
