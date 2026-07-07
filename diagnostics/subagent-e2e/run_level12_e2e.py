@@ -827,6 +827,7 @@ def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> di
     direct_artifact_mcp_calls = direct_artifact_tool_calls(parsed, output_path)
     expected_content = expected_level2_artifact_text(case, output_path, sentinel)
     artifact_text = output_path.read_text(encoding="utf-8", errors="replace") if output_path.exists() else ""
+    normalized_artifact_text = artifact_text.lstrip("\ufeff")
     final_lines = [line.strip() for line in parsed["final_text"].splitlines() if line.strip()]
     router = router_errors(parsed, stderr_path)
     proxy_counts = proxy_event_counts_for_case(case, parsed)
@@ -840,7 +841,7 @@ def analyze_level2(case: dict[str, Any], output_path: Path, sentinel: str) -> di
         "has_waits": len(waits) >= 3,
         "has_closes": len(closes) >= 3,
         "no_direct_artifact_workaround": not direct_artifact_commands and not direct_artifact_mcp_calls,
-        "artifact_exact": artifact_text.rstrip("\r\n") == expected_content.rstrip("\n"),
+        "artifact_exact": normalized_artifact_text.rstrip("\r\n") == expected_content.rstrip("\n"),
         "final_exact": final_lines
         == [
             "RESULT: PASS",

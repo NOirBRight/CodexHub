@@ -29,7 +29,7 @@ class Level12E2EParserTests(unittest.TestCase):
                 "endpoint: responses\n"
                 f"{sentinel}\n"
                 "artifact: ok\n",
-                encoding="utf-8",
+                encoding="utf-8-sig",
                 newline="\n",
             )
             stderr.write_text("", encoding="utf-8")
@@ -76,7 +76,7 @@ class Level12E2EParserTests(unittest.TestCase):
             self.assertTrue(summary["pass"])
             self.assertEqual(
                 summary["expected_artifact_text"],
-                output_path.read_text(encoding="utf-8"),
+                output_path.read_text(encoding="utf-8-sig"),
             )
 
 
