@@ -13,6 +13,7 @@ class WorkflowNode:
     dependencies: tuple[str, ...] = ()
     assigned_agent_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    terminal: bool = False
 
 
 @dataclass
@@ -41,7 +42,7 @@ def compute_allowed_actions(workflow: WorkflowState, protocol: ProtocolState) ->
                     kind="workflow",
                     tool_name="spawn_agent",
                     node_id=node.node_id,
-                    arguments={"message": node.prompt, "fork_context": False},
+                    arguments={"message": node.prompt, "nickname": node.node_id, "fork_context": False},
                 )
             )
     if actions:
@@ -91,6 +92,36 @@ def workflow_from_role_sequence(
     return WorkflowState(nodes=nodes)
 
 
+def append_node(
+    workflow: WorkflowState,
+    node: WorkflowNode,
+    *,
+    allow_external_dependencies: bool = False,
+) -> WorkflowState:
+    if node.node_id in workflow.nodes:
+        raise ValueError(f"duplicate workflow node: {node.node_id}")
+    if not allow_external_dependencies:
+        for dependency in node.dependencies:
+            if dependency not in workflow.nodes:
+                raise ValueError(f"missing workflow dependency: {dependency}")
+    nodes = dict(workflow.nodes)
+    nodes[node.node_id] = node
+    return WorkflowState(nodes=nodes)
+
+
+def node_complete(node: WorkflowNode, protocol: ProtocolState) -> bool:
+    return bool(node.assigned_agent_id and node.assigned_agent_id in protocol.closed_agent_ids)
+
+
+def workflow_complete(workflow: WorkflowState, protocol: ProtocolState) -> bool:
+    if protocol.violations or protocol.open_agent_ids or protocol.needs_input_agent_ids:
+        return False
+    terminal_nodes = [node for node in workflow.nodes.values() if node.terminal]
+    if terminal_nodes:
+        return all(node_complete(node, protocol) for node in terminal_nodes)
+    return bool(workflow.nodes) and all(node_complete(node, protocol) for node in workflow.nodes.values())
+
+
 def _protocol_actions(protocol: ProtocolState) -> list[WorkflowAction]:
     if protocol.needs_input_agent_ids:
         agent_id = protocol.needs_input_agent_ids[0]
@@ -133,4 +164,4 @@ def _protocol_actions(protocol: ProtocolState) -> list[WorkflowAction]:
 
 
 def _node_complete(node: WorkflowNode, protocol: ProtocolState) -> bool:
-    return bool(node.assigned_agent_id and node.assigned_agent_id in protocol.closed_agent_ids)
+    return node_complete(node, protocol)
