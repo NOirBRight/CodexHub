@@ -386,22 +386,183 @@ PERMANENT_HTTP_ERROR_STATUSES = {
     505,
 }
 PERMANENT_UPSTREAM_ERROR_VALUES = {
+    "400",
+    "401",
+    "402",
+    "403",
+    "404",
+    "405",
+    "406",
+    "410",
+    "413",
+    "414",
+    "415",
+    "422",
+    "451",
+    "10003",
+    "10004",
+    "10005",
+    "10013",
+    "10014",
+    "10015",
+    "10016",
+    "10019",
+    "10163",
+    "10404",
+    "10907",
+    "10910",
+    "11200",
+    "11201",
+    "11221",
+    "access_denied",
+    "accessdeniedexception",
     "authentication_error",
+    "bad_request",
+    "badrequest",
     "billing_hard_limit_reached",
     "billing_not_active",
+    "blocked_by_guardrail",
+    "content_filter",
+    "content_policy_violation",
     "context_length_exceeded",
+    "forbidden",
+    "guardrail_block",
+    "incorrect_api_key",
     "insufficient_quota",
+    "insufficient_balance",
+    "insufficient_credits",
+    "invalid_argument",
+    "invalidargument",
     "invalid_api_key",
     "invalid_image",
+    "invalid_key",
+    "invalid_parameter",
+    "invalid_parameters",
+    "invalid_request",
     "invalid_request_error",
+    "moderation",
     "model_not_found",
     "not_found_error",
+    "payment_required",
     "permission_denied",
     "permission_error",
+    "safety_violation",
+    "unauthorized",
     "unsupported_image",
     "unsupported_parameter",
+    "unsupported_country",
     "unsupported_value",
+    "validation_error",
+    "validationexception",
 }
+PERMANENT_UPSTREAM_ERROR_NEEDLES = (
+    "billing",
+    "content policy",
+    "context length",
+    "context_length",
+    "country not supported",
+    "incorrect api key",
+    "insufficient balance",
+    "insufficient credits",
+    "insufficient quota",
+    "invalid api key",
+    "invalid argument",
+    "invalid parameter",
+    "maximum context",
+    "moderation",
+    "payment required",
+    "permission denied",
+    "safety",
+    "schema",
+    "sensitive",
+    "token limit",
+    "tokens exceed",
+    "too many tokens",
+    "unsupported country",
+    "validation error",
+    "token数量超过上限",
+)
+PERMANENT_UPSTREAM_AUTH_NEEDLES = (
+    "access denied",
+    "forbidden",
+    "not authorized",
+    "unauthorized",
+)
+PROVIDER_THROTTLE_ERROR_VALUES = {
+    "10007",
+    "11202",
+    "11203",
+    "11210",
+    "429",
+    "rate_limit",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "rate_limit_reached",
+    "resource_exhausted",
+    "request_throttled",
+    "throttled",
+    "throttling",
+    "throttlingexception",
+    "too_many_requests",
+}
+PROVIDER_THROTTLE_ERROR_NEEDLES = (
+    "limit_requests",
+    "qps",
+    "rate limit",
+    "rate_limit",
+    "request limit",
+    "requests per minute",
+    "requests rate",
+    "resource exhausted",
+    "rpm",
+    "rps",
+    "throttl",
+    "tokens per minute",
+    "too many requests",
+    "tpm",
+    "流控",
+    "限流",
+)
+PROVIDER_OVERLOADED_ERROR_VALUES = {
+    "10008",
+    "10009",
+    "10010",
+    "10011",
+    "10012",
+    "10110",
+    "10222",
+    "10223",
+    "503",
+    "529",
+    "model_overloaded",
+    "overloaded_error",
+    "provider_unavailable",
+    "server_overloaded",
+    "service_unavailable",
+    "serviceunavailable",
+    "serviceunavailableexception",
+    "unavailable",
+}
+PROVIDER_OVERLOADED_ERROR_NEEDLES = (
+    "capacity",
+    "engine node",
+    "engineinternalerror",
+    "invalid response",
+    "lb",
+    "model is down",
+    "no available model provider",
+    "overload",
+    "overloaded",
+    "queue",
+    "queued",
+    "server overloaded",
+    "service unavailable",
+    "system is busy",
+    "temporarily unavailable",
+    "引擎节点",
+    "排队",
+    "服务忙",
+)
 IMAGE_PROXY_PROMPT_VERSION = "v3"
 IMAGE_PROXY_PROMPT = (
     "Describe the image for a downstream text-only coding agent that cannot see it. "
@@ -739,9 +900,9 @@ def gateway_retry_delay_seconds(
     retry_after_seconds = _retry_after_delay_seconds(exc)
     if retry_after_seconds is not None:
         return retry_after_seconds
-    if failure_class in CAPACITY_RETRY_FAILURE_CLASSES:
+    if failure_class == RETRY_FAILURE_PROVIDER_THROTTLE:
         return gateway_capacity_retry_delay_seconds(attempt)
-    return min(max(1, attempt) * 2, 8)
+    return min(max(1, attempt - 1) * 2, 8)
 
 
 def gateway_image_proxy_enabled() -> bool:
@@ -5351,19 +5512,21 @@ def transparent_request_body(
     upstream_model = upstream.get("upstream_model")
     official_responses_backend = upstream_name == "official"
     if not isinstance(upstream_model, str) or not upstream_model:
-        if official_responses_backend and isinstance(payload, Mapping):
+        if isinstance(payload, Mapping):
             next_payload = dict(payload)
             changed = False
-            if "max_output_tokens" in next_payload:
+            if _normalize_responses_message_input_items(next_payload):
+                changed = True
+            if official_responses_backend and "max_output_tokens" in next_payload:
                 del next_payload["max_output_tokens"]
                 changed = True
-            if next_payload.get("store") is not False:
+            if official_responses_backend and next_payload.get("store") is not False:
                 next_payload["store"] = False
                 changed = True
-            if next_payload.get("stream") is not True:
+            if official_responses_backend and next_payload.get("stream") is not True:
                 next_payload["stream"] = True
                 changed = True
-            if _normalize_responses_string_input(next_payload):
+            if official_responses_backend and _normalize_responses_string_input(next_payload):
                 changed = True
             if changed:
                 return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -5388,6 +5551,8 @@ def transparent_request_body(
         next_payload["stream"] = True
         changed = True
     if official_responses_backend and _normalize_responses_string_input(next_payload):
+        changed = True
+    if _normalize_responses_message_input_items(next_payload):
         changed = True
     if not changed:
         return body
@@ -6943,10 +7108,10 @@ def _default_retry_attempts_for_request_kind(request_kind: str) -> int:
     if request_kind == RETRY_REQUEST_COMPACT:
         return 3
     if request_kind == RETRY_REQUEST_IMAGE_PROXY_VISION:
-        return 1
+        return 3
     if request_kind == RETRY_REQUEST_OFFICIAL_CONTROL:
         return 1
-    return 3
+    return 5
 
 
 def _bounded_retry_attempts(value: Any, default: int) -> int:
@@ -7055,6 +7220,20 @@ def _payload_error_values(payload: Mapping[str, Any] | None) -> set[str]:
         return set()
     error = payload.get("error")
     values: set[str] = set()
+    value_keys = (
+        "__type",
+        "code",
+        "detail",
+        "error_code",
+        "error_type",
+        "errorCode",
+        "errorType",
+        "message",
+        "param",
+        "reason",
+        "status",
+        "type",
+    )
 
     def add_value(value: Any) -> None:
         if isinstance(value, str) and value:
@@ -7062,13 +7241,25 @@ def _payload_error_values(payload: Mapping[str, Any] | None) -> set[str]:
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
             values.add(str(value))
 
+    def add_mapping_values(mapping: Mapping[str, Any]) -> None:
+        for key in value_keys:
+            add_value(mapping.get(key))
+        nested_errors = mapping.get("errors")
+        if isinstance(nested_errors, list):
+            for item in nested_errors:
+                if isinstance(item, Mapping):
+                    add_mapping_values(item)
+        nested_response = mapping.get("response")
+        if isinstance(nested_response, Mapping):
+            nested_error = nested_response.get("error")
+            if isinstance(nested_error, Mapping):
+                add_mapping_values(nested_error)
+
     if isinstance(error, Mapping):
-        for key in ("type", "code", "param", "message"):
-            add_value(error.get(key))
+        add_mapping_values(error)
     elif isinstance(error, str) and error:
         values.add(error.strip().lower())
-    for key in ("type", "code", "detail", "message"):
-        add_value(payload.get(key))
+    add_mapping_values(payload)
     return values
 
 
@@ -7080,14 +7271,34 @@ def _http_error_values_contain(values: set[str], needles: tuple[str, ...]) -> bo
     return any(needle in value for value in values for needle in needles)
 
 
-def _has_permanent_upstream_error_value(exc: HTTPError) -> bool:
-    values = _http_error_values(exc)
+def _failure_class_from_error_values(values: set[str]) -> str | None:
     if not values:
-        return False
-    for value in values:
-        if value in PERMANENT_UPSTREAM_ERROR_VALUES:
-            return True
-    return False
+        return None
+    if any(value in PERMANENT_UPSTREAM_ERROR_VALUES for value in values):
+        return RETRY_FAILURE_PERMANENT
+    if _http_error_values_contain(values, PERMANENT_UPSTREAM_ERROR_NEEDLES):
+        return RETRY_FAILURE_PERMANENT
+    if any(value in PROVIDER_THROTTLE_ERROR_VALUES for value in values) or _http_error_values_contain(
+        values,
+        PROVIDER_THROTTLE_ERROR_NEEDLES,
+    ):
+        return RETRY_FAILURE_PROVIDER_THROTTLE
+    if any(value in PROVIDER_OVERLOADED_ERROR_VALUES for value in values) or _http_error_values_contain(
+        values,
+        PROVIDER_OVERLOADED_ERROR_NEEDLES,
+    ):
+        return RETRY_FAILURE_PROVIDER_OVERLOADED
+    if _http_error_values_contain(values, PERMANENT_UPSTREAM_AUTH_NEEDLES):
+        return RETRY_FAILURE_PERMANENT
+    return None
+
+
+def _status_allows_capacity_error_value(status: int | None) -> bool:
+    if status is None:
+        return True
+    if status == 400:
+        return True
+    return status not in PERMANENT_HTTP_ERROR_STATUSES
 
 
 def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
@@ -7117,21 +7328,9 @@ def _upstream_failure_class(exc: BaseException) -> str:
         return _upstream_failure_class(exc.cause)
     if isinstance(exc, UpstreamStreamErrorEvent):
         values = _payload_error_values(exc.payload)
-        if any(value in PERMANENT_UPSTREAM_ERROR_VALUES for value in values):
-            return RETRY_FAILURE_PERMANENT
-        if (
-            "11210" in values
-            or _http_error_values_contain(values, ("tpm", "tokens per minute", "rate limit", "rate_limit", "too many requests"))
-        ):
-            return RETRY_FAILURE_PROVIDER_THROTTLE
-        if (
-            "10012" in values
-            or _http_error_values_contain(
-                values,
-                ("overload", "overloaded", "queue", "queued", "temporarily unavailable", "system is busy", "engineinternalerror"),
-            )
-        ):
-            return RETRY_FAILURE_PROVIDER_OVERLOADED
+        value_class = _failure_class_from_error_values(values)
+        if value_class is not None:
+            return value_class
         return RETRY_FAILURE_QUICK_TRANSIENT
     if isinstance(exc, HTTPError):
         override = _http_retry_header_override(exc)
@@ -7139,26 +7338,18 @@ def _upstream_failure_class(exc: BaseException) -> str:
             return RETRY_FAILURE_PERMANENT
         status = _upstream_retry_status(exc)
         values = _http_error_values(exc)
+        value_class = _failure_class_from_error_values(values)
+        if value_class in CAPACITY_RETRY_FAILURE_CLASSES and _status_allows_capacity_error_value(status):
+            return value_class
+        if value_class == RETRY_FAILURE_PERMANENT and override is not True:
+            return RETRY_FAILURE_PERMANENT
         if status in PERMANENT_HTTP_ERROR_STATUSES:
             return RETRY_FAILURE_QUICK_TRANSIENT if override is True else RETRY_FAILURE_PERMANENT
-        if status == 429 and _has_permanent_upstream_error_value(exc):
-            return RETRY_FAILURE_PERMANENT
-        if _has_permanent_upstream_error_value(exc):
-            return RETRY_FAILURE_PERMANENT
-        if (
-            status == 429
-            or "11210" in values
-            or _http_error_values_contain(values, ("tpm", "tokens per minute", "rate limit", "rate_limit", "too many requests"))
-        ):
+        if status == 429:
+            if value_class == RETRY_FAILURE_PERMANENT:
+                return RETRY_FAILURE_PERMANENT
             return RETRY_FAILURE_PROVIDER_THROTTLE
-        if (
-            status == 503
-            or "10012" in values
-            or _http_error_values_contain(
-                values,
-                ("overload", "overloaded", "queue", "queued", "temporarily unavailable", "system is busy", "engineinternalerror"),
-            )
-        ):
+        if status == 503:
             return RETRY_FAILURE_PROVIDER_OVERLOADED
         if override is True:
             return RETRY_FAILURE_QUICK_TRANSIENT
@@ -7853,6 +8044,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             emit_request_start_once(request_observability)
             emit_retry_to_downstream = (
                 not is_official_http_passthrough
+                and not is_transparent_metered
                 and caller_stream
                 and inbound_format == "responses"
                 and gateway_downstream_retry_notice_enabled()
@@ -7956,8 +8148,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
                                     defer_stream_errors=False
-                                    if is_official_http_passthrough or is_transparent_metered
-                                    else relay_attempt < gateway_auto_retry_max_attempts(),
+                                    if is_official_http_passthrough
+                                    else relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                     behavior_profile=behavior_profile,
                                 )
@@ -8944,6 +9136,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         headers_already_sent: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
         event_context: Mapping[str, Any] | None = None,
+        defer_stream_errors: bool = False,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
@@ -8956,22 +9149,51 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             inbound_format=inbound_format,
         )
 
-        if not headers_already_sent:
+        headers_sent = headers_already_sent
+
+        def send_downstream_headers_once() -> None:
+            nonlocal headers_sent
+            if headers_sent:
+                return
             self.send_response(status)
             for key, value in _filtered_response_headers(response.headers, is_event_stream):
                 self.send_header(key, value)
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
             self.send_header("Connection", "close")
             self.end_headers()
+            headers_sent = True
             if is_event_stream and mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
 
+        if not (defer_stream_errors and is_event_stream and not headers_already_sent):
+            send_downstream_headers_once()
+
         _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
         if is_event_stream:
+            pending_lines: list[bytes] = []
+
+            def transparent_error_event(payload: Mapping[str, Any]) -> UpstreamStreamErrorEvent | None:
+                if upstream_format == "responses" and _responses_stream_error_type(payload) is not None:
+                    return UpstreamStreamErrorEvent(payload)
+                if upstream_format == "chat_completions" and _chat_stream_error_detail(payload) is not None:
+                    return UpstreamStreamErrorEvent(payload)
+                return None
+
+            def write_transparent_line(line: bytes) -> None:
+                self.wfile.write(line)
+                self.wfile.flush()
+                _offer_usage_observed_sse_line(
+                    usage_context,
+                    line,
+                    upstream_format=upstream_format,
+                )
+
             while True:
                 try:
                     line = response.readline()
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    if defer_stream_errors and not headers_sent:
+                        raise UpstreamStreamInterruptedError(exc) from exc
                     self.close_connection = True
                     write_proxy_event(
                         "transparent_stream_closed",
@@ -8987,9 +9209,65 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     return 502
                 if not line:
                     break
+                if defer_stream_errors and not headers_sent:
+                    pending_lines.append(line)
+                    payload_bytes = _sse_payload_bytes(line)
+                    if payload_bytes is None:
+                        continue
+                    release_pending = True
+                    if payload_bytes != b"[DONE]":
+                        try:
+                            payload = json.loads(payload_bytes.decode("utf-8-sig"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            payload = None
+                        if isinstance(payload, Mapping):
+                            stream_error = transparent_error_event(payload)
+                            if stream_error is not None:
+                                raise stream_error
+                            if upstream_format == "responses":
+                                event_type = payload.get("type")
+                                release_pending = (
+                                    event_type == "response.completed"
+                                    or _responses_event_starts_downstream_output(payload)
+                                )
+                    if not release_pending:
+                        continue
+                    send_downstream_headers_once()
+                    try:
+                        for pending_line in pending_lines:
+                            write_transparent_line(pending_line)
+                    except OSError as exc:
+                        self.close_connection = True
+                        event_fields = dict(event_context or {})
+                        for key in (
+                            "request_id",
+                            "model",
+                            "upstream",
+                            "status",
+                            "upstream_format",
+                            "inbound_format",
+                            "error",
+                            "detail",
+                        ):
+                            event_fields.pop(key, None)
+                        write_proxy_event(
+                            "downstream_stream_closed",
+                            request_id=request_id,
+                            model=model,
+                            upstream=upstream_name,
+                            status=status,
+                            upstream_format=upstream_format,
+                            inbound_format=inbound_format,
+                            error=type(exc).__name__,
+                            detail=safe_upstream_error_detail(exc),
+                            **event_fields,
+                        )
+                        return status
+                    pending_lines.clear()
+                    continue
                 try:
-                    self.wfile.write(line)
-                    self.wfile.flush()
+                    send_downstream_headers_once()
+                    write_transparent_line(line)
                 except OSError as exc:
                     self.close_connection = True
                     event_fields = dict(event_context or {})
@@ -9017,11 +9295,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **event_fields,
                     )
                     return status
-                _offer_usage_observed_sse_line(
-                    usage_context,
-                    line,
-                    upstream_format=upstream_format,
-                )
+            if pending_lines and not headers_sent:
+                send_downstream_headers_once()
+                for pending_line in pending_lines:
+                    write_transparent_line(pending_line)
             self.close_connection = True
             return status
 
@@ -9104,6 +9381,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 headers_already_sent=headers_already_sent,
                 mark_downstream_sse_started=mark_downstream_sse_started,
                 event_context=event_context,
+                defer_stream_errors=defer_stream_errors,
             )
         if (
             behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH

@@ -94,6 +94,9 @@ class FakeHandler:
     def _relay_official_passthrough_sse_response(self, *args, **kwargs):
         return CodexProxyHandler._relay_official_passthrough_sse_response(self, *args, **kwargs)
 
+    def _relay_transparent_upstream_response(self, *args, **kwargs):
+        return CodexProxyHandler._relay_transparent_upstream_response(self, *args, **kwargs)
+
 
 class FakeSseResponse:
     status = 200
@@ -1360,9 +1363,9 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(codex_proxy.model_event_sse_idle_timeout_seconds(), 300)
 
     def test_gateway_retry_delay_caps_after_third_retry(self):
-        self.assertEqual([codex_proxy.gateway_retry_delay_seconds(attempt) for attempt in range(1, 6)], [2, 4, 6, 8, 8])
+        self.assertEqual([codex_proxy.gateway_retry_delay_seconds(attempt) for attempt in range(1, 6)], [2, 2, 4, 6, 8])
 
-    def test_gateway_capacity_retry_delay_uses_slower_cadence(self):
+    def test_gateway_throttle_retry_delay_uses_slower_cadence(self):
         delays = [
             codex_proxy.gateway_retry_delay_seconds(
                 attempt,
@@ -1371,6 +1374,16 @@ class RoutingTests(unittest.TestCase):
             for attempt in range(1, 6)
         ]
         self.assertEqual(delays, [10, 20, 30, 60, 60])
+
+    def test_gateway_overloaded_retry_delay_uses_quick_cadence(self):
+        delays = [
+            codex_proxy.gateway_retry_delay_seconds(
+                attempt,
+                failure_class=codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            )
+            for attempt in range(1, 7)
+        ]
+        self.assertEqual(delays, [2, 2, 4, 6, 8, 8])
 
     def test_gateway_retry_delay_respects_retry_after_header(self):
         error = HTTPError(
@@ -1402,7 +1415,13 @@ class RoutingTests(unittest.TestCase):
         ):
             self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
             self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 2)
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 1)
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
+
+    def test_default_retry_attempts_by_request_kind(self):
+        with patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1"}, clear=False):
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 5)
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
+            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
 
     def test_open_upstream_response_retries_http_errors_for_any_provider(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
@@ -1568,7 +1587,7 @@ class RoutingTests(unittest.TestCase):
 
                 self.assertIs(response, success)
                 self.assertEqual(mock_urlopen.call_count, 2)
-                expected_delay = 10 if status in {429, 503} else 2
+                expected_delay = 10 if status == 429 else 2
                 mock_sleep.assert_called_once_with(expected_delay)
 
     def test_open_upstream_response_classifies_provider_capacity_codes(self):
@@ -1619,14 +1638,154 @@ class RoutingTests(unittest.TestCase):
                     )
 
                 self.assertIs(response, success)
-                mock_sleep.assert_called_once_with(10)
+                expected_delay = 10 if expected_class == codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE else 2
+                mock_sleep.assert_called_once_with(expected_delay)
                 retry_events = [
                     call.kwargs for call in self.write_proxy_event.call_args_list
                     if call.args and call.args[0] == "upstream_retry"
                 ]
                 self.assertEqual(len(retry_events), 1)
                 self.assertEqual(retry_events[0]["failure_class"], expected_class)
-                self.assertEqual(retry_events[0]["delay_ms"], 10000)
+                self.assertEqual(retry_events[0]["delay_ms"], expected_delay * 1000)
+
+    def test_stream_error_event_classifies_common_provider_error_values(self):
+        cases = [
+            (
+                "openai_rate_limit",
+                {"type": "error", "error": {"type": "rate_limit_error", "code": "rate_limit_exceeded"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "openai_insufficient_quota",
+                {"type": "error", "error": {"type": "insufficient_quota", "code": "insufficient_quota"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "openai_engine_overloaded",
+                {"type": "error", "error": {"type": "server_error", "message": "The engine is currently overloaded"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "azure_openai_rate_limit",
+                {"type": "error", "error": {"code": "429", "message": "Rate limit is exceeded. Try again in 10 seconds."}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "azure_openai_content_filter",
+                {"type": "error", "error": {"code": "content_filter", "message": "The response was filtered"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "anthropic_rate_limit",
+                {"type": "error", "error": {"type": "rate_limit_error"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "anthropic_overloaded",
+                {"type": "error", "error": {"type": "overloaded_error"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "google_resource_exhausted",
+                {"type": "error", "error": {"status": "RESOURCE_EXHAUSTED", "code": 429}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "google_unavailable",
+                {"type": "error", "error": {"status": "UNAVAILABLE", "code": 503}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "google_invalid_argument",
+                {"type": "error", "error": {"status": "INVALID_ARGUMENT", "message": "Request contains an invalid argument."}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "bedrock_throttling_exception",
+                {"type": "error", "error": {"type": "ThrottlingException"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "bedrock_service_unavailable",
+                {"type": "error", "error": {"type": "ServiceUnavailableException"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "bedrock_validation_exception",
+                {"type": "error", "error": {"__type": "ValidationException", "message": "Input is invalid."}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "mistral_validation",
+                {"type": "error", "error": {"type": "validation_error", "message": "Validation error"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "deepseek_insufficient_balance",
+                {"type": "error", "error": {"code": "insufficient_balance", "message": "Insufficient Balance"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "deepseek_server_overloaded",
+                {"type": "error", "error": {"code": 503, "message": "Server Overloaded"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "openrouter_model_down",
+                {"type": "error", "error": {"code": 502, "message": "Your chosen model is down"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "openrouter_no_available_provider",
+                {"type": "error", "error": {"code": 503, "message": "There is no available model provider"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "openrouter_insufficient_credits",
+                {"type": "error", "error": {"code": 402, "message": "Insufficient credits"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "cohere_rate_limit",
+                {"type": "error", "error": {"message": "trial token rate limit exceeded, limit is 100000 tokens per minute"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "dashscope_throttling",
+                {"type": "error", "code": "Throttling", "message": "Requests rate exceeded"},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "dashscope_allocation_quota",
+                {"type": "error", "code": "Throttling.AllocationQuota", "message": "Allocated quota exceeded, please try again later."},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "xunfei_concurrency_throttle",
+                {"type": "error", "error": {"code": "10007", "message": "service is processing current request"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
+            ),
+            (
+                "xunfei_engine_busy",
+                {"type": "error", "error": {"code": "10012", "message": "engine internal error or queued"}},
+                codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+            ),
+            (
+                "xunfei_schema_error",
+                {"type": "error", "error": {"code": "10004", "message": "$.payload.message.text min length is 1"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+            (
+                "xunfei_context_too_long",
+                {"type": "error", "error": {"code": "10012", "message": "context length exceeded"}},
+                codex_proxy.RETRY_FAILURE_PERMANENT,
+            ),
+        ]
+        for label, payload, expected_class in cases:
+            with self.subTest(label=label, expected_class=expected_class):
+                exc = codex_proxy.UpstreamStreamErrorEvent(payload)
+
+                self.assertEqual(codex_proxy._upstream_failure_class(exc), expected_class)
 
     def test_open_upstream_response_stops_capacity_retry_when_retry_after_exceeds_elapsed_limit(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
@@ -1723,7 +1882,7 @@ class RoutingTests(unittest.TestCase):
             clear=False,
         ):
             base_attempts = codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION)
-            self.assertEqual(base_attempts, 3)
+            self.assertEqual(base_attempts, 5)
             self.assertEqual(
                 codex_proxy._retry_attempts_for_failure_class(
                     request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
@@ -1742,7 +1901,7 @@ class RoutingTests(unittest.TestCase):
                     explicit_max_attempts=False,
                     stream_failure=False,
                 ),
-                3,
+                5,
             )
 
     def test_open_upstream_response_respects_x_should_retry_headers(self):
@@ -1935,7 +2094,7 @@ class RoutingTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(10)
+        mock_sleep.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertNotIn(b"event: codexhub.retry\n", written)
@@ -2007,6 +2166,78 @@ class RoutingTests(unittest.TestCase):
         ]
         self.assertEqual(len(retry_events), 1)
         self.assertEqual(retry_events[0]["error"], "TimeoutError")
+
+    def test_transparent_provider_responses_retries_sse_error_event_before_downstream_headers(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/providers/volc/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        failed_stream = FakeSseResponse(
+            [
+                b"event: response.created\n",
+                b'data: {"type":"response.created","response":{"id":"resp_busy","status":"in_progress","output":[]}}\n',
+                b"\n",
+                b"event: response.failed\n",
+                b'data: {"type":"response.failed","response":{"id":"resp_busy","status":"failed","error":{"code":10012,"message":"The system is busy, please try again later."}}}\n',
+                b"\n",
+                b"",
+            ]
+        )
+        success = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_transparent_retry","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_transparent_retry","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(2)
+        self.assertEqual(fake.status, 200)
+        written = b"".join(fake.wfile.writes)
+        self.assertIn(b"resp_transparent_retry", written)
+        self.assertIn(b"response.output_text.delta", written)
+        self.assertNotIn(b"The system is busy", written)
+        self.assertNotIn(b"event: codexhub.retry\n", written)
+        retry_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["failure_class"], codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED)
+        self.assertEqual(retry_events[0]["upstream"], "volcengine")
 
     def test_post_responses_streaming_retries_reset_after_buffered_reasoning_start(self):
         body = json.dumps(
@@ -2204,7 +2435,7 @@ class RoutingTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 5)
-        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [2, 4, 6, 8])
+        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [2, 2, 4, 6])
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_text_retry", written)
@@ -3590,6 +3821,33 @@ class RoutingTests(unittest.TestCase):
             payload["input"],
             [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         )
+
+    def test_provider_transparent_request_body_normalizes_message_shorthand(self):
+        body = json.dumps(
+            {
+                "model": "xopdeepseekv4flash",
+                "input": [
+                    {"role": "developer", "content": "System guidance."},
+                    {"role": "user", "content": [{"type": "input_text", "text": "test"}]},
+                ],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        upstream = {"name": "xunfei", "upstream_format": "responses"}
+
+        transformed = codex_proxy.transparent_request_body(
+            body,
+            json.loads(body),
+            upstream,
+            model_id="xunfei/xopdeepseekv4flash",
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "message")
+        self.assertEqual(payload["input"][0]["role"], "developer")
+        self.assertEqual(payload["input"][0]["content"], "System guidance.")
+        self.assertEqual(payload["input"][1]["type"], "message")
+        self.assertEqual(payload["input"][1]["role"], "user")
 
     def test_official_transparent_request_body_sets_store_false_for_codex_backend(self):
         body = json.dumps(
@@ -5191,6 +5449,78 @@ class RoutingTests(unittest.TestCase):
                 defer_stream_errors=True,
             )
 
+        self.assertEqual(handler.wfile.writes, [])
+        self.assertEqual(
+            codex_proxy._upstream_failure_class(raised.exception),
+            codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+        )
+
+    def test_transparent_responses_sse_error_event_before_output_defers_without_headers(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b"event: error\n",
+                b'data: {"type":"error","error":{"code":10012,"message":"The system is busy, please try again later."}}\n',
+                b"\n",
+                b"",
+            ]
+        )
+
+        with self.assertRaises(codex_proxy.UpstreamStreamErrorEvent) as raised:
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "xunfei",
+                request_id="req_transparent_busy_retry",
+                model="xunfei/xopglm52",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                defer_stream_errors=True,
+            )
+
+        self.assertIsNone(handler.status)
+        self.assertFalse(handler.headers_ended)
+        self.assertEqual(handler.wfile.writes, [])
+        self.assertEqual(
+            codex_proxy._upstream_failure_class(raised.exception),
+            codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
+        )
+
+    def test_transparent_responses_response_failed_after_metadata_defers_without_headers(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b"event: response.created\n",
+                b'data: {"type":"response.created","response":{"id":"resp_busy","status":"in_progress","output":[]}}\n',
+                b"\n",
+                b"event: response.in_progress\n",
+                b'data: {"type":"response.in_progress","response":{"id":"resp_busy","status":"in_progress"}}\n',
+                b"\n",
+                b"event: response.failed\n",
+                b'data: {"type":"response.failed","response":{"id":"resp_busy","status":"failed","error":{"code":10012,"message":"EngineInternalError:1105|{\\"Code\\":1105,\\"Message\\":\\"The system is busy, please try again later.\\"}"}}}\n',
+                b"\n",
+                b"",
+            ]
+        )
+
+        with self.assertRaises(codex_proxy.UpstreamStreamErrorEvent) as raised:
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "xunfei",
+                request_id="req_transparent_failed_after_metadata",
+                model="xunfei/xopglm52",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                defer_stream_errors=True,
+            )
+
+        self.assertIsNone(handler.status)
+        self.assertFalse(handler.headers_ended)
         self.assertEqual(handler.wfile.writes, [])
         self.assertEqual(
             codex_proxy._upstream_failure_class(raised.exception),
