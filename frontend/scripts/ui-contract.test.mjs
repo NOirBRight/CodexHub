@@ -959,6 +959,50 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
   assert.doesNotMatch(drawerSource, />\s*Sync history\s*</);
 });
 
+test("settings drawer places launch-at-startup below the language switch", async () => {
+  const [drawerSource, zhSource, enSource] = await Promise.all([
+    readFile(settingsDrawerPath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+  ]);
+
+  const languageIndex = drawerSource.indexOf('t("settings.language")');
+  const autoStartIndex = drawerSource.indexOf('t("settings.autoStartProxy")');
+  const includeOfficialIndex = drawerSource.indexOf('t("settings.includeOfficialModels")');
+
+  assert.ok(languageIndex >= 0, "language control should be present");
+  assert.ok(autoStartIndex > languageIndex, "autostart control should be below language");
+  assert.ok(includeOfficialIndex > autoStartIndex, "autostart control should be above official models");
+  assert.match(drawerSource, /checked=\{draft\.auto_start_proxy\}/);
+  assert.match(drawerSource, /onChange=\{\(value\) => setDraft\(\{ \.\.\.draft, auto_start_proxy: value \}\)\}/);
+  assert.match(zhSource, /autoStartProxy:\s*"开机自启动"/);
+  assert.match(enSource, /autoStartProxy:\s*"Launch at startup"/);
+});
+
+test("settings drawer keeps repair action and compact model select visually quiet", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+  const repairAction =
+    drawerSource.match(
+      /<button\s+type="button"\s+className="[^"]*"\s+disabled=\{Boolean\(busy\) \|\| historyBusy\}\s+onClick=\{\(\) => void repairHistory\(\)\}\s*>\s*\{t\("settings\.repairHistoryBucket"\)\}/,
+    )?.[0] ?? "";
+  const visionModelSelect =
+    drawerSource.match(/function VisionModelSelect[\s\S]*?<button[\s\S]*?<\/button>/)?.[0] ?? "";
+
+  assert.ok(repairAction, "repair history action should be present");
+  assert.doesNotMatch(repairAction, /font-semibold/);
+  assert.match(repairAction, /text-sm font-medium/);
+
+  assert.ok(visionModelSelect, "vision model select trigger should be present");
+  assert.match(visionModelSelect, /bg-transparent/);
+  assert.doesNotMatch(visionModelSelect, /bg-panel/);
+  assert.doesNotMatch(visionModelSelect, /bg-white/);
+  assert.doesNotMatch(visionModelSelect, /hover:bg-white/);
+  assert.doesNotMatch(visionModelSelect, /border border-transparent/);
+  assert.doesNotMatch(visionModelSelect, /border-action\/40/);
+  assert.doesNotMatch(visionModelSelect, /shadow-field/);
+  assert.doesNotMatch(visionModelSelect, /shadow-raised/);
+});
+
 test("settings drawer exposes gateway retry and image proxy controls", async () => {
   const [drawerSource, appSource, typesSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
@@ -1719,7 +1763,11 @@ test("settings drawer reports the backend sync result", async () => {
 });
 
 test("settings drawer keeps language immediate and protects unsaved drafts", async () => {
-  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+  const [drawerSource, zhSource, enSource] = await Promise.all([
+    readFile(settingsDrawerPath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+  ]);
 
   assert.match(drawerSource, /function settingsSaveComparable\(settings: Settings\)/);
   assert.match(drawerSource, /locale: _locale/);
@@ -1730,6 +1778,8 @@ test("settings drawer keeps language immediate and protects unsaved drafts", asy
   assert.match(drawerSource, /t\("settings\.unsavedChangesTitle"\)/);
   assert.match(drawerSource, /void saveDraft\(\{ closeOnSuccess: true \}\)/);
   assert.match(drawerSource, /await changeAppLocale\(locale\)/);
+  assert.match(zhSource, /includeOfficialModels:\s*"包含 OpenAI 官方模型"/);
+  assert.match(enSource, /includeOfficialModels:\s*"Include OpenAI official models"/);
 });
 
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {

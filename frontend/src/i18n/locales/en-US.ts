@@ -80,7 +80,7 @@ const enUS = {
   },
   settings: {
     autoRetry: "Auto retry",
-    autoStartProxy: "Auto-start proxy",
+    autoStartProxy: "Launch at startup",
     autoSyncBoundClients: "Auto-sync bound clients",
     bindAddress: "Bind address",
     bindAddressLocalOnly: "Only 127.0.0.1 is accepted in this release.",
@@ -88,7 +88,7 @@ const enUS = {
     discardUnsavedChanges: "Discard changes",
     enablingUnifiedHistory: "Enabling unified Codex history...",
     imageProxy: "Image proxy",
-    includeOfficialModels: "Include official models",
+    includeOfficialModels: "Include OpenAI official models",
     language: "Language",
     languageEnglish: "English",
     languageSaved: "Language saved",

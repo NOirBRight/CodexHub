@@ -80,7 +80,7 @@ const zhCN = {
   },
   settings: {
     autoRetry: "自动重试",
-    autoStartProxy: "自启动代理",
+    autoStartProxy: "开机自启动",
     autoSyncBoundClients: "自动同步已绑定客户端",
     bindAddress: "绑定地址",
     bindAddressLocalOnly: "此版本仅接受 127.0.0.1。",
@@ -88,7 +88,7 @@ const zhCN = {
     discardUnsavedChanges: "放弃更改",
     enablingUnifiedHistory: "正在启用统一 Codex 历史...",
     imageProxy: "图片代理",
-    includeOfficialModels: "包含官方模型",
+    includeOfficialModels: "包含 OpenAI 官方模型",
     language: "语言",
     languageEnglish: "English",
     languageSaved: "语言已保存",

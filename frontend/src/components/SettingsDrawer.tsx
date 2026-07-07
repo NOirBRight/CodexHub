@@ -232,6 +232,11 @@ export function SettingsDrawer({
                   />
                 </div>
                 <Toggle
+                  checked={draft.auto_start_proxy}
+                  label={t("settings.autoStartProxy")}
+                  onChange={(value) => setDraft({ ...draft, auto_start_proxy: value })}
+                />
+                <Toggle
                   checked={draft.include_official_models}
                   label={t("settings.includeOfficialModels")}
                   onChange={(value) => setDraft({ ...draft, include_official_models: value })}
@@ -249,7 +254,7 @@ export function SettingsDrawer({
                 />
                 <button
                   type="button"
-                  className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                  className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-medium text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                   disabled={Boolean(busy) || historyBusy}
                   onClick={() => void repairHistory()}
                 >
@@ -572,10 +577,7 @@ function VisionModelSelect({
     <div ref={ref} className="relative min-w-0">
       <button
         type="button"
-        className={cx(
-          "focus-ring flex h-7 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-control border border-transparent bg-panel px-2 text-left text-sm font-medium text-ink shadow-field transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-white disabled:cursor-not-allowed disabled:text-slate-400 disabled:shadow-control",
-          open && "border-action/40 bg-white shadow-raised",
-        )}
+        className="focus-ring flex h-7 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-control bg-transparent px-2 text-left text-sm font-medium text-ink transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:text-slate-400"
         disabled={disabled}
         title={label}
         aria-haspopup="listbox"
