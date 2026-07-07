@@ -5,7 +5,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from subagent_dynamic_dag import build_dynamic_dag_workflow, is_dynamic_dag_request
 from subagent_protocol import ProtocolState, protocol_state_from_input_items
+from subagent_scheduler import workflow_complete
 
 
 MULTI_AGENT_TOOL_NAMES = {"spawn_agent", "wait_agent", "close_agent", "resume_agent", "send_input"}
@@ -47,6 +49,7 @@ class SubagentState:
     append_baseline_count: int | None = None
     bounded_request: bool = False
     workflow_intent: bool = False
+    dynamic_dag_intent: bool = False
     workflow_plan_read: bool = False
     workflow_expected_artifact_text: str | None = None
     workflow_close_after_wait: bool = False
@@ -136,11 +139,17 @@ class _Event:
 def build_subagent_state(input_items: Any) -> SubagentState:
     events = _events_from_items(input_items)
     protocol_state = protocol_state_from_input_items(input_items)
+    dynamic_dag_intent = is_dynamic_dag_request(input_items)
     workflow_intent = _has_workflow_intent(input_items)
+    workflow_intent = workflow_intent or dynamic_dag_intent
     requested_count = None if workflow_intent else _requested_spawn_count(input_items)
     requested_append = _has_append_intent(input_items)
     append_baseline_count = _append_baseline_agent_count(input_items) if requested_append else None
     agents, epochs, pending_fix_targets = _apply_events(events)
+    dynamic_dag_complete = False
+    if dynamic_dag_intent:
+        dynamic_dag_workflow = build_dynamic_dag_workflow(input_items, protocol_state)
+        dynamic_dag_complete = workflow_complete(dynamic_dag_workflow, protocol_state)
     state = SubagentState(
         agents=agents,
         protocol_state=protocol_state,
@@ -149,12 +158,16 @@ def build_subagent_state(input_items: Any) -> SubagentState:
         append_baseline_count=append_baseline_count,
         bounded_request=requested_count is not None,
         workflow_intent=workflow_intent,
-        workflow_plan_read=_has_workflow_plan_read_context(input_items) if workflow_intent else False,
+        dynamic_dag_intent=dynamic_dag_intent,
+        workflow_plan_read=(
+            _has_workflow_plan_read_context(input_items) if workflow_intent and not dynamic_dag_intent else False
+        ),
         workflow_expected_artifact_text=_workflow_expected_artifact_text(input_items) if workflow_intent else None,
         workflow_close_after_wait=_has_workflow_close_after_wait_intent(input_items),
         workflow_task_count=_workflow_task_count(input_items) if workflow_intent else None,
         implementation_epoch_by_task=epochs,
         pending_fix_targets=pending_fix_targets,
+        lifecycle_complete=dynamic_dag_complete,
     )
     _compute_next_action(state)
     return state
@@ -199,7 +212,7 @@ def state_guidance_message(state: SubagentState) -> dict[str, str] | None:
         )
         return _developer_text_message("\n".join(lines))
 
-    if state.workflow_intent and not state.workflow_plan_read and not state.agents:
+    if state.workflow_intent and not state.dynamic_dag_intent and not state.workflow_plan_read and not state.agents:
         lines.append("status: workflow_plan_read_required")
         lines.append(
             "required_next_action: call mcp__node_repl__js now to read the subagent-driven-development skill and diagnostic plan before spawning any child agent. Use await import(\"node:fs\") inside node_repl; do not use require() or a static import statement."
@@ -381,6 +394,28 @@ def _compute_next_action(state: SubagentState) -> None:
         state.next_action = "spawn" if not state.agents else "final"
         return
 
+    if state.dynamic_dag_intent:
+        state.close_waited_agents = True
+        if state.lifecycle_complete:
+            state.next_action = "final"
+            return
+        empty_target = _open_agent_needing_input(state.agents.values())
+        if empty_target is not None:
+            state.next_action = "send_input"
+            state.send_input_target = empty_target.agent_id
+            state.send_input_reason = "child_empty_output"
+            return
+        if state.wait_agent_ids:
+            state.next_action = "wait"
+            return
+        if state.close_agent_ids:
+            state.next_action = "close"
+            return
+        state.next_action = "spawn"
+        state.next_expected_role = None
+        state.next_expected_task = None
+        return
+
     if not state.workflow_intent and not state.agents:
         state.next_action = "spawn" if state.requested_append else "idle"
         return
@@ -406,6 +441,14 @@ def _compute_next_action(state: SubagentState) -> None:
     # Compatibility path for existing Level 2 workflow gates.
     # New workflow behavior should be modeled in subagent_scheduler.py first,
     # then wired here after scheduler tests cover it.
+    if state.workflow_intent:
+        empty_target = _open_agent_needing_input(state.agents.values())
+        if empty_target is not None:
+            state.next_action = "send_input"
+            state.send_input_target = empty_target.agent_id
+            state.send_input_reason = "child_empty_output"
+            return
+
     if state.workflow_intent and state.wait_agent_ids:
         state.next_action = "wait"
         return

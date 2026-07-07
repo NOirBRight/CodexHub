@@ -119,7 +119,9 @@ def _input_text(input_items: Any) -> str:
         if not isinstance(item, MappingABC):
             continue
         content = item.get("content")
-        if isinstance(content, list):
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
             for part in content:
                 if isinstance(part, MappingABC):
                     value = part.get("text")

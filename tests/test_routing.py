@@ -4620,6 +4620,130 @@ Required sequence:
         self.assertEqual(call_args["message"], "Return exactly this line: SENTINEL:A")
         self.assertFalse(call_args["fork_context"])
 
+    def test_responses_structured_workflow_quality_reviewer_prompt_carries_baseline_status(self):
+        workflow_prompt = r"""
+Use subagent-driven-development with implementer, spec reviewer, and code quality reviewer.
+
+Coordinator inputs:
+OUTPUT_PATH=C:\repo\diagnostics\subagent-e2e\level12-e2e-20260707-000000\level2-k2_7-responses.artifact-r01.txt
+SENTINEL=SENTINEL:level2-k2_7-responses-20260706
+MODEL_UNDER_TEST=kimi-k2.7-code
+ENDPOINT_UNDER_TEST=responses
+CASE=level2-k2_7-responses
+
+Baseline git status before this E2E case started. These entries are pre-existing and must not be blamed on this diagnostic run:
+```text
+ M src-python/subagent_state.py
+ M tests/test_subagent_state.py
+```
+
+Execution constraints:
+1. The coordinator may read the plan once with node_repl.
+2. Start with this ordered lifecycle: spawn one implementer, wait, close; then spawn one spec reviewer, wait, close; then spawn one code-quality reviewer, wait, close.
+"""
+        plan_text = r"""
+# Short Subagent Development E2E Plan
+OUTPUT_PATH=C:\repo\diagnostics\subagent-e2e\level12-e2e-20260707-000000\level2-k2_7-responses.artifact-r01.txt
+SENTINEL=SENTINEL:level2-k2_7-responses-20260706
+Task 1: create the diagnostic artifact.
+"""
+        body = json.dumps(
+            {
+                "model": "ollama-e2e-responses/kimi-k2.7-code",
+                "input": [
+                    {"type": "message", "role": "user", "content": workflow_prompt},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_plan",
+                        "name": "mcp__node_repl__js",
+                        "arguments": "{}",
+                    },
+                    {"type": "function_call_output", "call_id": "call_plan", "output": plan_text},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": json.dumps(
+                            {"message": "Implement Task 1 exactly.", "nickname": "implementer-task-1"}
+                        ),
+                    },
+                    {"type": "function_call_output", "call_id": "call_impl_spawn", "output": json.dumps({"agent_id": "impl-1"})},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": json.dumps({"targets": ["impl-1"], "timeout_ms": 60000}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_impl_wait",
+                        "output": json.dumps({"status": {"impl-1": {"completed": "Status: DONE"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_impl_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": json.dumps({"target": "impl-1"}),
+                    },
+                    {"type": "function_call_output", "call_id": "call_impl_close", "output": json.dumps({"status": "closed"})},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec_spawn",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": json.dumps(
+                            {"message": "Spec compliance review for Task 1.", "nickname": "spec-reviewer-task-1"}
+                        ),
+                    },
+                    {"type": "function_call_output", "call_id": "call_spec_spawn", "output": json.dumps({"agent_id": "spec-1"})},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec_wait",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": json.dumps({"targets": ["spec-1"], "timeout_ms": 60000}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spec_wait",
+                        "output": json.dumps({"status": {"spec-1": {"completed": "Verdict: PASS\nChecks: ok"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spec_close",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": json.dumps({"target": "spec-1"}),
+                    },
+                    {"type": "function_call_output", "call_id": "call_spec_close", "output": json.dumps({"status": "closed"})},
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "assisted"}, clear=False):
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "upstream_format": "responses", "tool_protocol": "responses_structured"},
+                event_context=event_context,
+            )
+
+        spawn_args = event_context["subagent_required_spawn_arguments"]
+        message = spawn_args["message"]
+        self.assertEqual(spawn_args["nickname"], "quality-reviewer")
+        self.assertIn("Baseline git status entries allowed for this case:", message)
+        self.assertIn("M src-python/subagent_state.py", message)
+        self.assertIn("M tests/test_subagent_state.py", message)
+        self.assertIn("Do not report baseline-listed paths as product-source modifications introduced", message)
+
     def test_bounded_two_prompt_scheduler_uses_second_prompt_after_first_spawn(self):
         prompt = (
             "Spawn child A with prompt exactly this complete string: `Return A`\n"
@@ -4660,6 +4784,124 @@ Required sequence:
         self.assertIn("subagent_legal_actions", event_context)
         self.assertEqual(event_context["subagent_legal_actions"][0]["arguments"]["message"], "Return B")
         self.assertIn("Return B", transformed.decode("utf-8"))
+
+    def test_responses_structured_dynamic_dag_exposes_multiple_legal_spawns_without_required_repair(self):
+        body = json.dumps(
+            {
+                "model": "ollama-e2e-responses/minimax-m3",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Run LEVEL3_DYNAMIC_DAG with native subagents."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": json.dumps(
+                            {"message": "Node: task-a-implementer", "nickname": "task-a-implementer"}
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_a",
+                        "output": json.dumps({"agent_id": "agent-a", "nickname": "task-a-implementer"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "wait_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "wait_agent",
+                        "arguments": json.dumps({"targets": ["agent-a"], "timeout_ms": 60000}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "wait_a",
+                        "output": json.dumps({"timed_out": False, "status": {"agent-a": {"completed": "A_DONE"}}}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "close_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "close_agent",
+                        "arguments": json.dumps({"target": "agent-a"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "close_a",
+                        "output": json.dumps({"status": "closed"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "assisted"}, clear=False):
+            transformed = compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "upstream_format": "responses", "tool_protocol": "responses_structured"},
+                event_context=event_context,
+            )
+
+        payload = json.loads(transformed)
+        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertTrue(event_context["subagent_dynamic_dag_active"])
+        self.assertEqual(event_context["subagent_dynamic_dag_ready_nodes"], ["task-a-reviewer", "task-b-implementer"])
+        self.assertEqual(len(event_context["subagent_legal_actions"]), 2)
+        self.assertNotIn("subagent_required_spawn_arguments", event_context)
+        self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__wait_agent", tools_by_name)
+        self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
+        self.assertIn("Dynamic DAG workflow state", transcript)
+        self.assertIn("ready_nodes: task-a-reviewer, task-b-implementer", transcript)
+
+    def test_dynamic_dag_duplicate_spawn_for_assigned_node_is_suppressed(self):
+        event_context = {
+            "request_id": "req",
+            "tool_protocol": "responses_structured",
+            "subagent_spawn_allowed": True,
+            "subagent_dynamic_dag_active": True,
+            "subagent_legal_actions": [
+                {
+                    "kind": "workflow",
+                    "tool_name": "spawn_agent",
+                    "node_id": "task-a-reviewer",
+                    "arguments": {
+                        "message": "Node: task-a-reviewer",
+                        "nickname": "task-a-reviewer",
+                        "fork_context": False,
+                    },
+                }
+            ],
+            "subagent_assigned_dynamic_nodes": ["task-a-reviewer"],
+        }
+        events = [
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_dup",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_dup",
+                    "name": "multi_agent_v1__spawn_agent",
+                    "arguments": json.dumps(
+                        {"message": "Node: task-a-reviewer", "nickname": "task-a-reviewer"}
+                    ),
+                },
+            }
+        ]
+
+        guarded, changed = codex_proxy._guard_duplicate_multi_agent_spawn_calls(events, event_context)
+
+        self.assertTrue(changed)
+        self.assertEqual(guarded[0]["item"]["type"], "message")
+        self.assertIn("already assigned", guarded[0]["item"]["content"])
 
     def test_chat_tools_level_one_lifecycle_prompt_ignores_developer_workflow_guidance(self):
         developer_skill_text = """
@@ -7292,6 +7534,112 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(payload["output"][0]["name"], "wait_agent")
         self.assertNotIn("get_agent_state", json.dumps(payload))
 
+    def test_coordinator_workflow_response_suppresses_local_tool_after_plan_read(self):
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_plan",
+                        "call_id": "call_plan",
+                        "name": "update_plan",
+                        "arguments": json.dumps(
+                            {
+                                "steps": json.dumps(
+                                    [
+                                        {"label": "Spawn implementer subagent", "status": "in_progress"},
+                                        {"label": "Spawn spec reviewer subagent", "status": "pending"},
+                                    ]
+                                )
+                            }
+                        ),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        event_context = {
+            "request_id": "req",
+            "tool_protocol": "responses_structured",
+            "subagent_worker_context": False,
+            "subagent_wait_agent_ids": ["agent_1"],
+            "subagent_close_agent_ids": [],
+            "subagent_spawn_allowed": False,
+            "subagent_lifecycle_complete": False,
+            "subagent_workflow_active": True,
+            "subagent_workflow_plan_read_complete": True,
+        }
+
+        transformed = compatible_response_body(body, "ollama_cloud", event_context=event_context)
+        payload = json.loads(transformed)
+        transcript = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(payload["output"][0]["type"], "function_call")
+        self.assertEqual(payload["output"][0]["namespace"], "multi_agent_v1")
+        self.assertEqual(payload["output"][0]["name"], "wait_agent")
+        self.assertNotIn("update_plan", transcript)
+
+    def test_coordinator_workflow_sse_suppresses_local_tool_after_plan_read(self):
+        event_context = {
+            "request_id": "req",
+            "tool_protocol": "responses_structured",
+            "subagent_worker_context": False,
+            "subagent_wait_agent_ids": ["agent_1"],
+            "subagent_close_agent_ids": [],
+            "subagent_spawn_allowed": False,
+            "subagent_lifecycle_complete": False,
+            "subagent_workflow_active": True,
+            "subagent_workflow_plan_read_complete": True,
+        }
+        item_in_progress = {
+            "id": "fc_plan",
+            "type": "function_call",
+            "status": "in_progress",
+            "call_id": "call_plan",
+            "name": "update_plan",
+            "arguments": "",
+        }
+        item_done = {
+            **item_in_progress,
+            "status": "completed",
+            "arguments": json.dumps({"steps": "[]"}),
+        }
+
+        added = compatible_sse_line(
+            b"data: " + json.dumps(
+                {"type": "response.output_item.added", "output_index": 0, "item": item_in_progress}
+            ).encode("utf-8") + b"\n",
+            "ollama_cloud",
+            event_context=event_context,
+        )
+        args_done = compatible_sse_line(
+            b"data: " + json.dumps(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "fc_plan",
+                    "output_index": 0,
+                    "arguments": json.dumps({"steps": "[]"}),
+                }
+            ).encode("utf-8") + b"\n",
+            "ollama_cloud",
+            event_context=event_context,
+        )
+        done = compatible_sse_line(
+            b"data: " + json.dumps(
+                {"type": "response.output_item.done", "output_index": 0, "item": item_done}
+            ).encode("utf-8") + b"\n",
+            "ollama_cloud",
+            event_context=event_context,
+        )
+
+        added_payload = json.loads(added.removeprefix(b"data: "))
+        done_payload = json.loads(done.removeprefix(b"data: "))
+
+        self.assertEqual(added_payload["item"]["type"], "message")
+        self.assertEqual(args_done, b"")
+        self.assertEqual(done_payload["item"]["type"], "message")
+        self.assertNotIn('"type": "function_call"', added.decode("utf-8"))
+        self.assertNotIn('"type": "function_call"', done.decode("utf-8"))
+
     def test_worker_sse_suppresses_nested_multi_agent_alias_and_arguments(self):
         event_context = {
             "request_id": "req",
@@ -8311,6 +8659,116 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertIn("current-turn", transcript)
         self.assertIn("real Codex native tool executions", transcript)
         self.assertIn("hidden tools after close", transcript)
+
+    def test_responses_structured_suppresses_subagent_call_after_visible_lifecycle_final(self):
+        final_text = (
+            "RESULT: PASS\n"
+            "SENTINEL: SENTINEL:level2-m3-responses-20260706\n"
+            "SUBAGENT_CHAIN: implementer,spec-reviewer,quality-reviewer"
+        )
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": final_text, "annotations": []}],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_repeated_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "repeat implementer after final"}),
+                    },
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(
+            body,
+            "ollama_cloud",
+            event_context={
+                "request_id": "req",
+                "tool_protocol": "responses_structured",
+                "subagent_open_agent_ids": [],
+                "subagent_spawn_allowed": False,
+                "subagent_lifecycle_complete": True,
+            },
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(len(payload["output"]), 1)
+        self.assertEqual(payload["output"][0]["type"], "message")
+        self.assertEqual(payload["output"][0]["content"][0]["text"], final_text)
+        self.assertFalse(any(item.get("type") == "function_call" for item in payload["output"]))
+
+    def test_responses_structured_sse_suppresses_subagent_call_after_visible_lifecycle_final(self):
+        final_text = (
+            "RESULT: PASS\n"
+            "SENTINEL: SENTINEL:level2-m3-responses-20260706\n"
+            "SUBAGENT_CHAIN: implementer,spec-reviewer,quality-reviewer"
+        )
+        event_context = {
+            "request_id": "req",
+            "tool_protocol": "responses_structured",
+            "subagent_open_agent_ids": [],
+            "subagent_spawn_allowed": False,
+            "subagent_lifecycle_complete": True,
+        }
+        final_event = {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": "msg_final",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": final_text, "annotations": []}],
+            },
+        }
+        spawn_added = {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {
+                "id": "fc_repeat",
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": "call_repeat",
+                "name": "multi_agent_v1__spawn_agent",
+                "arguments": "",
+            },
+        }
+        spawn_arguments_done = {
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_repeat",
+            "output_index": 1,
+            "arguments": json.dumps({"message": "repeat implementer after final"}),
+        }
+        spawn_done = {
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": {
+                "id": "fc_repeat",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_repeat",
+                "name": "multi_agent_v1__spawn_agent",
+                "arguments": json.dumps({"message": "repeat implementer after final"}),
+            },
+        }
+
+        transformed = [
+            compatible_sse_line(
+                b"data: " + json.dumps(event).encode("utf-8") + b"\n",
+                "ollama_cloud",
+                event_context=event_context,
+            )
+            for event in [final_event, spawn_added, spawn_arguments_done, spawn_done]
+        ]
+
+        self.assertNotEqual(transformed[0], b"")
+        self.assertEqual(transformed[1], b"")
+        self.assertEqual(transformed[2], b"")
+        self.assertEqual(transformed[3], b"")
 
     def test_external_response_normalizes_mcp_node_repl_alias(self):
         body = json.dumps(

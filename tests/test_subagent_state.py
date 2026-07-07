@@ -7,6 +7,7 @@ from subagent_state import (
     is_worker_subagent_request,
     state_guidance_message,
 )
+from subagent_dynamic_dag import LEVEL3_DYNAMIC_DAG_MARKER
 
 
 def message(content):
@@ -113,6 +114,30 @@ class SubagentStateTests(unittest.TestCase):
         self.assertFalse(state.should_allow_spawn)
         self.assertEqual(state.next_action, "wait")
         self.assertEqual(state.wait_agent_ids, ["agent-a", "agent-b"])
+
+    def test_dynamic_dag_request_sets_workflow_without_plan_read_requirement(self):
+        state = build_subagent_state([message(f"Run {LEVEL3_DYNAMIC_DAG_MARKER} with native subagents.")])
+
+        self.assertTrue(state.dynamic_dag_intent)
+        self.assertTrue(state.workflow_intent)
+        self.assertFalse(state.workflow_plan_read)
+        self.assertEqual(state.next_action, "spawn")
+        self.assertIsNone(state.next_expected_role)
+        self.assertIsNone(state.next_expected_task)
+        self.assertIsNone(state_guidance_message(state))
+
+    def test_dynamic_dag_waited_node_requires_close(self):
+        state = build_subagent_state(
+            [
+                message(f"Run {LEVEL3_DYNAMIC_DAG_MARKER} with native subagents."),
+                *spawn("call_a", "agent-a", "Node: task-a-implementer", "task-a-implementer"),
+                *wait("wait_a", ["agent-a"], "A_DONE"),
+            ]
+        )
+
+        self.assertTrue(state.dynamic_dag_intent)
+        self.assertEqual(state.next_action, "close")
+        self.assertEqual(state.close_agent_ids, ["agent-a"])
 
     def test_workflow_rejects_reviewer_spawn_before_implementer(self):
         state = build_subagent_state(
@@ -605,6 +630,34 @@ Required sequence:
 
         self.assertEqual(state.next_action, "wait")
         self.assertEqual(state.wait_agent_ids, ["impl-1"])
+        self.assertEqual(state.close_agent_ids, [])
+
+    def test_workflow_completed_null_reviewer_message_requires_send_input_before_rewait(self):
+        workflow_prompt = "Use subagent-driven-development with implementer, spec reviewer, and code quality reviewer."
+        state = build_subagent_state(
+            [
+                message(workflow_prompt),
+                *spawn("call_impl", "impl-1", "Implement Task 1 exactly.", "implementer-task-1"),
+                *wait("call_impl_wait", ["impl-1"], "DONE"),
+                *close("call_impl_close", "impl-1"),
+                *spawn("call_spec", "spec-1", "Spec compliance review for Task 1.", "spec-reviewer-task-1"),
+                *wait_output(
+                    "call_spec_wait",
+                    ["spec-1"],
+                    {
+                        "timed_out": False,
+                        "status": {
+                            "spec-1": {"status": "completed", "message": None},
+                        },
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(state.next_action, "send_input")
+        self.assertEqual(state.send_input_target, "spec-1")
+        self.assertEqual(state.send_input_reason, "child_empty_output")
+        self.assertEqual(state.wait_agent_ids, ["spec-1"])
         self.assertEqual(state.close_agent_ids, [])
 
     def test_bounded_missing_wait_status_requires_wait_not_final(self):

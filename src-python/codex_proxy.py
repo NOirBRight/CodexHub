@@ -30,7 +30,8 @@ from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias
 from subagent_policy import deterministic_required_action
-from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions
+from subagent_dynamic_dag import build_dynamic_dag_workflow, dynamic_dag_guidance_message, is_dynamic_dag_request
+from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions, workflow_complete
 from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
 import proxy_telemetry
 
@@ -2213,6 +2214,17 @@ def _lifecycle_final_format_violation(text: str) -> bool:
     return False
 
 
+def _text_contains_lifecycle_final_report(text: str) -> bool:
+    lines = _final_report_nonempty_lines(text)
+    if not lines:
+        return False
+    for prefixes in FINAL_REPORT_LINE_PREFIXES:
+        for start in range(len(lines)):
+            if _lines_match_final_report_prefixes(lines, start, prefixes):
+                return True
+    return False
+
+
 def _chat_stream_visible_text(chunks: list[Mapping[str, Any] | str]) -> str:
     text_parts: list[str] = []
     for chunk in chunks:
@@ -4243,6 +4255,7 @@ def _required_workflow_spawn_arguments(text: str, subagent_state: Any) -> dict[s
     if not all(isinstance(value, str) and value for value in (output_path, sentinel, model, endpoint, case_name)):
         return None
 
+    baseline_status = _workflow_baseline_status(text)
     artifact_text = "\n".join(
         [
             f"case: {case_name}",
@@ -4316,11 +4329,17 @@ Runner-owned diagnostics scaffolding to ignore:
   diagnostics/subagent-e2e/level2-*.out.txt
   diagnostics/subagent-e2e/level2-*.err.txt
 
+Baseline git status entries allowed for this case:
+```text
+{baseline_status or "<none>"}
+```
+These baseline entries are pre-existing coordinator-owned changes. Do not report baseline-listed paths as product-source modifications introduced by the implementer.
+
 Verification steps:
 1. Run git status --porcelain=v1 -uall.
 2. Confirm the expected artifact exists and is non-empty.
 3. Ignore harness-owned diagnostics files under diagnostics/subagent-e2e.
-4. Fail only for implementer-owned extra files or product-source modifications.
+4. Fail only for implementer-owned extra files or product-source modifications not listed in the baseline block above.
 5. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
 
 Report back with only:
@@ -4331,6 +4350,18 @@ Extra implementer-owned files: <none, or paths>
 Runner-owned scaffolding files observed: <short summary>
 """
     return {"message": message, "nickname": "quality-reviewer", "fork_context": False}
+
+
+def _workflow_baseline_status(text: str) -> str:
+    marker = "Baseline git status before this E2E case started"
+    marker_index = text.lower().find(marker.lower())
+    if marker_index < 0:
+        return ""
+    candidate = text[marker_index:]
+    match = re.search(r"```(?:text)?\s*\n(?P<body>.*?)```", candidate, re.DOTALL)
+    if match:
+        return match.group("body").strip()
+    return ""
 
 
 def _line_value(text: str, prefix: str) -> str | None:
@@ -5090,12 +5121,184 @@ def _is_mcp_or_codex_app_function_call(item: Mapping[str, Any]) -> bool:
     return isinstance(name, str) and (name.startswith("mcp__") or name.startswith("codex_app__"))
 
 
+def _looks_like_coordinator_local_function_call(
+    item: Mapping[str, Any],
+    *,
+    allow_plan_read_node_repl: bool,
+) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    if _multi_agent_function_call_name(item) is not None:
+        return False
+    if allow_plan_read_node_repl and _node_repl_function_call_name(item) is not None:
+        return False
+    name = item.get("name")
+    return isinstance(name, str) and bool(name)
+
+
 def _coordinator_forbidden_tool_suppressed_message(
     item: Mapping[str, Any],
     *,
     reason: str,
 ) -> dict[str, Any]:
     return _assistant_transcript_message(f"subagent_coordinator_tool_call_suppressed: {reason}", item)
+
+
+def _message_item_visible_text(item: Mapping[str, Any]) -> str:
+    if item.get("type") != "message":
+        return ""
+    return _chat_content_text(item.get("content")).strip()
+
+
+def _mark_lifecycle_final_seen_if_present(value: Mapping[str, Any], state: dict[str, Any]) -> None:
+    if not state["lifecycle_complete"]:
+        return
+    text = ""
+    if value.get("type") == "message":
+        text = _message_item_visible_text(value)
+    elif value.get("type") == "response.output_item.done":
+        item = value.get("item")
+        if isinstance(item, Mapping):
+            text = _message_item_visible_text(item)
+    elif value.get("type") == "response.output_text.done":
+        event_text = value.get("text")
+        text = event_text if isinstance(event_text, str) else ""
+    if text and _text_contains_lifecycle_final_report(text):
+        state["final_seen"] = True
+
+
+def _post_final_multi_agent_suppressed_item_id(value: Mapping[str, Any]) -> str | None:
+    item_id = value.get("id")
+    return item_id if isinstance(item_id, str) and item_id else None
+
+
+def _suppress_multi_agent_calls_after_lifecycle_final(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    context = event_context or {}
+    if _is_raw_provider_probe_context(context):
+        return value, False
+    tool_protocol = str(context.get("tool_protocol") or "")
+    if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
+        return value, False
+    if not bool(context.get("subagent_lifecycle_complete")) and not bool(
+        context.get("_subagent_lifecycle_final_seen")
+    ):
+        return value, False
+
+    if isinstance(event_context, dict):
+        stored_ids = event_context.setdefault("_post_final_suppressed_multi_agent_item_ids", set())
+        suppressed_item_ids = stored_ids if isinstance(stored_ids, set) else set()
+        event_context["_post_final_suppressed_multi_agent_item_ids"] = suppressed_item_ids
+        final_seen = bool(event_context.get("_subagent_lifecycle_final_seen"))
+    else:
+        suppressed_item_ids = set()
+        final_seen = False
+    state = {
+        "lifecycle_complete": bool(context.get("subagent_lifecycle_complete")),
+        "final_seen": final_seen,
+        "suppressed_item_ids": suppressed_item_ids,
+        "event_context": event_context,
+    }
+
+    rewritten, changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(value, state)
+    if isinstance(event_context, dict) and state["final_seen"]:
+        event_context["_subagent_lifecycle_final_seen"] = True
+    return rewritten, changed
+
+
+def _suppress_multi_agent_calls_after_lifecycle_final_inner(
+    value: Any,
+    state: dict[str, Any],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(item, state)
+            if replacement is None:
+                changed = True
+                continue
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    event_type = value.get("type")
+    if event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id in state["suppressed_item_ids"]:
+            return None, True
+        return value, False
+
+    direct_tool_name = _multi_agent_function_call_name(value)
+    if state["final_seen"] and direct_tool_name is not None:
+        item_id = _post_final_multi_agent_suppressed_item_id(value)
+        if item_id:
+            state["suppressed_item_ids"].add(item_id)
+        _write_adapter_event(
+            state["event_context"],
+            "subagent_post_final_multi_agent_call_suppressed",
+            tool=direct_tool_name,
+        )
+        return None, True
+
+    event_item = value.get("item")
+    if (
+        state["final_seen"]
+        and event_type in {"response.output_item.added", "response.output_item.done"}
+        and isinstance(event_item, Mapping)
+    ):
+        event_tool_name = _multi_agent_function_call_name(event_item)
+        if event_tool_name is not None:
+            item_id = _post_final_multi_agent_suppressed_item_id(event_item)
+            if item_id:
+                state["suppressed_item_ids"].add(item_id)
+            _write_adapter_event(
+                state["event_context"],
+                "subagent_post_final_multi_agent_call_suppressed",
+                tool=event_tool_name,
+            )
+            return None, True
+
+    changed = False
+    rewritten = dict(value)
+    response = rewritten.get("response")
+    if isinstance(response, Mapping) and isinstance(response.get("output"), list):
+        response_rewritten = dict(response)
+        output, output_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(
+            response_rewritten["output"],
+            state,
+        )
+        response_rewritten["output"] = output
+        if output_changed:
+            rewritten["response"] = response_rewritten
+            changed = True
+
+    output = rewritten.get("output")
+    if isinstance(output, list):
+        output, output_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(output, state)
+        if output_changed:
+            rewritten["output"] = output
+            changed = True
+
+    for key, item in list(rewritten.items()):
+        if key in {"response", "output"}:
+            continue
+        replacement, item_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(item, state)
+        if replacement is None:
+            rewritten.pop(key, None)
+            changed = True
+            continue
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+
+    _mark_lifecycle_final_seen_if_present(rewritten, state)
+    return (rewritten if changed else value), changed
 
 
 def _suppress_coordinator_forbidden_tool_calls(
@@ -5185,6 +5388,11 @@ def _suppress_coordinator_forbidden_tool_calls_inner(
             reason = "node_repl_unavailable_after_subagent_plan_read"
     elif _is_mcp_or_codex_app_function_call(value):
         reason = "mcp_or_codex_app_tool_unavailable_during_subagent_workflow"
+    elif _looks_like_coordinator_local_function_call(
+        value,
+        allow_plan_read_node_repl=allow_plan_read_node_repl,
+    ):
+        reason = "coordinator_tool_unavailable_during_subagent_workflow"
 
     if reason is not None:
         item_id = value.get("id")
@@ -5301,12 +5509,13 @@ def _guard_duplicate_multi_agent_spawn_calls(
         return value, False
 
     tool_protocol = str((event_context or {}).get("tool_protocol") or "")
-    if tool_protocol not in {"text_compat", "chat_tools"}:
+    if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
         return value, False
 
     spawn_allowed = bool((event_context or {}).get("subagent_spawn_allowed"))
     subagent_state = (event_context or {}).get("_subagent_state")
-    if spawn_allowed and subagent_state is None:
+    dynamic_dag_active = bool((event_context or {}).get("subagent_dynamic_dag_active"))
+    if spawn_allowed and subagent_state is None and not dynamic_dag_active:
         return value, False
 
     lifecycle_complete = bool((event_context or {}).get("subagent_lifecycle_complete"))
@@ -5318,6 +5527,7 @@ def _guard_duplicate_multi_agent_spawn_calls(
 
     return _guard_duplicate_multi_agent_spawn_calls_inner(
         value,
+        event_context=event_context,
         spawn_allowed=spawn_allowed,
         subagent_state=subagent_state,
         lifecycle_complete=lifecycle_complete,
@@ -5330,6 +5540,7 @@ def _guard_duplicate_multi_agent_spawn_calls(
 def _guard_duplicate_multi_agent_spawn_calls_inner(
     value: Any,
     *,
+    event_context: Mapping[str, Any] | None,
     spawn_allowed: bool,
     subagent_state: Any | None,
     lifecycle_complete: bool,
@@ -5343,6 +5554,7 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
         for item in value:
             replacement, item_changed = _guard_duplicate_multi_agent_spawn_calls_inner(
                 item,
+                event_context=event_context,
                 spawn_allowed=spawn_allowed,
                 subagent_state=subagent_state,
                 lifecycle_complete=lifecycle_complete,
@@ -5359,6 +5571,23 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
 
     if _is_multi_agent_spawn_function_call(value):
         blocked_by_state = False
+        if bool((event_context or {}).get("subagent_dynamic_dag_active")):
+            arguments = _json_object_from_arguments(value.get("arguments")) or {}
+            nickname = str(arguments.get("nickname") or "")
+            assigned_nodes = {
+                node_id
+                for node_id in (event_context or {}).get("subagent_assigned_dynamic_nodes", [])
+                if isinstance(node_id, str)
+            }
+            if nickname in assigned_nodes:
+                return {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": (
+                        "dynamic_dag_spawn_suppressed: node already assigned; "
+                        "wait or close existing work before repeating it."
+                    ),
+                }, True
         if subagent_state is not None:
             arguments = _json_object_from_arguments(value.get("arguments")) or {}
             try:
@@ -5415,6 +5644,7 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
     for key, item in value.items():
         replacement, item_changed = _guard_duplicate_multi_agent_spawn_calls_inner(
             item,
+            event_context=event_context,
             spawn_allowed=spawn_allowed,
             subagent_state=subagent_state,
             lifecycle_complete=lifecycle_complete,
@@ -6017,6 +6247,7 @@ def compatible_request_body(
         and subagent_state_active
         and subagent_state is not None
         and bool(getattr(subagent_state, "workflow_intent", False))
+        and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
         and _has_node_repl_subagent_plan_read_context(input_items)
     )
     subagent_workflow_plan_read_required = (
@@ -6024,6 +6255,7 @@ def compatible_request_body(
         and subagent_state_active
         and subagent_state is not None
         and bool(getattr(subagent_state, "workflow_intent", False))
+        and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
         and not subagent_workflow_plan_read_complete
         and not bool(getattr(subagent_state, "agents", {}))
     )
@@ -6139,6 +6371,41 @@ def compatible_request_body(
             event_context["_subagent_state"] = subagent_state
             exact_prompts = _exact_child_prompts_from_request_text(_active_user_request_text(input_items))
             protocol_state = getattr(subagent_state, "protocol_state", None)
+            if (
+                protocol_state is not None
+                and bool(getattr(subagent_state, "dynamic_dag_intent", False))
+                and is_dynamic_dag_request(input_items)
+            ):
+                workflow = build_dynamic_dag_workflow(input_items, protocol_state)
+                legal_actions = compute_allowed_actions(workflow, protocol_state)
+                event_context["subagent_dynamic_dag_active"] = True
+                event_context["subagent_dynamic_dag_ready_nodes"] = [
+                    action.node_id for action in legal_actions if action.tool_name == "spawn_agent" and action.node_id
+                ]
+                event_context["subagent_assigned_dynamic_nodes"] = [
+                    node.node_id for node in workflow.nodes.values() if node.assigned_agent_id
+                ]
+                event_context["subagent_legal_actions"] = [
+                    {
+                        "kind": action.kind,
+                        "tool_name": action.tool_name,
+                        "arguments": dict(action.arguments),
+                        "agent_ids": list(action.agent_ids),
+                        "node_id": action.node_id,
+                    }
+                    for action in legal_actions
+                ]
+                include_spawn_agent = any(action.tool_name == "spawn_agent" for action in legal_actions)
+                include_wait_agent = any(action.tool_name == "wait_agent" for action in legal_actions)
+                include_close_agent = any(action.tool_name == "close_agent" for action in legal_actions)
+                include_send_input = any(action.tool_name == "send_input" for action in legal_actions)
+                include_resume_agent = include_send_input
+                lifecycle_complete = workflow_complete(workflow, protocol_state)
+                if guidance_enabled and isinstance(input_items, list):
+                    input_items.append(dynamic_dag_guidance_message(workflow, protocol_state))
+                    changed = True
+                if len(legal_actions) != 1:
+                    event_context.pop("subagent_required_spawn_arguments", None)
             if exact_prompts and protocol_state is not None:
                 workflow = bounded_workflow_from_exact_prompts(
                     exact_prompts,
@@ -6238,6 +6505,7 @@ def compatible_request_body(
                 restrict_to_subagent_coordinator_tools
                 and not node_repl_single_step_complete
                 and not subagent_workflow_plan_read_complete
+                and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
                 and not bool(subagent_state.agents if subagent_state is not None else {})
             )
             if subagent_worker_context and _filter_tools_for_subagent_worker(payload):
@@ -6394,6 +6662,11 @@ def compatible_response_body(
             surface="body",
         )
     changed = changed or alias_changed
+    payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
+        payload,
+        event_context,
+    )
+    changed = changed or post_final_multi_agent_changed
     payload, worker_multi_agent_changed = _suppress_worker_multi_agent_tool_calls(payload, event_context)
     changed = changed or worker_multi_agent_changed
     payload, coordinator_forbidden_changed = _suppress_coordinator_forbidden_tool_calls(payload, event_context)
@@ -6442,6 +6715,13 @@ def compatible_sse_line(
             surface="sse",
         )
     changed = changed or alias_changed
+    payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
+        payload,
+        event_context,
+    )
+    if payload is None:
+        return b""
+    changed = changed or post_final_multi_agent_changed
     payload, worker_multi_agent_changed = _suppress_worker_multi_agent_tool_calls(payload, event_context)
     if payload is None:
         return b""
