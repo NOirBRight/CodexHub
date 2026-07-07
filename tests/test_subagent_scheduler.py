@@ -54,6 +54,21 @@ class SubagentSchedulerTests(unittest.TestCase):
         self.assertEqual(actions[0].tool_name, "spawn_agent")
         self.assertEqual(actions[0].arguments["message"], "do B")
 
+    def test_bounded_exact_prompt_queue_releases_second_prompt_after_first_spawn(self):
+        from subagent_scheduler import bounded_workflow_from_exact_prompts
+
+        workflow = bounded_workflow_from_exact_prompts(
+            prompts=["Return A", "Return B"],
+            assigned_agent_ids=["agent-a"],
+        )
+        protocol = reduce_protocol_events([ProtocolEvent.spawn("call_spawn_a", "agent-a", "Return A")])
+
+        actions = compute_allowed_actions(workflow, protocol)
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].tool_name, "spawn_agent")
+        self.assertEqual(actions[0].arguments["message"], "Return B")
+
 
 if __name__ == "__main__":
     unittest.main()

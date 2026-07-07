@@ -4620,6 +4620,47 @@ Required sequence:
         self.assertEqual(call_args["message"], "Return exactly this line: SENTINEL:A")
         self.assertFalse(call_args["fork_context"])
 
+    def test_bounded_two_prompt_scheduler_uses_second_prompt_after_first_spawn(self):
+        prompt = (
+            "Spawn child A with prompt exactly this complete string: `Return A`\n"
+            "Spawn child B with prompt exactly this complete string: `Return B`\n"
+        )
+        body = json.dumps(
+            {
+                "model": "ollama-e2e-responses/minimax-m3",
+                "input": [
+                    {"type": "message", "role": "user", "content": prompt},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_a",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": json.dumps({"message": "Return A", "fork_context": False}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_a",
+                        "output": json.dumps({"agent_id": "agent-a"}),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}}
+                ],
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req"}
+
+        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "assisted"}, clear=False):
+            transformed = compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "upstream_format": "responses", "tool_protocol": "responses_structured"},
+                event_context=event_context,
+            )
+
+        self.assertIn("subagent_legal_actions", event_context)
+        self.assertEqual(event_context["subagent_legal_actions"][0]["arguments"]["message"], "Return B")
+        self.assertIn("Return B", transformed.decode("utf-8"))
+
     def test_chat_tools_level_one_lifecycle_prompt_ignores_developer_workflow_guidance(self):
         developer_skill_text = """
 Use the real subagent-driven-development skill.

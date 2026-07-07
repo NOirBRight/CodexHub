@@ -30,6 +30,7 @@ from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias
 from subagent_policy import deterministic_required_action
+from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions
 from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
 import proxy_telemetry
 
@@ -6025,6 +6026,24 @@ def compatible_request_body(
     if isinstance(event_context, dict) and not raw_provider_probe:
         if subagent_state is not None:
             event_context["_subagent_state"] = subagent_state
+            exact_prompts = _exact_child_prompts_from_request_text(_active_user_request_text(input_items))
+            protocol_state = getattr(subagent_state, "protocol_state", None)
+            if exact_prompts and protocol_state is not None:
+                workflow = bounded_workflow_from_exact_prompts(
+                    exact_prompts,
+                    assigned_agent_ids=list(protocol_state.agents.keys()),
+                )
+                legal_actions = compute_allowed_actions(workflow, protocol_state)
+                if len(legal_actions) == 1:
+                    event_context["subagent_legal_actions"] = [
+                        {
+                            "kind": legal_actions[0].kind,
+                            "tool_name": legal_actions[0].tool_name,
+                            "arguments": dict(legal_actions[0].arguments),
+                            "agent_ids": list(legal_actions[0].agent_ids),
+                            "node_id": legal_actions[0].node_id,
+                        }
+                    ]
             required_spawn_arguments = _required_spawn_arguments_for_state(input_items, subagent_state)
             if required_spawn_arguments is not None:
                 event_context["subagent_required_spawn_arguments"] = required_spawn_arguments

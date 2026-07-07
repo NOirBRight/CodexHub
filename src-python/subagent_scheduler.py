@@ -30,9 +30,6 @@ class WorkflowAction:
 
 
 def compute_allowed_actions(workflow: WorkflowState, protocol: ProtocolState) -> list[WorkflowAction]:
-    protocol_actions = _protocol_actions(protocol)
-    if protocol_actions:
-        return protocol_actions
     actions: list[WorkflowAction] = []
     for node_id in sorted(workflow.nodes):
         node = workflow.nodes[node_id]
@@ -47,7 +44,29 @@ def compute_allowed_actions(workflow: WorkflowState, protocol: ProtocolState) ->
                     arguments={"message": node.prompt, "fork_context": False},
                 )
             )
-    return actions
+    if actions:
+        return actions
+    return _protocol_actions(protocol)
+
+
+def bounded_workflow_from_exact_prompts(
+    prompts: list[str], assigned_agent_ids: list[str] | None = None
+) -> WorkflowState:
+    assigned = assigned_agent_ids or []
+    nodes: dict[str, WorkflowNode] = {}
+    previous_node_id: str | None = None
+    for index, prompt in enumerate(prompts):
+        node_id = f"bounded-{index + 1}"
+        assigned_agent_id = assigned[index] if index < len(assigned) else None
+        nodes[node_id] = WorkflowNode(
+            node_id=node_id,
+            prompt=prompt,
+            dependencies=(),
+            assigned_agent_id=assigned_agent_id,
+            metadata={"source": "bounded_exact_prompt"},
+        )
+        previous_node_id = node_id
+    return WorkflowState(nodes=nodes)
 
 
 def _protocol_actions(protocol: ProtocolState) -> list[WorkflowAction]:
