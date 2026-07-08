@@ -69,6 +69,31 @@ Manual update checks live in the settings drawer:
 
 No background forced installation is allowed in v0.1.0.
 
+### Settings Drawer Placement
+
+The update UI must be placed in the existing `SettingsDrawer`, not in `SettingsPage` and not on the Gateway page.
+
+Exact placement:
+
+- Opened from the top runtime bar settings button.
+- Inside the first `CodexHub` settings section.
+- Inside that section's existing rounded settings panel.
+- Immediately below the language selector.
+- Above the auto-start, official-models, unified-history, bound-client-sync, and repair-history controls.
+
+The drawer order should be:
+
+1. Header: `Settings` / `CodexHub & Gateway`
+2. `CodexHub` section
+3. Language selector
+4. `Version & Updates` block
+5. CodexHub behavior toggles and repair-history action
+6. Auto retry section
+7. Image proxy section
+8. Save footer
+
+The update block is part of the CodexHub product settings, not part of Gateway runtime settings. This keeps app lifecycle and version controls visible without scrolling past Gateway-specific options.
+
 ## Backend Design
 
 Add `src-tauri/src/app_updates.rs` to own desktop update behavior. The module exposes Tauri commands through `main.rs`:
@@ -151,12 +176,14 @@ These wrappers use `desktopCall`, not `call`, because browser preview and the lo
 
 Update `frontend/src/components/SettingsDrawer.tsx`:
 
-- Add an "Updates" section under the CodexHub section.
+- Add a `Version & Updates` block inside the existing `CodexHub` section's rounded settings panel.
+- Place the block immediately below the language selector and above the CodexHub behavior toggles.
 - Show the current version.
 - Show a check button.
 - Show update availability details when present.
 - Show an install button only after an update is available.
 - Disable update buttons while a check or installation is in progress.
+- Do not add update controls to `SettingsPage`, because it is not mounted by the current app shell.
 
 Update `frontend/src/App.tsx`:
 
