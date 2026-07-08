@@ -3945,7 +3945,8 @@ class RoutingTests(unittest.TestCase):
         self.assertIs(payload["store"], False)
         self.assertIs(payload["stream"], True)
         self.assertNotIn("max_output_tokens", payload)
-        self.assertIn("Codex browser context detected.", json.dumps(payload))
+        self.assertNotIn("Codex browser context detected.", json.dumps(payload))
+        self.assertEqual(len(payload["input"]), 1)
 
     def test_official_body_downgrades_invalid_function_call_names(self):
         upstream = choose_upstream("gpt-5.5")
