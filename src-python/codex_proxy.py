@@ -7,6 +7,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 import gzip
 import hashlib
+import html
 import io
 import json
 import logging
@@ -26,7 +27,7 @@ from typing import Any, Callable, Mapping
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 from urllib.request import Request, urlopen
 
 from catalog import (
@@ -40,7 +41,15 @@ from catalog import (
 from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
-from subagent_state import build_subagent_state, state_guidance_message
+from subagent_policy import (
+    deterministic_required_action,
+    guidance_enabled as _subagent_policy_guidance_enabled,
+    semantic_repair_enabled as _subagent_policy_semantic_repair_enabled,
+    subagent_assist_mode as _subagent_policy_assist_mode,
+)
+from subagent_dynamic_dag import build_dynamic_dag_workflow, dynamic_dag_guidance_message, is_dynamic_dag_request
+from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions, workflow_complete
+from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
 from websocket_transport import (
     WebSocketProtocolError,
     close_frame,
@@ -100,6 +109,10 @@ PROXY_FEATURES = [
     "stream-transient-global-retry-budget",
     "third-party-tool-terminal-synthesis",
     "browser-context-skill-guidance",
+    "third-party-multi-agent-deterministic-repair",
+    "third-party-required-subagent-action-repair",
+    "third-party-chat-output-repair-parity",
+    "raw-provider-probe-opt-out",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
@@ -113,7 +126,7 @@ OFFICIAL_FAST_VARIANT_DISPLAY_NAMES = {
     "gpt-5.4-fast": "OpenAI GPT-5.4 Fast",
 }
 OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
-UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6",)
+UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6", "kimi-k2.7")
 UPSTREAM_MAX_OUTPUT_TOKEN_CAPS = {
     "minimax-m3": 131072,
     "deepseek-v4-pro": 65536,
@@ -138,6 +151,9 @@ THIRD_PARTY_TOOL_NAME_ALIASES = {
 }
 THIRD_PARTY_TOOL_NAME_ALIASES.update(
     {f"multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
+)
+THIRD_PARTY_TOOL_NAME_ALIASES.update(
+    {f"multi_agent_v1{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
 )
 THIRD_PARTY_TOOL_NAME_ALIASES.update(
     {f"mcp__multi_agent_v1__{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
@@ -594,6 +610,22 @@ class CompactEmptyResponseError(RuntimeError):
         super().__init__("Upstream returned an empty compact summary.")
 
 
+class LifecycleEmptyFinalResponseError(RuntimeError):
+    """Raised when a completed subagent lifecycle ends with no visible final text."""
+
+    def __init__(self, upstream_name: str):
+        self.upstream_name = upstream_name
+        super().__init__("Upstream returned an empty final response after completed subagent lifecycle.")
+
+
+class LifecycleFinalFormatResponseError(RuntimeError):
+    """Raised when a completed subagent lifecycle emits a final report with extra prose."""
+
+    def __init__(self, upstream_name: str):
+        self.upstream_name = upstream_name
+        super().__init__("Upstream returned a final response that did not start with the requested report format.")
+
+
 class UpstreamStreamIncompleteError(RuntimeError):
     """Raised when an upstream stream ends without a terminal event."""
 
@@ -889,6 +921,29 @@ def gateway_capacity_retry_delay_seconds(attempt: int) -> int:
     if index < len(CAPACITY_RETRY_CADENCE_SECONDS):
         return CAPACITY_RETRY_CADENCE_SECONDS[index]
     return CAPACITY_RETRY_CADENCE_SECONDS[-1]
+
+
+def subagent_assist_mode() -> str:
+    return _subagent_policy_assist_mode()
+
+
+def subagent_guidance_enabled(event_context: Mapping[str, Any] | None) -> bool:
+    return _subagent_policy_guidance_enabled(event_context)
+
+
+def subagent_semantic_repair_enabled(event_context: Mapping[str, Any] | None) -> bool:
+    return _subagent_policy_semantic_repair_enabled(event_context)
+
+
+def lifecycle_empty_final_resample_enabled(
+    event_context: Mapping[str, Any] | None,
+    request_kind: str,
+) -> bool:
+    if request_kind != RETRY_REQUEST_MAIN_GENERATION:
+        return False
+    if not subagent_semantic_repair_enabled(event_context):
+        return False
+    return bool((event_context or {}).get("subagent_lifecycle_complete"))
 
 
 def gateway_retry_delay_seconds(
@@ -2007,6 +2062,13 @@ def _chat_stream_chunk_starts_downstream_output(chunk: Mapping[str, Any]) -> boo
             return True
         if isinstance(delta.get("tool_calls"), list) and delta.get("tool_calls"):
             return True
+        message = choice.get("message")
+        if isinstance(message, Mapping):
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                return True
+            if isinstance(message.get("tool_calls"), list) and message.get("tool_calls"):
+                return True
     return False
 
 
@@ -2419,10 +2481,57 @@ def _chat_completion_message_output(message: Mapping[str, Any], index: int) -> d
     }
 
 
+XMLISH_TOOL_INVOKE_RE = re.compile(
+    r"<invoke\s+name\s*=\s*['\"]([^'\"]+)['\"]\s*>(.*?)</invoke>",
+    re.IGNORECASE | re.DOTALL,
+)
+XMLISH_TOOL_ARG_RE = re.compile(
+    r"<([A-Za-z_][A-Za-z0-9_.-]*)\s*>(.*?)</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+MODEL_STREAM_TAG_RE = re.compile(r"\]<\][A-Za-z0-9_.:-]+\[>")
+
+
+def _strip_model_stream_tags(text: str) -> str:
+    return MODEL_STREAM_TAG_RE.sub("", text)
+
+
+def _xmlish_tool_call_outputs_from_text(text: str) -> list[dict[str, Any]]:
+    cleaned = _strip_model_stream_tags(text)
+    if "<invoke" not in cleaned.lower():
+        return []
+    output: list[dict[str, Any]] = []
+    for match in XMLISH_TOOL_INVOKE_RE.finditer(cleaned):
+        name = html.unescape(match.group(1)).strip()
+        if not _valid_tool_name(name):
+            continue
+        arguments: dict[str, Any] = {}
+        for arg_match in XMLISH_TOOL_ARG_RE.finditer(match.group(2)):
+            key = arg_match.group(1).strip()
+            if key.lower() in {"tool_call", "invoke"}:
+                continue
+            value = html.unescape(_strip_model_stream_tags(arg_match.group(2))).strip()
+            arguments[key] = value
+        call_id = f"call_{uuid.uuid4().hex[:12]}"
+        output.append(
+            {
+                "id": f"fc_{call_id}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": name,
+                "arguments": json.dumps(arguments, ensure_ascii=True, separators=(",", ":")),
+            }
+        )
+    return output
+
+
 def _chat_completion_tool_outputs(message: Mapping[str, Any]) -> list[dict[str, Any]]:
     tool_calls = message.get("tool_calls")
     if not isinstance(tool_calls, list):
-        return []
+        content = message.get("content")
+        text = content if isinstance(content, str) else _chat_content_text(content)
+        return _xmlish_tool_call_outputs_from_text(text) if text else []
     output: list[dict[str, Any]] = []
     for index, tool_call in enumerate(tool_calls):
         if not isinstance(tool_call, dict):
@@ -2489,6 +2598,17 @@ def _chat_completion_to_response_body(body: bytes, *, repair: bool = True) -> by
     return json.dumps(response_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+def _normalize_chat_function_call_name(name: str) -> str:
+    if name == f"{NODE_REPL_NAMESPACE}.js":
+        return f"{NODE_REPL_NAMESPACE}__js"
+    if name == f"{NODE_REPL_NAMESPACE}__js":
+        return name
+    tool_name = THIRD_PARTY_TOOL_NAME_ALIASES.get(name)
+    if tool_name in MULTI_AGENT_TOOL_NAMES:
+        return f"multi_agent_v1__{tool_name}"
+    return name
+
+
 def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]) -> list[dict[str, Any]]:
     """Translate Chat Completions tool-call chunks into Responses events.
 
@@ -2500,6 +2620,26 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]
     events: list[dict[str, Any]] = []
     text_parts: list[str] = []
     finished = False
+    response_id = f"resp_{uuid.uuid4().hex[:12]}"
+    model: str | None = None
+
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            continue
+        chunk_model = chunk.get("model")
+        if isinstance(chunk_model, str) and chunk_model:
+            model = chunk_model
+            break
+
+    created_response: dict[str, Any] = {
+        "id": response_id,
+        "object": "response",
+        "status": "in_progress",
+        "output": [],
+    }
+    if model:
+        created_response["model"] = model
+    events.append({"type": "response.created", "response": created_response})
 
     def state_for(index: int) -> dict[str, Any]:
         if index not in states:
@@ -2549,12 +2689,14 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]
             if choice.get("finish_reason") is not None:
                 finished = True
             delta = choice.get("delta")
-            if not isinstance(delta, dict):
+            message = choice.get("message")
+            source = delta if isinstance(delta, dict) else message if isinstance(message, dict) else None
+            if not isinstance(source, dict):
                 continue
-            content = delta.get("content")
+            content = source.get("content")
             if isinstance(content, str) and content:
                 text_parts.append(content)
-            tool_calls = delta.get("tool_calls")
+            tool_calls = source.get("tool_calls")
             if not isinstance(tool_calls, list):
                 continue
             for fallback_index, tool_call in enumerate(tool_calls):
@@ -2572,7 +2714,9 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]
                 if isinstance(function, dict):
                     name = function.get("name")
                     if isinstance(name, str) and name and not state["name"]:
-                        state["name"] = name
+                        state["name"] = _normalize_chat_function_call_name(name)
+                    if state["name"] and not state["call_id"]:
+                        state["call_id"] = f"call_{uuid.uuid4().hex[:12]}"
                     arguments = function.get("arguments")
                     if isinstance(arguments, str) and arguments:
                         state["arguments"].append(arguments)
@@ -2592,6 +2736,8 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]
 
     if finished:
         output: list[dict[str, Any]] = []
+        text = "".join(text_parts)
+        xmlish_tool_outputs = _xmlish_tool_call_outputs_from_text(text) if text else []
         for state in sorted(states.values(), key=lambda item: item["output_index"]):
             maybe_emit_added(state)
             if not state["added"]:
@@ -2615,8 +2761,30 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]
             )
             events.append({"type": "response.output_item.done", "output_index": state["output_index"], "item": item})
             output.append(item)
-        text = "".join(text_parts)
-        if text:
+        if xmlish_tool_outputs and not output:
+            for item in xmlish_tool_outputs:
+                output_index = len(output)
+                in_progress_item = dict(item)
+                in_progress_item["status"] = "in_progress"
+                in_progress_item["arguments"] = ""
+                events.append(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": in_progress_item,
+                    }
+                )
+                events.append(
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "item_id": item["id"],
+                        "output_index": output_index,
+                        "arguments": item["arguments"],
+                    }
+                )
+                events.append({"type": "response.output_item.done", "output_index": output_index, "item": item})
+                output.append(item)
+        elif text and not output:
             output_index = len(output)
             item_id = f"msg_{uuid.uuid4().hex[:12]}"
             item = {
@@ -2660,19 +2828,372 @@ def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]
             )
             events.append({"type": "response.output_item.done", "output_index": output_index, "item": item})
             output.append(item)
-        events.append(
-            {
-                "type": "response.completed",
-                "response": {
-                    "id": f"resp_{uuid.uuid4().hex[:12]}",
-                    "object": "response",
-                    "status": "completed",
-                    "output": output,
-                },
-            }
-        )
+        completed_response: dict[str, Any] = {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "output": output,
+        }
+        if model:
+            completed_response["model"] = model
+        events.append({"type": "response.completed", "response": completed_response})
 
     return events
+
+
+def _response_events_shape_summary(events: list[Mapping[str, Any]]) -> dict[str, Any]:
+    type_counts: dict[str, int] = {}
+    tool_items: list[dict[str, Any]] = []
+    output_items: list[dict[str, Any]] = []
+    terminal_count = 0
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        event_type = event.get("type")
+        if isinstance(event_type, str):
+            type_counts[event_type] = type_counts.get(event_type, 0) + 1
+            if event_type == "response.completed":
+                terminal_count += 1
+        item = event.get("item")
+        if isinstance(item, Mapping):
+            item_summary = {
+                "event_type": event_type,
+                "type": item.get("type"),
+                "name": item.get("name"),
+                "namespace": item.get("namespace"),
+                "call_id": item.get("call_id"),
+                "has_arguments": bool(item.get("arguments")),
+            }
+            output_items.append(item_summary)
+            if item.get("type") == "function_call":
+                tool_items.append(item_summary)
+        response = event.get("response")
+        if isinstance(response, Mapping):
+            output = response.get("output")
+            if isinstance(output, list):
+                for output_item in output:
+                    if not isinstance(output_item, Mapping):
+                        continue
+                    item_summary = {
+                        "event_type": event_type,
+                        "type": output_item.get("type"),
+                        "name": output_item.get("name"),
+                        "namespace": output_item.get("namespace"),
+                        "call_id": output_item.get("call_id"),
+                        "has_arguments": bool(output_item.get("arguments")),
+                    }
+                    output_items.append(item_summary)
+                    if output_item.get("type") == "function_call":
+                        tool_items.append(item_summary)
+    return {
+        "event_count": len(events),
+        "event_type_counts": type_counts,
+        "terminal_count": terminal_count,
+        "output_items": output_items[:12],
+        "output_item_count": len(output_items),
+        "tool_items": tool_items[:12],
+        "tool_item_count": len(tool_items),
+    }
+
+
+def _chat_stream_shape_summary(chunks: list[Mapping[str, Any] | str]) -> dict[str, Any]:
+    text_parts: list[str] = []
+    reasoning_chars = 0
+    source_key_counts: dict[str, int] = {}
+    finish_reason_counts: dict[str, int] = {}
+    tool_call_names: list[str] = []
+    summary: dict[str, Any] = {
+        "chunk_count": len(chunks),
+        "done_count": 0,
+        "choice_count": 0,
+        "delta_source_count": 0,
+        "message_source_count": 0,
+        "content_source_count": 0,
+        "tool_call_count": 0,
+        "tool_call_id_count": 0,
+        "tool_call_name_count": 0,
+        "tool_call_argument_chars": 0,
+        "reasoning_source_count": 0,
+        "reasoning_chars": 0,
+        "text_chars": 0,
+        "xmlish_tool_count": 0,
+    }
+
+    for chunk in chunks:
+        if chunk == "[DONE]":
+            summary["done_count"] += 1
+            continue
+        if not isinstance(chunk, Mapping):
+            continue
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            continue
+        summary["choice_count"] += len(choices)
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None:
+                key = str(finish_reason)[:80]
+                finish_reason_counts[key] = finish_reason_counts.get(key, 0) + 1
+            for source_name in ("delta", "message"):
+                source = choice.get(source_name)
+                if not isinstance(source, Mapping):
+                    continue
+                summary[f"{source_name}_source_count"] += 1
+                for key in source.keys():
+                    key_text = str(key)[:80]
+                    source_key_counts[key_text] = source_key_counts.get(key_text, 0) + 1
+                content = source.get("content")
+                text = content if isinstance(content, str) else _chat_content_text(content)
+                if text:
+                    summary["content_source_count"] += 1
+                    text_parts.append(text)
+                for key, value in source.items():
+                    if "reason" not in str(key).lower():
+                        continue
+                    summary["reasoning_source_count"] += 1
+                    if isinstance(value, str):
+                        reasoning_chars += len(value)
+                    elif value is not None:
+                        reasoning_chars += len(str(value))
+                tool_calls = source.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    continue
+                summary["tool_call_count"] += len(tool_calls)
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, Mapping):
+                        continue
+                    if isinstance(tool_call.get("id"), str) and tool_call.get("id"):
+                        summary["tool_call_id_count"] += 1
+                    function = tool_call.get("function")
+                    if not isinstance(function, Mapping):
+                        continue
+                    if isinstance(function.get("name"), str) and function.get("name"):
+                        summary["tool_call_name_count"] += 1
+                        if len(tool_call_names) < 12:
+                            tool_call_names.append(function["name"])
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        summary["tool_call_argument_chars"] += len(arguments)
+
+    text = "".join(text_parts)
+    summary["text_chars"] = len(text)
+    summary["reasoning_chars"] = reasoning_chars
+    summary["xmlish_tool_count"] = len(_xmlish_tool_call_outputs_from_text(text)) if text else 0
+    summary["finish_reasons"] = finish_reason_counts
+    summary["source_keys"] = source_key_counts
+    summary["tool_call_names"] = tool_call_names
+    if text:
+        summary["text_hmac"] = proxy_telemetry.telemetry_hmac(
+            RUNTIME_CODEX_DIR,
+            b"chat-stream-text",
+            text.encode("utf-8", errors="ignore"),
+        )
+    return summary
+
+
+def _chat_stream_is_empty_lifecycle_final(
+    summary: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    request_kind: str,
+) -> bool:
+    if not lifecycle_empty_final_resample_enabled(event_context, request_kind):
+        return False
+    return int(summary.get("text_chars") or 0) == 0 and int(summary.get("tool_call_count") or 0) == 0
+
+
+FINAL_REPORT_LINE_PREFIXES = (
+    ("RESULT:", "SENTINEL:", "SUBAGENT_CHAIN:"),
+    ("SPAWNED:", "AGENT_ID:", "SENTINEL_SEEN:", "CLOSED:"),
+    (
+        "SPAWN_COUNT:",
+        "AGENT_IDS:",
+        "SENTINEL_A_SEEN:",
+        "SENTINEL_B_SEEN:",
+        "CLOSED_COUNT:",
+        "EXTRA_SPAWN:",
+    ),
+)
+
+
+def _final_report_nonempty_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.strip().splitlines() if line.strip()]
+
+
+def _lines_match_final_report_prefixes(lines: list[str], start: int, prefixes: tuple[str, ...]) -> bool:
+    if start + len(prefixes) > len(lines):
+        return False
+    for offset, prefix in enumerate(prefixes):
+        if not lines[start + offset].upper().startswith(prefix):
+            return False
+    return True
+
+
+def _lifecycle_final_format_violation(text: str) -> bool:
+    lines = _final_report_nonempty_lines(text)
+    if not lines:
+        return False
+    for prefixes in FINAL_REPORT_LINE_PREFIXES:
+        for start in range(len(lines)):
+            if not _lines_match_final_report_prefixes(lines, start, prefixes):
+                continue
+            return start != 0 or len(lines) != len(prefixes)
+    return False
+
+
+def _text_contains_lifecycle_final_report(text: str) -> bool:
+    lines = _final_report_nonempty_lines(text)
+    if not lines:
+        return False
+    for prefixes in FINAL_REPORT_LINE_PREFIXES:
+        for start in range(len(lines)):
+            if _lines_match_final_report_prefixes(lines, start, prefixes):
+                return True
+    return False
+
+
+def _chat_stream_visible_text(chunks: list[Mapping[str, Any] | str]) -> str:
+    text_parts: list[str] = []
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            continue
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            for source_name in ("delta", "message"):
+                source = choice.get(source_name)
+                if not isinstance(source, Mapping):
+                    continue
+                content = source.get("content")
+                text = content if isinstance(content, str) else _chat_content_text(content)
+                if text:
+                    text_parts.append(text)
+    return "".join(text_parts).strip()
+
+
+def _response_payload_visible_text(payload: Any) -> str:
+    text_parts: list[str] = []
+    if not isinstance(payload, Mapping):
+        return ""
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, Mapping) or item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, Mapping) and part.get("type") in {"output_text", "text"}:
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        text_parts.append(text)
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, Mapping):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                text_parts.append(content)
+            elif isinstance(content, list):
+                text_parts.append(_chat_content_text(content))
+    return "\n".join(part.strip() for part in text_parts if part.strip()).strip()
+
+
+def _response_payload_tool_call_count(payload: Any) -> int:
+    if not isinstance(payload, Mapping):
+        return 0
+    count = 0
+    output = payload.get("output")
+    if isinstance(output, list):
+        count += sum(1 for item in output if isinstance(item, Mapping) and item.get("type") == "function_call")
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, Mapping):
+                continue
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                count += len(tool_calls)
+    return count
+
+
+def _response_body_lifecycle_final_issue(
+    body: bytes,
+    event_context: Mapping[str, Any] | None,
+    request_kind: str,
+) -> str | None:
+    if not lifecycle_empty_final_resample_enabled(event_context, request_kind):
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if _response_payload_tool_call_count(payload) > 0:
+        return None
+    text = _response_payload_visible_text(payload)
+    if not text:
+        return "empty"
+    if _lifecycle_final_format_violation(text):
+        return "format"
+    return None
+
+
+def _responses_events_lifecycle_final_issue(
+    events: list[Mapping[str, Any]],
+    event_context: Mapping[str, Any] | None,
+    request_kind: str,
+) -> str | None:
+    if not lifecycle_empty_final_resample_enabled(event_context, request_kind):
+        return None
+    return _response_body_lifecycle_final_issue(_events_to_responses_body(events), event_context, request_kind)
+
+
+def _chat_stream_lifecycle_final_issue(
+    chunks: list[Mapping[str, Any] | str],
+    summary: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    request_kind: str,
+) -> str | None:
+    if not lifecycle_empty_final_resample_enabled(event_context, request_kind):
+        return None
+    if int(summary.get("tool_call_count") or 0) > 0:
+        return None
+    if int(summary.get("text_chars") or 0) == 0:
+        return "empty"
+    if _lifecycle_final_format_violation(_chat_stream_visible_text(chunks)):
+        return "format"
+    return None
+
+
+def _raise_lifecycle_final_issue(upstream_name: str, issue: str) -> None:
+    if issue == "empty":
+        raise LifecycleEmptyFinalResponseError(upstream_name)
+    if issue == "format":
+        raise LifecycleFinalFormatResponseError(upstream_name)
+
+
+def _lifecycle_final_issue_event_name(issue: str) -> str:
+    if issue == "empty":
+        return "lifecycle_empty_final_resample"
+    return "lifecycle_final_format_resample"
+
+
+def _lifecycle_final_issue_missing_reason(issue: str) -> str:
+    if issue == "empty":
+        return "lifecycle_empty_final_response"
+    return "lifecycle_final_format_response"
 
 
 def _chat_content_to_responses_content(value: Any) -> list[dict[str, Any]]:
@@ -2901,6 +3422,25 @@ def _chat_completions_request_to_responses_body(body: bytes) -> bytes:
     return json.dumps(responses_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | None:
+    name = item.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    namespace = item.get("namespace")
+    if namespace == "multi_agent_v1":
+        return f"multi_agent_v1__{name}"
+    if namespace == NODE_REPL_NAMESPACE:
+        return f"{NODE_REPL_NAMESPACE}__{name}"
+    flat_codex_apps_alias = _codex_apps_namespace_flat_alias(namespace, name)
+    if flat_codex_apps_alias is not None:
+        return flat_codex_apps_alias
+    if isinstance(namespace, str) and _supports_explicit_namespace_alias(namespace) and _valid_tool_name(name):
+        alias = f"{namespace}__{name}"
+        if _valid_tool_name(alias):
+            return alias
+    return name
+
+
 def _response_body_to_chat_completion_body(body: bytes) -> bytes:
     """Convert a Responses API response body into a Chat Completions response body."""
     payload = json.loads(body.decode("utf-8-sig"))
@@ -2931,7 +3471,7 @@ def _response_body_to_chat_completion_body(body: bytes) -> bytes:
                                 text_parts.append(text)
             elif item.get("type") == "function_call":
                 call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-                name = item.get("name")
+                name = _chat_function_name_from_response_item(item)
                 arguments = item.get("arguments")
                 if isinstance(name, str) and name:
                     tool_calls.append({
@@ -2967,6 +3507,97 @@ def _response_body_to_chat_completion_body(body: bytes) -> bytes:
         chat_payload["usage"] = usage
 
     return json.dumps(chat_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
+    payload = json.loads(body.decode("utf-8-sig"))
+    if not isinstance(payload, dict):
+        return []
+
+    response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"chatcmpl_{uuid.uuid4().hex[:12]}"
+    model = payload.get("model")
+    chunks: list[dict[str, Any]] = [
+        {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+    ]
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for fallback_index, choice in enumerate(choices):
+            if not isinstance(choice, Mapping):
+                continue
+            index = choice.get("index")
+            index = index if isinstance(index, int) else fallback_index
+            message = choice.get("message")
+            if not isinstance(message, Mapping):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                chunks.append(
+                    {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": index, "delta": {"content": content}, "finish_reason": None}],
+                    }
+                )
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for fallback_tool_index, tool_call in enumerate(tool_calls):
+                    if not isinstance(tool_call, Mapping):
+                        continue
+                    function = tool_call.get("function")
+                    if not isinstance(function, Mapping):
+                        continue
+                    name = function.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    tool_index = tool_call.get("index")
+                    tool_index = tool_index if isinstance(tool_index, int) else fallback_tool_index
+                    call_id = tool_call.get("id") if isinstance(tool_call.get("id"), str) else f"call_{uuid.uuid4().hex[:12]}"
+                    arguments = function.get("arguments") if isinstance(function.get("arguments"), str) else ""
+                    chunks.append(
+                        {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": index,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": tool_index,
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {"name": name, "arguments": arguments},
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+            finish_reason = choice.get("finish_reason")
+            if not isinstance(finish_reason, str):
+                finish_reason = "tool_calls" if isinstance(tool_calls, list) and tool_calls else "stop"
+            chunks.append(
+                {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{"index": index, "delta": {}, "finish_reason": finish_reason}],
+                }
+            )
+    return chunks
 
 
 def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
@@ -3128,7 +3759,7 @@ def _response_events_to_chat_stream_chunks(
                 item_id = item.get("id") or item.get("call_id") or ""
                 state = tool_state(item_id)
                 state["id"] = item.get("call_id") or state["id"]
-                state["name"] = item.get("name") or state["name"]
+                state["name"] = _chat_function_name_from_response_item(item) or state["name"]
                 if state["id"] and state["name"] and not state["emitted_header"]:
                     chunks.append({
                         "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
@@ -3842,6 +4473,58 @@ def _developer_text_message(content: str) -> dict[str, str]:
     return {"type": "message", "role": "developer", "content": content}
 
 
+LIFECYCLE_FINAL_RETRY_GUIDANCE = """Codex native subagent final report correction
+status: lifecycle_complete_final_retry
+previous_attempt_status: the previous lifecycle-complete assistant response did not satisfy the requested visible final format.
+visible_response_required: re-emit only the final report requested by the user, as ordinary assistant message content.
+final_format_required: the first visible output token must be the first token of that requested final report. Do not include headings, bullets, summaries, markdown fences, or prose before or after the report.
+tool_calls_forbidden: the subagent lifecycle already completed via real current-turn tool executions; do not call tool_search, node_repl, local tools, or any multi_agent_v1 tool again.
+source_of_truth: use only the observed current-turn agent ids, sentinels, wait results, and close state already present in the transcript.
+"""
+
+
+def _lifecycle_final_retry_guidance_message(reason: str) -> dict[str, str]:
+    return _developer_text_message(LIFECYCLE_FINAL_RETRY_GUIDANCE + f"retry_reason: {reason}")
+
+
+def _responses_body_with_lifecycle_final_retry_guidance(body: bytes, reason: str) -> bytes:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    input_items = payload.get("input")
+    guidance = _lifecycle_final_retry_guidance_message(reason)
+    if isinstance(input_items, list):
+        payload["input"] = list(input_items) + [guidance]
+    elif isinstance(input_items, str):
+        payload["input"] = [_user_text_message(input_items), guidance]
+    else:
+        payload["input"] = [guidance]
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+WORKER_SUBAGENT_FINALIZATION_GUIDANCE = """Codex native worker subagent finalization guidance
+status: worker_subagent_finalization_required
+visible_response_required: after completing any required tool work, emit the worker result as ordinary assistant message content, not only reasoning, hidden notes, or tool arguments. If you emit an empty message, the coordinator receives no result and will treat the worker as incomplete.
+allowed_status_prefixes: DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, BLOCKED, PASS, FAIL
+required_next_action_after_tools: use the exact report format requested by the worker task. For diagnostic implementer/reviewer tasks, the first visible output token should usually be DONE, PASS, FAIL, or BLOCKED.
+do_not_spawn_subagents: this is a worker subagent request, not a coordinator request.
+"""
+
+
+def _worker_subagent_finalization_message() -> dict[str, str]:
+    return _developer_text_message(WORKER_SUBAGENT_FINALIZATION_GUIDANCE)
+
+
+def _has_worker_subagent_finalization_guidance(value: Any) -> bool:
+    return any(
+        "worker_subagent_finalization_required" in fragment
+        for fragment in _collect_text_fragments(value)
+    )
+
+
 def _stringify_internal_field(value: Any) -> str:
     if value is None:
         return ""
@@ -3913,11 +4596,26 @@ def _json_object_from_arguments(value: Any) -> dict[str, Any] | None:
         return dict(value)
     if not isinstance(value, str) or not value.strip():
         return None
+    text = value.strip()
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        try:
+            parsed, _end = json.JSONDecoder().raw_decode(text)
+        except json.JSONDecodeError:
+            return None
     return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _json_argument_string_needs_repair(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = json.loads(value.strip())
+    except json.JSONDecodeError:
+        parsed_obj = _json_object_from_arguments(value)
+        return parsed_obj is not None
+    return not isinstance(parsed, dict)
 
 
 def _dump_arguments_like(original: Any, arguments: Mapping[str, Any]) -> Any:
@@ -3985,6 +4683,21 @@ def _multi_agent_explicit_function_tools(
         alias = f"multi_agent_v1__{name}"
         description = str(tool.get("description") or f"Invoke Codex multi_agent_v1.{name}.")
         parameters = json.loads(json.dumps(_tool_parameters_schema(tool)))
+        properties = parameters.setdefault("properties", {})
+        if name == "spawn_agent" and isinstance(properties, dict):
+            message = properties.get("message")
+            if isinstance(message, dict):
+                message.setdefault(
+                    "description",
+                    "Complete child-agent task prompt. Include all instructions the child needs.",
+                )
+            fork_context = properties.get("fork_context")
+            if isinstance(fork_context, dict):
+                fork_context["description"] = (
+                    "Set false for self-contained child prompts so the child follows only the supplied message. "
+                    "Set true only when inheriting the coordinator transcript is explicitly needed."
+                )
+                fork_context.setdefault("default", False)
         target_agent_ids = open_agent_ids
         if name == "wait_agent" and wait_agent_ids is not None:
             target_agent_ids = wait_agent_ids
@@ -3993,7 +4706,6 @@ def _multi_agent_explicit_function_tools(
         if target_agent_ids and name in {"wait_agent", "close_agent"}:
             ids_text = ", ".join(target_agent_ids)
             description += f" Current open agent_id target(s): {ids_text}. Use these id(s) next."
-            properties = parameters.setdefault("properties", {})
             if isinstance(properties, dict):
                 if name == "wait_agent":
                     targets = properties.get("targets")
@@ -4034,6 +4746,23 @@ def _is_multi_agent_explicit_tool_name(name: str) -> bool:
     return name in THIRD_PARTY_TOOL_NAME_ALIASES
 
 
+def _multi_agent_alias_tool_name(name: Any) -> str | None:
+    if not isinstance(name, str):
+        return None
+    if name in MULTI_AGENT_TOOL_NAMES:
+        return name
+    return THIRD_PARTY_TOOL_NAME_ALIASES.get(name)
+
+
+def _looks_like_response_tool_name_fragment(value: Mapping[str, Any]) -> bool:
+    item_type = value.get("type")
+    if isinstance(item_type, str) and item_type.startswith("response."):
+        return True
+    if any(key in value for key in ("call_id", "item_id", "arguments", "status")):
+        return True
+    return set(value.keys()).issubset({"name", "namespace", "index", "id"})
+
+
 def _is_multi_agent_tool_schema(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
@@ -4064,6 +4793,35 @@ def _is_node_repl_tool_schema(value: Any) -> bool:
             return True
         return isinstance(name, str) and _is_node_repl_explicit_tool_name(name)
     return False
+
+
+def _is_local_tool_gateway_tool_schema(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    name = _tool_schema_name(value)
+    if not isinstance(name, str):
+        return False
+    local_gateway_namespace = "mcp__codex_apps__local_tool_gateway_"
+    if value.get("type") == "namespace":
+        return name == local_gateway_namespace
+    if value.get("type") == "function":
+        namespace = value.get("namespace")
+        if namespace == local_gateway_namespace:
+            return True
+        return name.startswith(f"{local_gateway_namespace}__")
+    return False
+
+
+def _is_mcp_or_codex_app_tool_schema(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    name = _tool_schema_name(value)
+    namespace = value.get("namespace")
+    if isinstance(namespace, str) and (namespace.startswith("mcp__") or namespace == "codex_app"):
+        return True
+    if not isinstance(name, str):
+        return False
+    return name.startswith("mcp__") or name == "codex_app" or name.startswith("codex_app__")
 
 
 def _is_flattened_namespace_schema(value: Any) -> bool:
@@ -4107,12 +4865,11 @@ def _multi_agent_function_call_name(item: Mapping[str, Any]) -> str | None:
 
     namespace = item.get("namespace")
     name = item.get("name")
-    if namespace == "multi_agent_v1" and isinstance(name, str) and name in MULTI_AGENT_TOOL_NAMES:
-        return name
-    if isinstance(name, str):
-        alias = THIRD_PARTY_TOOL_NAME_ALIASES.get(name)
-        if alias:
-            return alias
+    tool_name = _multi_agent_alias_tool_name(name)
+    if namespace == "multi_agent_v1" and tool_name is not None:
+        return tool_name
+    if tool_name is not None and name != tool_name:
+        return tool_name
     return None
 
 
@@ -4212,6 +4969,7 @@ def _inject_explicit_codex_tools(
     include_resume_agent: bool = True,
     include_send_input: bool = True,
     include_node_repl_tools: bool = True,
+    include_local_tool_gateway_tools: bool = True,
     strip_namespace_tools: bool = True,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
@@ -4231,6 +4989,15 @@ def _inject_explicit_codex_tools(
         if len(filtered_tools) != len(tools):
             tools[:] = filtered_tools
             changed = True
+
+    if not include_local_tool_gateway_tools:
+        filtered_tools = [tool for tool in tools if not _is_local_tool_gateway_tool_schema(tool)]
+        if len(filtered_tools) != len(tools):
+            tools[:] = filtered_tools
+            changed = True
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_local_tool_gateway_tool_schema(tool)
+        ]
 
     if not include_multi_agent_tools:
         filtered_tools = [tool for tool in tools if not _is_multi_agent_tool_schema(tool)]
@@ -4296,15 +5063,148 @@ def _inject_explicit_codex_tools(
         additions = [tool for tool in additions if not _is_multi_agent_tool_schema(tool)]
     if not include_node_repl_tools:
         additions = [tool for tool in additions if not _is_node_repl_tool_schema(tool)]
+    if excluded_tool_names:
+        additions = [
+            tool
+            for tool in additions
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("type") == "function"
+                and tool.get("name") in excluded_tool_names
+            )
+        ]
 
     for tool in additions:
         name = _tool_schema_name(tool)
-        if not name or name in existing_names:
+        if not name:
+            continue
+        replaced_existing = False
+        if name in existing_names:
+            for index, existing_tool in enumerate(tools):
+                if not isinstance(existing_tool, Mapping) or _tool_schema_name(existing_tool) != name:
+                    continue
+                if name.startswith("multi_agent_v1__") and dict(existing_tool) != tool:
+                    tools[index] = tool
+                    changed = True
+                replaced_existing = True
+                break
+        if replaced_existing:
             continue
         tools.append(tool)
         existing_names.add(name)
         changed = True
     return changed
+
+
+def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_node_repl_tools: bool) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    filtered_tools = [
+        tool
+        for tool in tools
+        if _is_multi_agent_tool_schema(tool)
+        or (include_node_repl_tools and _is_node_repl_tool_schema(tool))
+    ]
+    if len(filtered_tools) == len(tools):
+        return False
+    payload["tools"] = filtered_tools
+    return True
+
+
+def _filter_tools_for_subagent_worker(payload: dict[str, Any]) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    filtered_tools = [
+        tool
+        for tool in tools
+        if not _is_multi_agent_tool_schema(tool)
+        and not _is_mcp_or_codex_app_tool_schema(tool)
+        and _tool_schema_name(tool) != TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+    ]
+    if len(filtered_tools) == len(tools):
+        return False
+    payload["tools"] = filtered_tools
+    return True
+
+
+def _hide_tools_for_completed_subagent_lifecycle(payload: dict[str, Any]) -> bool:
+    changed = False
+    tools = payload.get("tools")
+    if isinstance(tools, list) and tools:
+        payload["tools"] = []
+        changed = True
+    elif "tools" not in payload:
+        payload["tools"] = []
+        changed = True
+    if payload.pop("tool_choice", None) is not None:
+        changed = True
+    return changed
+
+
+def _restrict_tools_to_required_tool(payload: dict[str, Any], tool_name: str | None) -> bool:
+    if not tool_name:
+        return False
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    filtered_tools = [tool for tool in tools if _tool_schema_name(tool) == tool_name]
+    if not filtered_tools or len(filtered_tools) == len(tools):
+        return False
+    payload["tools"] = filtered_tools
+    return True
+
+
+def _required_subagent_tool_choice(
+    *,
+    tool_protocol: str,
+    lifecycle_complete: bool,
+    include_spawn_agent: bool,
+    include_wait_agent: bool,
+    include_close_agent: bool,
+    include_resume_agent: bool,
+    include_send_input: bool,
+    include_node_repl_for_subagent_workflow: bool,
+) -> str | None:
+    if tool_protocol not in {"chat_tools", "responses_structured"} or lifecycle_complete:
+        return None
+    if include_node_repl_for_subagent_workflow:
+        return None
+    candidates: list[str] = []
+    if include_spawn_agent:
+        candidates.append("multi_agent_v1__spawn_agent")
+    if include_wait_agent:
+        candidates.append("multi_agent_v1__wait_agent")
+    if include_close_agent:
+        candidates.append("multi_agent_v1__close_agent")
+    if include_send_input:
+        candidates.append("multi_agent_v1__send_input")
+    elif include_resume_agent:
+        candidates.append("multi_agent_v1__resume_agent")
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _set_required_subagent_tool_choice(
+    payload: dict[str, Any],
+    tool_name: str | None,
+    *,
+    event_context: Mapping[str, Any] | None,
+    upstream: Any,
+) -> bool:
+    if not tool_name:
+        return False
+    desired = {"type": "function", "name": tool_name}
+    if payload.get("tool_choice") == desired:
+        return False
+    payload["tool_choice"] = desired
+    _write_adapter_event(
+        event_context,
+        "required_subagent_tool_choice_set",
+        upstream=upstream if isinstance(upstream, str) else None,
+        tool_name=tool_name,
+    )
+    return True
 
 
 def _function_tool_names(value: Any) -> set[str]:
@@ -4370,14 +5270,19 @@ def _infer_multi_agent_tool_name(arguments: Mapping[str, Any]) -> str | None:
         return "send_input" if "message" in arguments else "close_agent"
     if "id" in arguments:
         return "resume_agent"
-    if any(key in arguments for key in ("agent_type", "fork_context", "message")):
+    if any(key in arguments for key in ("agent_type", "fork_context", "message", "prompt", "input")):
         return "spawn_agent"
     return None
 
 
-def _codex_apps_flat_alias_name(name: Any) -> str | None:
+def _codex_apps_flat_alias_parts(name: Any) -> tuple[str, str] | None:
     if not isinstance(name, str) or not name.startswith("mcp__codex_apps__"):
         return None
+    local_gateway_namespace = "mcp__codex_apps__local_tool_gateway_"
+    if name.startswith(local_gateway_namespace):
+        tool_name = name[len(local_gateway_namespace) :].lstrip("_")
+        if _valid_tool_name(tool_name):
+            return local_gateway_namespace, tool_name
     namespace_stem, found, tool_name = name.rpartition("___")
     if not found:
         return None
@@ -4388,15 +5293,20 @@ def _codex_apps_flat_alias_name(name: Any) -> str | None:
         and _valid_tool_name(namespace)
         and _valid_tool_name(tool_name)
     ):
-        return name
+        return namespace, tool_name
     return None
+
+
+def _codex_apps_flat_alias_name(name: Any) -> str | None:
+    return name if _codex_apps_flat_alias_parts(name) is not None else None
 
 
 def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
     if not isinstance(name, str):
         return None
-    if _codex_apps_flat_alias_name(name) is not None:
-        return None
+    codex_apps_alias = _codex_apps_flat_alias_parts(name)
+    if codex_apps_alias is not None:
+        return codex_apps_alias
     for separator in ("__", "."):
         namespace, found, tool_name = name.rpartition(separator)
         if not found:
@@ -4484,6 +5394,35 @@ def _normalize_multi_agent_arguments(
     if resolved_tool_name is None:
         resolved_tool_name = _infer_multi_agent_tool_name(arguments)
 
+    changed = changed or _json_argument_string_needs_repair(value)
+
+    if resolved_tool_name == "spawn_agent":
+        if "message" not in arguments:
+            for alias in ("prompt", "input"):
+                alias_value = arguments.get(alias)
+                if isinstance(alias_value, str) and alias_value.strip():
+                    arguments["message"] = alias_value
+                    changed = True
+                    break
+        if "message" in arguments:
+            for alias in ("prompt", "input"):
+                if alias in arguments:
+                    arguments.pop(alias, None)
+                    changed = True
+        if "name" in arguments:
+            name_value = arguments.get("name")
+            if "nickname" not in arguments and isinstance(name_value, str) and name_value.strip() and name_value not in MULTI_AGENT_TOOL_NAMES:
+                arguments["nickname"] = name_value
+                changed = True
+            arguments.pop("name", None)
+            changed = True
+        if "agent_type" in arguments:
+            arguments.pop("agent_type", None)
+            changed = True
+        if "fork_context" not in arguments:
+            arguments["fork_context"] = False
+            changed = True
+
     for key in ("fork_context", "interrupt"):
         item = arguments.get(key)
         if isinstance(item, str) and item.lower() in {"true", "false"}:
@@ -4500,6 +5439,17 @@ def _normalize_multi_agent_arguments(
         if item_changed:
             arguments["target"] = coerced
             changed = True
+    if resolved_tool_name == "close_agent" and "target" not in arguments and "targets" in arguments:
+        target_value = arguments.get("targets")
+        if isinstance(target_value, list) and target_value:
+            arguments["target"] = target_value[0]
+            arguments.pop("targets", None)
+            changed = True
+    if resolved_tool_name == "wait_agent" and "targets" not in arguments and "target" in arguments:
+        target_value = arguments.get("target")
+        arguments["targets"] = target_value if isinstance(target_value, list) else [target_value]
+        arguments.pop("target", None)
+        changed = True
     if "timeout_ms" in arguments:
         coerced, item_changed = _coerce_number(arguments["timeout_ms"])
         if item_changed:
@@ -4548,40 +5498,51 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
         rewritten.setdefault("status", "completed")
         changed = True
     elif _is_tool_call_item(value):
-        flat_namespace_alias = _codex_apps_namespace_flat_alias(value.get("namespace"), value.get("name"))
-        if flat_namespace_alias is not None:
-            rewritten["name"] = flat_namespace_alias
-            rewritten.pop("namespace", None)
+        original_name = value.get("name")
+        tool_name = _multi_agent_alias_tool_name(original_name)
+        namespace_alias = None
+        argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
+        if argument_key is not None and _json_argument_string_needs_repair(value.get(argument_key)):
+            repaired_arguments = _json_object_from_arguments(value.get(argument_key))
+            if repaired_arguments is not None:
+                rewritten[argument_key] = _dump_arguments_like(value.get(argument_key), repaired_arguments)
+                changed = True
+        if (
+            (value.get("namespace") == NODE_REPL_NAMESPACE and original_name == "js")
+            or original_name in {f"{NODE_REPL_NAMESPACE}.js", f"{NODE_REPL_NAMESPACE}__js"}
+        ):
+            rewritten["namespace"] = NODE_REPL_NAMESPACE
+            rewritten["name"] = "js"
             changed = True
-        else:
-            original_name = value.get("name")
-            tool_name = THIRD_PARTY_TOOL_NAME_ALIASES.get(original_name) if isinstance(original_name, str) else None
-            namespace_alias = None
-            if tool_name is None and isinstance(original_name, str) and original_name in MULTI_AGENT_TOOL_NAMES:
-                tool_name = original_name
-            if tool_name is None:
-                namespace_alias = _split_namespace_tool_alias(original_name)
-            argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
-            if original_name in MULTI_AGENT_NAMESPACE_ALIASES and argument_key is not None:
-                normalized, tool_name, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), None)
-                if args_changed:
-                    rewritten[argument_key] = normalized
-                    changed = True
-            elif tool_name is not None and argument_key is not None:
-                normalized, _, args_changed = _normalize_multi_agent_arguments(value.get(argument_key), tool_name)
-                if args_changed:
-                    rewritten[argument_key] = normalized
-                    changed = True
+        elif tool_name is None:
+            namespace_alias = _split_namespace_tool_alias(original_name)
+        if original_name in MULTI_AGENT_NAMESPACE_ALIASES and argument_key is not None:
+            normalized, tool_name, args_changed = _normalize_multi_agent_arguments(rewritten.get(argument_key), None)
+            if args_changed:
+                rewritten[argument_key] = normalized
+                changed = True
+        elif tool_name is not None and argument_key is not None:
+            normalized, _, args_changed = _normalize_multi_agent_arguments(rewritten.get(argument_key), tool_name)
+            if args_changed:
+                rewritten[argument_key] = normalized
+                changed = True
 
-            if tool_name is not None:
-                rewritten["name"] = tool_name
-                rewritten["namespace"] = "multi_agent_v1"
-                changed = True
-            elif namespace_alias is not None:
-                namespace_name, namespaced_tool_name = namespace_alias
-                rewritten["name"] = namespaced_tool_name
-                rewritten["namespace"] = namespace_name
-                changed = True
+        if tool_name is not None:
+            rewritten["name"] = tool_name
+            rewritten["namespace"] = "multi_agent_v1"
+            changed = True
+        elif namespace_alias is not None:
+            namespace_name, namespaced_tool_name = namespace_alias
+            rewritten["name"] = namespaced_tool_name
+            rewritten["namespace"] = namespace_name
+            changed = True
+    else:
+        original_name = value.get("name")
+        tool_name = _multi_agent_alias_tool_name(original_name)
+        if tool_name is not None and _looks_like_response_tool_name_fragment(value):
+            rewritten["name"] = tool_name
+            rewritten["namespace"] = "multi_agent_v1"
+            changed = True
 
     for key, item in list(rewritten.items()):
         replacement, item_changed = _normalize_third_party_tool_call(item)
@@ -4662,6 +5623,183 @@ def _joined_text(value: Any) -> str:
         return "\n".join(_joined_text(child) for child in value.values())
     if isinstance(value, list):
         return "\n".join(_joined_text(child) for child in value)
+    return ""
+
+
+def _active_user_request_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return _joined_text(value)
+    messages: list[str] = []
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        if item.get("role") != "user":
+            continue
+        text = _joined_text(item.get("content"))
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if first_line.startswith("Previous real Codex native ") or first_line.startswith("Codex native "):
+            continue
+        if text.strip():
+            messages.append(text)
+    return "\n".join(messages)
+
+
+def _exact_child_prompts_from_request_text(text: str) -> list[str]:
+    prompts: list[str] = []
+    seen: set[str] = set()
+    patterns = (
+        r"child prompt must be exactly this complete string:\s*`([^`]+)`",
+        r"Spawn child [A-Z]\s+with prompt exactly this complete string:\s*`([^`]+)`",
+        r"Spawn child [A-Z]\s+with prompt exactly:\s*([^\r\n]+)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            prompt = match.group(1).strip()
+            if prompt and prompt not in seen:
+                prompts.append(prompt)
+                seen.add(prompt)
+    return prompts
+
+
+def _required_spawn_arguments_for_state(input_items: Any, subagent_state: Any | None) -> dict[str, Any] | None:
+    if subagent_state is None or getattr(subagent_state, "next_action", None) != "spawn":
+        return None
+    text = _active_user_request_text(input_items)
+    prompts = _exact_child_prompts_from_request_text(text)
+    if not prompts:
+        return _required_workflow_spawn_arguments(text, subagent_state)
+    index = len(getattr(subagent_state, "agents", {}) or {})
+    if index >= len(prompts):
+        return None
+    prompt = prompts[index]
+    if not prompt:
+        return None
+    return {"message": prompt, "fork_context": False}
+
+
+def _required_workflow_spawn_arguments(text: str, subagent_state: Any) -> dict[str, Any] | None:
+    if not bool(getattr(subagent_state, "workflow_intent", False)):
+        return None
+    if not bool(getattr(subagent_state, "workflow_plan_read", False)):
+        return None
+    role = getattr(subagent_state, "next_expected_role", None)
+    if role not in {"implementer", "spec_reviewer", "code_quality_reviewer"}:
+        return None
+
+    output_path = _line_value(text, "OUTPUT_PATH=")
+    sentinel = _line_value(text, "SENTINEL=")
+    model = _line_value(text, "MODEL_UNDER_TEST=") or _line_value(text, "MODEL=")
+    endpoint = _line_value(text, "ENDPOINT_UNDER_TEST=") or _line_value(text, "ENDPOINT=")
+    case_name = _line_value(text, "CASE=")
+    if not all(isinstance(value, str) and value for value in (output_path, sentinel, model, endpoint, case_name)):
+        return None
+
+    baseline_status = _workflow_baseline_status(text)
+    artifact_text = "\n".join(
+        [
+            f"case: {case_name}",
+            f"model: {model}",
+            f"endpoint: {endpoint}",
+            sentinel,
+            "artifact: ok",
+        ]
+    )
+    run_dir = str(Path(output_path).parent)
+    if role == "implementer":
+        message = f"""You are the IMPLEMENTER subagent in a Subagent-Driven Development workflow.
+
+Your job is the single, minimal task described below. Do exactly this and nothing else.
+
+Create exactly one UTF-8 text artifact at this absolute path:
+  OUTPUT_PATH = {output_path}
+
+Required file content, exactly five lines plus a trailing newline:
+{artifact_text}
+
+Hard constraints:
+1. Create exactly one file: OUTPUT_PATH above.
+2. Do not modify product-source files and do not commit anything.
+3. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+4. After writing, read the file back and confirm it matches the required content exactly.
+
+Report back with only:
+Status: DONE
+Artifact path: {output_path}
+Bytes written: <integer>
+File ends with newline: <yes/no>
+Other files created: <none, list if any>
+"""
+        return {"message": message, "nickname": "implementer", "fork_context": False}
+
+    if role == "spec_reviewer":
+        message = f"""You are the SPEC REVIEWER subagent in a Subagent-Driven Development workflow.
+
+Your single job is to verify the diagnostic artifact matches its specification exactly. Do not modify or create files.
+
+Artifact path:
+  {output_path}
+
+Required file content, exactly five lines plus a trailing newline:
+{artifact_text}
+
+Verification steps:
+1. Read the artifact using native shell/file-read tools.
+2. Confirm the file exists, is UTF-8 text, and ends with a trailing newline.
+3. Confirm all five lines above are present in exact order with no extra content.
+4. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+
+Report back with only:
+Verdict: PASS | FAIL
+Checks: <one-line summary>
+Failures: <none, or specific failures>
+"""
+        return {"message": message, "nickname": "spec-reviewer", "fork_context": False}
+
+    message = f"""You are the CODE-QUALITY REVIEWER subagent in a Subagent-Driven Development workflow.
+
+Your single job is to verify the implementer's work is minimal. Do not modify or create files.
+
+Expected artifact:
+  {output_path}
+
+Runner-owned diagnostics scaffolding to ignore:
+  {run_dir}
+  diagnostics/subagent-e2e/level12-e2e-*/
+  diagnostics/subagent-e2e/level2-*.out.txt
+  diagnostics/subagent-e2e/level2-*.err.txt
+
+Baseline git status entries allowed for this case:
+```text
+{baseline_status or "<none>"}
+```
+These baseline entries are pre-existing coordinator-owned changes. Do not report baseline-listed paths as product-source modifications introduced by the implementer.
+
+Verification steps:
+1. Run git status --porcelain=v1 -uall.
+2. Confirm the expected artifact exists and is non-empty.
+3. Ignore harness-owned diagnostics files under diagnostics/subagent-e2e.
+4. Fail only for implementer-owned extra files or product-source modifications not listed in the baseline block above.
+5. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
+
+Report back with only:
+Verdict: PASS | FAIL
+Artifact present: <yes/no>
+Product-source modifications introduced: <none, or paths>
+Extra implementer-owned files: <none, or paths>
+Runner-owned scaffolding files observed: <short summary>
+"""
+    return {"message": message, "nickname": "quality-reviewer", "fork_context": False}
+
+
+def _workflow_baseline_status(text: str) -> str:
+    marker = "Baseline git status before this E2E case started"
+    marker_index = text.lower().find(marker.lower())
+    if marker_index < 0:
+        return ""
+    candidate = text[marker_index:]
+    match = re.search(r"```(?:text)?\s*\n(?P<body>.*?)```", candidate, re.DOTALL)
+    if match:
+        return match.group("body").strip()
     return ""
 
 
@@ -4869,6 +6007,43 @@ def _has_completed_single_step_node_repl_context(value: Any) -> bool:
     return "codex native mcp__node_repl.js result" in text and "status: completed" in text
 
 
+def _looks_like_subagent_workflow_plan_text(text: str) -> bool:
+    lowered = text.lower()
+    if "# short subagent development e2e plan" in lowered:
+        return True
+    return (
+        "output_path" in lowered
+        and "sentinel" in lowered
+        and "implementer" in lowered
+        and ("spec reviewer" in lowered or "spec compliance" in lowered)
+        and ("quality reviewer" in lowered or "code quality" in lowered)
+    )
+
+
+def _has_node_repl_subagent_plan_read_context(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    node_repl_call_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if item_type == "function_call" and isinstance(call_id, str):
+            if _node_repl_function_call_name(item) is not None:
+                node_repl_call_ids.add(call_id)
+            continue
+        if item_type == "function_call_output" and isinstance(call_id, str) and call_id in node_repl_call_ids:
+            if _looks_like_subagent_workflow_plan_text(_joined_text(item.get("output"))):
+                return True
+            continue
+        if item_type == "message":
+            text = _joined_text(item.get("content"))
+            if "codex native mcp__node_repl.js result" in text.lower() and _looks_like_subagent_workflow_plan_text(text):
+                return True
+    return False
+
+
 def _node_repl_single_step_complete_message() -> dict[str, str]:
     return _developer_text_message(
         "\n".join(
@@ -4914,7 +6089,16 @@ def _multi_agent_lifecycle_complete_message(closed_agent_ids: list[str]) -> dict
         lines.append(f"closed_agent_ids: {', '.join(closed_agent_ids)}")
     lines.append("completed_tool_aliases: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent")
     lines.append(
-        "required_next_action: write the final concise report now. The lifecycle already completed via real Codex tool calls; do not infer hidden tools were unavailable, and do not call tool_search or any multi_agent_v1 tool again for this single-loop request."
+        "visible_response_required: emit the final report as ordinary assistant message content, not only reasoning, analysis, hidden notes, or tool arguments. If you emit only reasoning, the user receives an empty final answer."
+    )
+    lines.append(
+        "empty_final_forbidden: the next assistant response must contain visible text; stopping with zero visible output is a task failure."
+    )
+    lines.append(
+        "final_format_required: use exactly the final response format requested by the user; the first visible output token must be the first token of that requested final report, with no prose preface."
+    )
+    lines.append(
+        "required_next_action: write the final concise report now from the observed agent ids, wait sentinels, and close state in the current-turn transcript. The lifecycle already completed via real Codex native tool executions; hidden tools after close indicate lifecycle complete, not unavailable. Do not call tool_search or any multi_agent_v1 tool again for this completed request."
     )
     return _developer_text_message("\n".join(lines))
 
@@ -4955,7 +6139,8 @@ def _multi_agent_current_state_message(
         lines.append("status: wait_completed_close_required")
         lines.append(f"open_agent_ids_requiring_close: {ids_text}")
         lines.append(
-            "required_next_action: call multi_agent_v1__close_agent with target set to one of these agent_id values before writing the final report."
+            "required_next_action: call multi_agent_v1__close_agent with target set to one listed agent_id. "
+            "Do not write the final report until every listed agent_id has been closed."
         )
         return _developer_text_message("\n".join(lines))
     return None
@@ -5311,17 +6496,465 @@ def _downgrade_invalid_third_party_tool_calls(value: Any) -> tuple[Any, bool]:
     return (rewritten if changed else value), changed
 
 
+def _worker_multi_agent_suppressed_message(item: Mapping[str, Any]) -> dict[str, Any]:
+    tool_name = _multi_agent_function_call_name(item) or "multi_agent_tool"
+    message: dict[str, Any] = {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": (
+                    "worker_subagent_multi_agent_call_suppressed: this request is already running inside a "
+                    "worker subagent, so nested Codex multi-agent tools are unavailable. "
+                    f"Suppressed attempted tool: multi_agent_v1.{tool_name}. "
+                    "Use the worker's available native file/shell tools if present; otherwise report BLOCKED "
+                    "with the missing tool capability instead of spawning another subagent."
+                ),
+            }
+        ],
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        message["id"] = item_id
+    return message
+
+
+def _looks_like_unknown_multi_agent_function_call(item: Mapping[str, Any]) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    if _multi_agent_function_call_name(item) is not None:
+        return False
+    namespace = item.get("namespace")
+    name = item.get("name")
+    if isinstance(namespace, str) and namespace in MULTI_AGENT_NAMESPACE_ALIASES:
+        return True
+    if not isinstance(name, str):
+        return False
+    return (
+        name.startswith("multi_agent_v1__")
+        or name.startswith("multi_agent_v1.")
+        or name.startswith("mcp__multi_agent_v1__")
+        or name.startswith("mcp__multi_agent_v1.")
+        or (name.startswith("multi_agent_v1") and len(name) > len("multi_agent_v1"))
+    )
+
+
+def _function_call_namespace(item: Mapping[str, Any]) -> str | None:
+    namespace = item.get("namespace")
+    if isinstance(namespace, str) and namespace:
+        return namespace
+    alias = _split_namespace_tool_alias(item.get("name"))
+    if alias is not None:
+        return alias[0]
+    return None
+
+
+def _is_mcp_or_codex_app_function_call(item: Mapping[str, Any]) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    namespace = _function_call_namespace(item)
+    if isinstance(namespace, str) and (namespace.startswith("mcp__") or namespace == "codex_app"):
+        return True
+    name = item.get("name")
+    return isinstance(name, str) and (name.startswith("mcp__") or name.startswith("codex_app__"))
+
+
+def _looks_like_coordinator_local_function_call(
+    item: Mapping[str, Any],
+    *,
+    allow_plan_read_node_repl: bool,
+) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    if _multi_agent_function_call_name(item) is not None:
+        return False
+    if allow_plan_read_node_repl and _node_repl_function_call_name(item) is not None:
+        return False
+    name = item.get("name")
+    return isinstance(name, str) and bool(name)
+
+
+def _coordinator_forbidden_tool_suppressed_message(
+    item: Mapping[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    return _assistant_transcript_message(f"subagent_coordinator_tool_call_suppressed: {reason}", item)
+
+
+def _message_item_visible_text(item: Mapping[str, Any]) -> str:
+    if item.get("type") != "message":
+        return ""
+    return _chat_content_text(item.get("content")).strip()
+
+
+def _mark_lifecycle_final_seen_if_present(value: Mapping[str, Any], state: dict[str, Any]) -> None:
+    if not state["lifecycle_complete"]:
+        return
+    text = ""
+    if value.get("type") == "message":
+        text = _message_item_visible_text(value)
+    elif value.get("type") == "response.output_item.done":
+        item = value.get("item")
+        if isinstance(item, Mapping):
+            text = _message_item_visible_text(item)
+    elif value.get("type") == "response.output_text.done":
+        event_text = value.get("text")
+        text = event_text if isinstance(event_text, str) else ""
+    if text and _text_contains_lifecycle_final_report(text):
+        state["final_seen"] = True
+
+
+def _post_final_multi_agent_suppressed_item_id(value: Mapping[str, Any]) -> str | None:
+    item_id = value.get("id")
+    return item_id if isinstance(item_id, str) and item_id else None
+
+
+def _suppress_multi_agent_calls_after_lifecycle_final(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    context = event_context or {}
+    if _is_raw_provider_probe_context(context):
+        return value, False
+    tool_protocol = str(context.get("tool_protocol") or "")
+    if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
+        return value, False
+    if not bool(context.get("subagent_lifecycle_complete")) and not bool(
+        context.get("_subagent_lifecycle_final_seen")
+    ):
+        return value, False
+
+    if isinstance(event_context, dict):
+        stored_ids = event_context.setdefault("_post_final_suppressed_multi_agent_item_ids", set())
+        suppressed_item_ids = stored_ids if isinstance(stored_ids, set) else set()
+        event_context["_post_final_suppressed_multi_agent_item_ids"] = suppressed_item_ids
+        final_seen = bool(event_context.get("_subagent_lifecycle_final_seen"))
+    else:
+        suppressed_item_ids = set()
+        final_seen = False
+    state = {
+        "lifecycle_complete": bool(context.get("subagent_lifecycle_complete")),
+        "final_seen": final_seen,
+        "suppressed_item_ids": suppressed_item_ids,
+        "event_context": event_context,
+    }
+
+    rewritten, changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(value, state)
+    if isinstance(event_context, dict) and state["final_seen"]:
+        event_context["_subagent_lifecycle_final_seen"] = True
+    return rewritten, changed
+
+
+def _suppress_multi_agent_calls_after_lifecycle_final_inner(
+    value: Any,
+    state: dict[str, Any],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(item, state)
+            if replacement is None:
+                changed = True
+                continue
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    event_type = value.get("type")
+    if event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id in state["suppressed_item_ids"]:
+            return None, True
+        return value, False
+
+    direct_tool_name = _multi_agent_function_call_name(value)
+    if state["final_seen"] and direct_tool_name is not None:
+        item_id = _post_final_multi_agent_suppressed_item_id(value)
+        if item_id:
+            state["suppressed_item_ids"].add(item_id)
+        _write_adapter_event(
+            state["event_context"],
+            "subagent_post_final_multi_agent_call_suppressed",
+            tool=direct_tool_name,
+        )
+        return None, True
+
+    event_item = value.get("item")
+    if (
+        state["final_seen"]
+        and event_type in {"response.output_item.added", "response.output_item.done"}
+        and isinstance(event_item, Mapping)
+    ):
+        event_tool_name = _multi_agent_function_call_name(event_item)
+        if event_tool_name is not None:
+            item_id = _post_final_multi_agent_suppressed_item_id(event_item)
+            if item_id:
+                state["suppressed_item_ids"].add(item_id)
+            _write_adapter_event(
+                state["event_context"],
+                "subagent_post_final_multi_agent_call_suppressed",
+                tool=event_tool_name,
+            )
+            return None, True
+
+    changed = False
+    rewritten = dict(value)
+    response = rewritten.get("response")
+    if isinstance(response, Mapping) and isinstance(response.get("output"), list):
+        response_rewritten = dict(response)
+        output, output_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(
+            response_rewritten["output"],
+            state,
+        )
+        response_rewritten["output"] = output
+        if output_changed:
+            rewritten["response"] = response_rewritten
+            changed = True
+
+    output = rewritten.get("output")
+    if isinstance(output, list):
+        output, output_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(output, state)
+        if output_changed:
+            rewritten["output"] = output
+            changed = True
+
+    for key, item in list(rewritten.items()):
+        if key in {"response", "output"}:
+            continue
+        replacement, item_changed = _suppress_multi_agent_calls_after_lifecycle_final_inner(item, state)
+        if replacement is None:
+            rewritten.pop(key, None)
+            changed = True
+            continue
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+
+    _mark_lifecycle_final_seen_if_present(rewritten, state)
+    return (rewritten if changed else value), changed
+
+
+def _suppress_coordinator_forbidden_tool_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    context = event_context or {}
+    if bool(context.get("subagent_worker_context")) or _is_raw_provider_probe_context(context):
+        return value, False
+    tool_protocol = str(context.get("tool_protocol") or "")
+    if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
+        return value, False
+
+    plan_read_required = bool(context.get("subagent_workflow_plan_read_required"))
+    subagent_state = context.get("_subagent_state")
+    state_has_agents = bool(getattr(subagent_state, "agents", {}))
+    active = (
+        state_has_agents
+        or bool(_string_list(context.get("subagent_open_agent_ids")))
+        or bool(_string_list(context.get("subagent_wait_agent_ids")))
+        or bool(_string_list(context.get("subagent_close_agent_ids")))
+        or bool(_string_list(context.get("subagent_closed_agent_ids")))
+        or bool(context.get("subagent_lifecycle_complete"))
+        or (
+            bool(context.get("subagent_workflow_active"))
+            and bool(context.get("subagent_workflow_plan_read_complete"))
+        )
+    )
+    if not active and not plan_read_required:
+        return value, False
+
+    if isinstance(event_context, dict):
+        suppressed = event_context.setdefault("_coordinator_suppressed_tool_item_ids", set())
+        suppressed_item_ids = suppressed if isinstance(suppressed, set) else set()
+        event_context["_coordinator_suppressed_tool_item_ids"] = suppressed_item_ids
+    else:
+        suppressed_item_ids = set()
+    return _suppress_coordinator_forbidden_tool_calls_inner(
+        value,
+        event_context,
+        suppressed_item_ids,
+        allow_plan_read_node_repl=plan_read_required,
+    )
+
+
+def _suppress_coordinator_forbidden_tool_calls_inner(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+    suppressed_item_ids: set[str],
+    *,
+    allow_plan_read_node_repl: bool,
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _suppress_coordinator_forbidden_tool_calls_inner(
+                item,
+                event_context,
+                suppressed_item_ids,
+                allow_plan_read_node_repl=allow_plan_read_node_repl,
+            )
+            if replacement is None:
+                changed = True
+                continue
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    event_type = value.get("type")
+    if event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id in suppressed_item_ids:
+            return None, True
+        return value, False
+
+    reason = None
+    if event_type == "tool_search_call":
+        reason = "tool_search_unavailable_during_subagent_workflow"
+    elif _looks_like_unknown_multi_agent_function_call(value):
+        reason = "unknown_multi_agent_tool_unavailable"
+    elif _node_repl_function_call_name(value) is not None:
+        if not allow_plan_read_node_repl:
+            reason = "node_repl_unavailable_after_subagent_plan_read"
+    elif _is_mcp_or_codex_app_function_call(value):
+        reason = "mcp_or_codex_app_tool_unavailable_during_subagent_workflow"
+    elif _looks_like_coordinator_local_function_call(
+        value,
+        allow_plan_read_node_repl=allow_plan_read_node_repl,
+    ):
+        reason = "coordinator_tool_unavailable_during_subagent_workflow"
+
+    if reason is not None:
+        item_id = value.get("id")
+        if isinstance(item_id, str) and item_id:
+            suppressed_item_ids.add(item_id)
+        _write_adapter_event(
+            event_context,
+            "subagent_coordinator_tool_call_suppressed",
+            reason=reason,
+            tool=value.get("name") if isinstance(value.get("name"), str) else None,
+            namespace=value.get("namespace") if isinstance(value.get("namespace"), str) else None,
+        )
+        return _coordinator_forbidden_tool_suppressed_message(value, reason=reason), True
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _suppress_coordinator_forbidden_tool_calls_inner(
+            item,
+            event_context,
+            suppressed_item_ids,
+            allow_plan_read_node_repl=allow_plan_read_node_repl,
+        )
+        if replacement is None:
+            rewritten.pop(key, None)
+            changed = True
+            continue
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
+def _suppress_worker_multi_agent_tool_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not bool((event_context or {}).get("subagent_worker_context")):
+        return value, False
+    if isinstance(event_context, dict):
+        suppressed = event_context.setdefault("_worker_suppressed_multi_agent_item_ids", set())
+        suppressed_item_ids = suppressed if isinstance(suppressed, set) else set()
+        event_context["_worker_suppressed_multi_agent_item_ids"] = suppressed_item_ids
+    else:
+        suppressed_item_ids = set()
+    return _suppress_worker_multi_agent_tool_calls_inner(value, event_context, suppressed_item_ids)
+
+
+def _suppress_worker_multi_agent_tool_calls_inner(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+    suppressed_item_ids: set[str],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _suppress_worker_multi_agent_tool_calls_inner(
+                item,
+                event_context,
+                suppressed_item_ids,
+            )
+            if replacement is None:
+                changed = True
+                continue
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    event_type = value.get("type")
+    if event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id in suppressed_item_ids:
+            return None, True
+        return value, False
+
+    if _multi_agent_function_call_name(value) is not None:
+        item_id = value.get("id")
+        if isinstance(item_id, str) and item_id:
+            suppressed_item_ids.add(item_id)
+        _write_adapter_event(
+            event_context,
+            "worker_subagent_multi_agent_call_suppressed",
+            tool=_multi_agent_function_call_name(value),
+        )
+        return _worker_multi_agent_suppressed_message(value), True
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _suppress_worker_multi_agent_tool_calls_inner(
+            item,
+            event_context,
+            suppressed_item_ids,
+        )
+        if replacement is None:
+            rewritten.pop(key, None)
+            changed = True
+            continue
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
 def _guard_duplicate_multi_agent_spawn_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
+    if not subagent_semantic_repair_enabled(event_context):
+        return value, False
+
     tool_protocol = str((event_context or {}).get("tool_protocol") or "")
-    if tool_protocol not in {"text_compat", "chat_tools"}:
+    if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
         return value, False
 
     spawn_allowed = bool((event_context or {}).get("subagent_spawn_allowed"))
     subagent_state = (event_context or {}).get("_subagent_state")
-    if spawn_allowed and subagent_state is None:
+    dynamic_dag_active = bool((event_context or {}).get("subagent_dynamic_dag_active"))
+    if spawn_allowed and subagent_state is None and not dynamic_dag_active:
         return value, False
 
     lifecycle_complete = bool((event_context or {}).get("subagent_lifecycle_complete"))
@@ -5329,25 +6962,30 @@ def _guard_duplicate_multi_agent_spawn_calls(
     wait_agent_ids = [agent_id for agent_id in wait_agent_ids_value if isinstance(agent_id, str)] if isinstance(wait_agent_ids_value, list) else []
     open_agent_ids_value = (event_context or {}).get("subagent_open_agent_ids")
     open_agent_ids = [agent_id for agent_id in open_agent_ids_value if isinstance(agent_id, str)] if isinstance(open_agent_ids_value, list) else []
+    accepted_workflow_spawn: list[bool] = []
 
     return _guard_duplicate_multi_agent_spawn_calls_inner(
         value,
+        event_context=event_context,
         spawn_allowed=spawn_allowed,
         subagent_state=subagent_state,
         lifecycle_complete=lifecycle_complete,
         wait_agent_ids=wait_agent_ids,
         open_agent_ids=open_agent_ids,
+        accepted_workflow_spawn=accepted_workflow_spawn,
     )
 
 
 def _guard_duplicate_multi_agent_spawn_calls_inner(
     value: Any,
     *,
+    event_context: Mapping[str, Any] | None,
     spawn_allowed: bool,
     subagent_state: Any | None,
     lifecycle_complete: bool,
     wait_agent_ids: list[str],
     open_agent_ids: list[str],
+    accepted_workflow_spawn: list[bool],
 ) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
@@ -5355,11 +6993,13 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
         for item in value:
             replacement, item_changed = _guard_duplicate_multi_agent_spawn_calls_inner(
                 item,
+                event_context=event_context,
                 spawn_allowed=spawn_allowed,
                 subagent_state=subagent_state,
                 lifecycle_complete=lifecycle_complete,
                 wait_agent_ids=wait_agent_ids,
                 open_agent_ids=open_agent_ids,
+                accepted_workflow_spawn=accepted_workflow_spawn,
             )
             rewritten.append(replacement)
             changed = changed or item_changed
@@ -5370,12 +7010,40 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
 
     if _is_multi_agent_spawn_function_call(value):
         blocked_by_state = False
+        if bool((event_context or {}).get("subagent_dynamic_dag_active")):
+            arguments = _json_object_from_arguments(value.get("arguments")) or {}
+            nickname = str(arguments.get("nickname") or "")
+            assigned_nodes = {
+                node_id
+                for node_id in (event_context or {}).get("subagent_assigned_dynamic_nodes", [])
+                if isinstance(node_id, str)
+            }
+            if nickname in assigned_nodes:
+                return {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": (
+                        "dynamic_dag_spawn_suppressed: node already assigned; "
+                        "wait or close existing work before repeating it."
+                    ),
+                }, True
         if subagent_state is not None:
             arguments = _json_object_from_arguments(value.get("arguments")) or {}
             try:
                 if subagent_state.allows_spawn_request(arguments):
-                    return value, False
-                blocked_by_state = True
+                    if (
+                        not getattr(subagent_state, "bounded_request", False)
+                        and not getattr(subagent_state, "requested_append", False)
+                    ):
+                        if accepted_workflow_spawn:
+                            blocked_by_state = True
+                        else:
+                            accepted_workflow_spawn.append(True)
+                            return value, False
+                    else:
+                        return value, False
+                else:
+                    blocked_by_state = True
             except Exception:
                 if spawn_allowed:
                     return value, False
@@ -5387,8 +7055,12 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
                     "type": "message",
                     "role": "assistant",
                     "content": (
-                        "required_next_action: write the final concise report now. "
-                        "The requested subagent lifecycle is already complete."
+                        "visible_response_required: emit the final report as ordinary assistant message content, not only reasoning, analysis, hidden notes, or tool arguments. "
+                        "If you emit only reasoning, the user receives an empty final answer. "
+                        "empty_final_forbidden: the next assistant response must contain visible text; stopping with zero visible output is a task failure. "
+                        "final_format_required: use exactly the final response format requested by the user; the first visible output token must be the first token of that requested final report, with no prose preface. "
+                        "required_next_action: write the final concise report now from the observed agent ids, wait sentinels, and close state in the current-turn transcript. "
+                        "The requested subagent lifecycle already completed via real Codex native tool executions; hidden tools after close indicate lifecycle complete, not unavailable."
                     ),
                 },
                 True,
@@ -5411,16 +7083,573 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
     for key, item in value.items():
         replacement, item_changed = _guard_duplicate_multi_agent_spawn_calls_inner(
             item,
+            event_context=event_context,
             spawn_allowed=spawn_allowed,
             subagent_state=subagent_state,
             lifecycle_complete=lifecycle_complete,
             wait_agent_ids=wait_agent_ids,
             open_agent_ids=open_agent_ids,
+            accepted_workflow_spawn=accepted_workflow_spawn,
         )
         if item_changed:
             rewritten[key] = replacement
             changed = True
     return (rewritten if changed else value), changed
+
+
+def _reconcile_function_call_argument_events(events: list[Mapping[str, Any]]) -> tuple[list[Mapping[str, Any]], bool]:
+    arguments_by_item_id: dict[str, str] = {}
+
+    def remember_item(item: Any) -> None:
+        if not isinstance(item, Mapping) or item.get("type") != "function_call":
+            return
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            return
+        arguments = item.get("arguments")
+        if isinstance(arguments, str):
+            arguments_text = arguments
+        elif isinstance(arguments, Mapping):
+            arguments_text = json.dumps(arguments, ensure_ascii=True, separators=(",", ":"))
+        else:
+            arguments_text = ""
+        if arguments_text or item_id not in arguments_by_item_id:
+            arguments_by_item_id[item_id] = arguments_text
+
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("type") in {"response.output_item.added", "response.output_item.done"}:
+            remember_item(event.get("item"))
+            continue
+        if event.get("type") == "response.completed":
+            response = event.get("response")
+            output = response.get("output") if isinstance(response, Mapping) else None
+            if isinstance(output, list):
+                for item in output:
+                    remember_item(item)
+
+    changed = False
+    rewritten: list[Mapping[str, Any]] = []
+    for event in events:
+        if isinstance(event, Mapping) and event.get("type") == "response.function_call_arguments.delta":
+            changed = True
+            continue
+        if not isinstance(event, Mapping) or event.get("type") != "response.function_call_arguments.done":
+            rewritten.append(event)
+            continue
+        item_id = event.get("item_id")
+        if not isinstance(item_id, str) or item_id not in arguments_by_item_id:
+            changed = True
+            continue
+        expected_arguments = arguments_by_item_id[item_id]
+        if event.get("arguments") != expected_arguments:
+            replacement = dict(event)
+            replacement["arguments"] = expected_arguments
+            rewritten.append(replacement)
+            changed = True
+            continue
+        rewritten.append(event)
+    return (rewritten if changed else events), changed
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def _required_subagent_call_spec(event_context: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    context = event_context or {}
+    if _is_raw_provider_probe_context(context):
+        return None
+    tool_protocol = str(context.get("tool_protocol") or "")
+    if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
+        return None
+    if bool(context.get("subagent_lifecycle_complete")):
+        return None
+
+    subagent_state = context.get("_subagent_state")
+    state_next_action = getattr(subagent_state, "next_action", None)
+    if state_next_action is not None and state_next_action not in {"spawn", "wait", "close", "send_input"}:
+        return None
+    if bool(context.get("subagent_spawn_allowed")) and state_next_action not in {"spawn", "wait", "close", "send_input"}:
+        return None
+
+    legal_actions = context.get("subagent_legal_actions")
+    if isinstance(legal_actions, list):
+        action = deterministic_required_action([item for item in legal_actions if isinstance(item, Mapping)])
+        if action is None:
+            return None
+        tool_name = action.get("tool_name")
+        arguments = action.get("arguments")
+        if isinstance(tool_name, str) and isinstance(arguments, Mapping):
+            agent_ids = action.get("agent_ids")
+            return {
+                "tool_name": tool_name,
+                "agent_ids": _string_list(agent_ids) if isinstance(agent_ids, list) else [],
+                "arguments": dict(arguments),
+            }
+
+    close_agent_ids = _string_list(context.get("subagent_close_agent_ids"))
+    wait_agent_ids = _string_list(context.get("subagent_wait_agent_ids"))
+    if state_next_action == "spawn":
+        arguments = context.get("subagent_required_spawn_arguments")
+        if isinstance(arguments, Mapping) and isinstance(arguments.get("message"), str) and arguments.get("message"):
+            return {
+                "tool_name": "spawn_agent",
+                "agent_ids": [],
+                "arguments": dict(arguments),
+            }
+    if state_next_action == "send_input":
+        target = getattr(subagent_state, "send_input_target", None)
+        if isinstance(target, str) and target:
+            return {
+                "tool_name": "send_input",
+                "agent_ids": [target],
+                "arguments": {
+                    "target": target,
+                    "message": _required_subagent_send_input_message(subagent_state, target),
+                },
+            }
+    if state_next_action == "close" and close_agent_ids:
+        return {"tool_name": "close_agent", "agent_ids": close_agent_ids, "arguments": {"target": close_agent_ids[0]}}
+    if state_next_action == "wait" and wait_agent_ids:
+        return {
+            "tool_name": "wait_agent",
+            "agent_ids": wait_agent_ids,
+            "arguments": {"targets": wait_agent_ids, "timeout_ms": 60000},
+        }
+    if close_agent_ids:
+        return {"tool_name": "close_agent", "agent_ids": close_agent_ids, "arguments": {"target": close_agent_ids[0]}}
+    if wait_agent_ids:
+        return {
+            "tool_name": "wait_agent",
+            "agent_ids": wait_agent_ids,
+            "arguments": {"targets": wait_agent_ids, "timeout_ms": 60000},
+        }
+    return None
+
+
+def _required_subagent_send_input_message(subagent_state: Any, target: str) -> str:
+    agent = getattr(subagent_state, "agents", {}).get(target) if subagent_state is not None else None
+    prompt = getattr(agent, "prompt", "") if agent is not None else ""
+    if isinstance(prompt, str) and prompt.strip():
+        return (
+            "Your previous completed result had empty visible output. "
+            "Return exactly the output requested in your original prompt, with no prose or markdown.\n"
+            f"Original prompt:\n{prompt.strip()}"
+        )
+    return (
+        "Your previous completed result had empty visible output. "
+        "Return the exact output requested in your original prompt, with no prose or markdown."
+    )
+
+
+def _contains_response_function_call(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_contains_response_function_call(item) for item in value)
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("type") == "function_call":
+        return True
+    tool_calls = value.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        return True
+    return any(_contains_response_function_call(item) for item in value.values())
+
+
+def _response_output_is_text_or_empty(output: Any) -> bool:
+    if output is None:
+        return True
+    if not isinstance(output, list):
+        return False
+    for item in output:
+        if not isinstance(item, Mapping):
+            return False
+        item_type = item.get("type")
+        if item_type not in {"message", "reasoning"}:
+            return False
+    return True
+
+
+def _response_events_are_text_or_empty(events: list[Mapping[str, Any]]) -> bool:
+    for event in events:
+        event_type = event.get("type")
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            item = event.get("item")
+            if not isinstance(item, Mapping):
+                continue
+            item_type = item.get("type")
+            if item_type not in {"message", "reasoning"}:
+                return False
+        elif event_type == "response.completed":
+            response = event.get("response")
+            if isinstance(response, Mapping) and not _response_output_is_text_or_empty(response.get("output")):
+                return False
+        elif event_type in {"response.failed", "response.incomplete", "error"}:
+            return False
+    return True
+
+
+def _required_subagent_call_item(spec: Mapping[str, Any], call_id: str | None = None) -> dict[str, Any]:
+    tool_name = spec.get("tool_name")
+    if not isinstance(tool_name, str) or tool_name not in MULTI_AGENT_TOOL_NAMES:
+        tool_name = "wait_agent"
+    arguments = spec.get("arguments")
+    if not isinstance(arguments, Mapping):
+        arguments = {}
+    call_id = call_id or f"call_codexhub_required_{tool_name}_{uuid.uuid4().hex[:12]}"
+    return {
+        "id": f"fc_{call_id}",
+        "type": "function_call",
+        "status": "completed",
+        "call_id": call_id,
+        "namespace": "multi_agent_v1",
+        "name": tool_name,
+        "arguments": json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":")),
+    }
+
+
+def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
+    call_id = value.get("call_id")
+    item = _required_subagent_call_item(spec, call_id=call_id if isinstance(call_id, str) and call_id else None)
+    item_id = value.get("id")
+    if isinstance(item_id, str) and item_id:
+        item["id"] = item_id
+    status = value.get("status")
+    if isinstance(status, str) and status:
+        item["status"] = status
+    if item.get("status") == "in_progress":
+        item["arguments"] = ""
+    return item
+
+
+def _coerce_required_subagent_tool_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not subagent_semantic_repair_enabled(event_context):
+        return value, False
+
+    spec = _required_subagent_call_spec(event_context)
+    if spec is None:
+        return value, False
+    if spec.get("tool_name") == "spawn_agent":
+        prompts = (event_context or {}).get("subagent_exact_spawn_prompts")
+        if isinstance(prompts, list) and len([prompt for prompt in prompts if isinstance(prompt, str) and prompt]) > 1:
+            return value, False
+    coerced_item_ids: set[str]
+    if isinstance(event_context, dict):
+        stored = event_context.setdefault("_required_subagent_coerced_item_ids", set())
+        coerced_item_ids = stored if isinstance(stored, set) else set()
+        event_context["_required_subagent_coerced_item_ids"] = coerced_item_ids
+    else:
+        coerced_item_ids = set()
+    rewritten, changed = _coerce_required_subagent_tool_calls_inner(value, spec, coerced_item_ids)
+    if changed:
+        _write_required_subagent_repair_event(event_context, spec, surface="coerce")
+    return rewritten, changed
+
+
+def _coerce_exact_spawn_prompt_tool_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not subagent_semantic_repair_enabled(event_context):
+        return value, False
+    context = event_context or {}
+    prompts = context.get("subagent_exact_spawn_prompts")
+    if not isinstance(prompts, list):
+        return value, False
+    exact_prompts = [prompt for prompt in prompts if isinstance(prompt, str) and prompt]
+    if not exact_prompts:
+        return value, False
+    try:
+        offset = int(context.get("subagent_exact_spawn_offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    specs = [{"message": prompt, "fork_context": False} for prompt in exact_prompts[max(0, offset) :]]
+    if not specs:
+        return value, False
+    if isinstance(event_context, dict):
+        state_key = "_exact_spawn_prompt_coerce_state"
+        stored_state = event_context.get(state_key)
+        if not isinstance(stored_state, dict):
+            stored_state = {}
+            event_context[state_key] = stored_state
+        signature = {"prompts": exact_prompts, "offset": max(0, offset)}
+        if stored_state.get("signature") != signature:
+            stored_state.clear()
+            stored_state["signature"] = signature
+            stored_state["next_index"] = 0
+            stored_state["arguments_by_item_id"] = {}
+        state = stored_state
+    else:
+        state = {"next_index": 0, "arguments_by_item_id": {}}
+    rewritten, changed = _coerce_exact_spawn_prompt_tool_calls_inner(value, specs, state)
+    if changed:
+        _write_required_subagent_repair_event(
+            event_context,
+            {"tool_name": "spawn_agent", "agent_ids": []},
+            surface="exact_prompt_coerce",
+        )
+    return rewritten, changed
+
+
+def _coerce_exact_spawn_prompt_tool_calls_inner(
+    value: Any,
+    specs: list[Mapping[str, Any]],
+    state: dict[str, Any],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _coerce_exact_spawn_prompt_tool_calls_inner(item, specs, state)
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    if value.get("type") == "response.function_call_arguments.done":
+        item_id = value.get("item_id")
+        arguments_by_item_id = state.get("arguments_by_item_id")
+        if not isinstance(item_id, str) or not isinstance(arguments_by_item_id, dict):
+            return value, False
+        expected = arguments_by_item_id.get(item_id)
+        if not isinstance(expected, str) or value.get("arguments") == expected:
+            return value, False
+        rewritten = dict(value)
+        rewritten["arguments"] = expected
+        return rewritten, True
+
+    if _is_multi_agent_spawn_function_call(value):
+        item_id = value.get("id")
+        arguments_by_item_id = state.setdefault("arguments_by_item_id", {})
+        expected_arguments: Mapping[str, Any] | None = None
+        if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
+            stored = arguments_by_item_id.get(item_id)
+            if isinstance(stored, str):
+                parsed = _json_object_from_arguments(stored)
+                if parsed is not None:
+                    expected_arguments = parsed
+        if expected_arguments is None:
+            next_index = int(state.get("next_index") or 0)
+            if next_index >= len(specs):
+                return value, False
+            expected_arguments = specs[next_index]
+            state["next_index"] = next_index + 1
+        expected_json = json.dumps(dict(expected_arguments), ensure_ascii=True, separators=(",", ":"))
+        if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
+            arguments_by_item_id[item_id] = expected_json
+        rewritten = dict(value)
+        rewritten["namespace"] = "multi_agent_v1"
+        rewritten["name"] = "spawn_agent"
+        if rewritten.get("status") == "in_progress":
+            rewritten["arguments"] = ""
+        else:
+            rewritten["arguments"] = _dump_arguments_like(value.get("arguments"), expected_arguments)
+        return (rewritten, True) if rewritten != value else (value, False)
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _coerce_exact_spawn_prompt_tool_calls_inner(item, specs, state)
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
+def _coerce_required_subagent_tool_calls_inner(
+    value: Any,
+    spec: Mapping[str, Any],
+    coerced_item_ids: set[str],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _coerce_required_subagent_tool_calls_inner(item, spec, coerced_item_ids)
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    if value.get("type") == "response.function_call_arguments.done":
+        item_id = value.get("item_id")
+        if not isinstance(item_id, str) or item_id not in coerced_item_ids:
+            return value, False
+        arguments = spec.get("arguments") if isinstance(spec.get("arguments"), Mapping) else {}
+        expected = json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":"))
+        if value.get("arguments") != expected:
+            rewritten = dict(value)
+            rewritten["arguments"] = expected
+            return rewritten, True
+        return value, False
+
+    if _multi_agent_function_call_name(value) is not None:
+        replacement = _required_subagent_call_item_like(spec, value)
+        item_id = replacement.get("id")
+        if isinstance(item_id, str) and item_id:
+            coerced_item_ids.add(item_id)
+        return (replacement, True) if replacement != value else (value, False)
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _coerce_required_subagent_tool_calls_inner(item, spec, coerced_item_ids)
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
+def _required_subagent_call_events(
+    spec: Mapping[str, Any],
+    response: Mapping[str, Any] | None = None,
+    *,
+    output_index: int = 0,
+) -> list[dict[str, Any]]:
+    response_obj = dict(response) if isinstance(response, Mapping) else {}
+    call_id = f"call_codexhub_required_{spec.get('tool_name')}_{uuid.uuid4().hex[:12]}"
+    item = _required_subagent_call_item(spec, call_id=call_id)
+    in_progress_item = dict(item)
+    in_progress_item["status"] = "in_progress"
+    in_progress_item["arguments"] = ""
+    completed_response = {
+        "id": response_obj.get("id") if isinstance(response_obj.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}",
+        "object": "response",
+        "status": "completed",
+        "model": response_obj.get("model"),
+        "output": [item],
+    }
+    usage = response_obj.get("usage")
+    if isinstance(usage, Mapping):
+        completed_response["usage"] = dict(usage)
+    return [
+        {
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": in_progress_item,
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": item["id"],
+            "output_index": output_index,
+            "arguments": item["arguments"],
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": output_index,
+            "item": item,
+        },
+        {
+            "type": "response.completed",
+            "response": completed_response,
+        },
+    ]
+
+
+def _write_required_subagent_repair_event(
+    event_context: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
+    *,
+    surface: str,
+) -> None:
+    _write_adapter_event(
+        event_context,
+        "required_subagent_call_repaired",
+        surface=surface,
+        tool=spec.get("tool_name") if isinstance(spec.get("tool_name"), str) else None,
+        agent_ids=spec.get("agent_ids") if isinstance(spec.get("agent_ids"), list) else None,
+    )
+
+
+def _repair_missing_required_subagent_call_payload(
+    payload: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not subagent_semantic_repair_enabled(event_context):
+        return payload, False
+
+    if not isinstance(payload, dict):
+        return payload, False
+    spec = _required_subagent_call_spec(event_context)
+    if spec is None:
+        return payload, False
+    if _contains_response_function_call(payload):
+        return payload, False
+    if "error" in payload or not _response_output_is_text_or_empty(payload.get("output")):
+        return payload, False
+
+    rewritten = dict(payload)
+    rewritten["status"] = "completed"
+    rewritten["output"] = [_required_subagent_call_item(spec)]
+    _write_required_subagent_repair_event(event_context, spec, surface="body")
+    return rewritten, True
+
+
+def _repair_missing_required_subagent_call_events(
+    events: list[Mapping[str, Any]],
+    event_context: Mapping[str, Any] | None,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    if not subagent_semantic_repair_enabled(event_context):
+        return events, False
+
+    spec = _required_subagent_call_spec(event_context)
+    if spec is None:
+        return events, False
+    if _contains_response_function_call(events) or not _response_events_are_text_or_empty(events):
+        return events, False
+
+    completed_response: Mapping[str, Any] | None = None
+    for event in events:
+        if event.get("type") == "response.completed":
+            response = event.get("response")
+            completed_response = response if isinstance(response, Mapping) else {}
+    if completed_response is None:
+        return events, False
+
+    prefix = [
+        dict(event)
+        for event in events
+        if event.get("type") in {"response.created", "response.in_progress", "response.queued"}
+    ]
+    repaired = prefix + _required_subagent_call_events(spec, completed_response, output_index=0)
+    _write_required_subagent_repair_event(event_context, spec, surface="events")
+    return repaired, True
+
+
+def _repair_missing_required_subagent_call_sse_line(
+    payload: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    line_ending: bytes,
+) -> bytes | None:
+    if not subagent_semantic_repair_enabled(event_context):
+        return None
+
+    if payload.get("type") != "response.completed":
+        return None
+    spec = _required_subagent_call_spec(event_context)
+    if spec is None:
+        return None
+    if _contains_response_function_call(payload):
+        return None
+    response = payload.get("response")
+    response_obj = response if isinstance(response, Mapping) else {}
+    if not _response_output_is_text_or_empty(response_obj.get("output")):
+        return None
+    output = response_obj.get("output")
+    output_index = len(output) if isinstance(output, list) else 0
+    events = _required_subagent_call_events(spec, response_obj, output_index=output_index)
+    _write_required_subagent_repair_event(event_context, spec, surface="sse")
+    return b"".join(_sse_json_line(event, line_ending) + line_ending for event in events)
 
 
 def _suppressed_duplicate_spawn_message(subagent_state: Any | None) -> dict[str, Any]:
@@ -5559,6 +7788,10 @@ def transparent_request_body(
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+def _is_raw_provider_probe_context(event_context: Mapping[str, Any] | None) -> bool:
+    return bool((event_context or {}).get("raw_provider_probe"))
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -5623,34 +7856,98 @@ def compatible_request_body(
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
+    raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = _external_tool_protocol(upstream)
+    guidance_enabled = subagent_guidance_enabled(event_context)
+    semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
-    if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
-        if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
-            changed = True
-    elif tool_protocol == "none":
-        tools = payload.get("tools")
-        if isinstance(tools, list):
-            filtered_tools = [tool for tool in tools if not _is_multi_agent_tool_schema(tool)]
-            if len(filtered_tools) != len(tools):
-                payload["tools"] = filtered_tools
-                changed = True
+    if raw_provider_probe:
+        pass
     else:
-        if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
-            changed = True
+        if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
+            if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+                changed = True
+        elif tool_protocol == "none":
+            tools = payload.get("tools")
+            if isinstance(tools, list):
+                filtered_tools = [tool for tool in tools if not _is_multi_agent_tool_schema(tool)]
+                if len(filtered_tools) != len(tools):
+                    payload["tools"] = filtered_tools
+                    changed = True
+        else:
+            if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+                changed = True
     input_items = payload.get("input")
-    if _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
+    if not raw_provider_probe and _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
         changed = True
         input_items = payload.get("input")
     include_tool_search = False
-    subagent_state = build_subagent_state(input_items) if tool_protocol in {"text_compat", "chat_tools"} else None
+    subagent_worker_context = (
+        not raw_provider_probe
+        and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
+        and is_worker_subagent_request(input_items)
+    )
+    subagent_state = (
+        build_subagent_state(input_items)
+        if (
+            not raw_provider_probe
+            and not subagent_worker_context
+            and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
+        )
+        else None
+    )
     subagent_state_active = subagent_state is not None and (
         bool(subagent_state.agents) or subagent_state.requested_count is not None
+        or bool(getattr(subagent_state, "workflow_intent", False))
+        or subagent_state.next_action == "send_input"
     )
-    node_repl_single_step_complete = _has_completed_single_step_node_repl_context(input_items)
+    node_repl_single_step_complete = (
+        not raw_provider_probe and _has_completed_single_step_node_repl_context(input_items)
+    )
+    subagent_workflow_plan_read_complete = (
+        not raw_provider_probe
+        and subagent_state_active
+        and subagent_state is not None
+        and bool(getattr(subagent_state, "workflow_intent", False))
+        and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
+        and _has_node_repl_subagent_plan_read_context(input_items)
+    )
+    subagent_workflow_plan_read_required = (
+        not raw_provider_probe
+        and subagent_state_active
+        and subagent_state is not None
+        and bool(getattr(subagent_state, "workflow_intent", False))
+        and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
+        and not subagent_workflow_plan_read_complete
+        and not bool(getattr(subagent_state, "agents", {}))
+    )
 
-    if subagent_state_active and subagent_state is not None:
+    if raw_provider_probe:
+        open_agent_ids = []
+        wait_agent_ids = []
+        close_agent_ids = []
+        closed_agent_ids = []
+        lifecycle_complete = False
+        include_spawn_agent = False
+        include_wait_agent = False
+        include_close_agent = False
+        include_resume_agent = False
+        include_send_input = False
+        state_hint = None
+    elif subagent_worker_context:
+        open_agent_ids = []
+        wait_agent_ids = []
+        close_agent_ids = []
+        closed_agent_ids = []
+        lifecycle_complete = False
+        include_spawn_agent = False
+        include_wait_agent = False
+        include_close_agent = False
+        include_resume_agent = False
+        include_send_input = False
+        state_hint = None
+    elif subagent_state_active and subagent_state is not None and guidance_enabled:
         spawned_agent_ids = subagent_state.spawned_agent_ids
         open_agent_ids = subagent_state.open_agent_ids
         wait_agent_ids = subagent_state.wait_agent_ids
@@ -5662,7 +7959,30 @@ def compatible_request_body(
         include_close_agent = subagent_state.next_action == "close" and bool(close_agent_ids)
         include_resume_agent = subagent_state.next_action == "send_input"
         include_send_input = subagent_state.next_action == "send_input"
-        state_hint = state_guidance_message(subagent_state) if tool_protocol == "text_compat" else None
+        if subagent_workflow_plan_read_required:
+            include_spawn_agent = False
+            include_wait_agent = False
+            include_close_agent = False
+            include_resume_agent = False
+            include_send_input = False
+        state_hint = (
+            state_guidance_message(subagent_state)
+            if tool_protocol in {"text_compat", "chat_tools", "responses_structured"} or lifecycle_complete
+            else None
+        )
+    elif subagent_state_active and subagent_state is not None:
+        spawned_agent_ids = subagent_state.spawned_agent_ids
+        open_agent_ids = subagent_state.open_agent_ids
+        wait_agent_ids = subagent_state.wait_agent_ids
+        close_agent_ids = subagent_state.close_agent_ids
+        closed_agent_ids = subagent_state.closed_agent_ids
+        lifecycle_complete = False
+        include_spawn_agent = True
+        include_wait_agent = True
+        include_close_agent = True
+        include_resume_agent = True
+        include_send_input = True
+        state_hint = None
     else:
         spawned_agent_ids = _spawned_multi_agent_ids(input_items)
         open_agent_ids = _open_multi_agent_ids(input_items)
@@ -5709,15 +8029,85 @@ def compatible_request_body(
             state_hint = _multi_agent_spawn_more_message(spawned_agent_ids, requested_spawn_count)
         else:
             state_hint = _multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
-    if isinstance(event_context, dict):
+    if isinstance(event_context, dict) and not raw_provider_probe:
         if subagent_state is not None:
             event_context["_subagent_state"] = subagent_state
+            exact_prompts = _exact_child_prompts_from_request_text(_active_user_request_text(input_items))
+            protocol_state = getattr(subagent_state, "protocol_state", None)
+            if exact_prompts:
+                event_context["subagent_exact_spawn_prompts"] = list(exact_prompts)
+                event_context["subagent_exact_spawn_offset"] = (
+                    len(getattr(protocol_state, "agents", {}) or {}) if protocol_state is not None else 0
+                )
+            if (
+                protocol_state is not None
+                and bool(getattr(subagent_state, "dynamic_dag_intent", False))
+                and is_dynamic_dag_request(input_items)
+            ):
+                workflow = build_dynamic_dag_workflow(input_items, protocol_state)
+                legal_actions = compute_allowed_actions(workflow, protocol_state)
+                event_context["subagent_dynamic_dag_active"] = True
+                event_context["subagent_dynamic_dag_ready_nodes"] = [
+                    action.node_id for action in legal_actions if action.tool_name == "spawn_agent" and action.node_id
+                ]
+                event_context["subagent_assigned_dynamic_nodes"] = [
+                    node.node_id for node in workflow.nodes.values() if node.assigned_agent_id
+                ]
+                event_context["subagent_legal_actions"] = [
+                    {
+                        "kind": action.kind,
+                        "tool_name": action.tool_name,
+                        "arguments": dict(action.arguments),
+                        "agent_ids": list(action.agent_ids),
+                        "node_id": action.node_id,
+                    }
+                    for action in legal_actions
+                ]
+                include_spawn_agent = any(action.tool_name == "spawn_agent" for action in legal_actions)
+                include_wait_agent = any(action.tool_name == "wait_agent" for action in legal_actions)
+                include_close_agent = any(action.tool_name == "close_agent" for action in legal_actions)
+                include_send_input = any(action.tool_name == "send_input" for action in legal_actions)
+                include_resume_agent = include_send_input
+                lifecycle_complete = workflow_complete(workflow, protocol_state)
+                if guidance_enabled and isinstance(input_items, list):
+                    input_items.append(dynamic_dag_guidance_message(workflow, protocol_state))
+                    changed = True
+                if len(legal_actions) != 1:
+                    event_context.pop("subagent_required_spawn_arguments", None)
+            if exact_prompts and protocol_state is not None:
+                workflow = bounded_workflow_from_exact_prompts(
+                    exact_prompts,
+                    assigned_agent_ids=list(protocol_state.agents.keys()),
+                )
+                legal_actions = compute_allowed_actions(workflow, protocol_state)
+                if len(legal_actions) == 1:
+                    event_context["subagent_legal_actions"] = [
+                        {
+                            "kind": legal_actions[0].kind,
+                            "tool_name": legal_actions[0].tool_name,
+                            "arguments": dict(legal_actions[0].arguments),
+                            "agent_ids": list(legal_actions[0].agent_ids),
+                            "node_id": legal_actions[0].node_id,
+                        }
+                    ]
+            required_spawn_arguments = _required_spawn_arguments_for_state(input_items, subagent_state)
+            if required_spawn_arguments is not None:
+                event_context["subagent_required_spawn_arguments"] = required_spawn_arguments
+        event_context["subagent_worker_context"] = bool(subagent_worker_context)
         event_context["subagent_open_agent_ids"] = list(open_agent_ids)
         event_context["subagent_wait_agent_ids"] = list(wait_agent_ids)
         event_context["subagent_close_agent_ids"] = list(close_agent_ids)
+        event_context["subagent_closed_agent_ids"] = list(closed_agent_ids)
         event_context["subagent_spawn_allowed"] = bool(include_spawn_agent)
         event_context["subagent_lifecycle_complete"] = bool(lifecycle_complete)
-    if state_hint is not None and isinstance(input_items, list):
+        event_context["subagent_workflow_active"] = bool(
+            subagent_state_active
+            and subagent_state is not None
+            and bool(getattr(subagent_state, "workflow_intent", False))
+        )
+        event_context["subagent_workflow_plan_read_complete"] = bool(subagent_workflow_plan_read_complete)
+        event_context["subagent_workflow_plan_read_required"] = bool(subagent_workflow_plan_read_required)
+    if guidance_enabled and state_hint is not None and isinstance(input_items, list):
         input_items.append(state_hint)
         _write_adapter_event(
             event_context,
@@ -5730,6 +8120,20 @@ def compatible_request_body(
             lifecycle_complete=lifecycle_complete,
         )
         changed = True
+    if (
+        subagent_worker_context
+        and guidance_enabled
+        and isinstance(input_items, list)
+        and not _has_worker_subagent_finalization_guidance(input_items)
+    ):
+        input_items.append(_worker_subagent_finalization_message())
+        _write_adapter_event(
+            event_context,
+            "worker_subagent_finalization_guidance_injected",
+            upstream=upstream_name,
+            model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+        )
+        changed = True
     if node_repl_single_step_complete and isinstance(input_items, list):
         input_items.append(_node_repl_single_step_complete_message())
         _write_adapter_event(
@@ -5739,33 +8143,123 @@ def compatible_request_body(
             model=payload.get("model") if isinstance(payload.get("model"), str) else None,
         )
         changed = True
-    allow_codex_tools = tool_protocol != "none"
-    if inject_codex_tools and allow_codex_tools:
-        tool_names_before = _function_tool_names(payload.get("tools"))
-        if _inject_explicit_codex_tools(
-            payload,
-            include_tool_search=include_tool_search,
-            include_multi_agent_tools=not lifecycle_complete,
-            include_spawn_agent=include_spawn_agent,
-            include_wait_agent=include_wait_agent,
-            include_close_agent=include_close_agent,
-            include_resume_agent=include_resume_agent,
-            include_send_input=include_send_input,
-            include_node_repl_tools=not node_repl_single_step_complete,
-            open_agent_ids=open_agent_ids,
-            wait_agent_ids=wait_agent_ids,
-            close_agent_ids=close_agent_ids,
-        ):
-            added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
-            _write_adapter_event(
-                event_context,
-                "explicit_codex_tools_injected",
-                upstream=upstream_name,
-                model=payload.get("model") if isinstance(payload.get("model"), str) else None,
-                added_tool_count=len(added_tool_names),
-                added_tool_names=added_tool_names,
-            )
+    if raw_provider_probe:
+        if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
+            payload["model"] = upstream_model
             changed = True
+        if not changed:
+            return body
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    allow_codex_tools = tool_protocol != "none"
+    if inject_codex_tools and allow_codex_tools and not raw_provider_probe:
+        if lifecycle_complete:
+            if _hide_tools_for_completed_subagent_lifecycle(payload):
+                _write_adapter_event(
+                    event_context,
+                    "subagent_lifecycle_complete_tools_hidden",
+                    upstream=upstream_name,
+                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                )
+                changed = True
+        else:
+            restrict_to_subagent_coordinator_tools = bool(
+                guidance_enabled
+                and
+                subagent_state_active
+                and subagent_state is not None
+                and bool(getattr(subagent_state, "workflow_intent", False))
+            )
+            include_node_repl_for_subagent_workflow = (
+                restrict_to_subagent_coordinator_tools
+                and not node_repl_single_step_complete
+                and not subagent_workflow_plan_read_complete
+                and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
+                and not bool(subagent_state.agents if subagent_state is not None else {})
+            )
+            if subagent_worker_context and _filter_tools_for_subagent_worker(payload):
+                _write_adapter_event(
+                    event_context,
+                    "subagent_worker_tools_restricted",
+                    upstream=upstream_name,
+                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                )
+                changed = True
+            if restrict_to_subagent_coordinator_tools and _filter_tools_for_subagent_coordinator(
+                payload,
+                include_node_repl_tools=include_node_repl_for_subagent_workflow,
+            ):
+                _write_adapter_event(
+                    event_context,
+                    "subagent_coordinator_tools_restricted",
+                    upstream=upstream_name,
+                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                    include_node_repl_tools=include_node_repl_for_subagent_workflow,
+                )
+                changed = True
+            tool_names_before = _function_tool_names(payload.get("tools"))
+            if _inject_explicit_codex_tools(
+                payload,
+                include_tool_search=include_tool_search,
+                include_multi_agent_tools=not subagent_worker_context,
+                include_spawn_agent=include_spawn_agent,
+                include_wait_agent=include_wait_agent,
+                include_close_agent=include_close_agent,
+                include_resume_agent=include_resume_agent,
+                include_send_input=include_send_input,
+                include_node_repl_tools=(
+                    include_node_repl_for_subagent_workflow
+                    if restrict_to_subagent_coordinator_tools
+                    else not node_repl_single_step_complete
+                ),
+                include_local_tool_gateway_tools=not subagent_worker_context,
+                open_agent_ids=open_agent_ids,
+                wait_agent_ids=wait_agent_ids,
+                close_agent_ids=close_agent_ids,
+            ):
+                added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
+                _write_adapter_event(
+                    event_context,
+                    "explicit_codex_tools_injected",
+                    upstream=upstream_name,
+                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                    added_tool_count=len(added_tool_names),
+                    added_tool_names=added_tool_names,
+                )
+                changed = True
+            required_tool_choice_name = None
+            if (
+                subagent_workflow_plan_read_required
+                and include_node_repl_for_subagent_workflow
+                and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
+            ):
+                required_tool_choice_name = "mcp__node_repl__js"
+            else:
+                required_tool_choice_name = _required_subagent_tool_choice(
+                    tool_protocol=tool_protocol,
+                    lifecycle_complete=lifecycle_complete,
+                    include_spawn_agent=include_spawn_agent,
+                    include_wait_agent=include_wait_agent,
+                    include_close_agent=include_close_agent,
+                    include_resume_agent=include_resume_agent,
+                    include_send_input=include_send_input,
+                    include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
+                )
+            if semantic_repair_enabled and _restrict_tools_to_required_tool(payload, required_tool_choice_name):
+                _write_adapter_event(
+                    event_context,
+                    "required_tool_tools_restricted",
+                    upstream=upstream_name,
+                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
+                    tool_name=required_tool_choice_name,
+                )
+                changed = True
+            if semantic_repair_enabled and _set_required_subagent_tool_choice(
+                payload,
+                required_tool_choice_name,
+                event_context=event_context,
+                upstream=upstream_name,
+            ):
+                changed = True
     model_id = payload.get("model")
     max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
     if max_output_tokens is not None:
@@ -5778,7 +8272,12 @@ def compatible_request_body(
         payload["model"] = upstream_model
         changed = True
 
-    if "reasoning" in payload and _reasoning_param_is_unsupported(upstream_name, requested_model, upstream_model):
+    upstream_format = upstream.get("upstream_format")
+    if (
+        "reasoning" in payload
+        and upstream_format != "chat_completions"
+        and _reasoning_param_is_unsupported(upstream_name, requested_model, upstream_model)
+    ):
         del payload["reasoning"]
         _write_adapter_event(
             event_context,
@@ -5813,7 +8312,7 @@ def compatible_response_body(
     upstream_name: str,
     event_context: Mapping[str, Any] | None = None,
 ) -> bytes:
-    if upstream_name == "official":
+    if upstream_name == "official" or _is_raw_provider_probe_context(event_context):
         return body
 
     try:
@@ -5831,10 +8330,25 @@ def compatible_response_body(
             surface="body",
         )
     changed = changed or alias_changed
+    payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
+        payload,
+        event_context,
+    )
+    changed = changed or post_final_multi_agent_changed
+    payload, worker_multi_agent_changed = _suppress_worker_multi_agent_tool_calls(payload, event_context)
+    changed = changed or worker_multi_agent_changed
+    payload, coordinator_forbidden_changed = _suppress_coordinator_forbidden_tool_calls(payload, event_context)
+    changed = changed or coordinator_forbidden_changed
     payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
     changed = changed or invalid_tool_changed
     payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
+    payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
+    changed = changed or exact_spawn_changed
+    payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
+    changed = changed or required_tool_changed
+    payload, required_call_changed = _repair_missing_required_subagent_call_payload(payload, event_context)
+    changed = changed or required_call_changed
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -5845,7 +8359,7 @@ def compatible_sse_line(
     upstream_name: str,
     event_context: Mapping[str, Any] | None = None,
 ) -> bytes:
-    if upstream_name == "official" or not line.startswith(b"data:"):
+    if upstream_name == "official" or _is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
         return line
 
     line_ending = _sse_line_ending(line)
@@ -5871,10 +8385,32 @@ def compatible_sse_line(
             surface="sse",
         )
     changed = changed or alias_changed
+    payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
+        payload,
+        event_context,
+    )
+    if payload is None:
+        return b""
+    changed = changed or post_final_multi_agent_changed
+    payload, worker_multi_agent_changed = _suppress_worker_multi_agent_tool_calls(payload, event_context)
+    if payload is None:
+        return b""
+    changed = changed or worker_multi_agent_changed
+    payload, coordinator_forbidden_changed = _suppress_coordinator_forbidden_tool_calls(payload, event_context)
+    if payload is None:
+        return b""
+    changed = changed or coordinator_forbidden_changed
     payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
     changed = changed or invalid_tool_changed
     payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
+    payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
+    changed = changed or exact_spawn_changed
+    payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
+    changed = changed or required_tool_changed
+    repaired_line = _repair_missing_required_subagent_call_sse_line(payload, event_context, line_ending)
+    if repaired_line is not None:
+        return repaired_line
     if not changed:
         return line
     return _sse_json_line(payload, line_ending)
@@ -5900,6 +8436,20 @@ def _get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
         if key.lower() == wanted:
             return value
     return None
+
+
+def _truthy_probe_value(value: str | None) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def raw_provider_probe_requested(headers: Mapping[str, str] | Any, path: str) -> bool:
+    if _truthy_probe_value(_get_header(headers, "X-CodexHub-Raw-Provider-Probe")):
+        return True
+    try:
+        query_values = parse_qs(urlsplit(path).query, keep_blank_values=True)
+    except ValueError:
+        return False
+    return any(_truthy_probe_value(value) for value in query_values.get("raw_provider_probe", []))
 
 
 def _header_tokens(headers: Mapping[str, str] | Any, name: str) -> set[str]:
@@ -6120,7 +8670,7 @@ def route_decision_for_request(
             request_kind_policy=REQUEST_KIND_GATEWAY,
             retry_policy=RETRY_GATEWAY_FULL,
             usage_policy=USAGE_SYNC_CAPTURE,
-            repair_policy=REPAIR_CODEX_SUBAGENT,
+            repair_policy=REPAIR_NONE,
         )
 
     if not _is_codex_app_context(request_context):
@@ -7683,6 +10233,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_context = request_context_from_headers(self.headers)
         request_kind = RETRY_REQUEST_MAIN_GENERATION
         proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+        raw_provider_probe = raw_provider_probe_requested(self.headers, self.path)
+        if raw_provider_probe:
+            proxy_request_context["raw_provider_probe"] = True
         model = None
         model_requested = None
         upstream_name = None
@@ -7715,6 +10268,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             request_kind = _request_kind_from_headers_and_payload(self.headers, inbound_payload, inbound_format)
             if request_kind == RETRY_REQUEST_COMPACT:
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+                if raw_provider_probe:
+                    proxy_request_context["raw_provider_probe"] = True
             if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("model"), str):
                 model_requested = inbound_payload["model"]
             else:
@@ -7939,7 +10494,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     downstream_sse_started = True
                 self._write_sse_data(
                     _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
-                )
+            )
 
             usage_capture: dict[str, Any] = {}
             if is_official_http_passthrough:
@@ -7962,7 +10517,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream,
                     model_id=model,
                     event_context=adapter_event_context,
-                    inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT,
+                    inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT and not raw_provider_probe,
                     behavior_profile=behavior_profile,
                 )
             vision_proxy_payload_format = (
@@ -8050,7 +10605,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 and gateway_downstream_retry_notice_enabled()
             )
 
-            def upstream_request_for_format(selected_format: str) -> Request:
+            def upstream_request_for_format(
+                selected_format: str,
+                lifecycle_final_retry_reason: str | None = None,
+            ) -> Request:
+                request_body = body if is_transparent_same_format else responses_body
+                if lifecycle_final_retry_reason and not is_transparent_same_format:
+                    request_body = _responses_body_with_lifecycle_final_retry_guidance(
+                        responses_body,
+                        lifecycle_final_retry_reason,
+                    )
+                    _write_adapter_event(
+                        adapter_event_context,
+                        "lifecycle_final_retry_guidance_injected",
+                        upstream=upstream_name,
+                        upstream_format=selected_format,
+                        reason=lifecycle_final_retry_reason,
+                    )
                 if is_transparent_same_format:
                     url = (
                         _chat_completions_url(upstream)
@@ -8059,20 +10630,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     return Request(
                         url,
-                        data=body,
+                        data=request_body,
                         headers=headers,
                         method="POST",
                     )
                 if selected_format == "chat_completions":
                     return Request(
                         _chat_completions_url(upstream),
-                        data=upstream_body_for_format(selected_format),
+                        data=_responses_request_to_chat_completion_body(request_body),
                         headers=headers,
                         method="POST",
                     )
                 return Request(
                     _responses_url(upstream, "/v1/responses"),
-                    data=responses_body,
+                    data=request_body,
                     headers=headers,
                     method="POST",
                 )
@@ -8115,12 +10686,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             selected_upstream_format = upstream_format
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
             for format_index, selected_upstream_format in enumerate(upstream_format_options):
-                request = upstream_request_for_format(selected_upstream_format)
                 base_relay_attempts = 1 if is_official_http_passthrough else _upstream_retry_attempts(request_kind)
                 relay_attempts = base_relay_attempts
+                lifecycle_final_extra_attempts = (
+                    1
+                    if (not is_official_http_passthrough and lifecycle_empty_final_resample_enabled(adapter_event_context, request_kind))
+                    else 0
+                )
+                max_relay_attempts = relay_attempts + lifecycle_final_extra_attempts
                 relay_attempt = 1
+                lifecycle_final_retry_reason: str | None = None
                 try:
-                    while relay_attempt <= relay_attempts:
+                    while relay_attempt <= max_relay_attempts:
+                        request = upstream_request_for_format(
+                            selected_upstream_format,
+                            lifecycle_final_retry_reason,
+                        )
                         try:
                             with _open_upstream_response(
                                 request,
@@ -8161,49 +10742,66 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             UpstreamStreamIdleTimeoutError,
                             UpstreamStreamIncompleteError,
                             UpstreamStreamErrorEvent,
+                            LifecycleEmptyFinalResponseError,
+                            LifecycleFinalFormatResponseError,
                         ) as exc:
-                            stream_failure = isinstance(
+                            lifecycle_retry = isinstance(
                                 exc,
-                                (
-                                    UpstreamStreamInterruptedError,
-                                    UpstreamStreamIdleTimeoutError,
-                                    UpstreamStreamIncompleteError,
-                                ),
+                                (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError),
                             )
-                            retry_exc = exc.cause if isinstance(exc, UpstreamStreamInterruptedError) else exc
-                            failure_class = _upstream_failure_class(retry_exc)
-                            relay_attempts = _retry_attempts_for_failure_class(
-                                request_kind=request_kind,
-                                base_attempts=base_relay_attempts,
-                                failure_class=failure_class,
-                                explicit_max_attempts=False,
-                                stream_failure=stream_failure,
-                            )
-                            if relay_attempt >= relay_attempts or failure_class == RETRY_FAILURE_PERMANENT:
-                                raise retry_exc
-                            delay_seconds = gateway_retry_delay_seconds(
-                                relay_attempt,
-                                failure_class=failure_class,
-                                exc=retry_exc,
-                            )
-                            if failure_class in CAPACITY_RETRY_FAILURE_CLASSES and not _capacity_retry_elapsed_limit_allows(
-                                started_at,
-                                delay_seconds,
-                            ):
-                                raise retry_exc
-                            if (
-                                stream_failure
-                                and failure_class == RETRY_FAILURE_QUICK_TRANSIENT
-                                and not _stream_retry_elapsed_limit_allows(started_at, delay_seconds)
-                            ):
-                                raise retry_exc
+                            if lifecycle_retry:
+                                retry_exc: BaseException = exc
+                                failure_class = RETRY_FAILURE_QUICK_TRANSIENT
+                                lifecycle_final_retry_reason = "empty" if isinstance(exc, LifecycleEmptyFinalResponseError) else "format"
+                                retry_limit = max_relay_attempts
+                                if relay_attempt >= retry_limit:
+                                    raise
+                                delay_seconds = 0
+                            else:
+                                stream_failure = isinstance(
+                                    exc,
+                                    (
+                                        UpstreamStreamInterruptedError,
+                                        UpstreamStreamIdleTimeoutError,
+                                        UpstreamStreamIncompleteError,
+                                    ),
+                                )
+                                retry_exc = exc.cause if isinstance(exc, UpstreamStreamInterruptedError) else exc
+                                failure_class = _upstream_failure_class(retry_exc)
+                                relay_attempts = _retry_attempts_for_failure_class(
+                                    request_kind=request_kind,
+                                    base_attempts=base_relay_attempts,
+                                    failure_class=failure_class,
+                                    explicit_max_attempts=False,
+                                    stream_failure=stream_failure,
+                                )
+                                max_relay_attempts = relay_attempts + lifecycle_final_extra_attempts
+                                retry_limit = relay_attempts
+                                if relay_attempt >= retry_limit or failure_class == RETRY_FAILURE_PERMANENT:
+                                    raise retry_exc
+                                delay_seconds = gateway_retry_delay_seconds(
+                                    relay_attempt,
+                                    failure_class=failure_class,
+                                    exc=retry_exc,
+                                )
+                                if failure_class in CAPACITY_RETRY_FAILURE_CLASSES and not _capacity_retry_elapsed_limit_allows(
+                                    started_at,
+                                    delay_seconds,
+                                ):
+                                    raise retry_exc
+                                if (
+                                    stream_failure
+                                    and failure_class == RETRY_FAILURE_QUICK_TRANSIENT
+                                    and not _stream_retry_elapsed_limit_allows(started_at, delay_seconds)
+                                ):
+                                    raise retry_exc
                             _emit_upstream_retry_event(
                                 adapter_event_context,
                                 upstream_name=upstream_name,
                                 upstream_format=selected_upstream_format,
                                 request_kind=request_kind,
                                 attempt=relay_attempt,
-                                max_attempts=relay_attempts,
+                                max_attempts=retry_limit,
                                 exc=retry_exc,
                                 delay_seconds=delay_seconds,
                                 failure_class=failure_class,
@@ -8214,7 +10812,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     upstream_format=selected_upstream_format,
                                     request_kind=request_kind,
                                     attempt=relay_attempt,
-                                    max_attempts=relay_attempts,
+                                    max_attempts=retry_limit,
                                     exc=retry_exc,
                                     delay_seconds=delay_seconds,
                                     failure_class=failure_class,
@@ -8319,6 +10917,48 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error="compact_empty_response",
                 detail=detail,
                 error_type="compact_empty_response",
+            )
+        except (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError) as exc:
+            detail = safe_upstream_error_detail(exc)
+            error_code = (
+                "lifecycle_empty_final_response"
+                if isinstance(exc, LifecycleEmptyFinalResponseError)
+                else "lifecycle_final_format_response"
+            )
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                upstream=upstream_name,
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                status=502,
+                error=error_code,
+                detail=detail,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **proxy_request_context,
+            )
+            if downstream_sse_started:
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    status=502,
+                    exc=exc,
+                    error=error_code,
+                    detail=detail,
+                )
+                return
+            self._safe_send_downstream_json_error(
+                502,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                error=error_code,
+                detail=detail,
+                error_type=error_code,
             )
         except ImageProxyError as exc:
             if not request_start_written and callable(write_request_start_once):
@@ -9402,6 +12042,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 mark_downstream_sse_started=mark_downstream_sse_started,
                 event_context=event_context,
             )
+        defer_stream_headers = (
+            is_event_stream
+            and caller_stream
+            and lifecycle_empty_final_resample_enabled(event_context, request_kind)
+        )
+        headers_sent = headers_already_sent
         if not is_event_stream or buffer_sse_to_json:
             if buffer_sse_to_json:
                 # Buffer the full SSE stream into a list of events.
@@ -9458,11 +12104,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_body_for_usage = body
             if want_chat_output:
                 if upstream_format == "chat_completions":
-                    # Upstream already returned Chat Completions; pass through.
-                    pass
+                    body = _response_body_to_chat_completion_body(
+                        compatible_response_body(
+                            _chat_completion_to_response_body(body),
+                            upstream_name,
+                            event_context=event_context,
+                        )
+                    )
                 else:
                     # Upstream returned Responses format; convert to Chat Completions.
-                    body = _response_body_to_chat_completion_body(body)
+                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                        body = _response_body_to_chat_completion_body(body)
+                    else:
+                        body = _response_body_to_chat_completion_body(
+                            compatible_response_body(body, upstream_name, event_context=event_context)
+                        )
             elif upstream_format == "chat_completions":
                 converted_body = _chat_completion_to_response_body(
                     body,
@@ -9483,6 +12139,41 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 _offer_usage_observed_body(usage_context, upstream_body_for_usage)
             else:
                 _capture_usage(usage_capture, _usage_from_json_body(body))
+                if status < 400:
+                    lifecycle_issue = _response_body_lifecycle_final_issue(body, event_context, request_kind)
+                    if lifecycle_issue is not None:
+                        _write_adapter_event(
+                            event_context,
+                            _lifecycle_final_issue_event_name(lifecycle_issue),
+                            upstream=upstream_name,
+                            inbound_format=inbound_format,
+                            want_chat_output=want_chat_output,
+                            body_format="chat_completions" if want_chat_output else "responses",
+                        )
+                        _capture_usage(
+                            usage_capture,
+                            None,
+                            missing_reason=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                        )
+                        if not headers_already_sent:
+                            _raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
+                        status = 502
+                        body = json.dumps(
+                            _json_error_payload_for_inbound_format(
+                                inbound_format=inbound_format,
+                                upstream_name=upstream_name,
+                                status=status,
+                                error=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                                detail=(
+                                    "Upstream returned an empty final response after completed subagent lifecycle."
+                                    if lifecycle_issue == "empty"
+                                    else "Upstream returned a final response with extra text outside the requested report format."
+                                ),
+                                error_type=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                            ),
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
             if (
                 status < 400
                 and request_kind == RETRY_REQUEST_COMPACT
@@ -9542,7 +12233,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **event_fields,
                     )
             downstream_expects_sse = caller_stream and (
-                headers_already_sent or mark_downstream_sse_started is not None
+                headers_sent or mark_downstream_sse_started is not None
             )
             if downstream_expects_sse and not want_chat_output and status < 400:
                 try:
@@ -9550,8 +12241,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     response_events = []
                 if response_events:
-                    if not headers_already_sent:
+                    if not headers_sent:
                         self._send_sse_headers(status, upstream_name)
+                        headers_sent = True
                         if mark_downstream_sse_started is not None:
                             mark_downstream_sse_started()
                     for event in response_events:
@@ -9571,7 +12263,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         else "upstream_missing_usage",
                     )
                     return status
-            if headers_already_sent:
+            if headers_sent:
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
@@ -9583,7 +12275,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
                 return status
 
-        if not headers_already_sent:
+        def send_downstream_response_headers_once() -> None:
+            nonlocal headers_sent
+            if headers_sent:
+                return
             self.send_response(status)
             content_length = None if is_event_stream else len(body)
             content_type = "application/json" if buffered_json_response else None
@@ -9597,8 +12292,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
             self.send_header("Connection", "close")
             self.end_headers()
+            headers_sent = True
             if mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
+
+        if not defer_stream_headers:
+            send_downstream_response_headers_once()
 
         if is_event_stream:
             def finish_downstream_stream_closed(exc: OSError) -> int:
@@ -9702,6 +12401,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
+                    send_downstream_response_headers_once()
                     self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -9722,6 +12422,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
+                    send_downstream_response_headers_once()
                     self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -9740,6 +12441,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
+                    send_downstream_response_headers_once()
                     self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -9962,7 +12664,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 try:
-                    chunks = _response_events_to_chat_stream_chunks(events, require_completed=True)
+                    response_body = compatible_response_body(
+                        _events_to_responses_body(events, require_completed=True),
+                        upstream_name,
+                        event_context=event_context,
+                    )
                 except UpstreamStreamIncompleteError:
                     if defer_stream_errors:
                         raise
@@ -9986,7 +12692,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
 
-                for chunk in chunks:
+                send_downstream_response_headers_once()
+                for chunk in _chat_completion_body_to_stream_chunks(
+                    _response_body_to_chat_completion_body(response_body)
+                ):
                     self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -10101,19 +12810,97 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
+                chat_summary = _chat_stream_shape_summary(chunks)
+                _write_adapter_event(
+                    event_context,
+                    "chat_stream_shape_summary",
+                    upstream=upstream_name,
+                    inbound_format=inbound_format,
+                    want_chat_output=want_chat_output,
+                    **chat_summary,
+                )
+                lifecycle_issue = (
+                    _chat_stream_lifecycle_final_issue(chunks, chat_summary, event_context, request_kind)
+                    if status < 400
+                    else None
+                )
+                if lifecycle_issue is not None:
+                    _write_adapter_event(
+                        event_context,
+                        _lifecycle_final_issue_event_name(lifecycle_issue),
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        want_chat_output=want_chat_output,
+                        **chat_summary,
+                    )
+                    _capture_usage(
+                        usage_capture,
+                        None,
+                        missing_reason=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                    )
+                    _raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
                 if want_chat_output:
-                    # Inbound and upstream are both Chat Completions; pass through.
-                    for chunk in chunks:
-                        if chunk == "[DONE]":
-                            continue
+                    response_body = compatible_response_body(
+                        _events_to_responses_body(_chat_stream_chunks_to_response_events(chunks)),
+                        upstream_name,
+                        event_context=event_context,
+                    )
+                    send_downstream_response_headers_once()
+                    for chunk in _chat_completion_body_to_stream_chunks(
+                        _response_body_to_chat_completion_body(response_body)
+                    ):
                         self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
                         self.wfile.flush()
                 else:
-                    for event in _chat_stream_chunks_to_response_events(chunks):
-                        if behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                            event, _ = _normalize_third_party_tool_call(event)
-                            event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
+                    events = _chat_stream_chunks_to_response_events(chunks)
+                    _write_adapter_event(
+                        event_context,
+                        "chat_to_responses_event_summary",
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        want_chat_output=want_chat_output,
+                        stage="converted",
+                        **_response_events_shape_summary(events),
+                    )
+                    events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    events, _ = _normalize_third_party_tool_call(events)
+                    _write_adapter_event(
+                        event_context,
+                        "chat_to_responses_event_summary",
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        want_chat_output=want_chat_output,
+                        stage="normalized",
+                        **_response_events_shape_summary(events),
+                    )
+                    events, _ = _suppress_worker_multi_agent_tool_calls(events, event_context)
+                    events, _ = _suppress_coordinator_forbidden_tool_calls(events, event_context)
+                    events, _ = _downgrade_invalid_third_party_tool_calls(events)
+                    _write_adapter_event(
+                        event_context,
+                        "chat_to_responses_event_summary",
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        want_chat_output=want_chat_output,
+                        stage="downgraded",
+                        **_response_events_shape_summary(events),
+                    )
+                    events, _ = _guard_duplicate_multi_agent_spawn_calls(events, event_context)
+                    events, _ = _coerce_exact_spawn_prompt_tool_calls(events, event_context)
+                    events, _ = _coerce_required_subagent_tool_calls(events, event_context)
+                    events, _ = _reconcile_function_call_argument_events(events)
+                    events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    _write_adapter_event(
+                        event_context,
+                        "chat_to_responses_event_summary",
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        want_chat_output=want_chat_output,
+                        stage="final",
+                        **_response_events_shape_summary(events),
+                    )
+                    send_downstream_response_headers_once()
+                    for event in events:
                         self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -10126,6 +12913,160 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
                     else "upstream_missing_usage",
                 )
+                return status
+
+            if lifecycle_empty_final_resample_enabled(event_context, request_kind):
+                reasoning_stats: dict[str, Any] = {
+                    "seen": False,
+                    "original_event_counts": {},
+                    "rewritten_event_counts": {},
+                    "delta_events": 0,
+                    "delta_chars": 0,
+                }
+                saw_response_event = False
+                saw_terminal_event = False
+                downstream_output_started = False
+                buffered_lines: list[tuple[bytes, bool]] = []
+                rewritten_events: list[Mapping[str, Any]] = []
+                try:
+                    for line in self._iter_upstream_sse_lines(
+                        response,
+                        line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                    ):
+                        if not line:
+                            break
+                        original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
+                        usage_payload = _parse_sse_json_payload(line)
+                        if isinstance(usage_payload, Mapping):
+                            event_type = usage_payload.get("type")
+                            if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
+                                saw_response_event = True
+                            if _responses_events_have_terminal([usage_payload]):
+                                saw_terminal_event = True
+                            if _responses_event_starts_downstream_output(usage_payload):
+                                downstream_output_started = True
+                            _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
+                        rewritten_line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                        rewritten_payload = _parse_sse_json_payload(rewritten_line) if upstream_name != "official" else usage_payload
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
+                        if isinstance(rewritten_payload, Mapping):
+                            rewritten_events.append(rewritten_payload)
+                        terminal = bool(
+                            isinstance(rewritten_payload, Mapping)
+                            and _responses_events_have_terminal([rewritten_payload])
+                        )
+                        buffered_lines.append((rewritten_line, terminal))
+                        if saw_terminal_event:
+                            break
+                except UpstreamStreamIdleTimeoutError as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_idle_timeout",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        stream_idle_timeout_seconds=exc.timeout_seconds,
+                        stream_idle_phase=exc.phase,
+                        terminal_seen=saw_terminal_event,
+                        downstream_output_started=downstream_output_started,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    send_downstream_response_headers_once()
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_idle_timeout",
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                    return 502
+                except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_interrupted",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        error=type(exc).__name__,
+                        detail=safe_upstream_error_detail(exc),
+                    )
+                    send_downstream_response_headers_once()
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        exc=exc,
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                    return 502
+                if status < 400 and saw_response_event and not saw_terminal_event:
+                    self.close_connection = True
+                    write_proxy_event(
+                        "upstream_stream_incomplete",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                    )
+                    send_downstream_response_headers_once()
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name,
+                        status=502,
+                        error="upstream_stream_incomplete",
+                        detail="Upstream Responses stream ended without a terminal event.",
+                    )
+                    _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                    return 502
+                lifecycle_issue = (
+                    _responses_events_lifecycle_final_issue(rewritten_events, event_context, request_kind)
+                    if status < 400
+                    else None
+                )
+                if lifecycle_issue is not None:
+                    _write_adapter_event(
+                        event_context,
+                        _lifecycle_final_issue_event_name(lifecycle_issue),
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        want_chat_output=want_chat_output,
+                        **_response_events_shape_summary(list(rewritten_events)),
+                    )
+                    _capture_usage(
+                        usage_capture,
+                        None,
+                        missing_reason=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                    )
+                    _raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
+                if upstream_name != "official" and reasoning_stats["seen"]:
+                    write_proxy_event(
+                        "sse_reasoning_summary",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        original_event_counts=reasoning_stats["original_event_counts"],
+                        rewritten_event_counts=reasoning_stats["rewritten_event_counts"],
+                        delta_events=reasoning_stats["delta_events"],
+                        delta_chars=reasoning_stats["delta_chars"],
+                    )
+                send_downstream_response_headers_once()
+                for buffered_line, terminal in buffered_lines:
+                    self.wfile.write(buffered_line)
+                    if terminal:
+                        separator = _sse_event_separator_after_line(buffered_line)
+                        if separator:
+                            self.wfile.write(separator)
+                    self.wfile.flush()
+                    if terminal:
+                        break
+                self.close_connection = True
+                _capture_usage(usage_capture, None)
                 return status
 
             reasoning_stats: dict[str, Any] = {

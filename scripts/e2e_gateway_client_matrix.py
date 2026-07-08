@@ -14,6 +14,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.11+ in supported runs
+    tomllib = None
+
 
 DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:9099/v1"
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -72,6 +77,37 @@ def home_path(*parts: str) -> Path:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def parse_runtime_providers_config(path: Path, *, proxy_base_url: str) -> list[ClientCase]:
+    if tomllib is None:
+        raise RuntimeError("Python 3.11+ tomllib is required")
+    data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    cases: list[ClientCase] = []
+    base = proxy_base_url.rstrip("/")
+    for provider in sorted(data.get("providers", []), key=lambda item: str(item.get("id") or "")):
+        provider_id = str(provider.get("id") or "")
+        if not provider_id or not provider.get("enabled", True):
+            continue
+        upstream_format = str(provider.get("upstream_format") or "responses")
+        api = "openai-completions" if upstream_format == "chat_completions" else "openai-responses"
+        for model in sorted(provider.get("models", []), key=lambda item: str(item.get("id") or "")):
+            model_id = str(model.get("id") or "")
+            if not model_id or not model.get("enabled", True) or not model.get("gateway_exported", False):
+                continue
+            cases.append(
+                ClientCase(
+                    client="codex-app",
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    display_name=str(model.get("name") or model_id),
+                    api=api,
+                    base_url=f"{base}/providers/{provider_id}",
+                    api_key="dummy-codexhub-e2e",
+                    source_path=str(path),
+                )
+            )
+    return cases
 
 
 def parse_opencode_config(path: Path) -> list[ClientCase]:
@@ -476,14 +512,27 @@ def compact_error(value: str, limit: int = 700) -> str:
     return value[: limit - 3] + "..."
 
 
+def coverage_selector(case: ClientCase) -> str:
+    provider_id = case.provider_id
+    if provider_id.startswith("codexhub-"):
+        provider_id = provider_id.removeprefix("codexhub-")
+    return f"{provider_id}/{case.model_id}"
+
+
 def load_cases(args: argparse.Namespace) -> list[ClientCase]:
     cases: list[ClientCase] = []
+    runtime_baseline: set[str] = set()
     paths = {
+        "runtime_providers": Path(args.runtime_providers),
         "opencode": Path(args.opencode_config),
         "zcode": Path(args.zcode_config),
         "pi": Path(args.pi_models),
         "omp": Path(args.omp_models),
     }
+    if paths["runtime_providers"].exists():
+        runtime_cases = parse_runtime_providers_config(paths["runtime_providers"], proxy_base_url=args.proxy_base_url)
+        runtime_baseline = {coverage_selector(case) for case in runtime_cases}
+        cases.extend(runtime_cases)
     if paths["opencode"].exists():
         cases.extend(parse_opencode_config(paths["opencode"]))
     if paths["zcode"].exists():
@@ -492,6 +541,10 @@ def load_cases(args: argparse.Namespace) -> list[ClientCase]:
         cases.extend(parse_pi_models(paths["pi"], client="pi"))
     if paths["omp"].exists():
         cases.extend(parse_omp_models(paths["omp"]))
+    include_extra = bool(getattr(args, "include_extra_config_selectors", False))
+    has_explicit_selector_filter = bool(getattr(args, "provider", None) or getattr(args, "model", None))
+    if runtime_baseline and not include_extra and not has_explicit_selector_filter:
+        cases = [case for case in cases if case.client == "codex-app" or coverage_selector(case) in runtime_baseline]
     if args.client:
         allowed = set(args.client)
         cases = [case for case in cases if case.client in allowed]
@@ -511,18 +564,44 @@ def load_cases(args: argparse.Namespace) -> list[ClientCase]:
 def summarize_config_coverage(cases: list[ClientCase]) -> dict[str, Any]:
     by_client: dict[str, set[str]] = {}
     for case in cases:
-        by_client.setdefault(case.client, set()).add(case.selector)
-    all_selectors = sorted({selector for selectors in by_client.values() for selector in selectors})
+        by_client.setdefault(case.client, set()).add(coverage_selector(case))
+    baseline = by_client.get("codex-app")
+    all_selectors = sorted(baseline or {selector for selectors in by_client.values() for selector in selectors})
     missing = {
         client: [selector for selector in all_selectors if selector not in selectors]
+        for client, selectors in sorted(by_client.items())
+    }
+    extras = {
+        client: [selector for selector in sorted(selectors) if selector not in set(all_selectors)]
         for client, selectors in sorted(by_client.items())
     }
     return {
         "clients": {client: sorted(selectors) for client, selectors in sorted(by_client.items())},
         "missing_by_client": missing,
+        "extra_by_client": extras,
         "selector_count": len(all_selectors),
         "selectors": all_selectors,
     }
+
+
+def manual_results_for_cases(cases: list[ClientCase], *, manual_clients: set[str]) -> list[CaseResult]:
+    results: list[CaseResult] = []
+    for case in cases:
+        if case.client not in manual_clients:
+            continue
+        results.append(
+            CaseResult(
+                client=case.client,
+                provider_id=case.provider_id,
+                model_id=case.model_id,
+                api=case.api,
+                endpoint=f"{case.client}-ui",
+                status="manual_pending",
+                duration_ms=0,
+                error="manual user-assisted verification required",
+            )
+        )
+    return results
 
 
 def write_report(output_dir: Path, results: list[CaseResult], cases: list[ClientCase]) -> Path:
@@ -552,11 +631,14 @@ def print_result(result: CaseResult) -> None:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Run CodexHub Gateway client/model E2E matrix.")
+    parser.add_argument("--runtime-providers", default=str(home_path(".codex", "proxy", "config", "providers.toml")))
+    parser.add_argument("--proxy-base-url", default=DEFAULT_PROXY_BASE_URL)
     parser.add_argument("--opencode-config", default=str(home_path(".config", "opencode", "opencode.json")))
     parser.add_argument("--zcode-config", default=r"D:\zcode\.zcode\v2\config.json")
     parser.add_argument("--pi-models", default=str(home_path(".pi", "agent", "models.json")))
     parser.add_argument("--omp-models", default=str(home_path(".omp", "agent", "models.yml")))
-    parser.add_argument("--client", action="append", choices=["opencode", "zcode", "pi", "omp"])
+    parser.add_argument("--client", action="append", choices=["codex-app", "opencode", "zcode", "pi", "omp"])
+    parser.add_argument("--manual-client", action="append", choices=["zcode"])
     parser.add_argument("--provider", action="append")
     parser.add_argument("--model", action="append")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
@@ -565,6 +647,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--retry-delay-seconds", type=float, default=DEFAULT_RETRY_DELAY_SECONDS)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--output-dir", default="test-results")
+    parser.add_argument("--include-extra-config-selectors", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -580,6 +663,17 @@ def main(argv: list[str]) -> int:
     if args.dry_run:
         for case in cases:
             print(f"CASE {case.client} {case.provider_id}/{case.model_id} {case.api} {endpoint_for_case(case)}")
+        return 0
+    if args.manual_client:
+        manual_results = manual_results_for_cases(cases, manual_clients=set(args.manual_client))
+        if not manual_results:
+            print(f"No manual cases found for: {', '.join(args.manual_client)}", file=sys.stderr)
+            return 2
+        for result in manual_results:
+            print(f"MANUAL {result.client} {result.provider_id}/{result.model_id} {result.api} {result.status}")
+        report_path = write_report(Path(args.output_dir), manual_results, cases)
+        print(f"Report: {report_path}")
+        print(f"Summary: {len(manual_results)} manual pending, 0 failed.")
         return 0
 
     results: list[CaseResult] = []
