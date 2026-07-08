@@ -184,6 +184,20 @@ test("main desktop window opens tall enough for the primary dashboard", async ()
   assert.ok(mainWindow.minHeight >= 800);
 });
 
+test("tauri config enables Windows updater packaging", async () => {
+  const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
+
+  assert.equal(tauriConfig.bundle.active, true);
+  assert.deepEqual(tauriConfig.bundle.targets, ["nsis"]);
+  assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
+  assert.deepEqual(tauriConfig.plugins.updater.endpoints, [
+    "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
+  ]);
+  assert.equal(tauriConfig.plugins.updater.windows.installMode, "passive");
+  assert.equal(typeof tauriConfig.plugins.updater.pubkey, "string");
+  assert.ok(tauriConfig.plugins.updater.pubkey.length > 80);
+});
+
 test("release desktop binary does not allocate a Windows console", async () => {
   const mainSource = await readFile(tauriMainPath, "utf8");
 
