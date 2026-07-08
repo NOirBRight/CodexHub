@@ -63,7 +63,6 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String>
 }
 
 #[tauri::command]
-#[allow(unreachable_code, unused_variables)]
 pub async fn install_app_update(app: AppHandle) -> Result<AppUpdateInstallResult, String> {
     let current = current_version(&app);
     let Some(update) = app
@@ -80,18 +79,11 @@ pub async fn install_app_update(app: AppHandle) -> Result<AppUpdateInstallResult
         });
     };
 
-    let version = update.version.clone();
-    let message = format!("CodexHub {version} installed. Restarting...");
     update
         .download_and_install(|_chunk_length, _content_length| {}, || {})
         .await
         .map_err(|error| operation_error("install update", error))?;
-    app.restart();
-    Ok(AppUpdateInstallResult {
-        installed: true,
-        version,
-        message,
-    })
+    restart_after_update(app)
 }
 
 fn current_version(app: &AppHandle) -> String {
@@ -154,6 +146,10 @@ fn checked_at_now() -> String {
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     format!("unix:{seconds}")
+}
+
+fn restart_after_update(app: AppHandle) -> ! {
+    app.restart()
 }
 
 #[cfg(test)]

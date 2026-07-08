@@ -2,6 +2,7 @@ import { Check, ChevronDown, Download, RefreshCcw, Save, X } from "lucide-react"
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
+import { runAppUpdateInstall } from "../lib/appUpdates";
 import { cx } from "../lib/format";
 import { api, messageFromError } from "../lib/tauri";
 import type { AppUpdateStatus, AppVersionInfo, Model, Provider, Settings } from "../lib/types";
@@ -214,41 +215,14 @@ export function SettingsDrawer({
       showToast(t("settings.updateInstallUnavailable"), "info");
       return;
     }
-    if (!window.confirm(t("settings.updateInstallConfirm"))) {
-      return;
-    }
-    const toastId = showToast({
-      text: t("settings.installingUpdate"),
-      tone: "loading",
-      timeoutMs: null,
+    await runAppUpdateInstall({
+      installAppUpdate: () => api.installAppUpdate(),
+      onSettled: () => setUpdateBusy(null),
+      onStart: () => setUpdateBusy("install"),
+      showToast,
+      t,
+      updateToast,
     });
-    setUpdateBusy("install");
-    try {
-      const result = await api.installAppUpdate();
-      if (!result) {
-        updateToast(toastId, {
-          action: null,
-          text: t("settings.desktopUpdatesUnavailable"),
-          tone: "info",
-        });
-        return;
-      }
-      if (!result.installed) {
-        updateToast(toastId, {
-          action: null,
-          text: result.message,
-          tone: "info",
-        });
-      }
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
-    } finally {
-      setUpdateBusy(null);
-    }
   }
 
   function requestClose() {

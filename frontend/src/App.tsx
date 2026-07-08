@@ -5,6 +5,7 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
+import { runAppUpdateInstall } from "./lib/appUpdates";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
 import type {
@@ -328,38 +329,12 @@ export default function App() {
   }, [usageWindow]);
 
   const installAppUpdate = useCallback(async () => {
-    if (!window.confirm(t("settings.updateInstallConfirm"))) {
-      return;
-    }
-    const toastId = showToast({
-      text: t("settings.installingUpdate"),
-      tone: "loading",
-      timeoutMs: null,
+    await runAppUpdateInstall({
+      installAppUpdate: () => api.installAppUpdate(),
+      showToast,
+      t,
+      updateToast,
     });
-    try {
-      const result = await api.installAppUpdate();
-      if (!result) {
-        updateToast(toastId, {
-          action: null,
-          text: t("settings.desktopUpdatesUnavailable"),
-          tone: "info",
-        });
-        return;
-      }
-      if (!result.installed) {
-        updateToast(toastId, {
-          action: null,
-          text: result.message,
-          tone: "info",
-        });
-      }
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: messageFromError(err),
-        tone: "error",
-      });
-    }
   }, [showToast, t, updateToast]);
 
   const runStartupUpdateCheck = useCallback(async () => {
