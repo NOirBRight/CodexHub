@@ -524,7 +524,8 @@ fn quote_command_part(part: OsString) -> String {
 }
 
 pub(crate) fn find_python() -> PathBuf {
-    which::which("python").unwrap_or_else(|_| PathBuf::from("python"))
+    let resource_root = runtime_paths::resource_root().ok();
+    runtime_paths::find_python(resource_root.as_deref())
 }
 
 #[cfg(test)]

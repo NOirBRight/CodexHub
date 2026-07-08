@@ -1858,9 +1858,8 @@ fn format_exit_code(code: Option<i32>) -> String {
 }
 
 fn find_python() -> PathBuf {
-    which::which("python")
-        .or_else(|_| which::which("python3"))
-        .unwrap_or_else(|_| PathBuf::from("python"))
+    let resource_root = runtime_paths::resource_root().ok();
+    runtime_paths::find_python(resource_root.as_deref())
 }
 
 fn find_codex_executable() -> Result<PathBuf, String> {

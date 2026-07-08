@@ -1280,11 +1280,7 @@ fn find_python(paths: &ProxyPaths) -> PathBuf {
 
 fn python_candidates(paths: &ProxyPaths) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    for name in ["CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"] {
-        if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
-            candidates.push(PathBuf::from(value));
-        }
-    }
+    candidates.extend(runtime_paths::python_env_candidates());
 
     #[cfg(windows)]
     {
@@ -1295,7 +1291,6 @@ fn python_candidates(paths: &ProxyPaths) -> Vec<PathBuf> {
                 .join("Scripts")
                 .join("python.exe"),
         );
-        candidates.push(paths.repo_root.join("python").join("python.exe"));
     }
 
     #[cfg(not(windows))]
@@ -1307,25 +1302,10 @@ fn python_candidates(paths: &ProxyPaths) -> Vec<PathBuf> {
                 .join("bin")
                 .join("python"),
         );
-        candidates.push(paths.repo_root.join("python").join("bin").join("python"));
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            #[cfg(windows)]
-            {
-                candidates.push(dir.join("python.exe"));
-                candidates.push(dir.join("python3.exe"));
-                candidates.push(dir.join("codexhub-python.exe"));
-            }
-            #[cfg(not(windows))]
-            {
-                candidates.push(dir.join("python"));
-                candidates.push(dir.join("python3"));
-                candidates.push(dir.join("codexhub-python"));
-            }
-        }
-    }
+    candidates.extend(runtime_paths::bundled_python_candidates(&paths.repo_root));
+    candidates.extend(runtime_paths::current_exe_python_candidates());
 
     candidates
 }

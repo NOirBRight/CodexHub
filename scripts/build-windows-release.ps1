@@ -14,6 +14,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $frontendDir = Join-Path $repoRoot "frontend"
 $tauriDir = Join-Path $repoRoot "src-tauri"
 $tauriConfigPath = Join-Path $tauriDir "tauri.conf.json"
+$preparePythonRuntimePath = Join-Path $PSScriptRoot "Prepare-PythonRuntime.ps1"
 
 if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
     throw "Updater private key was not found: $PrivateKeyPath"
@@ -37,6 +38,11 @@ if (-not ($tauriConfig.bundle.targets -contains "nsis")) {
 
 if ($tauriConfig.bundle.createUpdaterArtifacts -ne $true) {
     throw "tauri.conf.json must set bundle.createUpdaterArtifacts = true."
+}
+
+& $preparePythonRuntimePath -RepoRoot $repoRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Python runtime preparation failed with exit code $LASTEXITCODE."
 }
 
 if (-not $SkipFrontendBuild) {

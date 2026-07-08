@@ -5,6 +5,7 @@ import { test } from "node:test";
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
 const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta.url);
+const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
@@ -25,6 +26,7 @@ const tailwindConfigPath = new URL("../tailwind.config.js", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 const viteConfigPath = new URL("../vite.config.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
+const preparePythonRuntimePath = new URL("../../scripts/Prepare-PythonRuntime.ps1", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
 const tauriAppUpdatesPath = new URL("../../src-tauri/src/app_updates.rs", import.meta.url);
@@ -298,6 +300,19 @@ test("tauri config enables Windows updater packaging", async () => {
   assert.equal(tauriConfig.plugins.updater.windows.installMode, "quiet");
   assert.equal(typeof tauriConfig.plugins.updater.pubkey, "string");
   assert.ok(tauriConfig.plugins.updater.pubkey.length > 80);
+  assert.equal(tauriConfig.bundle.resources["resources/python/*"], "python");
+});
+
+test("Windows release build vendors a pinned Python runtime", async () => {
+  const [buildScript, prepareScript] = await Promise.all([
+    readFile(buildWindowsReleasePath, "utf8"),
+    readFile(preparePythonRuntimePath, "utf8"),
+  ]);
+
+  assert.match(buildScript, /Prepare-PythonRuntime\.ps1/);
+  assert.match(prepareScript, /python-3\.13\.14-embed-amd64\.zip/);
+  assert.match(prepareScript, /90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907/);
+  assert.match(prepareScript, /src-python\\codex_proxy\.py/);
 });
 
 test("release desktop binary does not allocate a Windows console", async () => {

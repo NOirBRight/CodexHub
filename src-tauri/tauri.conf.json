@@ -29,7 +29,8 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "../config/*.toml": "config",
-      "../src-python/*.py": "src-python"
+      "../src-python/*.py": "src-python",
+      "resources/python/*": "python"
     },
     "icon": [
       "icons/32x32.png",
