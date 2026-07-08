@@ -87,6 +87,25 @@ export interface AppStatus {
   history_sync_message?: string | null;
 }
 
+export interface AppVersionInfo {
+  current_version: string;
+}
+
+export interface AppUpdateStatus {
+  available: boolean;
+  current_version: string;
+  latest_version?: string | null;
+  checked_at: string;
+  notes?: string | null;
+  date?: string | null;
+}
+
+export interface AppUpdateInstallResult {
+  installed: boolean;
+  version: string;
+  message: string;
+}
+
 export interface GatewayStatus {
   proxy_running: boolean;
   host: string;

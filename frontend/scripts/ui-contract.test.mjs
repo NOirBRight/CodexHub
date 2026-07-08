@@ -14,6 +14,7 @@ const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.
 const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
 const settingsLibPath = new URL("../src/lib/settings.ts", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
+const settingsPagePath = new URL("../src/pages/SettingsPage.tsx", import.meta.url);
 const sortableListPath = new URL("../src/components/SortableList.tsx", import.meta.url);
 const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
 const tauriSourcePath = new URL("../src/lib/tauri.ts", import.meta.url);
@@ -182,6 +183,20 @@ test("main desktop window opens tall enough for the primary dashboard", async ()
   assert.equal(mainWindow.width, 1280);
   assert.ok(mainWindow.height >= 900);
   assert.ok(mainWindow.minHeight >= 800);
+});
+
+test("tauri config enables Windows updater packaging", async () => {
+  const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
+
+  assert.equal(tauriConfig.bundle.active, true);
+  assert.deepEqual(tauriConfig.bundle.targets, ["nsis"]);
+  assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
+  assert.deepEqual(tauriConfig.plugins.updater.endpoints, [
+    "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
+  ]);
+  assert.equal(tauriConfig.plugins.updater.windows.installMode, "passive");
+  assert.equal(typeof tauriConfig.plugins.updater.pubkey, "string");
+  assert.ok(tauriConfig.plugins.updater.pubkey.length > 80);
 });
 
 test("release desktop binary does not allocate a Windows console", async () => {
@@ -1796,6 +1811,70 @@ test("settings drawer keeps language immediate and protects unsaved drafts", asy
   assert.match(drawerSource, /await changeAppLocale\(locale\)/);
   assert.match(zhSource, /includeOfficialModels:\s*"包含 OpenAI 官方模型"/);
   assert.match(enSource, /includeOfficialModels:\s*"Include OpenAI official models"/);
+});
+
+test("settings drawer silently absorbs version load failures on open", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+  const loadAppVersion = drawerSource.match(/async function loadAppVersion\(\)[\s\S]*?async function checkForUpdates\(\)/)?.[0] ?? "";
+
+  assert.match(loadAppVersion, /try\s*\{[\s\S]*const info = await api\.getAppVersion\(\);[\s\S]*setVersionInfo\(info\);[\s\S]*\}\s*catch\s*\{[\s\S]*setVersionInfo\(null\);[\s\S]*\}/);
+  assert.doesNotMatch(loadAppVersion, /showToast|updateToast|\bthrow\b/);
+});
+
+test("app update APIs are desktop-only wrappers", async () => {
+  const [tauriSource, typesSource] = await Promise.all([
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface AppVersionInfo/);
+  assert.match(typesSource, /current_version: string/);
+  assert.match(typesSource, /export interface AppUpdateStatus/);
+  assert.match(typesSource, /available: boolean/);
+  assert.match(typesSource, /latest_version\?: string \| null/);
+  assert.match(typesSource, /export interface AppUpdateInstallResult/);
+  assert.match(typesSource, /installed: boolean/);
+  assert.match(tauriSource, /getAppVersion: \(\) => desktopCall<AppVersionInfo>\("get_app_version"\)/);
+  assert.match(tauriSource, /checkAppUpdate: \(\) => desktopCall<AppUpdateStatus>\("check_app_update"\)/);
+  assert.match(tauriSource, /installAppUpdate: \(\) => desktopCall<AppUpdateInstallResult>\("install_app_update"\)/);
+  assert.doesNotMatch(tauriSource, /checkAppUpdate: \(\) => call/);
+  assert.doesNotMatch(tauriSource, /installAppUpdate: \(\) => call/);
+});
+
+test("settings drawer places version updates below language and above behavior toggles", async () => {
+  const [settingsDrawerSource, settingsPageSource, enSource, zhSource] = await Promise.all([
+    readFile(settingsDrawerPath, "utf8"),
+    readFile(settingsPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  const codexSection =
+    settingsDrawerSource.match(/<section className="grid gap-3">[\s\S]*?<h3 className="text-sm font-semibold text-ink">CodexHub<\/h3>[\s\S]*?<section className="grid gap-3">/)?.[0] ?? "";
+
+  assert.match(codexSection, /t\("settings\.language"\)[\s\S]*t\("settings\.updates"\)[\s\S]*draft\.auto_start_proxy/);
+  assert.match(settingsDrawerSource, /function VersionUpdateBlock/);
+  assert.match(settingsDrawerSource, /api\.getAppVersion\(\)/);
+  assert.match(settingsDrawerSource, /api\.checkAppUpdate\(\)/);
+  assert.match(settingsDrawerSource, /api\.installAppUpdate\(\)/);
+  assert.doesNotMatch(settingsPageSource, /settings\.updates/);
+  assert.match(enSource, /updates: "Version & Updates"/);
+  assert.match(zhSource, /updates: "版本与更新"/);
+  assert.match(enSource, /installUpdate: "Install update"/);
+  assert.match(zhSource, /installUpdate: "安装更新"/);
+});
+
+test("startup update check is delayed and silent on failure", async () => {
+  const appSource = await readFile(appPath, "utf8");
+
+  assert.match(appSource, /STARTUP_UPDATE_CHECK_DELAY_MS\s*=\s*2500/);
+  assert.match(appSource, /startupUpdateCheckStarted/);
+  assert.match(appSource, /api\.checkAppUpdate\(\)/);
+  assert.match(appSource, /settings\.updateAvailable/);
+  assert.match(appSource, /settings\.installUpdate/);
+  assert.match(appSource, /api\.installAppUpdate\(\)/);
+  assert.match(appSource, /Startup update checks are best-effort/);
+  assert.doesNotMatch(appSource, /setBanner\(messageFromError\(err\)\)[\s\S]*Startup update/);
 });
 
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {

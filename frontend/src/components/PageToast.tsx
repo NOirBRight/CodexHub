@@ -29,7 +29,7 @@ type ToastInput = {
   tone?: PageToastTone;
 };
 
-type ToastContextValue = {
+export type ToastContextValue = {
   dismissToast: (id: string) => void;
   showToast: {
     (text: string, tone?: PageToastTone, action?: PageToastAction): string;

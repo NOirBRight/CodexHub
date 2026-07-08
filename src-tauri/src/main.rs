@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_updates;
 mod autostart;
 mod catalog;
 mod cli;
@@ -714,6 +715,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_gui() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             #[cfg(desktop)]
@@ -728,6 +730,9 @@ fn run_gui() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            app_updates::get_app_version,
+            app_updates::check_app_update,
+            app_updates::install_app_update,
             get_status,
             switch_mode,
             start_proxy,

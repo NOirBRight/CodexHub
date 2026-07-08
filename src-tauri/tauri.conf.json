@@ -24,7 +24,9 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -32,5 +34,16 @@
       "icons/icon.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBNDc5QjIxOUI4OUNFMUEKUldRYXpvbWJJWnRIU3FZUmoycFE1bnpjVklrOU5ZK3gwakpRaFpzM1YrTm9JcWdydDRTNWlrZjIK"
+    }
   }
 }
