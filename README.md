@@ -30,7 +30,9 @@ After Codex is connected to CodexHub, the Gateway must keep running because Code
 
 The desktop app and Gateway have independent lifecycles. Closing the window hides it to the tray; it does not stop the Gateway. You can also start, stop, or restart the Gateway from the UI, tray menu, or CLI.
 
-![CodexHub connected overview](docs/assets/readme/codexhub-overview-en.png)
+**Figure 1: Real-account Provider catalog and connection state**
+
+![CodexHub real-account Provider catalog and connection state](docs/assets/readme/codexhub-overview-en.png)
 
 ## Core Features
 
@@ -70,6 +72,10 @@ CodexHub updates the Codex configuration so model requests go to the local Gatew
 - The default local endpoint is `http://127.0.0.1:9099`.
 
 CodexHub does not try to replace the Codex protocol. It stays transparent for official models and adds compatibility for third-party models only where needed.
+
+**Figure 2: Use official and third-party models side by side in Codex**
+
+![Official and third-party models in the Codex model picker](docs/assets/readme/codexhub-codex-model-picker.jpg)
 
 ### Configuring Providers
 
@@ -129,6 +135,10 @@ The Gateway page detects local OpenCode, ZCode, Pi, and OMP config locations and
 
 ![Gateway endpoints, usage, and client routing](docs/assets/readme/codexhub-gateway-en.png)
 
+**Figure 3: Use your OpenAI subscription in software that cannot sign in with OpenAI auth**
+
+![ZCode using OpenAI subscription models through CodexHub](docs/assets/readme/codexhub-zcode-openai-subscription.jpg)
+
 ### Vision Proxy
 
 Vision Proxy lets non-vision models handle image requests. When enabled, choose an image-capable model as the Vision model.
@@ -152,6 +162,10 @@ If the target model already supports image input, the Gateway leaves the image a
 Provider models default to text-only. If a third-party model actually supports image input, mark it as Vision-capable in the model settings or add `input_modalities = ["text", "image"]` to its configuration.
 
 ![Vision Proxy settings](docs/assets/readme/codexhub-vision-proxy-en.png)
+
+**Figure 4: Let non-vision models see images**
+
+![A non-vision model understanding an image through Vision Proxy](docs/assets/readme/codexhub-vision-proxy-result.jpg)
 
 ## Source Development
 
