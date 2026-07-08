@@ -1,10 +1,10 @@
-import { Check, ChevronDown, Save, X } from "lucide-react";
+import { Check, ChevronDown, Download, RefreshCcw, Save, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
 import { cx } from "../lib/format";
-import { messageFromError } from "../lib/tauri";
-import type { Model, Provider, Settings } from "../lib/types";
+import { api, messageFromError } from "../lib/tauri";
+import type { AppUpdateStatus, AppVersionInfo, Model, Provider, Settings } from "../lib/types";
 import { useToasts } from "./PageToast";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
@@ -34,6 +34,9 @@ export function SettingsDrawer({
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
+  const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const hasUnsavedChanges = Boolean(settings && draft && settingsSaveComparable(settings) !== settingsSaveComparable(draft));
 
   useEffect(() => {
@@ -50,6 +53,13 @@ export function SettingsDrawer({
     if (open) {
       setHistoryBusy(false);
     }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    void loadAppVersion();
   }, [open]);
 
   async function saveDraft(options?: { closeOnSuccess?: boolean }) {
@@ -157,6 +167,86 @@ export function SettingsDrawer({
     }
   }
 
+  async function loadAppVersion() {
+    const info = await api.getAppVersion();
+    setVersionInfo(info);
+  }
+
+  async function checkForUpdates() {
+    const toastId = showToast(t("settings.checkingUpdates"), "loading");
+    setUpdateBusy("check");
+    try {
+      const status = await api.checkAppUpdate();
+      if (!status) {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.desktopUpdatesUnavailable"),
+          tone: "info",
+        });
+        return;
+      }
+      setVersionInfo({ current_version: status.current_version });
+      setUpdateStatus(status);
+      updateToast(toastId, {
+        action: null,
+        text: status.available && status.latest_version
+          ? t("settings.updateAvailable", { version: status.latest_version })
+          : t("settings.noUpdatesAvailable"),
+        tone: status.available ? "info" : "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("settings.updateCheckFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+    } finally {
+      setUpdateBusy(null);
+    }
+  }
+
+  async function installUpdate() {
+    if (!updateStatus?.available) {
+      showToast(t("settings.updateInstallUnavailable"), "info");
+      return;
+    }
+    if (!window.confirm(t("settings.updateInstallConfirm"))) {
+      return;
+    }
+    const toastId = showToast({
+      text: t("settings.installingUpdate"),
+      tone: "loading",
+      timeoutMs: null,
+    });
+    setUpdateBusy("install");
+    try {
+      const result = await api.installAppUpdate();
+      if (!result) {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.desktopUpdatesUnavailable"),
+          tone: "info",
+        });
+        return;
+      }
+      if (!result.installed) {
+        updateToast(toastId, {
+          action: null,
+          text: result.message,
+          tone: "info",
+        });
+      }
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    } finally {
+      setUpdateBusy(null);
+    }
+  }
+
   function requestClose() {
     if (!hasUnsavedChanges) {
       onClose();
@@ -231,6 +321,14 @@ export function SettingsDrawer({
                     onChange={(value) => void changeLanguage(value)}
                   />
                 </div>
+                <VersionUpdateBlock
+                  busy={updateBusy}
+                  status={updateStatus}
+                  title={t("settings.updates")}
+                  versionInfo={versionInfo}
+                  onCheck={() => void checkForUpdates()}
+                  onInstall={() => void installUpdate()}
+                />
                 <Toggle
                   checked={draft.auto_start_proxy}
                   label={t("settings.autoStartProxy")}
@@ -373,6 +471,80 @@ export function SettingsDrawer({
 function settingsSaveComparable(settings: Settings) {
   const { locale: _locale, unified_codex_history: _unifiedHistory, ...saveManagedSettings } = settings;
   return JSON.stringify(saveManagedSettings);
+}
+
+function VersionUpdateBlock({
+  busy,
+  onCheck,
+  onInstall,
+  status,
+  title,
+  versionInfo,
+}: {
+  busy: "check" | "install" | null;
+  onCheck: () => void;
+  onInstall: () => void;
+  status: AppUpdateStatus | null;
+  title: string;
+  versionInfo: AppVersionInfo | null;
+}) {
+  const { t } = useTranslation();
+  const currentVersion = status?.current_version ?? versionInfo?.current_version ?? t("common.unknown");
+  const latestVersion = status?.latest_version ?? null;
+
+  return (
+    <div className="grid gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+          {title}
+        </span>
+        <span className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-600">
+          v{currentVersion}
+        </span>
+      </div>
+      <div className="grid min-w-0 gap-1">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <span className="min-w-0 truncate text-sm text-slate-700">{t("settings.currentVersion")}</span>
+          <span className="shrink-0 font-mono text-xs font-semibold text-ink">{currentVersion}</span>
+        </div>
+        {status?.available && latestVersion && (
+          <p className="min-w-0 text-xs leading-5 text-action">
+            {t("settings.updateAvailable", { version: latestVersion })}
+          </p>
+        )}
+        {status && !status.available && (
+          <p className="min-w-0 text-xs leading-5 text-emerald-700">{t("settings.noUpdatesAvailable")}</p>
+        )}
+        {status?.notes && (
+          <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-500">
+            {status.notes}
+          </p>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="mini-button"
+          disabled={Boolean(busy)}
+          onClick={onCheck}
+        >
+          <RefreshCcw size={14} className={busy === "check" ? "animate-spin" : ""} />
+          {t("settings.checkForUpdates")}
+        </button>
+        {status?.available && (
+          <button
+            type="button"
+            className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+            disabled={Boolean(busy)}
+            onClick={onInstall}
+          >
+            <Download size={14} />
+            {t("settings.installUpdate")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function clampRetryAttempts(value: string) {
