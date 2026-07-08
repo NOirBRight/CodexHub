@@ -38,7 +38,7 @@ test("web bridge handles requests concurrently so slow probes do not block switc
 test("gateway client version probes do not create visible Windows console windows", async () => {
   const gatewaySource = await readFile(new URL("../../src-tauri/src/gateway.rs", import.meta.url), "utf8");
   const versionProbe =
-    gatewaySource.match(/fn version_output_for_path[\s\S]*?\n}\n\nfn command_output_no_window/)?.[0] ?? "";
+    gatewaySource.match(/fn version_output_for_path[\s\S]*?\r?\n}\r?\n\r?\nfn command_output_no_window/)?.[0] ?? "";
 
   assert.match(gatewaySource, /fn command_output_no_window/);
   assert.match(gatewaySource, /CREATE_NO_WINDOW/);

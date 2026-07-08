@@ -3739,22 +3739,29 @@ fn zcode_v2_provider_matches_expected(
     let kind = group.endpoint_selection.zcode_kind();
     let (expected_base_url, expected_path) =
         zcode_provider_endpoint(&Settings::default(), group, ZcodeProviderFileKind::V2Cache);
+    let api_format_matches = provider
+        .get("apiFormat")
+        .and_then(Value::as_str)
+        .map(|value| value == group.endpoint_selection.zcode_api_format())
+        .unwrap_or(true);
+    let endpoints_match = if provider.get("endpoints").is_some() {
+        provider
+            .pointer("/endpoints/baseURL")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_base_url)
+            && provider
+                .pointer(&format!("/endpoints/paths/{kind}"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == expected_path)
+    } else {
+        true
+    };
     provider
         .get("kind")
         .and_then(Value::as_str)
         .is_some_and(|value| value == kind)
-        && provider
-            .get("apiFormat")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
-        && provider
-            .pointer("/endpoints/baseURL")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_base_url)
-        && provider
-            .pointer(&format!("/endpoints/paths/{kind}"))
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_path)
+        && api_format_matches
+        && endpoints_match
         && provider
             .pointer("/options/baseURL")
             .and_then(Value::as_str)
@@ -7883,6 +7890,52 @@ mod tests {
         assert_eq!(
             super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
             "stale"
+        );
+    }
+
+    #[test]
+    fn zcode_route_mode_accepts_zcode_normalized_v2_provider_config() {
+        let root = unique_temp_dir("codexhub-zcode-normalized-v2");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: v2_cache_path.clone(),
+        };
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+        let model = "ollama-cloud/glm-5.2";
+        let expected_config =
+            super::zcode_v2_config_text(&v2_config_path, &settings, &providers, model).unwrap();
+        let expected_catalog = super::zcode_catalog_text(&settings, &providers, model).unwrap();
+        let expected_cache = super::zcode_v2_cache_text(&settings, &providers, model).unwrap();
+        let mut normalized_config: serde_json::Value =
+            serde_json::from_str(&expected_config).unwrap();
+        for provider in normalized_config
+            .get_mut("provider")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .values_mut()
+        {
+            provider.as_object_mut().unwrap().remove("apiFormat");
+            provider.as_object_mut().unwrap().remove("endpoints");
+        }
+
+        fs::write(&catalog_path, expected_catalog).unwrap();
+        fs::write(
+            &v2_config_path,
+            serde_json::to_string_pretty(&normalized_config).unwrap(),
+        )
+        .unwrap();
+        fs::write(&v2_cache_path, expected_cache).unwrap();
+
+        assert_eq!(
+            super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+            "hub"
         );
     }
 
