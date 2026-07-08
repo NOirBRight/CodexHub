@@ -496,11 +496,6 @@ function VersionUpdateBlock({
           </button>
         </div>
       )}
-      {status && !status.available && (
-        <p className="min-w-0 rounded-inner bg-surface px-3 py-2 text-xs leading-5 text-emerald-700 shadow-control">
-          {t("settings.noUpdatesAvailable")}
-        </p>
-      )}
     </div>
   );
 }

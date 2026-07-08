@@ -2128,6 +2128,14 @@ test("settings drawer update-available state shows version, release notes, and i
   assert.match(zhSource, /noReleaseNotes: "暂无更新日志。"/);
 });
 
+test("settings drawer does not render a persistent no-update row", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+  const blockSource = drawerSource.match(/function VersionUpdateBlock[\s\S]*?function isUpdateInstallActive/)?.[0] ?? "";
+
+  assert.doesNotMatch(blockSource, /status && !status\.available/);
+  assert.doesNotMatch(blockSource, /settings\.noUpdatesAvailable/);
+});
+
 test("app updater has an opt-in E2E script for virtual release detection and install", async () => {
   const [script, appUpdatesSource] = await Promise.all([
     readFile(appUpdateE2ePath, "utf8"),
