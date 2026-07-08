@@ -10,6 +10,8 @@ const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", imp
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
 const indexCssPath = new URL("../src/index.css", import.meta.url);
 const pageToastPath = new URL("../src/components/PageToast.tsx", import.meta.url);
+const perfMouseHookPath = new URL("./perf-mouse-hook.ps1", import.meta.url);
+const perfTabSwitchPath = new URL("./perf-tab-switch.mjs", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
 const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
 const settingsLibPath = new URL("../src/lib/settings.ts", import.meta.url);
@@ -96,6 +98,102 @@ test("main navigation exposes only CodexHub and Gateway", async () => {
   assert.doesNotMatch(appSource, /tab\.id === "gateway" && exportedCount/);
 });
 
+test("main tabs use persistent panes and tab clicks do not reload runtime data", async () => {
+  const appSource = await readFile(appPath, "utf8");
+
+  assert.match(appSource, /const \[mountedTabs, setMountedTabs\] = useState<Record<TabId, boolean>>/);
+  assert.match(appSource, /const \[visibleTab, setVisibleTab\] = useState<TabId>\("codexhub"\)/);
+  assert.match(appSource, /const \[gatewayVisited, setGatewayVisited\] = useState\(false\)/);
+  assert.match(appSource, /setActiveTab\(tabId\);[\s\S]*setVisibleTab\(tabId\);[\s\S]*setMountedTabs/);
+  const selectTabSource = appSource.match(/const selectTab = useCallback[\s\S]*?\}, \[\]\);/)?.[0] ?? "";
+  const gatewayTelemetryEffect = appSource.match(/useEffect\(\(\) => \{[\s\S]*?refreshGatewayTelemetry[\s\S]*?\}, \[gatewayVisited, loadGatewayClients, refreshGatewayTelemetry, visibleTab\]\);/)?.[0] ?? "";
+  assert.match(appSource, /setMountedTabs\(\(current\) => \(current\.gateway \? current : \{ \.\.\.current, gateway: true \}\)\)/);
+  assert.match(appSource, /function tabPaneClass\(active: boolean\)/);
+  assert.match(appSource, /"absolute inset-0 min-h-0 min-w-0 p-4 \[contain:layout_paint_style\]"/);
+  assert.match(appSource, /"visible z-10 opacity-100 \[content-visibility:visible\] \[will-change:opacity\]"/);
+  assert.match(appSource, /"invisible z-0 opacity-0 pointer-events-none \[content-visibility:hidden\]"/);
+  assert.match(appSource, /mountedTabs\.codexhub &&/);
+  assert.match(appSource, /mountedTabs\.gateway &&/);
+  assert.match(appSource, /aria-hidden=\{visibleTab !== "codexhub"\}/);
+  assert.match(appSource, /aria-hidden=\{visibleTab !== "gateway"\}/);
+  assert.match(appSource, /data-tab-pane="codexhub"/);
+  assert.match(appSource, /data-tab-pane="gateway"/);
+  assert.doesNotMatch(selectTabSource, /refreshGatewayTelemetry|loadGatewayClients|setTimeout|requestAnimationFrame/);
+  assert.match(gatewayTelemetryEffect, /visibleTab !== "gateway"/);
+  assert.match(gatewayTelemetryEffect, /window\.setTimeout\(\(\) => \{[\s\S]*refreshGatewayTelemetry/);
+  assert.match(gatewayTelemetryEffect, /loadGatewayClients\(\{ staleMs: 30_000 \}\)/);
+  assert.doesNotMatch(appSource, /activeTab === "codexhub"\s*\?\s*\(/);
+  assert.doesNotMatch(appSource, /activeTab === "codexhub" \? "block" : "hidden"/);
+  assert.doesNotMatch(appSource, /activeTab === "gateway" \? "block" : "hidden"/);
+});
+
+test("tab switch performance harness uses CDP metrics without package dependencies", async () => {
+  const [perfSource, mouseHookSource] = await Promise.all([
+    readFile(perfTabSwitchPath, "utf8"),
+    readFile(perfMouseHookPath, "utf8"),
+  ]);
+
+  assert.doesNotMatch(perfSource, /from "playwright"|from '@playwright\/test'/);
+  assert.match(perfSource, /Performance\.getMetrics/);
+  assert.match(perfSource, /PerformanceObserver/);
+  assert.match(perfSource, /entryTypes: \["longtask"\]/);
+  assert.match(perfSource, /data-tab-pane/);
+  assert.match(perfSource, /steadySummary/);
+  assert.match(perfSource, /CODEXHUB_PERF_WARMUP_DISCARD/);
+  assert.match(perfSource, /CODEXHUB_PERF_OS_HOOK/);
+  assert.match(perfSource, /pointerEpochMs/);
+  assert.match(perfSource, /osToPointerMs/);
+  assert.match(perfSource, /perf-mouse-hook\.ps1/);
+  assert.match(mouseHookSource, /SetWindowsHookEx/);
+  assert.match(mouseHookSource, /WH_MOUSE_LL/);
+  assert.match(mouseHookSource, /WM_LBUTTONDOWN/);
+});
+
+test("heavy tab pages are memoized behind stable app callbacks", async () => {
+  const [appSource, providersSource, gatewaySource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+  ]);
+
+  assert.match(providersSource, /import \{ memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState \} from "react";/);
+  assert.match(providersSource, /function ProvidersPageImpl\(/);
+  assert.match(providersSource, /export const ProvidersPage = memo\(ProvidersPageImpl\);/);
+  assert.match(gatewaySource, /import \{ memo, useEffect, useMemo, useRef, useState \} from "react";/);
+  assert.match(gatewaySource, /function GatewayPageImpl\(/);
+  assert.match(gatewaySource, /export const GatewayPage = memo\(GatewayPageImpl\);/);
+  assert.match(appSource, /const updateProvidersCache = useCallback/);
+  assert.match(appSource, /const applyGatewaySettings = useCallback/);
+  assert.match(appSource, /onProvidersChanged=\{updateProvidersCache\}/);
+  assert.match(appSource, /onApplySettings=\{applyGatewaySettings\}/);
+  assert.doesNotMatch(appSource, /onApplySettings=\{async \(settings\) =>/);
+  assert.doesNotMatch(appSource, /onProvidersChanged=\{\(nextProviders\) =>/);
+});
+
+test("runtime data uses app-level cached refreshes instead of page lifecycle reloads", async () => {
+  const [appSource, providersSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+  ]);
+  const runtimeCacheType = appSource.match(/type RuntimeCache<T> = \{[\s\S]*?\};/)?.[0] ?? "";
+  const providersMountEffect = providersSource.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[\]\);/)?.[0] ?? "";
+
+  assert.match(runtimeCacheType, /data: T \| null/);
+  assert.match(runtimeCacheType, /loading: boolean/);
+  assert.match(runtimeCacheType, /error: string \| null/);
+  assert.match(runtimeCacheType, /updatedAt: number \| null/);
+  assert.match(runtimeCacheType, /inflight\?: Promise<T>/);
+  assert.match(appSource, /runtimeInflight/);
+  assert.match(appSource, /refreshRuntimeStatus/);
+  assert.match(appSource, /refreshGatewayTelemetry/);
+  assert.match(providersSource, /appStatus: AppStatus \| null/);
+  assert.match(providersSource, /providers: Provider\[\]/);
+  assert.match(providersSource, /catalogModels: Model\[\]/);
+  assert.match(providersSource, /modelMetadata: Model\[\]/);
+  assert.doesNotMatch(providersMountEffect, /api\.getSettings|api\.getProviders|api\.listModels|api\.listModelMetadata|api\.getStatus|api\.gatewayStatus/);
+  assert.doesNotMatch(providersSource, /async function load\(\)/);
+});
+
 test("ui contract keeps ids and paths but no localizable display copy", async () => {
   const contract = await readContract();
 
@@ -148,9 +246,9 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(runtimeSource, /onMouseDownCapture=\{startWindowDrag\}/);
   assert.doesNotMatch(runtimeSource, /onPointerDown=\{startWindowDrag\}/);
   assert.ok((runtimeSource.match(/data-tauri-drag-region/g) ?? []).length >= 4);
-  assert.match(css, /\[data-tauri-drag-region\][\s\S]*-webkit-app-region:\s*drag/);
   assert.match(css, /\[data-tauri-drag-region\][\s\S]*user-select:\s*none/);
-  assert.match(css, /\[data-tauri-drag-region\]\s+button[\s\S]*-webkit-app-region:\s*no-drag/);
+  assert.doesNotMatch(css, /-webkit-app-region:\s*drag/);
+  assert.doesNotMatch(css, /-webkit-app-region:\s*no-drag/);
   const capability = JSON.parse(tauriDefaultCapability);
   assert.deepEqual(capability.windows, ["main"]);
   assert.ok(capability.permissions.includes("core:default"));
@@ -486,13 +584,11 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
 
   assert.match(tauriSource, /gatewayUsageSnapshot: \(window\?: UsageQueryWindow \| null\) =>/);
   assert.match(tauriSource, /call<GatewayUsageSnapshot>\("gateway_usage_snapshot"/);
-  assert.match(appSource, /usageSnapshotResult/);
-  assert.match(appSource, /gatewayUsageStatus/);
-  assert.match(appSource, /usageError/);
-  assert.doesNotMatch(
-    appSource.match(/const rejected = \[[\s\S]*?\]\.find/)?.[0] ?? "",
-    /usageSnapshotResult/,
-  );
+  const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[runCachedRequest, usageWindow\]\);/)?.[0] ?? "";
+  assert.match(appSource, /gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>/);
+  assert.match(telemetryRefresh, /api\.gatewayUsageSnapshot\(usageWindow\)/);
+  assert.match(telemetryRefresh, /quiet: true/);
+  assert.match(appSource, /usageError=\{runtime\.gatewayUsageSnapshot\.error\}/);
   assert.match(usageSource, /telemetryStatus/);
   assert.doesNotMatch(usageSource, /Indexing usage/);
   assert.match(gatewaySource, /lastUsageErrorToast/);
@@ -666,8 +762,14 @@ test("slow desktop commands run off the Tauri invoke thread", async () => {
 
   assert.match(mainSource, /tauri::async_runtime::spawn_blocking/);
   for (const command of [
+    "get_status",
     "refresh_official_models",
     "openai_usage_completions",
+    "gateway_status",
+    "gateway_recent_events",
+    "gateway_usage_summary",
+    "gateway_usage_snapshot",
+    "gateway_usage_events",
     "list_gateway_clients",
     "sync_gateway_clients",
     "generate_catalog",
@@ -1102,7 +1204,7 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.match(appSource, /gateway_auto_retry_max_attempts/);
   assert.match(appSource, /gateway_image_proxy_enabled/);
   assert.match(appSource, /gateway_image_proxy_model/);
-  assert.match(appSource, /runtime\.status\?\.proxy_running/);
+  assert.match(appSource, /appStatus\?\.proxy_running/);
   assert.match(appSource, /api\.restartProxy\(\)/);
   assert.match(appSource, /t\("gateway\.gatewaySettingsSavedRestarted"\)/);
   assert.match(appSource, /setBanner\(null\)/);
@@ -1146,7 +1248,9 @@ test("app content region owns horizontal overflow for minimum-width pages", asyn
 
   assert.match(appSource, /h-screen min-h-\[720px\] min-w-0/);
   assert.doesNotMatch(appSource, /min-w-\[1004px\]/);
-  assert.match(appSource, /activeTab === "gateway" \? "overflow-x-hidden" : "overflow-x-auto"/);
+  assert.match(appSource, /<div className="relative min-h-0 min-w-0 max-w-full overflow-hidden">/);
+  assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">/);
+  assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">/);
   assert.doesNotMatch(appSource, /className="min-h-0 overflow-hidden p-4"/);
 });
 
@@ -1228,7 +1332,7 @@ test("provider endpoint probe persists detected formats and selects the recommen
     readFile(providersPagePath, "utf8"),
     readFile(typesPath, "utf8"),
   ]);
-  const pageSource = providersSource.match(/export function ProvidersPage[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
+  const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
   const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
   const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
 
@@ -1454,7 +1558,8 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(providersSource, /authIssue=\{gatewayStatus\?\.codex_auth\?\.issue \?\? null\}/);
   assert.match(providersSource, /const \[codexAuthPreviewState, setCodexAuthPreviewState\] = useState<CodexAuthState \| null>\(\(\) => readCodexAuthPreviewState\(\)\);/);
   assert.match(providersSource, /useState<CodexAuthState>\(\(\) => codexAuthPreviewState \?\? "unknown"\)/);
-  assert.match(providersSource, /setCodexAuthState\(codexAuthPreviewState \?\? codexAuthStateFromGatewayStatus\(gatewayStatus\)\)/);
+  assert.match(providersSource, /setCodexAuthState\(codexAuthPreviewState \?\? codexAuthStateFromGatewayStatus\(gatewayStatusSnapshot \?\? null\)\)/);
+  assert.match(providersSource, /setCodexAuthState\(codexAuthPreviewState \?\? codexAuthStateFromGatewayStatus\(gatewayStatus \?\? null\)\)/);
   assert.match(providersSource, /function readCodexAuthPreviewState\(\): CodexAuthState \| null/);
   assert.match(providersSource, /function clearCodexAuthPreviewParam\(\)/);
   assert.match(providersSource, /url\.searchParams\.delete\("codexAuth"\)/);
@@ -1822,12 +1927,21 @@ test("settings drawer keeps language immediate and protects unsaved drafts", asy
   assert.match(enSource, /includeOfficialModels:\s*"Include OpenAI official models"/);
 });
 
-test("settings drawer silently absorbs version load failures on open", async () => {
-  const drawerSource = await readFile(settingsDrawerPath, "utf8");
-  const loadAppVersion = drawerSource.match(/async function loadAppVersion\(\)[\s\S]*?async function checkForUpdates\(\)/)?.[0] ?? "";
+test("app owns version cache and settings drawer only receives update actions", async () => {
+  const [appSource, drawerSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(settingsDrawerPath, "utf8"),
+  ]);
+  const loadAppVersion = appSource.match(/const loadAppVersion = useCallback[\s\S]*?\}, \[runCachedRequest, t\]\);/)?.[0] ?? "";
 
-  assert.match(loadAppVersion, /try\s*\{[\s\S]*const info = await api\.getAppVersion\(\);[\s\S]*setVersionInfo\(info\);[\s\S]*\}\s*catch\s*\{[\s\S]*setVersionInfo\(null\);[\s\S]*\}/);
-  assert.doesNotMatch(loadAppVersion, /showToast|updateToast|\bthrow\b/);
+  assert.match(loadAppVersion, /api\.getAppVersion\(\)/);
+  assert.match(loadAppVersion, /catch\s*\{\s*return null;\s*\}/);
+  assert.match(drawerSource, /appVersion: AppVersionInfo \| null/);
+  assert.match(drawerSource, /onCheckUpdate: \(\) => Promise<AppUpdateStatus \| null>/);
+  assert.match(drawerSource, /onInstallUpdate: \(\) => Promise<void>/);
+  assert.doesNotMatch(drawerSource, /api\.getAppVersion\(\)/);
+  assert.doesNotMatch(drawerSource, /api\.checkAppUpdate\(\)/);
+  assert.doesNotMatch(drawerSource, /api\.installAppUpdate\(\)/);
 });
 
 test("app update APIs are desktop-only wrappers", async () => {
@@ -1850,7 +1964,7 @@ test("app update APIs are desktop-only wrappers", async () => {
   assert.doesNotMatch(tauriSource, /installAppUpdate: \(\) => call/);
 });
 
-test("settings drawer places version updates below language and above behavior toggles", async () => {
+test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
   const [settingsDrawerSource, settingsPageSource, enSource, zhSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
     readFile(settingsPagePath, "utf8"),
@@ -1860,12 +1974,14 @@ test("settings drawer places version updates below language and above behavior t
 
   const codexSection =
     settingsDrawerSource.match(/<section className="grid gap-3">[\s\S]*?<h3 className="text-sm font-semibold text-ink">CodexHub<\/h3>[\s\S]*?<section className="grid gap-3">/)?.[0] ?? "";
+  const imageProxyIndex = settingsDrawerSource.indexOf('t("settings.imageProxy")');
+  const updatesIndex = settingsDrawerSource.lastIndexOf('t("settings.updates")');
 
-  assert.match(codexSection, /t\("settings\.language"\)[\s\S]*t\("settings\.updates"\)[\s\S]*draft\.auto_start_proxy/);
+  assert.doesNotMatch(codexSection, /settings\.updates/);
+  assert.ok(imageProxyIndex >= 0, "image proxy section should be present");
+  assert.ok(updatesIndex > imageProxyIndex, "version updates should be below image proxy settings");
+  assert.match(settingsDrawerSource, /backdrop-blur-\[1px\]/);
   assert.match(settingsDrawerSource, /function VersionUpdateBlock/);
-  assert.match(settingsDrawerSource, /api\.getAppVersion\(\)/);
-  assert.match(settingsDrawerSource, /api\.checkAppUpdate\(\)/);
-  assert.match(settingsDrawerSource, /api\.installAppUpdate\(\)/);
   assert.doesNotMatch(settingsPageSource, /settings\.updates/);
   assert.match(enSource, /updates: "Version & Updates"/);
   assert.match(zhSource, /updates: "版本与更新"/);

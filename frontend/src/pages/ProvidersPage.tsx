@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import type { FocusEvent as ReactFocusEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
@@ -273,28 +273,56 @@ type OfficialOpenAIUsageTooltipState = {
   hostWidth: number;
 };
 
-export function ProvidersPage({
-  gatewayStatus: gatewayStatusSnapshot,
-  onGatewayChanged,
-  onStartProxy,
-}: {
+type ProvidersPageProps = {
+  appStatus: AppStatus | null;
+  catalogModels: Model[];
   gatewayStatus?: GatewayStatus | null;
-  onGatewayChanged?: () => Promise<void>;
+  modelMetadata: Model[];
+  providers: Provider[];
+  settings: Settings | null;
+  onGatewayChanged?: () => Promise<GatewayStatus | null | void>;
+  onProvidersChanged?: (providers: Provider[]) => void;
+  onSettingsChanged?: (settings: Settings) => void;
   onStartProxy?: () => Promise<void>;
-}) {
+  onStatusChanged?: (status: AppStatus) => void;
+};
+
+function ProvidersPageImpl({
+  appStatus: appStatusSnapshot,
+  catalogModels,
+  gatewayStatus: gatewayStatusSnapshot,
+  modelMetadata,
+  onGatewayChanged,
+  onProvidersChanged,
+  onSettingsChanged,
+  onStartProxy,
+  onStatusChanged,
+  providers: providersSnapshot,
+  settings: settingsSnapshot,
+}: ProvidersPageProps) {
   const { t } = useTranslation();
   const tr = t as Translate;
   const { showToast, updateToast } = useToasts();
   const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
   const [codexAuthPreviewState, setCodexAuthPreviewState] = useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
-  const [codexStatus, setCodexStatus] = useState<AppStatus | null>(null);
+  const [providers, setProviders] = useState<Provider[]>(() => providersSnapshot);
+  const [settings, setSettings] = useState<Settings | null>(() => (
+    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
+  ));
+  const [settingsDraft, setSettingsDraft] = useState<Settings | null>(() => (
+    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
+  ));
+  const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
-  const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(null);
+  const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
-  const [officialModels, setOfficialModels] = useState<Model[]>([]);
+  const [officialModels, setOfficialModels] = useState<Model[]>(() => {
+    const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
+    return sortOfficialModels(
+      mergeOfficialModelSources(catalogModels, modelMetadata),
+      normalizedSettings?.official_model_sort_order ?? [],
+    );
+  });
   const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
@@ -303,7 +331,7 @@ export function ProvidersPage({
   const [selectedId, setSelectedId] = useState<string>(OFFICIAL_ID);
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
-  const [busy, setBusy] = useState<string | null>("load");
+  const [busy, setBusy] = useState<string | null>(null);
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
   const dirtyProviderDraftRef = useRef<ProviderDraftState | null>(null);
   const [pendingProviderNavigation, setPendingProviderNavigation] =
@@ -320,8 +348,35 @@ export function ProvidersPage({
   }, []);
 
   useEffect(() => {
-    void load();
-  }, []);
+    const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
+    setSettings(normalizedSettings);
+    setSettingsDraft(normalizedSettings);
+  }, [settingsSnapshot]);
+
+  useEffect(() => {
+    setProviders(providersSnapshot);
+    if (
+      selectedId !== OFFICIAL_ID &&
+      selectedId !== ADD_ID &&
+      !providersSnapshot.some((provider) => provider.id === selectedId)
+    ) {
+      setSelectedId(providersSnapshot[0]?.id ?? OFFICIAL_ID);
+    }
+  }, [providersSnapshot, selectedId]);
+
+  useEffect(() => {
+    setCodexStatus(appStatusSnapshot);
+  }, [appStatusSnapshot]);
+
+  useEffect(() => {
+    const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
+    setOfficialModels(
+      sortOfficialModels(
+        mergeOfficialModelSources(catalogModels, modelMetadata),
+        normalizedSettings?.official_model_sort_order ?? [],
+      ),
+    );
+  }, [catalogModels, modelMetadata, settingsSnapshot]);
 
   useEffect(() => {
     officialUsageSnapshotRef.current = officialUsageSnapshot;
@@ -338,6 +393,7 @@ export function ProvidersPage({
 
   useEffect(() => {
     if (gatewayStatusSnapshot !== undefined) {
+      setLoadedGatewayStatus(gatewayStatusSnapshot ?? null);
       setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatusSnapshot ?? null));
     }
   }, [codexAuthPreviewState, gatewayStatusSnapshot]);
@@ -527,7 +583,11 @@ export function ProvidersPage({
       } else {
         await api.startProxy();
       }
-      await load();
+      const nextCodexStatus = await api.getStatus().catch(() => null);
+      if (nextCodexStatus) {
+        setCodexStatus(nextCodexStatus);
+        onStatusChanged?.(nextCodexStatus);
+      }
       await refreshGatewayState();
       updateToast(activeToastId, {
         action: null,
@@ -543,7 +603,11 @@ export function ProvidersPage({
 
   async function refreshGatewayState() {
     try {
-      await onGatewayChanged?.();
+      const gatewayStatus = await onGatewayChanged?.();
+      if (gatewayStatus !== undefined) {
+        setLoadedGatewayStatus(gatewayStatus ?? null);
+        setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatus ?? null));
+      }
     } catch {
       // Refresh failures are surfaced by the owning runtime loader.
     }
@@ -593,43 +657,6 @@ export function ProvidersPage({
       return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
     }
     return baseMessage ?? null;
-  }
-
-  async function load() {
-    setBusy("load");
-    try {
-      const [nextSettings, nextProviders, catalog, modelMetadata, nextCodexStatus, gatewayStatus] = await Promise.all([
-        api.getSettings(),
-        api.getProviders(),
-        api.listModels(),
-        api.listModelMetadata().catch(() => []),
-        api.getStatus().catch(() => null),
-        api.gatewayStatus().catch(() => null),
-      ]);
-      const normalizedSettings = withDefaultFastVariants(nextSettings);
-      setSettings(normalizedSettings);
-      setSettingsDraft(normalizedSettings);
-      setCodexStatus(nextCodexStatus);
-      setConnectionPendingMode(null);
-      setLoadedGatewayStatus(gatewayStatus);
-      setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatus));
-      setProviders(nextProviders);
-      setOfficialModels(
-        sortOfficialModels(
-          mergeOfficialModelSources(catalog, modelMetadata),
-          normalizedSettings.official_model_sort_order,
-        ),
-      );
-      if (selectedId !== OFFICIAL_ID && selectedId !== ADD_ID && !nextProviders.some((provider) => provider.id === selectedId)) {
-        setSelectedId(nextProviders[0]?.id ?? OFFICIAL_ID);
-      }
-      setError(null);
-      setModelDiscoveryError(null);
-    } catch (err) {
-      setError(messageFromError(err));
-    } finally {
-      setBusy(null);
-    }
   }
 
   async function primeOfficialOpenAIUsage() {
@@ -739,6 +766,7 @@ export function ProvidersPage({
       clearCodexAuthPreviewParam();
       setLoadedGatewayStatus(gatewayStatus);
       setCodexAuthState(authState);
+      await refreshGatewayState();
       setError(null);
       showToast(t("providers.codexAuthRefreshed"), "message");
     } catch (err) {
@@ -759,6 +787,7 @@ export function ProvidersPage({
     try {
       const saved = await api.saveProviders(next);
       setProviders(saved);
+      onProvidersChanged?.(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
         syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
@@ -794,6 +823,7 @@ export function ProvidersPage({
       const saved = await api.saveSettings(next);
       setSettings(saved);
       setSettingsDraft(saved);
+      onSettingsChanged?.(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
         syncResult = await updateGatewayAfterCatalog(saved, activeToastId);
@@ -946,6 +976,7 @@ export function ProvidersPage({
         status = refreshedStatus ?? status;
       }
       setCodexStatus(status);
+      onStatusChanged?.(status);
       setConnectionPendingMode(null);
       setError(null);
       const targetProvider =
@@ -1189,6 +1220,7 @@ export function ProvidersPage({
     try {
       const saved = await api.saveProviders(nextProviders);
       setProviders(saved);
+      onProvidersChanged?.(saved);
       setError(null);
     } catch (err) {
       setError(messageFromError(err));
@@ -1359,6 +1391,8 @@ export function ProvidersPage({
     </>
   );
 }
+
+export const ProvidersPage = memo(ProvidersPageImpl);
 
 function UnsavedProviderChangesDialog({
   busy,

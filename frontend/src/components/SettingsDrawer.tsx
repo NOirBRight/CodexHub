@@ -2,32 +2,41 @@ import { Check, ChevronDown, Download, RefreshCcw, Save, X } from "lucide-react"
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
-import { runAppUpdateInstall } from "../lib/appUpdates";
 import { cx } from "../lib/format";
-import { api, messageFromError } from "../lib/tauri";
+import { messageFromError } from "../lib/tauri";
 import type { AppUpdateStatus, AppVersionInfo, Model, Provider, Settings } from "../lib/types";
 import { useToasts } from "./PageToast";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
 interface SettingsDrawerProps {
+  appVersion: AppVersionInfo | null;
   busy?: string | null;
   open: boolean;
   providers: Provider[];
   settings: Settings | null;
+  updateBusy: "check" | "install" | null;
+  updateStatus: AppUpdateStatus | null;
   visionModels: Model[];
+  onCheckUpdate: () => Promise<AppUpdateStatus | null>;
   onClose: () => void;
+  onInstallUpdate: () => Promise<void>;
   onSave: (settings: Settings) => Promise<string | void>;
   onSyncHistory: (targetProvider: string) => Promise<string>;
 }
 
 export function SettingsDrawer({
+  appVersion,
   busy,
+  onCheckUpdate,
   onClose,
+  onInstallUpdate,
   onSave,
   onSyncHistory,
   open,
   providers,
   settings,
+  updateBusy,
+  updateStatus,
   visionModels,
 }: SettingsDrawerProps) {
   const { t } = useTranslation();
@@ -35,9 +44,6 @@ export function SettingsDrawer({
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
-  const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
-  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const hasUnsavedChanges = Boolean(settings && draft && settingsSaveComparable(settings) !== settingsSaveComparable(draft));
 
   useEffect(() => {
@@ -54,13 +60,6 @@ export function SettingsDrawer({
     if (open) {
       setHistoryBusy(false);
     }
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    void loadAppVersion();
   }, [open]);
 
   async function saveDraft(options?: { closeOnSuccess?: boolean }) {
@@ -168,63 +167,6 @@ export function SettingsDrawer({
     }
   }
 
-  async function loadAppVersion() {
-    try {
-      const info = await api.getAppVersion();
-      setVersionInfo(info);
-    } catch {
-      setVersionInfo(null);
-    }
-  }
-
-  async function checkForUpdates() {
-    const toastId = showToast(t("settings.checkingUpdates"), "loading");
-    setUpdateBusy("check");
-    try {
-      const status = await api.checkAppUpdate();
-      if (!status) {
-        updateToast(toastId, {
-          action: null,
-          text: t("settings.desktopUpdatesUnavailable"),
-          tone: "info",
-        });
-        return;
-      }
-      setVersionInfo({ current_version: status.current_version });
-      setUpdateStatus(status);
-      updateToast(toastId, {
-        action: null,
-        text: status.available && status.latest_version
-          ? t("settings.updateAvailable", { version: status.latest_version })
-          : t("settings.noUpdatesAvailable"),
-        tone: status.available ? "info" : "success",
-      });
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: t("settings.updateCheckFailed", { message: messageFromError(err) }),
-        tone: "error",
-      });
-    } finally {
-      setUpdateBusy(null);
-    }
-  }
-
-  async function installUpdate() {
-    if (!updateStatus?.available) {
-      showToast(t("settings.updateInstallUnavailable"), "info");
-      return;
-    }
-    await runAppUpdateInstall({
-      installAppUpdate: () => api.installAppUpdate(),
-      onSettled: () => setUpdateBusy(null),
-      onStart: () => setUpdateBusy("install"),
-      showToast,
-      t,
-      updateToast,
-    });
-  }
-
   function requestClose() {
     if (!hasUnsavedChanges) {
       onClose();
@@ -299,14 +241,6 @@ export function SettingsDrawer({
                     onChange={(value) => void changeLanguage(value)}
                   />
                 </div>
-                <VersionUpdateBlock
-                  busy={updateBusy}
-                  status={updateStatus}
-                  title={t("settings.updates")}
-                  versionInfo={versionInfo}
-                  onCheck={() => void checkForUpdates()}
-                  onInstall={() => void installUpdate()}
-                />
                 <Toggle
                   checked={draft.auto_start_proxy}
                   label={t("settings.autoStartProxy")}
@@ -389,6 +323,17 @@ export function SettingsDrawer({
                 </div>
               </div>
             </section>
+
+            <section className="grid gap-3">
+              <h3 className="text-sm font-semibold text-ink">{t("settings.updates")}</h3>
+              <VersionUpdateBlock
+                busy={updateBusy}
+                status={updateStatus}
+                versionInfo={appVersion}
+                onCheck={() => void onCheckUpdate()}
+                onInstall={() => void onInstallUpdate()}
+              />
+            </section>
           </div>
         )}
       </div>
@@ -456,14 +401,12 @@ function VersionUpdateBlock({
   onCheck,
   onInstall,
   status,
-  title,
   versionInfo,
 }: {
   busy: "check" | "install" | null;
   onCheck: () => void;
   onInstall: () => void;
   status: AppUpdateStatus | null;
-  title: string;
   versionInfo: AppVersionInfo | null;
 }) {
   const { t } = useTranslation();
@@ -474,17 +417,13 @@ function VersionUpdateBlock({
     <div className="grid gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
-          {title}
+          {t("settings.currentVersion")}
         </span>
         <span className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-600">
           v{currentVersion}
         </span>
       </div>
       <div className="grid min-w-0 gap-1">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <span className="min-w-0 truncate text-sm text-slate-700">{t("settings.currentVersion")}</span>
-          <span className="shrink-0 font-mono text-xs font-semibold text-ink">{currentVersion}</span>
-        </div>
         {status?.available && latestVersion && (
           <p className="min-w-0 text-xs leading-5 text-action">
             {t("settings.updateAvailable", { version: latestVersion })}

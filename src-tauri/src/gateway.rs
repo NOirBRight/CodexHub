@@ -1723,10 +1723,20 @@ fn is_local_gateway_url(url: &str) -> bool {
 
 fn provider_entry_base_url(entry: &Value) -> Option<&str> {
     entry
-        .get("baseUrl")
+        .get("baseURL")
         .and_then(Value::as_str)
+        .or_else(|| entry.get("baseUrl").and_then(Value::as_str))
         .or_else(|| entry.pointer("/options/baseURL").and_then(Value::as_str))
+        .or_else(|| entry.pointer("/options/baseUrl").and_then(Value::as_str))
         .or_else(|| entry.pointer("/endpoints/baseURL").and_then(Value::as_str))
+        .or_else(|| entry.pointer("/endpoints/baseUrl").and_then(Value::as_str))
+}
+
+fn provider_entry_api_key(entry: &Value) -> Option<&str> {
+    entry
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .or_else(|| entry.pointer("/options/apiKey").and_then(Value::as_str))
 }
 
 fn provider_entry_has_gateway_path(entry: &Value) -> bool {
@@ -1746,7 +1756,26 @@ fn provider_entry_has_codexhub_name(entry: &Value) -> bool {
         .is_some_and(|name| name == "CodexHub Gateway" || name.starts_with("CodexHub "))
 }
 
+fn is_legacy_codexhub_chatgpt_sub_provider_entry(provider_id: &str, entry: &Value) -> bool {
+    if provider_id != "openai-chatgpt-sub" {
+        return false;
+    }
+    if !provider_entry_base_url(entry).is_some_and(is_local_gateway_url) {
+        return false;
+    }
+    provider_entry_has_gateway_path(entry)
+        || provider_entry_api_key(entry).is_some_and(|api_key| {
+            matches!(
+                api_key,
+                "codexhub-proxy" | "__zcode_cached_api_key_present__"
+            )
+        })
+}
+
 fn is_managed_codexhub_provider_entry(provider_id: &str, entry: &Value) -> bool {
+    if is_legacy_codexhub_chatgpt_sub_provider_entry(provider_id, entry) {
+        return true;
+    }
     if !is_codexhub_client_provider_id(provider_id) {
         return false;
     }
@@ -4628,7 +4657,7 @@ fn restore_zcode_config_with_targets(
     });
     match latest {
         Ok(path) => {
-            restore_snapshot_files(&path, &zcode_target_files(targets))?;
+            restore_zcode_sanitized_snapshot_files(&path, targets)?;
             Ok(GatewayClientApplyResult {
                 client_id: "zcode".to_string(),
                 applied: true,
@@ -4637,7 +4666,20 @@ fn restore_zcode_config_with_targets(
                 message: "ZCode official config restored.".to_string(),
             })
         }
-        Err(_) if zcode_targets_contain_managed(targets) => {
+        Err(clean_error) => {
+            if let Ok(path) = latest_zcode_official_config_snapshot(backup_root) {
+                restore_zcode_sanitized_snapshot_files(&path, targets)?;
+                return Ok(GatewayClientApplyResult {
+                    client_id: "zcode".to_string(),
+                    applied: true,
+                    config_path: Some(targets.v2_config_path.clone()),
+                    backup_path: Some(path),
+                    message: "ZCode official config restored.".to_string(),
+                });
+            }
+            if !zcode_targets_contain_managed(targets) {
+                return Err(clean_error);
+            }
             let mut removed_any = false;
             if targets.catalog_path.exists()
                 && is_zcode_codexhub_config(
@@ -4666,6 +4708,7 @@ fn restore_zcode_config_with_targets(
                 removed_any = true;
             }
             removed_any |= remove_zcode_v2_codexhub_provider(&targets.v2_config_path)?;
+            removed_any |= remove_zcode_coding_plan_cache(targets)?;
             Ok(GatewayClientApplyResult {
                 client_id: "zcode".to_string(),
                 applied: true,
@@ -4678,7 +4721,6 @@ fn restore_zcode_config_with_targets(
                 },
             })
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -4737,6 +4779,123 @@ fn zcode_snapshot_contains_managed(snapshot_path: &Path) -> bool {
         v2_cache_path,
     };
     zcode_targets_contain_managed(&targets)
+}
+
+fn latest_zcode_official_config_snapshot(backup_root: &Path) -> Result<PathBuf, String> {
+    fs::read_dir(backup_root)
+        .map_err(|error| {
+            format!(
+                "failed to read backup directory {}: {error}",
+                backup_root.display()
+            )
+        })?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_dir() {
+                return None;
+            }
+            let modified = metadata.modified().ok()?;
+            let path = entry.path();
+            zcode_cleaned_v2_config_snapshot_text(&path)
+                .ok()
+                .flatten()
+                .map(|_| (modified, path))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+        .ok_or_else(|| "no ZCode snapshot with official v2 config is available".to_string())
+}
+
+fn restore_zcode_sanitized_snapshot_files(
+    snapshot_path: &Path,
+    targets: &ZcodeConfigTargets,
+) -> Result<(), String> {
+    if let Some(text) = zcode_cleaned_v2_config_snapshot_text(snapshot_path)? {
+        write_text_replace(&targets.v2_config_path, &text)?;
+    } else if targets.v2_config_path.exists() {
+        fs::remove_file(&targets.v2_config_path).map_err(|error| {
+            format!(
+                "failed to remove restored-absent config {}: {error}",
+                targets.v2_config_path.display()
+            )
+        })?;
+    }
+
+    restore_zcode_sanitized_provider_collection_file(
+        &snapshot_path.join("codexhub.json"),
+        &targets.catalog_path,
+    )?;
+    restore_zcode_sanitized_provider_collection_file(
+        &snapshot_path.join("bots-model-cache.v2.json"),
+        &targets.v2_cache_path,
+    )?;
+    remove_zcode_coding_plan_cache(targets)?;
+    Ok(())
+}
+
+fn zcode_cleaned_v2_config_snapshot_text(snapshot_path: &Path) -> Result<Option<String>, String> {
+    let path = snapshot_path.join("config.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read ZCode snapshot {}: {error}", path.display()))?;
+    sanitize_zcode_v2_config_text(&text)
+}
+
+fn restore_zcode_sanitized_provider_collection_file(
+    source: &Path,
+    target: &Path,
+) -> Result<(), String> {
+    let clean_text = if source.exists() {
+        let text = fs::read_to_string(source).map_err(|error| {
+            format!(
+                "failed to read ZCode snapshot {}: {error}",
+                source.display()
+            )
+        })?;
+        sanitize_zcode_provider_collection_text(&text)?
+    } else {
+        None
+    };
+    if let Some(text) = clean_text {
+        write_text_replace(target, &text)?;
+    } else if target.exists() {
+        fs::remove_file(target).map_err(|error| {
+            format!(
+                "failed to remove restored-absent config {}: {error}",
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn zcode_coding_plan_cache_path(targets: &ZcodeConfigTargets) -> PathBuf {
+    targets
+        .v2_cache_path
+        .with_file_name("coding-plan-cache.json")
+}
+
+fn remove_zcode_coding_plan_cache(targets: &ZcodeConfigTargets) -> Result<bool, String> {
+    let path = zcode_coding_plan_cache_path(targets);
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&path).map_err(|error| {
+        format!(
+            "failed to remove ZCode coding plan cache {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn sanitize_zcode_v2_provider_entry(provider: &mut Value) {
+    if let Some(provider) = provider.as_object_mut() {
+        provider.remove("systemDisabledReason");
+    }
 }
 
 fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String> {
@@ -5089,25 +5248,35 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
 }
 
 fn zcode_v2_config_text(
-    _config_path: &Path,
+    config_path: &Path,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
     let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let provider_map = groups
-        .providers
-        .iter()
-        .map(|group| {
-            (
-                group.client_provider_id.clone(),
-                zcode_v2_provider_value(settings, group),
-            )
-        })
-        .collect::<Map<_, _>>();
-    let value = json!({
-        "provider": Value::Object(provider_map),
-    });
+    let mut value = read_json_file_or_empty(config_path, "ZCode v2 config")?;
+    if !value.is_object() {
+        value = json!({});
+    }
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "ZCode v2 config root must be a JSON object".to_string())?;
+    let provider_root = root
+        .entry("provider".to_string())
+        .or_insert_with(|| json!({}));
+    if !provider_root.is_object() {
+        *provider_root = json!({});
+    }
+    let provider_map = provider_root
+        .as_object_mut()
+        .ok_or_else(|| "ZCode v2 provider root must be a JSON object".to_string())?;
+    remove_codexhub_client_provider_entries(provider_map);
+    for group in &groups.providers {
+        provider_map.insert(
+            group.client_provider_id.clone(),
+            zcode_v2_provider_value(settings, group),
+        );
+    }
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))
@@ -5282,19 +5451,9 @@ fn is_zcode_codexhub_config(text: &str) -> bool {
         .get("providers")
         .and_then(Value::as_array)
         .is_some_and(|providers| {
-            providers.iter().any(|provider| {
-                provider
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| {
-                        is_managed_codexhub_provider_entry(id, provider)
-                            || (is_builtin_codexhub_client_provider_id(id)
-                                && provider_entry_base_url(provider).is_none())
-                    })
-                    || (provider_entry_has_codexhub_name(provider)
-                        && provider_entry_base_url(provider).is_some_and(is_local_gateway_url)
-                        && provider_entry_has_gateway_path(provider))
-            })
+            providers
+                .iter()
+                .any(is_managed_zcode_catalog_provider_entry)
         })
 }
 
@@ -5312,6 +5471,53 @@ fn is_zcode_v2_codexhub_config(text: &str) -> bool {
                 .iter()
                 .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
         })
+}
+
+fn is_managed_zcode_catalog_provider_entry(provider: &Value) -> bool {
+    provider
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| {
+            is_managed_codexhub_provider_entry(id, provider)
+                || (is_builtin_codexhub_client_provider_id(id)
+                    && provider_entry_base_url(provider).is_none())
+        })
+        || (provider_entry_has_codexhub_name(provider)
+            && provider_entry_base_url(provider).is_some_and(is_local_gateway_url)
+            && provider_entry_has_gateway_path(provider))
+}
+
+fn sanitize_zcode_v2_config_text(text: &str) -> Result<Option<String>, String> {
+    let mut value = serde_json::from_str::<Value>(text)
+        .map_err(|error| format!("failed to parse ZCode v2 config backup: {error}"))?;
+    let Some(providers) = value.get_mut("provider").and_then(Value::as_object_mut) else {
+        return Ok(None);
+    };
+    remove_codexhub_client_provider_entries(providers);
+    for provider in providers.values_mut() {
+        sanitize_zcode_v2_provider_entry(provider);
+    }
+    if providers.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string_pretty(&value)
+        .map(|text| Some(format!("{text}\n")))
+        .map_err(|error| format!("failed to serialize cleaned ZCode v2 config: {error}"))
+}
+
+fn sanitize_zcode_provider_collection_text(text: &str) -> Result<Option<String>, String> {
+    let mut value = serde_json::from_str::<Value>(text)
+        .map_err(|error| format!("failed to parse ZCode provider collection backup: {error}"))?;
+    let Some(providers) = value.get_mut("providers").and_then(Value::as_array_mut) else {
+        return Ok(None);
+    };
+    providers.retain(|provider| !is_managed_zcode_catalog_provider_entry(provider));
+    if providers.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string_pretty(&value)
+        .map(|text| Some(format!("{text}\n")))
+        .map_err(|error| format!("failed to serialize cleaned ZCode provider collection: {error}"))
 }
 
 fn read_json_file_or_empty(path: &Path, label: &str) -> Result<Value, String> {
@@ -7718,13 +7924,13 @@ mod tests {
     }
 
     #[test]
-    fn zcode_v2_config_replaces_active_config_with_codexhub_provider() {
+    fn zcode_v2_config_preserves_active_config_with_codexhub_provider() {
         let root = unique_temp_dir("codexhub-zcode-v2-config");
         let config_path = root.join("config.json");
         fs::create_dir_all(root.as_path()).unwrap();
         fs::write(
             &config_path,
-            r#"{"provider":{"builtin:test":{"name":"Existing","kind":"openai-compatible","options":{"baseURL":"https://example.test"},"models":{}}}}"#,
+            r#"{"provider":{"builtin:test":{"name":"Existing","kind":"openai-compatible","options":{"baseURL":"https://example.test"},"models":{}},"codexhub-old":{"name":"CodexHub Gateway","kind":"openai-compatible","options":{"baseURL":"http://127.0.0.1:9099/v1"},"models":{}}}}"#,
         )
         .unwrap();
         let settings = Settings::default();
@@ -7741,7 +7947,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let provider = value.pointer("/provider/codexhub-ollama-cloud").unwrap();
 
-        assert!(value.pointer("/provider/builtin:test").is_none());
+        assert!(value.pointer("/provider/builtin:test").is_some());
+        assert!(value.pointer("/provider/codexhub-old").is_none());
         assert_eq!(
             provider.get("name").and_then(serde_json::Value::as_str),
             Some("CodexHub Ollama Cloud")
@@ -7786,6 +7993,46 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(1_024_000)
         );
+    }
+
+    #[test]
+    fn zcode_apply_preserves_existing_official_v2_providers() {
+        let root = unique_temp_dir("codexhub-zcode-preserve-official");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path,
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path,
+        };
+        let backup_root = root.join("backups");
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"builtin:bigmodel-coding-plan":{"name":"Bigmodel - Coding Plan","kind":"anthropic","source":"custom","models":{"GLM-5.2":{"name":"GLM-5.2"}}}}}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+        let providers = case_sensitive_client_export_test_providers();
+
+        let result = super::apply_zcode_config_with_targets(
+            &targets,
+            &backup_root,
+            &settings,
+            &providers,
+            "ollama-cloud/glm-5.2",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
+        assert!(value
+            .pointer("/provider/builtin:bigmodel-coding-plan")
+            .is_some());
+        assert!(value.pointer("/provider/codexhub-ollama-cloud").is_some());
     }
 
     #[test]
@@ -8058,6 +8305,76 @@ mod tests {
         assert!(value.pointer("/provider/codexhub-labs").is_some());
         assert!(value.pointer("/provider/codexhub-openai").is_none());
         assert!(value.pointer("/provider/codexhub-volc").is_none());
+    }
+
+    #[test]
+    fn zcode_restore_uses_official_config_from_snapshot_with_managed_cache() {
+        let root = unique_temp_dir("codexhub-zcode-restore-snapshot-config");
+        let catalog_path = root.join("model-providers").join("codexhub.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+        let coding_plan_cache_path = root.join("v2").join("coding-plan-cache.json");
+        let targets = super::ZcodeConfigTargets {
+            catalog_path: catalog_path.clone(),
+            v2_config_path: v2_config_path.clone(),
+            v2_cache_path: v2_cache_path.clone(),
+        };
+        let backup_root = root.join("backups");
+        let official_config_snapshot = backup_root.join("zcode-official-config");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(official_config_snapshot.as_path()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub-openai","name":"CodexHub OpenAI","endpoints":{"baseURL":"http://127.0.0.1:9099/v1/providers/openai","paths":{"openai":"/responses"}}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &v2_config_path,
+            r#"{"provider":{"codexhub-openai":{"name":"CodexHub OpenAI","options":{"baseURL":"http://127.0.0.1:9099/v1/providers/openai"},"models":{"gpt-5.5":{"name":"GPT-5.5"}}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &v2_cache_path,
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"codexhub-openai","name":"CodexHub OpenAI","endpoints":{"baseURL":"http://127.0.0.1:9099/v1/providers/openai","paths":{"openai":"/responses"}}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &coding_plan_cache_path,
+            r#"{"version":1,"entryStatus":{"items":{"builtin:bigmodel-coding-plan":{"status":"unavailable","reason":"coding_plan_not_entitled"}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            official_config_snapshot.join("config.json"),
+            r#"{"provider":{"builtin:bigmodel-coding-plan":{"name":"Bigmodel - Coding Plan","kind":"anthropic","source":"custom","systemDisabledReason":"coding_plan_not_entitled","models":{"GLM-5.2":{"name":"GLM-5.2"}}},"openai-chatgpt-sub":{"name":"OpenAI (ChatGPT 订阅)","kind":"openai-compatible","options":{"apiKey":"codexhub-proxy","baseURL":"http://127.0.0.1:9099/v1"},"source":"custom","models":{"gpt-5.5":{}}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            official_config_snapshot.join("bots-model-cache.v2.json"),
+            r#"{"schemaVersion":"zcode.model-providers.v2","providers":[{"id":"openai-chatgpt-sub","name":"OpenAI (ChatGPT 订阅)","endpoints":{"baseURL":"http://127.0.0.1:9099/v1","paths":{"openai-compatible":"/chat/completions"}},"apiFormat":"openai-chat-completions","apiKey":"__zcode_cached_api_key_present__","models":[{"id":"gpt-5.5"}]}]}"#,
+        )
+        .unwrap();
+
+        let result = super::restore_zcode_config_with_targets(&targets, &backup_root).unwrap();
+
+        assert!(result.applied);
+        assert_eq!(
+            result.backup_path.as_deref(),
+            Some(official_config_snapshot.as_path())
+        );
+        assert!(!catalog_path.exists());
+        assert!(!v2_cache_path.exists());
+        assert!(!coding_plan_cache_path.exists());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_config_path).unwrap()).unwrap();
+        assert!(value
+            .pointer("/provider/builtin:bigmodel-coding-plan")
+            .is_some());
+        assert!(value
+            .pointer("/provider/builtin:bigmodel-coding-plan/systemDisabledReason")
+            .is_none());
+        assert!(value.pointer("/provider/codexhub-openai").is_none());
+        assert!(value.pointer("/provider/openai-chatgpt-sub").is_none());
     }
 
     #[test]

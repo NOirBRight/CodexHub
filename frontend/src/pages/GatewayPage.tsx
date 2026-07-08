@@ -1,5 +1,5 @@
 import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, RefreshCcw, Save, Server, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
@@ -48,7 +48,7 @@ interface GatewayPageProps {
   onUsageWindowChange: (window: UsageQueryWindow) => void;
 }
 
-export function GatewayPage({
+function GatewayPageImpl({
   busy,
   clients,
   onApplySettings,
@@ -609,6 +609,8 @@ export function GatewayPage({
     </main>
   );
 }
+
+export const GatewayPage = memo(GatewayPageImpl);
 
 interface RecoverySummary {
   activeCount: number;

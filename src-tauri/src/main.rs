@@ -258,8 +258,8 @@ where
 }
 
 #[tauri::command]
-fn get_status() -> Result<AppStatus, String> {
-    proxy::status()
+async fn get_status() -> Result<AppStatus, String> {
+    run_blocking("get_status", proxy::status).await
 }
 
 #[tauri::command]
@@ -352,8 +352,8 @@ fn test_model_endpoint(
 }
 
 #[tauri::command]
-fn gateway_status() -> Result<gateway::GatewayStatus, String> {
-    gateway::gateway_status()
+async fn gateway_status() -> Result<gateway::GatewayStatus, String> {
+    run_blocking("gateway_status", gateway::gateway_status).await
 }
 
 #[tauri::command]
@@ -365,37 +365,49 @@ fn gateway_test_request(
 }
 
 #[tauri::command]
-fn gateway_recent_events(
+async fn gateway_recent_events(
     limit: Option<usize>,
     since_ts: Option<String>,
 ) -> Result<Vec<gateway::GatewayEvent>, String> {
-    gateway::gateway_recent_events(limit, since_ts)
+    run_blocking("gateway_recent_events", move || {
+        gateway::gateway_recent_events(limit, since_ts)
+    })
+    .await
 }
 
 #[tauri::command]
-fn gateway_usage_summary(
+async fn gateway_usage_summary(
     start_ts: Option<String>,
     end_ts: Option<String>,
 ) -> Result<gateway::GatewayUsageSummary, String> {
-    gateway::gateway_usage_summary(start_ts, end_ts)
+    run_blocking("gateway_usage_summary", move || {
+        gateway::gateway_usage_summary(start_ts, end_ts)
+    })
+    .await
 }
 
 #[tauri::command]
-fn gateway_usage_snapshot(
+async fn gateway_usage_snapshot(
     limit: Option<usize>,
     start_ts: Option<String>,
     end_ts: Option<String>,
 ) -> Result<gateway::GatewayUsageSnapshot, String> {
-    gateway::gateway_usage_snapshot(limit, start_ts, end_ts)
+    run_blocking("gateway_usage_snapshot", move || {
+        gateway::gateway_usage_snapshot(limit, start_ts, end_ts)
+    })
+    .await
 }
 
 #[tauri::command]
-fn gateway_usage_events(
+async fn gateway_usage_events(
     limit: Option<usize>,
     start_ts: Option<String>,
     end_ts: Option<String>,
 ) -> Result<Vec<gateway::GatewayUsageEvent>, String> {
-    gateway::gateway_usage_events(limit, start_ts, end_ts)
+    run_blocking("gateway_usage_events", move || {
+        gateway::gateway_usage_events(limit, start_ts, end_ts)
+    })
+    .await
 }
 
 #[tauri::command]
