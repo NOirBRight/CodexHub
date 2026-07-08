@@ -761,8 +761,8 @@ export default function App() {
       const shouldRestartGateway = Boolean(
         appStatus?.proxy_running && gatewayRuntimeSettingsChanged(settings, next),
       );
-      if (settings && next.auto_start_proxy !== settings.auto_start_proxy) {
-        if (next.auto_start_proxy) {
+      if (settings && next.auto_start_software !== settings.auto_start_software) {
+        if (next.auto_start_software) {
           await api.setAutostart(true);
         } else {
           await api.removeAutostart();

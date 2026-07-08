@@ -26,6 +26,7 @@ const viteConfigPath = new URL("../vite.config.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
+const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
 const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
@@ -319,6 +320,26 @@ test("desktop exe starts the web bridge in the background", async () => {
   assert.match(bridgeSource, /pub fn start_background\(\) -> Result<\(\), String>/);
   assert.match(bridgeSource, /std::thread::Builder::new\(\)[\s\S]*\.name\("codexhub-web-bridge"/);
   assert.match(bridgeSource, /ErrorKind::AddrInUse/);
+});
+
+test("desktop startup opens the gateway backend and reuses the existing app instance", async () => {
+  const [mainSource, cargoSource] = await Promise.all([
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriCargoPath, "utf8"),
+  ]);
+  const setupSource = mainSource.match(/\.setup\(\|app\| \{[\s\S]*?Ok\(\(\)\)/)?.[0] ?? "";
+
+  assert.match(setupSource, /start_gateway_on_launch\(\)/);
+  assert.ok(
+    setupSource.indexOf("runtime_paths::set_resource_root(resource_dir)") <
+      setupSource.indexOf("start_gateway_on_launch()"),
+    "gateway startup should run after packaged resources are registered",
+  );
+  assert.match(mainSource, /fn start_gateway_on_launch\(\)/);
+  assert.match(mainSource, /tauri::async_runtime::spawn_blocking\(\|\|/);
+  assert.match(mainSource, /proxy::start\(\)/);
+  assert.match(cargoSource, /tauri-plugin-single-instance\s*=\s*"2"/);
+  assert.match(mainSource, /tauri_plugin_single_instance::init\(\|app,[\s\S]*show_main_window\(app\)/);
 });
 
 test("global cursor contract marks interactive controls as pointer and disabled controls as unavailable", async () => {
@@ -1046,6 +1067,22 @@ test("gateway toast uses the shared dismissible page toast", async () => {
   assert.doesNotMatch(pageToastSource, /\[onDismiss, toast\]/);
 });
 
+test("gateway stopped proxy state stays out of warning banners and toasts", async () => {
+  const [gatewaySource, gatewayBackendSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(new URL("../../src-tauri/src/gateway.rs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(gatewayBackendSource, /category:\s*"proxy_state"\.to_string\(\)/);
+  assert.match(gatewayBackendSource, /level:\s*"status"\.to_string\(\)/);
+  assert.doesNotMatch(gatewayBackendSource, /Gateway endpoints are unavailable/);
+  assert.match(gatewaySource, /function isActionableDiagnostic/);
+  assert.match(gatewaySource, /item\.level !== "status"/);
+  assert.match(gatewaySource, /item\.category !== "proxy_state"/);
+  assert.match(gatewaySource, /if \(!running && isBackendDisconnectedMessage\(usageError\)\) \{\s*return;\s*\}/);
+  assert.doesNotMatch(gatewaySource, /Proxy is not running; Gateway endpoints are unavailable/);
+});
+
 test("gateway client version refresh uses a persistent loading toast", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
@@ -1118,24 +1155,44 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
   assert.doesNotMatch(drawerSource, />\s*Sync history\s*</);
 });
 
-test("settings drawer places launch-at-startup below the language switch", async () => {
-  const [drawerSource, zhSource, enSource] = await Promise.all([
+test("settings drawer separates software and gateway autostart controls", async () => {
+  const [drawerSource, settingsSource, typesSource, appSource, mainSource, zhSource, enSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
+    readFile(settingsLibPath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(appPath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
     readFile(zhLocalePath, "utf8"),
     readFile(enLocalePath, "utf8"),
   ]);
 
   const languageIndex = drawerSource.indexOf('t("settings.language")');
-  const autoStartIndex = drawerSource.indexOf('t("settings.autoStartProxy")');
+  const softwareIndex = drawerSource.indexOf('t("settings.autoStartSoftware")');
+  const gatewayIndex = drawerSource.indexOf('t("settings.autoStartGateway")');
   const includeOfficialIndex = drawerSource.indexOf('t("settings.includeOfficialModels")');
 
   assert.ok(languageIndex >= 0, "language control should be present");
-  assert.ok(autoStartIndex > languageIndex, "autostart control should be below language");
-  assert.ok(includeOfficialIndex > autoStartIndex, "autostart control should be above official models");
-  assert.match(drawerSource, /checked=\{draft\.auto_start_proxy\}/);
-  assert.match(drawerSource, /onChange=\{\(value\) => setDraft\(\{ \.\.\.draft, auto_start_proxy: value \}\)\}/);
-  assert.match(zhSource, /autoStartProxy:\s*"开机自启动"/);
-  assert.match(enSource, /autoStartProxy:\s*"Launch at startup"/);
+  assert.ok(softwareIndex > languageIndex, "software autostart should be below language");
+  assert.ok(gatewayIndex > softwareIndex, "gateway autostart should be below software autostart");
+  assert.ok(includeOfficialIndex > gatewayIndex, "autostart controls should be above official models");
+  assert.match(drawerSource, /checked=\{draft\.auto_start_software\}/);
+  assert.match(drawerSource, /checked=\{draft\.auto_start_gateway\}/);
+  assert.match(drawerSource, /auto_start_software: value/);
+  assert.match(drawerSource, /auto_start_gateway: value/);
+  assert.match(typesSource, /auto_start_software: boolean;/);
+  assert.match(typesSource, /auto_start_gateway: boolean;/);
+  assert.doesNotMatch(typesSource, /auto_start_proxy: boolean;/);
+  assert.match(settingsSource, /auto_start_software:\s*true/);
+  assert.match(settingsSource, /auto_start_gateway:\s*true/);
+  assert.match(settingsSource, /source\.auto_start_proxy/);
+  assert.doesNotMatch(appSource, /next\.auto_start_proxy|settings\.auto_start_proxy/);
+  assert.match(appSource, /next\.auto_start_software !== settings\.auto_start_software/);
+  assert.doesNotMatch(appSource, /next\.auto_start_gateway[\s\S]*setAutostart/);
+  assert.match(mainSource, /settings\.auto_start_gateway/);
+  assert.match(zhSource, /autoStartSoftware:\s*"开机自启动软件"/);
+  assert.match(zhSource, /autoStartGateway:\s*"打开软件后启动 Gateway"/);
+  assert.match(enSource, /autoStartSoftware:\s*"Launch app at startup"/);
+  assert.match(enSource, /autoStartGateway:\s*"Start Gateway when app opens"/);
 });
 
 test("settings drawer keeps repair action and compact model select visually quiet", async () => {

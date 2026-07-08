@@ -1989,9 +1989,9 @@ fn gateway_diagnostics(
     let mut diagnostics = Vec::new();
     if !proxy_running {
         diagnostics.push(GatewayDiagnostic {
-            level: "error".to_string(),
-            category: "proxy".to_string(),
-            message: "Proxy is not running; Gateway endpoints are unavailable.".to_string(),
+            level: "status".to_string(),
+            category: "proxy_state".to_string(),
+            message: "Gateway is stopped.".to_string(),
         });
     }
     if proxy_running && !has_chat_completions_gateway {
@@ -5819,6 +5819,32 @@ mod tests {
                 },
             ],
         }]
+    }
+
+    #[test]
+    fn stopped_proxy_is_status_not_actionable_gateway_error() {
+        let auth = super::CodexAuthStatus {
+            auth_file_present: true,
+            logged_in: true,
+            auth_mode: Some("chatgpt".to_string()),
+            account_id_present: true,
+            access_token_present: true,
+            refresh_token_present: true,
+            token_refresh_status: "fresh".to_string(),
+            last_refresh: None,
+            issue: None,
+        };
+
+        let diagnostics = super::gateway_diagnostics(false, false, &auth);
+
+        assert!(diagnostics.iter().any(|item| {
+            item.category == "proxy_state"
+                && item.level == "status"
+                && item.message == "Gateway is stopped."
+        }));
+        assert!(!diagnostics
+            .iter()
+            .any(|item| item.category == "proxy" && item.level == "error"));
     }
 
     fn case_sensitive_client_export_test_providers() -> Vec<Provider> {

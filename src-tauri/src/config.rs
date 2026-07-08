@@ -147,6 +147,8 @@ struct SettingsDocument {
     locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
+    auto_start_software: Option<bool>,
+    auto_start_gateway: Option<bool>,
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
     auto_sync_catalog: Option<bool>,
@@ -178,7 +180,13 @@ impl SettingsDocument {
             unified_codex_history: self
                 .unified_codex_history
                 .unwrap_or(defaults.unified_codex_history),
-            auto_start_proxy: self.auto_start_proxy.unwrap_or(defaults.auto_start_proxy),
+            auto_start_software: self
+                .auto_start_software
+                .or(self.auto_start_proxy)
+                .unwrap_or(defaults.auto_start_software),
+            auto_start_gateway: self
+                .auto_start_gateway
+                .unwrap_or(defaults.auto_start_gateway),
             include_official_models: self
                 .include_official_models
                 .unwrap_or(defaults.include_official_models),
@@ -698,7 +706,8 @@ sort_order = 7
             locale: "zh-CN".to_string(),
             auto_sync_history: false,
             unified_codex_history: false,
-            auto_start_proxy: false,
+            auto_start_software: false,
+            auto_start_gateway: false,
             include_official_models: false,
             auto_sync_catalog: false,
             auto_sync_clients: false,
@@ -739,8 +748,30 @@ sort_order = 7
         assert!(written.contains("\"official_model_sort_order\""));
         assert!(written.contains("\"official_provider_sort_order\": 3"));
         assert!(written.contains("\"auto_sync_clients\": false"));
+        assert!(written.contains("\"auto_start_software\": false"));
+        assert!(written.contains("\"auto_start_gateway\": false"));
         assert!(written.contains("\"unified_codex_history\": false"));
         assert!(written.contains("\"locale\": \"zh-CN\""));
+    }
+
+    #[test]
+    fn legacy_auto_start_proxy_migrates_to_software_autostart_only() {
+        let root = temp_root("legacy-autostart-split");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "auto_start_proxy": false,
+              "proxy_port": 4555
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert!(!loaded.auto_start_software);
+        assert!(loaded.auto_start_gateway);
     }
 
     #[test]
@@ -1131,7 +1162,8 @@ sort_order = 7
         assert_eq!(left.locale, right.locale);
         assert_eq!(left.auto_sync_history, right.auto_sync_history);
         assert_eq!(left.unified_codex_history, right.unified_codex_history);
-        assert_eq!(left.auto_start_proxy, right.auto_start_proxy);
+        assert_eq!(left.auto_start_software, right.auto_start_software);
+        assert_eq!(left.auto_start_gateway, right.auto_start_gateway);
         assert_eq!(left.include_official_models, right.include_official_models);
         assert_eq!(left.auto_sync_catalog, right.auto_sync_catalog);
         assert_eq!(left.auto_sync_clients, right.auto_sync_clients);

@@ -7,7 +7,8 @@ const DEFAULT_SETTINGS: Settings = {
   locale: browserLocale(),
   auto_sync_history: false,
   unified_codex_history: true,
-  auto_start_proxy: true,
+  auto_start_software: true,
+  auto_start_gateway: true,
   include_official_models: true,
   auto_sync_catalog: true,
   auto_sync_clients: true,
@@ -29,13 +30,22 @@ const DEFAULT_SETTINGS: Settings = {
   proxy_port: 9099,
 };
 
-export function normalizeSettings(settings: Partial<Settings> | null | undefined): Settings {
+type LegacySettings = Partial<Settings> & {
+  auto_start_proxy?: boolean;
+};
+
+export function normalizeSettings(settings: LegacySettings | null | undefined): Settings {
   const source = settings ?? {};
   return {
     ...DEFAULT_SETTINGS,
     ...source,
     locale: source.locale ? resolveLocale(source.locale) : DEFAULT_SETTINGS.locale,
     unified_codex_history: source.unified_codex_history ?? DEFAULT_SETTINGS.unified_codex_history,
+    auto_start_software:
+      source.auto_start_software ??
+      source.auto_start_proxy ??
+      DEFAULT_SETTINGS.auto_start_software,
+    auto_start_gateway: source.auto_start_gateway ?? DEFAULT_SETTINGS.auto_start_gateway,
     auto_sync_clients:
       source.auto_sync_clients ??
       source.auto_sync_catalog ??

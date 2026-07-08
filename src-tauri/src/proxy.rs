@@ -91,6 +91,8 @@ struct SettingsDocument {
     locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
+    auto_start_software: Option<bool>,
+    auto_start_gateway: Option<bool>,
     auto_start_proxy: Option<bool>,
     include_official_models: Option<bool>,
     auto_sync_catalog: Option<bool>,
@@ -122,7 +124,13 @@ impl SettingsDocument {
             unified_codex_history: self
                 .unified_codex_history
                 .unwrap_or(defaults.unified_codex_history),
-            auto_start_proxy: self.auto_start_proxy.unwrap_or(defaults.auto_start_proxy),
+            auto_start_software: self
+                .auto_start_software
+                .or(self.auto_start_proxy)
+                .unwrap_or(defaults.auto_start_software),
+            auto_start_gateway: self
+                .auto_start_gateway
+                .unwrap_or(defaults.auto_start_gateway),
             include_official_models: self
                 .include_official_models
                 .unwrap_or(defaults.include_official_models),

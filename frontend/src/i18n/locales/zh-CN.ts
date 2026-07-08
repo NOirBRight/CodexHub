@@ -80,7 +80,8 @@ const zhCN = {
   },
   settings: {
     autoRetry: "自动重试",
-    autoStartProxy: "开机自启动",
+    autoStartSoftware: "开机自启动软件",
+    autoStartGateway: "打开软件后启动 Gateway",
     autoSyncBoundClients: "自动同步已绑定客户端",
     bindAddress: "绑定地址",
     bindAddressLocalOnly: "此版本仅接受 127.0.0.1。",

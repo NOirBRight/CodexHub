@@ -80,7 +80,8 @@ const enUS = {
   },
   settings: {
     autoRetry: "Auto retry",
-    autoStartProxy: "Launch at startup",
+    autoStartSoftware: "Launch app at startup",
+    autoStartGateway: "Start Gateway when app opens",
     autoSyncBoundClients: "Auto-sync bound clients",
     bindAddress: "Bind address",
     bindAddressLocalOnly: "Only 127.0.0.1 is accepted in this release.",

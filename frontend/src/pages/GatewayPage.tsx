@@ -48,6 +48,10 @@ interface GatewayPageProps {
   onUsageWindowChange: (window: UsageQueryWindow) => void;
 }
 
+function isActionableDiagnostic(item: GatewayStatus["diagnostics"][number]) {
+  return item.level !== "ok" && item.level !== "status" && item.category !== "proxy_state";
+}
+
 function GatewayPageImpl({
   busy,
   clients,
@@ -80,6 +84,7 @@ function GatewayPageImpl({
   const [autoRetryBusy, setAutoRetryBusy] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
+  const running = status?.proxy_running ?? false;
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
@@ -101,6 +106,9 @@ function GatewayPageImpl({
       lastUsageErrorToast.current = null;
       return;
     }
+    if (!running && isBackendDisconnectedMessage(usageError)) {
+      return;
+    }
     const text = isBackendDisconnectedMessage(usageError)
       ? t("gateway.backendNotConnected")
       : t("gateway.usageTelemetryDelayed", { message: usageError });
@@ -113,7 +121,7 @@ function GatewayPageImpl({
       return;
     }
     showToast(text, "error");
-  }, [usageError, showToast, t]);
+  }, [running, usageError, showToast, t]);
 
   const endpoints = useMemo(
     () =>
@@ -349,8 +357,7 @@ function GatewayPageImpl({
     }
   }
 
-  const running = status?.proxy_running ?? false;
-  const actionableDiagnostics = status?.diagnostics.filter((item) => item.level !== "ok") ?? [];
+  const actionableDiagnostics = status?.diagnostics.filter(isActionableDiagnostic) ?? [];
   const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 

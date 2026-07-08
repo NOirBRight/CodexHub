@@ -242,9 +242,14 @@ export function SettingsDrawer({
                   />
                 </div>
                 <Toggle
-                  checked={draft.auto_start_proxy}
-                  label={t("settings.autoStartProxy")}
-                  onChange={(value) => setDraft({ ...draft, auto_start_proxy: value })}
+                  checked={draft.auto_start_software}
+                  label={t("settings.autoStartSoftware")}
+                  onChange={(value) => setDraft({ ...draft, auto_start_software: value })}
+                />
+                <Toggle
+                  checked={draft.auto_start_gateway}
+                  label={t("settings.autoStartGateway")}
+                  onChange={(value) => setDraft({ ...draft, auto_start_gateway: value })}
                 />
                 <Toggle
                   checked={draft.include_official_models}

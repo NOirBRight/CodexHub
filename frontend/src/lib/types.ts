@@ -369,7 +369,8 @@ export interface Settings {
   locale: "zh-CN" | "en-US";
   auto_sync_history: boolean;
   unified_codex_history: boolean;
-  auto_start_proxy: boolean;
+  auto_start_software: boolean;
+  auto_start_gateway: boolean;
   include_official_models: boolean;
   auto_sync_catalog: boolean;
   auto_sync_clients: boolean;

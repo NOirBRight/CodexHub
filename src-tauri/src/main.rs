@@ -176,7 +176,9 @@ pub struct Settings {
     pub auto_sync_history: bool,
     #[serde(default = "default_enabled")]
     pub unified_codex_history: bool,
-    pub auto_start_proxy: bool,
+    pub auto_start_software: bool,
+    #[serde(default = "default_enabled")]
+    pub auto_start_gateway: bool,
     pub include_official_models: bool,
     pub auto_sync_catalog: bool,
     #[serde(default = "default_enabled")]
@@ -215,7 +217,8 @@ impl Default for Settings {
             locale: String::new(),
             auto_sync_history: false,
             unified_codex_history: true,
-            auto_start_proxy: true,
+            auto_start_software: true,
+            auto_start_gateway: true,
             include_official_models: true,
             auto_sync_catalog: true,
             auto_sync_clients: true,
@@ -728,6 +731,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_gui() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
@@ -738,6 +744,7 @@ fn run_gui() {
             setup_tray(app)?;
             gateway::start_telemetry_ingester();
             web_bridge::start_background()?;
+            start_gateway_on_launch();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -797,6 +804,20 @@ fn run_gui() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running CodexHub Tauri application");
+}
+
+fn start_gateway_on_launch() {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Ok(settings) = config::get_settings() else {
+            return;
+        };
+        if !settings.auto_start_gateway {
+            return;
+        }
+        if let Err(error) = proxy::start() {
+            eprintln!("failed to start CodexHub gateway on app launch: {error}");
+        }
+    });
 }
 
 fn main() {

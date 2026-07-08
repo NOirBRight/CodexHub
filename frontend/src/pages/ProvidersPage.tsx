@@ -863,7 +863,7 @@ function ProvidersPageImpl({
         await api.removeAutostart();
       }
       await saveSettings(
-        { ...settingsDraft, auto_start_proxy: enabled },
+        { ...settingsDraft, auto_start_software: enabled },
         false,
         enabled ? t("providers.autoStartEnabled") : t("providers.autoStartDisabled"),
         toastId,
