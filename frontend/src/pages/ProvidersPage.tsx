@@ -51,6 +51,7 @@ const OPENAI_USAGE_DAY_SECONDS = 86_400;
 const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
 const OPENAI_USAGE_QUERY_WINDOW_DAYS = 730;
 const OPENAI_USAGE_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
+const OPENAI_USAGE_STORAGE_TTL_MS = OPENAI_USAGE_REFRESH_INTERVAL_MS;
 const OFFICIAL_OPENAI_USAGE_STORAGE_KEY = "codexhub.officialOpenAIUsageSnapshot.v1";
 const OFFICIAL_USAGE_CELL_GAP = 2;
 const OFFICIAL_USAGE_CELL_SIZE = 8;
@@ -131,8 +132,14 @@ function readStoredOfficialOpenAIUsageSnapshot(): OpenAIUsageSnapshot | null {
     if (!raw) {
       return null;
     }
-    const snapshot = JSON.parse(raw) as unknown;
-    return isOpenAIUsageSnapshot(snapshot) ? snapshot : null;
+    const stored = JSON.parse(raw) as unknown;
+    if (!isStoredOpenAIUsageSnapshot(stored)) {
+      return null;
+    }
+    if (Date.now() - stored.stored_at > OPENAI_USAGE_STORAGE_TTL_MS) {
+      return null;
+    }
+    return stored.snapshot;
   } catch {
     return null;
   }
@@ -143,10 +150,26 @@ function storeOfficialOpenAIUsageSnapshot(snapshot: OpenAIUsageSnapshot) {
     return;
   }
   try {
-    window.localStorage.setItem(OFFICIAL_OPENAI_USAGE_STORAGE_KEY, JSON.stringify(snapshot));
+    const stored = {
+      stored_at: Date.now(),
+      snapshot,
+    };
+    window.localStorage.setItem(OFFICIAL_OPENAI_USAGE_STORAGE_KEY, JSON.stringify(stored));
   } catch {
     // Ignore storage quota or privacy-mode failures; backend cache still works.
   }
+}
+
+function isStoredOpenAIUsageSnapshot(value: unknown): value is StoredOpenAIUsageSnapshot {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const stored = value as Partial<StoredOpenAIUsageSnapshot>;
+  return (
+    typeof stored.stored_at === "number" &&
+    Number.isFinite(stored.stored_at) &&
+    isOpenAIUsageSnapshot(stored.snapshot)
+  );
 }
 
 function isOpenAIUsageSnapshot(value: unknown): value is OpenAIUsageSnapshot {
@@ -192,6 +215,10 @@ type ProviderDraftState = {
   dirty: boolean;
 };
 type AddProviderForm = typeof emptyProvider;
+type StoredOpenAIUsageSnapshot = {
+  stored_at: number;
+  snapshot: OpenAIUsageSnapshot;
+};
 type PendingProviderNavigation =
   | {
       kind: "existing";

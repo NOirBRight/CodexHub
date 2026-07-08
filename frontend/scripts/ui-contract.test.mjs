@@ -527,6 +527,10 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(providersSource, /function OfficialOpenAIUsageSkeleton/);
   assert.match(providersSource, /const OFFICIAL_OPENAI_USAGE_STORAGE_KEY/);
   assert.match(providersSource, /const OPENAI_USAGE_REFRESH_INTERVAL_MS = 3 \* 60 \* 1000;/);
+  assert.match(providersSource, /const OPENAI_USAGE_STORAGE_TTL_MS = OPENAI_USAGE_REFRESH_INTERVAL_MS;/);
+  assert.match(providersSource, /stored_at: Date\.now\(\),\s*snapshot,/);
+  assert.match(providersSource, /Date\.now\(\) - stored\.stored_at > OPENAI_USAGE_STORAGE_TTL_MS/);
+  assert.doesNotMatch(providersSource, /return isOpenAIUsageSnapshot\(snapshot\) \? snapshot : null;/);
   assert.match(providersSource, /const \[officialUsageHidden, setOfficialUsageHidden\] = useState\(false\);/);
   assert.match(providersSource, /const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot \| null>\(null\);/);
   assert.match(providersSource, /readStoredOfficialOpenAIUsageSnapshot/);
