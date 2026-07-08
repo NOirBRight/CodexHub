@@ -414,14 +414,17 @@ function VersionUpdateBlock({
   status: AppUpdateStatus | null;
   versionInfo: AppVersionInfo | null;
 }) {
-  const { t } = useTranslation();
+  const { i18n, t } = useTranslation();
   const rawCurrentVersion = status?.current_version ?? versionInfo?.current_version ?? null;
   const currentVersion = rawCurrentVersion ? `v${rawCurrentVersion}` : t("common.unknown");
   const latestVersion = status?.latest_version ?? null;
+  const updateAvailable = Boolean(status?.available && latestVersion);
+  const releaseNotes = status?.notes?.trim() || t("settings.noReleaseNotes");
+  const releaseDate = formatUpdateDate(status?.date, i18n.language);
 
   return (
     <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-      <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
+      <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
         <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
           {t("settings.currentVersion")}
         </span>
@@ -433,46 +436,54 @@ function VersionUpdateBlock({
         >
           {currentVersion}
         </span>
-      </div>
-      {(status?.available || status?.notes || (status && !status.available)) && (
-        <div className="grid min-w-0 gap-1 rounded-inner bg-surface px-3 py-2 shadow-control">
-        {status?.available && latestVersion && (
-          <p className="min-w-0 text-xs leading-5 text-action">
-            {t("settings.updateAvailable", { version: latestVersion })}
-          </p>
-        )}
-        {status && !status.available && (
-          <p className="min-w-0 text-xs leading-5 text-emerald-700">{t("settings.noUpdatesAvailable")}</p>
-        )}
-        {status?.notes && (
-          <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-500">
-            {status.notes}
-          </p>
-        )}
-        </div>
-      )}
-      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-400"
+          className="focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:text-ink hover:shadow-raised active:scale-[0.96] disabled:text-slate-400"
+          aria-label={t("settings.checkForUpdates")}
+          title={t("settings.checkForUpdates")}
           disabled={Boolean(busy)}
           onClick={onCheck}
         >
           <RefreshCcw size={14} className={busy === "check" ? "animate-spin" : ""} />
-          {t("settings.checkForUpdates")}
         </button>
-        {status?.available && (
+      </div>
+      {updateAvailable && (
+        <div className="grid min-w-0 gap-3 rounded-inner bg-surface px-3 py-2 shadow-control">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+            <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+              {t("settings.latestVersion")}
+            </span>
+            <span className="shrink-0 rounded-full bg-action/10 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-action">
+              {`v${latestVersion}`}
+            </span>
+          </div>
+          {releaseDate && (
+            <p className="min-w-0 truncate text-[11px] leading-4 text-slate-400">{releaseDate}</p>
+          )}
+          <div className="grid min-w-0 gap-1">
+            <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+              {t("settings.releaseNotes")}
+            </span>
+            <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">
+              {releaseNotes}
+            </p>
+          </div>
           <button
             type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+            className="focus-ring inline-flex h-9 min-w-0 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
             disabled={Boolean(busy)}
             onClick={onInstall}
           >
             <Download size={14} />
             {t("settings.installUpdate")}
           </button>
-        )}
-      </div>
+        </div>
+      )}
+      {status && !status.available && (
+        <p className="min-w-0 rounded-inner bg-surface px-3 py-2 text-xs leading-5 text-emerald-700 shadow-control">
+          {t("settings.noUpdatesAvailable")}
+        </p>
+      )}
     </div>
   );
 }
@@ -483,6 +494,21 @@ function clampRetryAttempts(value: string) {
     return 30;
   }
   return Math.max(1, Math.min(30, Math.round(parsed)));
+}
+
+function formatUpdateDate(value: string | null | undefined, locale: string) {
+  const raw = value?.trim();
+  if (!raw) {
+    return null;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return raw;
+  }
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 interface VisionModelParts {

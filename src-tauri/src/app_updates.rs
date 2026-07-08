@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
-use tauri_plugin_updater::{Error as UpdaterError, UpdaterExt};
+use tauri_plugin_updater::{Error as UpdaterError, Updater, UpdaterExt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppVersionInfo {
@@ -41,9 +41,7 @@ pub fn get_app_version(app: AppHandle) -> AppVersionInfo {
 pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String> {
     let current = current_version(&app);
     let checked_at = checked_at_now();
-    let update = app
-        .updater()
-        .map_err(|error| updater_setup_error("check for updates", error))?
+    let update = updater(&app, "check for updates")?
         .check()
         .await
         .map_err(|error| operation_error("check for updates", error))?;
@@ -65,9 +63,7 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String>
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle) -> Result<AppUpdateInstallResult, String> {
     let current = current_version(&app);
-    let Some(update) = app
-        .updater()
-        .map_err(|error| updater_setup_error("install update", error))?
+    let Some(update) = updater(&app, "install update")?
         .check()
         .await
         .map_err(|error| operation_error("install update", error))?
@@ -94,6 +90,31 @@ fn version_info(current_version: impl Into<String>) -> AppVersionInfo {
     AppVersionInfo {
         current_version: current_version.into(),
     }
+}
+
+#[cfg(debug_assertions)]
+fn updater(app: &AppHandle, action: &str) -> Result<Updater, String> {
+    let mut builder = app.updater_builder();
+    if let Ok(endpoint) = std::env::var("CODEXHUB_UPDATE_E2E_ENDPOINT") {
+        let endpoint = endpoint.trim();
+        if !endpoint.is_empty() {
+            let endpoint = endpoint
+                .parse()
+                .map_err(|error| operation_error(action, error))?;
+            builder = builder
+                .endpoints(vec![endpoint])
+                .map_err(|error| operation_error(action, error))?;
+        }
+    }
+    builder
+        .build()
+        .map_err(|error| updater_setup_error(action, error))
+}
+
+#[cfg(not(debug_assertions))]
+fn updater(app: &AppHandle, action: &str) -> Result<Updater, String> {
+    app.updater()
+        .map_err(|error| updater_setup_error(action, error))
 }
 
 fn no_update_status(

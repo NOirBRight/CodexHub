@@ -533,7 +533,7 @@ export default function App() {
   }, [showToast, t, updateToast]);
 
   const checkForUpdates = useCallback(async () => {
-    const toastId = showToast(t("settings.checkingUpdates"), "loading");
+    const toastId = showToast(t("settings.checkForUpdates"), "loading");
     setUpdateBusy("check");
     try {
       const status = await runCachedRequest<AppUpdateStatus>(

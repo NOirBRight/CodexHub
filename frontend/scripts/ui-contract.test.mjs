@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
+const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
@@ -26,6 +27,7 @@ const viteConfigPath = new URL("../vite.config.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
+const tauriAppUpdatesPath = new URL("../../src-tauri/src/app_updates.rs", import.meta.url);
 const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
@@ -2045,14 +2047,64 @@ test("app update APIs use the web bridge fallback and bridge dispatches updater 
 test("settings drawer version updates use the design-system grouped settings surface", async () => {
   const drawerSource = await readFile(settingsDrawerPath, "utf8");
   const blockSource = drawerSource.match(/function VersionUpdateBlock[\s\S]*?function clampRetryAttempts/)?.[0] ?? "";
+  const checkButton = blockSource.match(/<button[\s\S]*?onClick=\{onCheck\}[\s\S]*?<\/button>/)?.[0] ?? "";
 
   assert.match(blockSource, /rounded-panel bg-panel p-3 shadow-card/);
+  assert.match(blockSource, /grid-cols-\[minmax\(0,1fr\)_auto_auto\]/);
   assert.match(blockSource, /rounded-inner bg-surface px-3 py-2[\s\S]*shadow-control/);
   assert.match(blockSource, /const rawCurrentVersion = status\?\.current_version \?\? versionInfo\?\.current_version \?\? null/);
   assert.match(blockSource, /const currentVersion = rawCurrentVersion \? `v\$\{rawCurrentVersion\}` : t\("common.unknown"\)/);
   assert.doesNotMatch(blockSource, /v\{currentVersion\}/);
   assert.doesNotMatch(blockSource, /className="mini-button"/);
-  assert.match(blockSource, /inline-flex h-9 items-center justify-center gap-2 rounded-control/);
+  assert.match(checkButton, /aria-label=\{t\("settings\.checkForUpdates"\)\}/);
+  assert.match(checkButton, /title=\{t\("settings\.checkForUpdates"\)\}/);
+  assert.match(checkButton, /h-7 w-7/);
+  assert.match(checkButton, /<RefreshCcw/);
+  assert.doesNotMatch(checkButton, />\s*\{t\("settings\.checkForUpdates"\)\}\s*<\/button>/);
+});
+
+test("settings drawer update-available state shows version, release notes, and install action", async () => {
+  const [drawerSource, enSource, zhSource] = await Promise.all([
+    readFile(settingsDrawerPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const blockSource = drawerSource.match(/function VersionUpdateBlock[\s\S]*?function clampRetryAttempts/)?.[0] ?? "";
+
+  assert.match(blockSource, /const updateAvailable = Boolean\(status\?\.available && latestVersion\)/);
+  assert.match(blockSource, /\{updateAvailable && \(/);
+  assert.match(blockSource, /t\("settings\.latestVersion"\)/);
+  assert.match(blockSource, /`v\$\{latestVersion\}`/);
+  assert.match(blockSource, /t\("settings\.releaseNotes"\)/);
+  assert.match(blockSource, /status\?\.notes\?\.trim\(\) \|\| t\("settings\.noReleaseNotes"\)/);
+  assert.match(blockSource, /onClick=\{onInstall\}/);
+  assert.match(blockSource, /<Download size=\{14\}/);
+  assert.match(enSource, /latestVersion: "New version"/);
+  assert.match(enSource, /releaseNotes: "Release notes"/);
+  assert.match(enSource, /noReleaseNotes: "No release notes provided."/);
+  assert.match(zhSource, /latestVersion: "新版本"/);
+  assert.match(zhSource, /releaseNotes: "更新日志"/);
+  assert.match(zhSource, /noReleaseNotes: "暂无更新日志。"/);
+});
+
+test("app updater has an opt-in E2E script for virtual release detection and install", async () => {
+  const [script, appUpdatesSource] = await Promise.all([
+    readFile(appUpdateE2ePath, "utf8"),
+    readFile(tauriAppUpdatesPath, "utf8"),
+  ]);
+
+  assert.match(script, /latest\.json/);
+  assert.match(script, /virtual CodexHub update/);
+  assert.match(script, /check_app_update/);
+  assert.match(script, /install_app_update/);
+  assert.match(script, /\[switch\]\$Install/);
+  assert.match(script, /\[switch\]\$ValidateOnly/);
+  assert.match(script, /windows-x86_64/);
+  assert.match(script, /windows-x86_64-nsis/);
+  assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_ENDPOINT/);
+  assert.match(appUpdatesSource, /app\.updater_builder\(\)/);
+  assert.match(appUpdatesSource, /builder[\s\S]*\.endpoints\(vec!\[endpoint\]\)/);
+  assert.match(appUpdatesSource, /cfg\(debug_assertions\)/);
 });
 
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
