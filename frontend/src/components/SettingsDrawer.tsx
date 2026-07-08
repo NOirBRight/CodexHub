@@ -168,8 +168,12 @@ export function SettingsDrawer({
   }
 
   async function loadAppVersion() {
-    const info = await api.getAppVersion();
-    setVersionInfo(info);
+    try {
+      const info = await api.getAppVersion();
+      setVersionInfo(info);
+    } catch {
+      setVersionInfo(null);
+    }
   }
 
   async function checkForUpdates() {

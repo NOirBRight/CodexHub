@@ -1813,6 +1813,14 @@ test("settings drawer keeps language immediate and protects unsaved drafts", asy
   assert.match(enSource, /includeOfficialModels:\s*"Include OpenAI official models"/);
 });
 
+test("settings drawer silently absorbs version load failures on open", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+  const loadAppVersion = drawerSource.match(/async function loadAppVersion\(\)[\s\S]*?async function checkForUpdates\(\)/)?.[0] ?? "";
+
+  assert.match(loadAppVersion, /try\s*\{[\s\S]*const info = await api\.getAppVersion\(\);[\s\S]*setVersionInfo\(info\);[\s\S]*\}\s*catch\s*\{[\s\S]*setVersionInfo\(null\);[\s\S]*\}/);
+  assert.doesNotMatch(loadAppVersion, /showToast|updateToast|\bthrow\b/);
+});
+
 test("app update APIs are desktop-only wrappers", async () => {
   const [tauriSource, typesSource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
