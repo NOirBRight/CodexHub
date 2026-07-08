@@ -251,7 +251,7 @@ Run:
 
 ```powershell
 cd src-tauri
-cargo test app_updates --lib
+cargo test app_updates
 ```
 
 Expected: `update_status_maps_candidate_metadata` fails because `update_status` returns `available: false` and does not copy candidate metadata.
@@ -372,7 +372,7 @@ Run:
 
 ```powershell
 cd src-tauri
-cargo test app_updates --lib
+cargo test app_updates
 cargo test
 ```
 
@@ -510,7 +510,7 @@ Run:
 cd frontend
 npm run test:ui-contract
 cd ..\src-tauri
-cargo test app_updates --lib
+cargo test app_updates
 ```
 
 Expected: tests pass.
