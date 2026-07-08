@@ -743,7 +743,7 @@ fn run_gui() {
             #[cfg(desktop)]
             setup_tray(app)?;
             gateway::start_telemetry_ingester();
-            web_bridge::start_background()?;
+            web_bridge::start_background(app.handle().clone())?;
             start_gateway_on_launch();
             Ok(())
         })

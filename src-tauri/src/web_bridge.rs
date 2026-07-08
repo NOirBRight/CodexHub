@@ -1,9 +1,12 @@
-use crate::{autostart, catalog, config, gateway, history, models, openai_usage, proxy};
+use crate::{
+    app_updates, autostart, catalog, config, gateway, history, models, openai_usage, proxy,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::AppHandle;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:1421";
 const INVOKE_PATH: &str = "/api/invoke";
@@ -23,7 +26,7 @@ pub fn run(args: &[String]) -> i32 {
     match TcpListener::bind(&addr) {
         Ok(listener) => {
             println!("CodexHub web bridge listening on http://{addr}");
-            serve(listener);
+            serve(listener, None);
             0
         }
         Err(error) => {
@@ -33,17 +36,17 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-pub fn start_background() -> Result<(), String> {
+pub fn start_background(app: AppHandle) -> Result<(), String> {
     if BACKGROUND_BRIDGE_STARTED.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
 
     std::thread::Builder::new()
         .name("codexhub-web-bridge".to_string())
-        .spawn(|| {
+        .spawn(move || {
             gateway::start_telemetry_ingester();
             match TcpListener::bind(DEFAULT_ADDR) {
-                Ok(listener) => serve(listener),
+                Ok(listener) => serve(listener, Some(app)),
                 Err(error) if error.kind() == ErrorKind::AddrInUse => {
                     eprintln!("CodexHub web bridge already listening on http://{DEFAULT_ADDR}");
                 }
@@ -59,11 +62,12 @@ pub fn start_background() -> Result<(), String> {
         })
 }
 
-fn serve(listener: TcpListener) {
+fn serve(listener: TcpListener, app: Option<AppHandle>) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                std::thread::spawn(move || handle_stream(stream));
+                let app = app.clone();
+                std::thread::spawn(move || handle_stream(stream, app));
             }
             Err(error) => eprintln!("web bridge connection failed: {error}"),
         }
@@ -84,8 +88,9 @@ fn parse_addr(args: &[String]) -> Option<String> {
     None
 }
 
-fn handle_stream(mut stream: TcpStream) {
-    let response = match read_request(&mut stream).and_then(handle_request) {
+fn handle_stream(mut stream: TcpStream, app: Option<AppHandle>) {
+    let response = match read_request(&mut stream).and_then(|request| handle_request(request, app))
+    {
         Ok(response) => response,
         Err(error) => BridgeResponse::error(500, error),
     };
@@ -176,7 +181,10 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn handle_request(request: BridgeRequest) -> Result<BridgeResponse, String> {
+fn handle_request(
+    request: BridgeRequest,
+    app: Option<AppHandle>,
+) -> Result<BridgeResponse, String> {
     if !origin_allowed(request.origin.as_deref()) {
         return Ok(BridgeResponse::error(
             403,
@@ -195,7 +203,7 @@ fn handle_request(request: BridgeRequest) -> Result<BridgeResponse, String> {
 
     let invoke: InvokeRequest = serde_json::from_slice(&request.body)
         .map_err(|error| format!("invalid bridge invoke JSON: {error}"))?;
-    let value = match dispatch(invoke) {
+    let value = match dispatch(invoke, app) {
         Ok(value) => value,
         Err(error) => return Ok(BridgeResponse::error(500, error)),
     };
@@ -219,8 +227,15 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     port >= 1024
 }
 
-fn dispatch(request: InvokeRequest) -> Result<Value, String> {
+fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, String> {
     match request.command.as_str() {
+        "get_app_version" => to_value(Ok(app_updates::get_app_version(desktop_app(&app)?))),
+        "check_app_update" => to_value(tauri::async_runtime::block_on(
+            app_updates::check_app_update(desktop_app(&app)?),
+        )),
+        "install_app_update" => to_value(tauri::async_runtime::block_on(
+            app_updates::install_app_update(desktop_app(&app)?),
+        )),
         "get_status" => to_value(proxy::status()),
         "switch_mode" => {
             let mode = string_arg(&request.args, "mode")?;
@@ -467,6 +482,11 @@ fn dispatch(request: InvokeRequest) -> Result<Value, String> {
     }
 }
 
+fn desktop_app(app: &Option<AppHandle>) -> Result<AppHandle, String> {
+    app.clone()
+        .ok_or_else(|| "desktop app context is unavailable for this bridge command".to_string())
+}
+
 fn to_value<T: serde::Serialize>(result: Result<T, String>) -> Result<Value, String> {
     result.and_then(|value| {
         serde_json::to_value(value).map_err(|error| format!("failed to encode response: {error}"))
@@ -576,12 +596,15 @@ mod tests {
 
     #[test]
     fn options_preflight_succeeds() {
-        let response = handle_request(BridgeRequest {
-            method: "OPTIONS".to_string(),
-            path: "/api/invoke".to_string(),
-            origin: Some("http://127.0.0.1:1420".to_string()),
-            body: Vec::new(),
-        })
+        let response = handle_request(
+            BridgeRequest {
+                method: "OPTIONS".to_string(),
+                path: "/api/invoke".to_string(),
+                origin: Some("http://127.0.0.1:1420".to_string()),
+                body: Vec::new(),
+            },
+            None,
+        )
         .expect("preflight");
 
         assert_eq!(response.status, 204);
@@ -589,19 +612,43 @@ mod tests {
 
     #[test]
     fn unknown_command_returns_error() {
-        let response = handle_request(BridgeRequest {
-            method: "POST".to_string(),
-            path: "/api/invoke".to_string(),
-            origin: Some("http://127.0.0.1:1420".to_string()),
-            body: serde_json::to_vec(&json!({
-                "command": "missing_command",
-                "args": {}
-            }))
-            .unwrap(),
-        })
+        let response = handle_request(
+            BridgeRequest {
+                method: "POST".to_string(),
+                path: "/api/invoke".to_string(),
+                origin: Some("http://127.0.0.1:1420".to_string()),
+                body: serde_json::to_vec(&json!({
+                    "command": "missing_command",
+                    "args": {}
+                }))
+                .unwrap(),
+            },
+            None,
+        )
         .expect("invoke");
 
         assert_eq!(response.status, 500);
         assert!(String::from_utf8_lossy(&response.body).contains("missing_command"));
+    }
+
+    #[test]
+    fn updater_commands_require_desktop_app_context() {
+        let response = handle_request(
+            BridgeRequest {
+                method: "POST".to_string(),
+                path: "/api/invoke".to_string(),
+                origin: Some("http://127.0.0.1:1420".to_string()),
+                body: serde_json::to_vec(&json!({
+                    "command": "get_app_version",
+                    "args": {}
+                }))
+                .unwrap(),
+            },
+            None,
+        )
+        .expect("invoke");
+
+        assert_eq!(response.status, 500);
+        assert!(String::from_utf8_lossy(&response.body).contains("desktop app context"));
     }
 }

@@ -415,20 +415,27 @@ function VersionUpdateBlock({
   versionInfo: AppVersionInfo | null;
 }) {
   const { t } = useTranslation();
-  const currentVersion = status?.current_version ?? versionInfo?.current_version ?? t("common.unknown");
+  const rawCurrentVersion = status?.current_version ?? versionInfo?.current_version ?? null;
+  const currentVersion = rawCurrentVersion ? `v${rawCurrentVersion}` : t("common.unknown");
   const latestVersion = status?.latest_version ?? null;
 
   return (
-    <div className="grid gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
-      <div className="flex min-w-0 items-center justify-between gap-3">
+    <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+      <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
         <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
           {t("settings.currentVersion")}
         </span>
-        <span className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-600">
-          v{currentVersion}
+        <span
+          className={cx(
+            "shrink-0 rounded-full bg-panel px-2 py-0.5 text-[11px] font-semibold text-slate-600",
+            rawCurrentVersion ? "font-mono tabular-nums" : "",
+          )}
+        >
+          {currentVersion}
         </span>
       </div>
-      <div className="grid min-w-0 gap-1">
+      {(status?.available || status?.notes || (status && !status.available)) && (
+        <div className="grid min-w-0 gap-1 rounded-inner bg-surface px-3 py-2 shadow-control">
         {status?.available && latestVersion && (
           <p className="min-w-0 text-xs leading-5 text-action">
             {t("settings.updateAvailable", { version: latestVersion })}
@@ -442,11 +449,12 @@ function VersionUpdateBlock({
             {status.notes}
           </p>
         )}
-      </div>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className="mini-button"
+          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-surface px-3 text-sm font-semibold text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-400"
           disabled={Boolean(busy)}
           onClick={onCheck}
         >
@@ -456,7 +464,7 @@ function VersionUpdateBlock({
         {status?.available && (
           <button
             type="button"
-            className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
             disabled={Boolean(busy)}
             onClick={onInstall}
           >

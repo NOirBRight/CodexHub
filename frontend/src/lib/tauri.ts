@@ -137,9 +137,9 @@ function openaiUsageWindowArgs(window?: OpenAIUsageQueryWindow | null) {
 }
 
 export const api = {
-  getAppVersion: () => desktopCall<AppVersionInfo>("get_app_version"),
-  checkAppUpdate: () => desktopCall<AppUpdateStatus>("check_app_update"),
-  installAppUpdate: () => desktopCall<AppUpdateInstallResult>("install_app_update"),
+  getAppVersion: () => call<AppVersionInfo>("get_app_version"),
+  checkAppUpdate: () => call<AppUpdateStatus>("check_app_update"),
+  installAppUpdate: () => call<AppUpdateInstallResult>("install_app_update"),
   getStatus: () => call<AppStatus>("get_status"),
   switchMode: (mode: string, autoSync: boolean) =>
     call<AppStatus>("switch_mode", { mode, autoSync }),

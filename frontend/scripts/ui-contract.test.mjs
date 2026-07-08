@@ -312,12 +312,12 @@ test("desktop exe starts the web bridge in the background", async () => {
   ]);
   const setupSource = mainSource.match(/\.setup\(\|app\| \{[\s\S]*?Ok\(\(\)\)/)?.[0] ?? "";
 
-  assert.match(setupSource, /web_bridge::start_background\(\)/);
+  assert.match(setupSource, /web_bridge::start_background\(app\.handle\(\)\.clone\(\)\)/);
   assert.ok(
-    setupSource.indexOf("web_bridge::start_background()") < setupSource.indexOf("Ok(())"),
+    setupSource.indexOf("web_bridge::start_background(app.handle().clone())") < setupSource.indexOf("Ok(())"),
     "web bridge should start during GUI setup before setup succeeds",
   );
-  assert.match(bridgeSource, /pub fn start_background\(\) -> Result<\(\), String>/);
+  assert.match(bridgeSource, /pub fn start_background\(app: AppHandle\) -> Result<\(\), String>/);
   assert.match(bridgeSource, /std::thread::Builder::new\(\)[\s\S]*\.name\("codexhub-web-bridge"/);
   assert.match(bridgeSource, /ErrorKind::AddrInUse/);
 });
@@ -2018,10 +2018,12 @@ test("app owns version cache and settings drawer only receives update actions", 
   assert.doesNotMatch(drawerSource, /api\.installAppUpdate\(\)/);
 });
 
-test("app update APIs are desktop-only wrappers", async () => {
-  const [tauriSource, typesSource] = await Promise.all([
+test("app update APIs use the web bridge fallback and bridge dispatches updater commands", async () => {
+  const [tauriSource, typesSource, bridgeSource, mainSource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(new URL("../../src-tauri/src/web_bridge.rs", import.meta.url), "utf8"),
+    readFile(tauriMainPath, "utf8"),
   ]);
 
   assert.match(typesSource, /export interface AppVersionInfo/);
@@ -2031,11 +2033,26 @@ test("app update APIs are desktop-only wrappers", async () => {
   assert.match(typesSource, /latest_version\?: string \| null/);
   assert.match(typesSource, /export interface AppUpdateInstallResult/);
   assert.match(typesSource, /installed: boolean/);
-  assert.match(tauriSource, /getAppVersion: \(\) => desktopCall<AppVersionInfo>\("get_app_version"\)/);
-  assert.match(tauriSource, /checkAppUpdate: \(\) => desktopCall<AppUpdateStatus>\("check_app_update"\)/);
-  assert.match(tauriSource, /installAppUpdate: \(\) => desktopCall<AppUpdateInstallResult>\("install_app_update"\)/);
-  assert.doesNotMatch(tauriSource, /checkAppUpdate: \(\) => call/);
-  assert.doesNotMatch(tauriSource, /installAppUpdate: \(\) => call/);
+  assert.match(tauriSource, /getAppVersion: \(\) => call<AppVersionInfo>\("get_app_version"\)/);
+  assert.match(tauriSource, /checkAppUpdate: \(\) => call<AppUpdateStatus>\("check_app_update"\)/);
+  assert.match(tauriSource, /installAppUpdate: \(\) => call<AppUpdateInstallResult>\("install_app_update"\)/);
+  assert.match(mainSource, /web_bridge::start_background\(app\.handle\(\)\.clone\(\)\)/);
+  assert.match(bridgeSource, /"get_app_version"\s*=>\s*to_value\(Ok\(app_updates::get_app_version\(desktop_app\(&app\)\?\)\)\)/);
+  assert.match(bridgeSource, /"check_app_update"\s*=>\s*to_value\(tauri::async_runtime::block_on\([\s\S]*app_updates::check_app_update\(desktop_app\(&app\)\?\)/);
+  assert.match(bridgeSource, /"install_app_update"\s*=>\s*to_value\(tauri::async_runtime::block_on\([\s\S]*app_updates::install_app_update\(desktop_app\(&app\)\?\)/);
+});
+
+test("settings drawer version updates use the design-system grouped settings surface", async () => {
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
+  const blockSource = drawerSource.match(/function VersionUpdateBlock[\s\S]*?function clampRetryAttempts/)?.[0] ?? "";
+
+  assert.match(blockSource, /rounded-panel bg-panel p-3 shadow-card/);
+  assert.match(blockSource, /rounded-inner bg-surface px-3 py-2[\s\S]*shadow-control/);
+  assert.match(blockSource, /const rawCurrentVersion = status\?\.current_version \?\? versionInfo\?\.current_version \?\? null/);
+  assert.match(blockSource, /const currentVersion = rawCurrentVersion \? `v\$\{rawCurrentVersion\}` : t\("common.unknown"\)/);
+  assert.doesNotMatch(blockSource, /v\{currentVersion\}/);
+  assert.doesNotMatch(blockSource, /className="mini-button"/);
+  assert.match(blockSource, /inline-flex h-9 items-center justify-center gap-2 rounded-control/);
 });
 
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
