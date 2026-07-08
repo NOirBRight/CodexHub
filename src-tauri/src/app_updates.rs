@@ -44,20 +44,19 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String>
     let update = updater(&app, "check for updates")?
         .check()
         .await
-        .map_err(|error| operation_error("check for updates", error))?;
-
-    Ok(match update {
-        Some(update) => update_status(
-            current,
-            UpdateCandidate {
+        .map(|update| {
+            update.map(|update| UpdateCandidate {
                 version: update.version.clone(),
                 notes: update.body.clone(),
                 date: update.date.as_ref().map(ToString::to_string),
-            },
-            checked_at,
-        ),
-        None => no_update_status(current, checked_at),
-    })
+            })
+        });
+
+    if update_feed_is_missing(&update).await {
+        return Ok(no_update_status(current, checked_at));
+    }
+
+    status_from_update_check(current, checked_at, update)
 }
 
 #[tauri::command]
@@ -146,6 +145,61 @@ fn update_status(
     }
 }
 
+fn status_from_update_check(
+    current_version: impl Into<String>,
+    checked_at: impl Into<String>,
+    update: Result<Option<UpdateCandidate>, UpdaterError>,
+) -> Result<AppUpdateStatus, String> {
+    let current_version = current_version.into();
+    let checked_at = checked_at.into();
+    match update {
+        Ok(Some(candidate)) => Ok(update_status(current_version, candidate, checked_at)),
+        Ok(None) | Err(UpdaterError::ReleaseNotFound) => {
+            Ok(no_update_status(current_version, checked_at))
+        }
+        Err(error) => Err(operation_error("check for updates", error)),
+    }
+}
+
+async fn update_feed_is_missing(update: &Result<Option<UpdateCandidate>, UpdaterError>) -> bool {
+    let Err(error) = update else {
+        return false;
+    };
+    if matches!(error, UpdaterError::ReleaseNotFound) {
+        return true;
+    }
+    let Some(url) = update_error_url(error) else {
+        return false;
+    };
+    if !is_github_latest_update_manifest_url(&url) {
+        return false;
+    }
+    update_manifest_returns_not_found(&url).await
+}
+
+fn update_error_url(error: &UpdaterError) -> Option<String> {
+    match error {
+        UpdaterError::Reqwest(error) => error.url().map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn is_github_latest_update_manifest_url(url: &str) -> bool {
+    url.starts_with("https://github.com/") && url.contains("/releases/latest/download/latest.json")
+}
+
+async fn update_manifest_returns_not_found(url: &str) -> bool {
+    let Ok(response) = reqwest::Client::new()
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+    else {
+        return false;
+    };
+    response.status() == reqwest::StatusCode::NOT_FOUND
+}
+
 fn operation_error(action: &str, error: impl std::fmt::Display) -> String {
     format!("Failed to {action}: {error}")
 }
@@ -223,6 +277,38 @@ mod tests {
                 date: Some("2026-07-08T12:00:00Z".to_string()),
             },
         );
+    }
+
+    #[test]
+    fn release_not_found_from_update_feed_counts_as_no_update() {
+        assert_eq!(
+            status_from_update_check("0.1.0", "unix:789", Err(UpdaterError::ReleaseNotFound)),
+            Ok(no_update_status("0.1.0", "unix:789")),
+        );
+    }
+
+    #[test]
+    fn other_update_check_errors_still_surface() {
+        let error =
+            status_from_update_check("0.1.0", "unix:789", Err(UpdaterError::UnsupportedArch))
+                .expect_err("unsupported arch should remain an updater error");
+
+        assert!(
+            error.starts_with("Failed to check for updates: Unsupported application architecture")
+        );
+    }
+
+    #[test]
+    fn missing_feed_probe_is_limited_to_github_latest_update_manifests() {
+        assert!(is_github_latest_update_manifest_url(
+            "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
+        ));
+        assert!(!is_github_latest_update_manifest_url(
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.0/latest.json",
+        ));
+        assert!(!is_github_latest_update_manifest_url(
+            "https://example.com/releases/latest/download/latest.json",
+        ));
     }
 
     #[test]

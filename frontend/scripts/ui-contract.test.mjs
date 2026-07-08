@@ -2098,7 +2098,9 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(script, /check_app_update/);
   assert.match(script, /install_app_update/);
   assert.match(script, /\[switch\]\$Install/);
+  assert.match(script, /\[switch\]\$KeepAlive/);
   assert.match(script, /\[switch\]\$ValidateOnly/);
+  assert.match(script, /KeepAlive enabled/);
   assert.match(script, /windows-x86_64/);
   assert.match(script, /windows-x86_64-nsis/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_ENDPOINT/);

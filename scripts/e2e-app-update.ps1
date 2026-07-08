@@ -10,6 +10,7 @@ param(
     [string]$NextVersion = "",
     [switch]$Launch,
     [switch]$Install,
+    [switch]$KeepAlive,
     [switch]$ValidateOnly
 )
 
@@ -250,12 +251,22 @@ try {
         }
         Write-Host "Install path was invoked. Reopen CodexHub and verify the installed version if the updater did not restart automatically."
     }
+
+    if ($KeepAlive -and -not $Install) {
+        Write-Host "KeepAlive enabled. Virtual release server and app will keep running for manual UI testing."
+        Write-Host "  Server PID: $($server.Id)"
+        if ($null -ne $appProcess) {
+            Write-Host "  App PID:    $($appProcess.Id)"
+        }
+        Write-Host "  Bridge:     $BridgeUrl"
+        Write-Host "  Endpoint:   $manifestUrl"
+    }
 }
 finally {
-    if ($null -ne $appProcess -and -not $appProcess.HasExited -and -not $Install) {
+    if (-not $KeepAlive -and $null -ne $appProcess -and -not $appProcess.HasExited -and -not $Install) {
         Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     }
-    if ($null -ne $server -and -not $server.HasExited) {
+    if (-not $KeepAlive -and $null -ne $server -and -not $server.HasExited) {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     }
 }
