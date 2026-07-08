@@ -69,7 +69,6 @@ label:has(input[type="radio"]:disabled) {
 }
 
 [data-tauri-drag-region] {
-  -webkit-app-region: drag;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -77,16 +76,6 @@ label:has(input[type="radio"]:disabled) {
 [data-tauri-drag-region] * {
   -webkit-user-select: none;
   user-select: none;
-}
-
-[data-tauri-drag-region] button,
-[data-tauri-drag-region] a,
-[data-tauri-drag-region] input,
-[data-tauri-drag-region] select,
-[data-tauri-drag-region] textarea,
-[data-tauri-drag-region] [role="button"],
-[data-tauri-drag-region] [data-window-control] {
-  -webkit-app-region: no-drag;
 }
 
 [data-sortable-handle="true"],

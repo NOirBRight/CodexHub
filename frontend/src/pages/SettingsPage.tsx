@@ -88,7 +88,7 @@ export function SettingsPage() {
       } else {
         await api.removeAutostart();
       }
-      await save({ ...settings, auto_start_proxy: enabled });
+      await save({ ...settings, auto_start_software: enabled });
     } catch (err) {
       setError(messageFromError(err));
       setBusy(null);
@@ -108,9 +108,14 @@ export function SettingsPage() {
       <section className="rounded-md border border-line bg-white p-4 shadow-subtle">
         <div className="grid gap-4 md:grid-cols-2">
           <Toggle
-            label={t("settings.autoStartProxy")}
-            checked={settings.auto_start_proxy}
+            label={t("settings.autoStartSoftware")}
+            checked={settings.auto_start_software}
             onChange={(value) => void toggleAutostart(value)}
+          />
+          <Toggle
+            label={t("settings.autoStartGateway")}
+            checked={settings.auto_start_gateway}
+            onChange={(value) => void save({ ...settings, auto_start_gateway: value })}
           />
           <Toggle
             label={t("settings.includeOfficialModels")}

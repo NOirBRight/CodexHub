@@ -1,47 +1,66 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useTranslation } from "react-i18next";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
-import { runAppUpdateInstall } from "./lib/appUpdates";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
 import type {
   AppStatus,
+  AppUpdateInstallStatus,
+  AppUpdateStatus,
+  AppVersionInfo,
   GatewayClientContract,
   GatewayClientInfo,
   GatewayEvent,
   GatewayStatus,
-  GatewayUsageEvent,
-  GatewayUsageSummary,
+  GatewayUsageSnapshot,
   Model,
   Provider,
   Settings,
   TabId,
-  TelemetryStatus,
   UsageQueryWindow,
 } from "./lib/types";
 import { GatewayPage } from "./pages/GatewayPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 
 type RuntimeSnapshot = {
-  status: AppStatus | null;
-  settings: Settings | null;
-  providers: Provider[];
-  gatewayStatus: GatewayStatus | null;
-  gatewayUsageSummary: GatewayUsageSummary | null;
-  gatewayUsageEvents: GatewayUsageEvent[];
-  gatewayUsageStatus: TelemetryStatus | null;
-  gatewayEvents: GatewayEvent[];
-  usageError: string | null;
-  gatewayClients: GatewayClientInfo[];
-  catalogModels: Model[];
+  status: RuntimeCache<AppStatus>;
+  settings: RuntimeCache<Settings>;
+  providers: RuntimeCache<Provider[]>;
+  gatewayStatus: RuntimeCache<GatewayStatus>;
+  gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>;
+  gatewayEvents: RuntimeCache<GatewayEvent[]>;
+  gatewayClients: RuntimeCache<GatewayClientInfo[]>;
+  catalogModels: RuntimeCache<Model[]>;
+  modelMetadata: RuntimeCache<Model[]>;
+  appVersion: RuntimeCache<AppVersionInfo>;
+  updateStatus: RuntimeCache<AppUpdateStatus>;
 };
 
 type LoadRuntimeOptions = {
+  force?: boolean;
   includeClientVersions?: boolean;
+  staleMs?: number;
+};
+
+type RuntimeCache<T> = {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  updatedAt: number | null;
+  inflight?: Promise<T>;
+};
+
+type RuntimeCacheKey = keyof RuntimeSnapshot;
+
+type RuntimeCacheOptions<T> = {
+  apply?: (current: RuntimeSnapshot, data: T) => RuntimeSnapshot;
+  force?: boolean;
+  quiet?: boolean;
+  staleMs?: number;
 };
 
 type GatewayClientVersionCacheEntry = {
@@ -55,6 +74,8 @@ type GatewayClientVersionCacheEntry = {
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
 const BACKGROUND_VERSION_PROBE_DELAY_MS = 1000;
 const STARTUP_UPDATE_CHECK_DELAY_MS = 2500;
+const APP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_INSTALL_STATUS_POLL_MS = 500;
 
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
@@ -74,6 +95,57 @@ function endOfDay(date: Date) {
 
 function addDays(date: Date, days: number) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function runtimeCache<T>(data: T | null = null): RuntimeCache<T> {
+  return {
+    data,
+    loading: false,
+    error: null,
+    updatedAt: data === null ? null : Date.now(),
+  };
+}
+
+function setCacheLoading(current: RuntimeSnapshot, key: RuntimeCacheKey): RuntimeSnapshot {
+  const cache = current[key] as RuntimeCache<unknown>;
+  return {
+    ...current,
+    [key]: {
+      ...cache,
+      loading: true,
+      error: null,
+    },
+  } as RuntimeSnapshot;
+}
+
+function setCacheData<T>(
+  current: RuntimeSnapshot,
+  key: RuntimeCacheKey,
+  data: T,
+): RuntimeSnapshot {
+  const cache = current[key] as RuntimeCache<T>;
+  return {
+    ...current,
+    [key]: {
+      ...cache,
+      data,
+      loading: false,
+      error: null,
+      updatedAt: Date.now(),
+    },
+  } as RuntimeSnapshot;
+}
+
+function setCacheError(current: RuntimeSnapshot, key: RuntimeCacheKey, error: string): RuntimeSnapshot {
+  const cache = current[key] as RuntimeCache<unknown>;
+  return {
+    ...current,
+    [key]: {
+      ...cache,
+      loading: false,
+      error,
+    },
+  } as RuntimeSnapshot;
 }
 
 function readGatewayClientVersionCache(): Map<string, GatewayClientVersionCacheEntry> {
@@ -205,157 +277,382 @@ function visionModelOptions(models: Model[]) {
     });
 }
 
+function tabPaneClass(active: boolean) {
+  return cx(
+    "absolute inset-0 min-h-0 min-w-0 p-4 [contain:layout_paint_style]",
+    active
+      ? "visible z-10 opacity-100 [content-visibility:visible] [will-change:opacity]"
+      : "invisible z-0 opacity-0 pointer-events-none [content-visibility:hidden]",
+  );
+}
+
 export default function App() {
   const { t } = useTranslation();
-  const { showToast, updateToast } = useToasts();
+  const { dismissToast, showToast, updateToast } = useToasts();
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
+  const [visibleTab, setVisibleTab] = useState<TabId>("codexhub");
+  const [mountedTabs, setMountedTabs] = useState<Record<TabId, boolean>>({
+    codexhub: true,
+    gateway: false,
+  });
+  const [gatewayVisited, setGatewayVisited] = useState(false);
+  const [, startUiTransition] = useTransition();
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
-    status: null,
-    settings: null,
-    providers: [],
-    gatewayStatus: null,
-    gatewayUsageSummary: null,
-    gatewayUsageEvents: [],
-    gatewayUsageStatus: null,
-    gatewayEvents: [],
-    usageError: null,
-    gatewayClients: [],
-    catalogModels: [],
+    status: runtimeCache<AppStatus>(),
+    settings: runtimeCache<Settings>(),
+    providers: runtimeCache<Provider[]>([]),
+    gatewayStatus: runtimeCache<GatewayStatus>(),
+    gatewayUsageSnapshot: runtimeCache<GatewayUsageSnapshot>(),
+    gatewayEvents: runtimeCache<GatewayEvent[]>([]),
+    gatewayClients: runtimeCache<GatewayClientInfo[]>([]),
+    catalogModels: runtimeCache<Model[]>([]),
+    modelMetadata: runtimeCache<Model[]>([]),
+    appVersion: runtimeCache<AppVersionInfo>(),
+    updateStatus: runtimeCache<AppUpdateStatus>(),
   });
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [updateBusy, setUpdateBusy] = useState<"check" | null>(null);
+  const [updateInstallStatus, setUpdateInstallStatus] = useState<AppUpdateInstallStatus | null>(null);
+  const [updateInstallSource, setUpdateInstallSource] = useState<"settings" | "toast" | null>(null);
   const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() => defaultUsageWindow());
-  const gatewayClientLoadSeq = useRef(0);
+  const runtimeInflight = useRef<Partial<Record<RuntimeCacheKey, Promise<unknown>>>>({});
+  const runtimeRef = useRef<RuntimeSnapshot | null>(null);
   const startupUpdateCheckStarted = useRef(false);
+  const updateAvailableToastId = useRef<string | null>(null);
+  const updateInstallToastId = useRef<string | null>(null);
+  runtimeRef.current = runtime;
+  const settingsLoaded = Boolean(runtime.settings.data);
+
+  const runCachedRequest = useCallback(async <T,>(
+    key: RuntimeCacheKey,
+    loader: () => Promise<T>,
+  options?: RuntimeCacheOptions<T>,
+  ): Promise<T> => {
+    const existing = runtimeInflight.current[key] as Promise<T> | undefined;
+    if (existing && !options?.force) {
+      return existing;
+    }
+    const cached = runtimeRef.current?.[key] as RuntimeCache<T> | undefined;
+    const staleMs = options?.staleMs ?? 0;
+    if (
+      !options?.force &&
+      staleMs > 0 &&
+      cached?.data !== null &&
+      cached?.data !== undefined &&
+      cached.updatedAt !== null &&
+      Date.now() - cached.updatedAt < staleMs
+    ) {
+      return cached.data;
+    }
+
+    if (!options?.quiet) {
+      startUiTransition(() => {
+        setRuntime((current) => setCacheLoading(current, key));
+      });
+    }
+
+    let request: Promise<T>;
+    request = loader()
+      .then((data) => {
+        startUiTransition(() => {
+          setRuntime((current) =>
+            options?.apply ? options.apply(current, data) : setCacheData(current, key, data),
+          );
+        });
+        return data;
+      })
+      .catch((err) => {
+        const message = messageFromError(err);
+        startUiTransition(() => {
+          setRuntime((current) => setCacheError(current, key, message));
+        });
+        if (!options?.quiet) {
+          setBanner(message);
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (runtimeInflight.current[key] === request) {
+          delete runtimeInflight.current[key];
+        }
+      });
+
+    runtimeInflight.current[key] = request;
+    return request;
+  }, [startUiTransition]);
+
+  const setRuntimeCacheData = useCallback(<T,>(key: RuntimeCacheKey, data: T) => {
+    startUiTransition(() => {
+      setRuntime((current) => setCacheData(current, key, data));
+    });
+  }, [startUiTransition]);
+
+  const refreshStatus = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) =>
+      runCachedRequest<AppStatus>("status", () => api.getStatus(), options),
+    [runCachedRequest],
+  );
+
+  const refreshGatewayStatus = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) =>
+      runCachedRequest<GatewayStatus>("gatewayStatus", () => api.gatewayStatus(), options),
+    [runCachedRequest],
+  );
+
+  const refreshSettings = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) =>
+      runCachedRequest<Settings>("settings", () => api.getSettings(), options),
+    [runCachedRequest],
+  );
+
+  const refreshProviders = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) =>
+      runCachedRequest<Provider[]>("providers", () => api.getProviders(), options),
+    [runCachedRequest],
+  );
+
+  const refreshCatalogModels = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) =>
+      runCachedRequest<Model[]>("catalogModels", () => api.listModels(), options),
+    [runCachedRequest],
+  );
+
+  const refreshModelMetadata = useCallback(
+    (options?: { force?: boolean; quiet?: boolean }) =>
+      runCachedRequest<Model[]>("modelMetadata", () => api.listModelMetadata(), {
+        quiet: true,
+        ...options,
+      }),
+    [runCachedRequest],
+  );
 
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
-    const requestSeq = ++gatewayClientLoadSeq.current;
     const includeClientVersions = Boolean(options?.includeClientVersions);
+    await runCachedRequest<GatewayClientInfo[]>(
+      "gatewayClients",
+      async () => {
+        const clients = await api.listGatewayClients(includeClientVersions);
+        const cachedClients = applyGatewayClientVersionCache(clients);
+        return includeClientVersions
+          ? cachedClients.map((client) => ({
+              ...client,
+              versions_checked: Boolean(client.versions_checked ?? (client.installed && client.id !== "generic")),
+            }))
+          : cachedClients;
+      },
+      {
+        force: options?.force,
+        staleMs: options?.staleMs,
+        quiet: true,
+        apply: (current, clients) =>
+          setCacheData(
+            current,
+            "gatewayClients",
+            mergeGatewayClients(current.gatewayClients.data ?? [], clients),
+          ),
+      },
+    );
+  }, [runCachedRequest]);
+
+  const refreshGatewayTelemetry = useCallback(async (options?: { force?: boolean }) => {
+    await Promise.allSettled([
+      runCachedRequest<GatewayUsageSnapshot>(
+        "gatewayUsageSnapshot",
+        () => api.gatewayUsageSnapshot(usageWindow),
+        { force: options?.force, quiet: true, staleMs: 4000 },
+      ),
+      runCachedRequest<GatewayEvent[]>(
+        "gatewayEvents",
+        () => api.gatewayRecentEvents(80),
+        { force: options?.force, quiet: true, staleMs: 4000 },
+      ),
+    ]);
+  }, [runCachedRequest, usageWindow]);
+
+  const refreshCoreRuntime = useCallback(async (options?: { force?: boolean }) => {
     try {
-      const clients = await api.listGatewayClients(includeClientVersions);
-      const cachedClients = applyGatewayClientVersionCache(clients);
-      const normalizedClients = includeClientVersions
-        ? cachedClients.map((client) => ({
-            ...client,
-            versions_checked: Boolean(client.versions_checked ?? (client.installed && client.id !== "generic")),
-          }))
-        : cachedClients;
-      setRuntime((current) => {
-        if (requestSeq !== gatewayClientLoadSeq.current) {
-          return current;
-        }
-        return {
-          ...current,
-          gatewayClients: mergeGatewayClients(current.gatewayClients, normalizedClients),
-        };
-      });
-    } catch (err) {
-      if (requestSeq !== gatewayClientLoadSeq.current) {
-        return;
-      }
-      const message = messageFromError(err);
-      setBanner(message);
-      throw err;
-    }
-  }, []);
-
-  const loadRuntime = useCallback(async () => {
-    try {
-      const [
-        statusResult,
-        settingsResult,
-        providersResult,
-        gatewayResult,
-        catalogResult,
-        usageSnapshotResult,
-        gatewayEventsResult,
-      ] =
-        await Promise.allSettled([
-          api.getStatus(),
-          api.getSettings(),
-          api.getProviders(),
-          api.gatewayStatus(),
-          api.listModels(),
-          api.gatewayUsageSnapshot(usageWindow),
-          api.gatewayRecentEvents(80),
-        ]);
-
-      setRuntime((current) => ({
-        ...current,
-        status: statusResult.status === "fulfilled" ? statusResult.value : current.status,
-        settings: settingsResult.status === "fulfilled" ? settingsResult.value : current.settings,
-        providers: providersResult.status === "fulfilled" ? providersResult.value : current.providers,
-        gatewayStatus: gatewayResult.status === "fulfilled" ? gatewayResult.value : current.gatewayStatus,
-        catalogModels: catalogResult.status === "fulfilled" ? catalogResult.value : current.catalogModels,
-        gatewayUsageSummary:
-          usageSnapshotResult.status === "fulfilled"
-            ? usageSnapshotResult.value.summary
-            : current.gatewayUsageSummary,
-        gatewayUsageEvents:
-          usageSnapshotResult.status === "fulfilled"
-            ? usageSnapshotResult.value.events
-            : current.gatewayUsageEvents,
-        gatewayUsageStatus:
-          usageSnapshotResult.status === "fulfilled"
-            ? usageSnapshotResult.value.telemetry_status
-            : current.gatewayUsageStatus,
-        gatewayEvents:
-          gatewayEventsResult.status === "fulfilled"
-            ? gatewayEventsResult.value
-            : current.gatewayEvents,
-        usageError:
-          usageSnapshotResult.status === "fulfilled"
-            ? null
-            : messageFromError(usageSnapshotResult.reason),
-      }));
-
-      const rejected = [
-        statusResult,
-        settingsResult,
-        providersResult,
-        gatewayResult,
-        catalogResult,
-      ].find((result) => result.status === "rejected");
-      if (rejected?.status === "rejected") {
-        setBanner(messageFromError(rejected.reason));
-      }
-    } catch (err) {
-      const message = messageFromError(err);
-      setBanner(message);
+      await Promise.allSettled([
+        refreshStatus({ force: options?.force }),
+        refreshSettings({ force: options?.force }),
+        refreshProviders({ force: options?.force }),
+        refreshGatewayStatus({ force: options?.force }),
+        refreshCatalogModels({ force: options?.force }),
+        refreshModelMetadata({ force: options?.force, quiet: true }),
+      ]);
     } finally {
       setBusy((current) => (current === "load" ? null : current));
     }
-  }, [usageWindow]);
+  }, [
+    refreshCatalogModels,
+    refreshGatewayStatus,
+    refreshModelMetadata,
+    refreshProviders,
+    refreshSettings,
+    refreshStatus,
+  ]);
 
-  const installAppUpdate = useCallback(async () => {
-    await runAppUpdateInstall({
-      installAppUpdate: () => api.installAppUpdate(),
-      showToast,
-      t,
-      updateToast,
-    });
-  }, [showToast, t, updateToast]);
+  const refreshRuntimeStatus = useCallback(async (options?: { force?: boolean }) => {
+    await Promise.allSettled([
+      refreshStatus({ force: options?.force, quiet: true }),
+      refreshGatewayStatus({ force: options?.force, quiet: true }),
+    ]);
+  }, [refreshGatewayStatus, refreshStatus]);
 
-  const runStartupUpdateCheck = useCallback(async () => {
+  const refreshProviderRuntime = useCallback(async () => {
+    const [gatewayResult] = await Promise.allSettled([
+      refreshGatewayStatus({ force: true, quiet: true }),
+      refreshCatalogModels({ force: true, quiet: true }),
+      refreshModelMetadata({ force: true, quiet: true }),
+      loadGatewayClients({ force: true }),
+    ]);
+    return gatewayResult.status === "fulfilled" ? gatewayResult.value : null;
+  }, [loadGatewayClients, refreshCatalogModels, refreshGatewayStatus, refreshModelMetadata]);
+
+  const loadAppVersion = useCallback(async () => {
     try {
-      const status = await api.checkAppUpdate();
+      return await runCachedRequest<AppVersionInfo>(
+        "appVersion",
+        async () => {
+          const info = await api.getAppVersion();
+          if (!info) {
+            throw new Error(t("settings.desktopUpdatesUnavailable"));
+          }
+          return info;
+        },
+        { quiet: true },
+      );
+    } catch {
+      return null;
+    }
+  }, [runCachedRequest, t]);
+
+  const loadAppUpdateStatus = useCallback(async () => {
+    return runCachedRequest<AppUpdateStatus>(
+      "updateStatus",
+      async () => {
+        const status = await api.checkAppUpdate();
+        if (!status) {
+          throw new Error(t("settings.desktopUpdatesUnavailable"));
+        }
+        return status;
+      },
+      {
+        force: true,
+        quiet: true,
+        apply: (current, nextStatus) =>
+          setCacheData(
+            setCacheData(current, "appVersion", { current_version: nextStatus.current_version }),
+            "updateStatus",
+            nextStatus,
+          ),
+      },
+    );
+  }, [runCachedRequest, t]);
+
+  const updateInstallToast = useCallback(
+    (status: AppUpdateInstallStatus, source: "settings" | "toast" | null = updateInstallSource) => {
+      if (source !== "toast" || !updateInstallToastId.current) {
+        return;
+      }
+      updateToast(updateInstallToastId.current, {
+        action: null,
+        text: updateInstallToastText(status, t),
+        tone: status.phase === "failed" ? "error" : isUpdateInstallActive(status) ? "loading" : "success",
+      });
+      if (!isUpdateInstallActive(status)) {
+        updateInstallToastId.current = null;
+      }
+    },
+    [t, updateInstallSource, updateToast],
+  );
+
+  const startAppUpdateInstall = useCallback(
+    async (source: "settings" | "toast" = "settings") => {
+      const toastId = updateAvailableToastId.current;
+      if (toastId) {
+        dismissToast(toastId);
+        updateAvailableToastId.current = null;
+      }
+
+      setUpdateInstallSource(source);
+      if (source === "toast") {
+        updateInstallToastId.current = showToast({
+          dedupeKey: "app-update-install",
+          text: t("settings.downloadingUpdate"),
+          timeoutMs: null,
+          tone: "loading",
+        });
+      }
+
+      try {
+        const status = await api.startAppUpdateInstall();
+        setUpdateInstallStatus(status);
+        updateInstallToast(status, source);
+        if (source === "settings" && status.phase === "failed") {
+          showToast(t("settings.updateInstallFailed", { message: status.message }), "error");
+        }
+      } catch (err) {
+        const message = messageFromError(err);
+        const failedStatus = failedUpdateInstallStatus(
+          updateInstallStatus,
+          runtimeRef.current?.appVersion.data?.current_version ?? "",
+          runtimeRef.current?.updateStatus.data?.latest_version ?? null,
+          message,
+        );
+        setUpdateInstallStatus(failedStatus);
+        updateInstallToast(failedStatus, source);
+        if (source === "settings") {
+          showToast(t("settings.updateInstallFailed", { message }), "error");
+        }
+      }
+    },
+    [dismissToast, showToast, t, updateInstallStatus, updateInstallToast],
+  );
+
+  const checkForUpdates = useCallback(async () => {
+    setUpdateBusy("check");
+    try {
+      const status = await loadAppUpdateStatus();
+      showToast({
+        text: status.available && status.latest_version
+          ? t("settings.updateAvailable", { version: status.latest_version })
+          : t("settings.noUpdatesAvailable"),
+        tone: status.available ? "info" : "success",
+      });
+      return status;
+    } catch (err) {
+      showToast({
+        text: t("settings.updateCheckFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+      return null;
+    } finally {
+      setUpdateBusy(null);
+    }
+  }, [loadAppUpdateStatus, showToast, t]);
+
+  const runAutomaticUpdateCheck = useCallback(async () => {
+    try {
+      const status = await loadAppUpdateStatus();
       if (!status?.available || !status.latest_version) {
         return;
       }
-      showToast({
+      updateAvailableToastId.current = showToast({
+        dedupeKey: "app-update-available",
         action: {
-          label: t("settings.installUpdate"),
-          onClick: () => void installAppUpdate(),
+          label: t("settings.update"),
+          onClick: () => void startAppUpdateInstall("toast"),
         },
         text: t("settings.updateAvailable", { version: status.latest_version }),
         timeoutMs: null,
         tone: "info",
       });
     } catch {
-      // Startup update checks are best-effort and should not create noisy banners.
+      // Automatic update checks are best-effort and should not create noisy banners.
     }
-  }, [installAppUpdate, showToast, t]);
+  }, [loadAppUpdateStatus, showToast, startAppUpdateInstall, t]);
 
   const updateUsageWindow = useCallback((nextWindow: UsageQueryWindow) => {
     setUsageWindow((current) => {
@@ -366,51 +663,163 @@ export default function App() {
     });
   }, []);
 
+  const selectTab = useCallback((tabId: TabId) => {
+    setActiveTab(tabId);
+    setVisibleTab(tabId);
+    setMountedTabs((current) => (current[tabId] ? current : { ...current, [tabId]: true }));
+    if (tabId === "gateway") {
+      setGatewayVisited(true);
+    }
+  }, []);
+
   useEffect(() => {
-    void loadRuntime();
+    void refreshCoreRuntime();
     void loadGatewayClients();
     const versionProbeTimer = window.setTimeout(
       () => void loadGatewayClients({ includeClientVersions: true }),
       BACKGROUND_VERSION_PROBE_DELAY_MS,
     );
-    const timer = window.setInterval(() => void loadRuntime(), 5000);
+    const timer = window.setInterval(() => void refreshRuntimeStatus(), 5000);
     const clientTimer = window.setInterval(() => void loadGatewayClients(), 12 * 60 * 60 * 1000);
     return () => {
       window.clearTimeout(versionProbeTimer);
       window.clearInterval(timer);
       window.clearInterval(clientTimer);
     };
-  }, [loadGatewayClients, loadRuntime]);
+  }, [loadGatewayClients, refreshCoreRuntime, refreshRuntimeStatus]);
 
   useEffect(() => {
-    if (startupUpdateCheckStarted.current || !runtime.settings) {
+    const timer = window.setTimeout(() => {
+      setMountedTabs((current) => (current.gateway ? current : { ...current, gateway: true }));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (startupUpdateCheckStarted.current || !settingsLoaded) {
       return;
     }
     startupUpdateCheckStarted.current = true;
     const timer = window.setTimeout(
-      () => void runStartupUpdateCheck(),
+      () => void runAutomaticUpdateCheck(),
       STARTUP_UPDATE_CHECK_DELAY_MS,
     );
+    const interval = window.setInterval(() => void runAutomaticUpdateCheck(), APP_UPDATE_CHECK_INTERVAL_MS);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(interval);
+    };
+  }, [runAutomaticUpdateCheck, settingsLoaded]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      try {
+        const completion = await api.consumeAppUpdateCompletion();
+        if (!completion?.completed) {
+          return;
+        }
+        showToast(t("settings.updateInstalled", { version: completion.current_version }), "success");
+        setRuntime((current) =>
+          setCacheData(current, "appVersion", { current_version: completion.current_version }),
+        );
+      } catch {
+        // Completion verification is best-effort; pending failures should not interrupt startup.
+      }
+    }, 0);
     return () => window.clearTimeout(timer);
-  }, [runStartupUpdateCheck, runtime.settings]);
+  }, [showToast, t]);
 
   useEffect(() => {
-    writeGatewayClientVersionCache(runtime.gatewayClients);
-  }, [runtime.gatewayClients]);
-
-  const visionModels = visionModelOptions(runtime.catalogModels);
-
-  useEffect(() => {
-    if (runtime.settings?.locale) {
-      void changeAppLocale(runtime.settings.locale);
+    if (!isUpdateInstallActive(updateInstallStatus)) {
+      return;
     }
-  }, [runtime.settings?.locale]);
 
-  async function runRuntimeAction(
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const status = await api.getAppUpdateInstallStatus();
+        if (cancelled) {
+          return;
+        }
+        setUpdateInstallStatus(status);
+        updateInstallToast(status);
+        if (updateInstallSource === "settings" && status.phase === "failed") {
+          showToast(t("settings.updateInstallFailed", { message: status.message }), "error");
+        }
+      } catch (err) {
+        if (cancelled || updateInstallStatus?.phase === "installing" || updateInstallStatus?.phase === "restarting") {
+          return;
+        }
+        const message = messageFromError(err);
+        const failedStatus = failedUpdateInstallStatus(
+          updateInstallStatus,
+          runtimeRef.current?.appVersion.data?.current_version ?? "",
+          runtimeRef.current?.updateStatus.data?.latest_version ?? null,
+          message,
+        );
+        setUpdateInstallStatus(failedStatus);
+        updateInstallToast(failedStatus);
+        if (updateInstallSource === "settings") {
+          showToast(t("settings.updateInstallFailed", { message }), "error");
+        }
+      }
+    }, UPDATE_INSTALL_STATUS_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [showToast, t, updateInstallSource, updateInstallStatus, updateInstallToast]);
+
+  useEffect(() => {
+    if (!settingsOpen || runtime.appVersion.data || runtime.appVersion.loading) {
+      return;
+    }
+    const timer = window.setTimeout(() => void loadAppVersion(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadAppVersion, runtime.appVersion.data, runtime.appVersion.loading, settingsOpen]);
+
+  useEffect(() => {
+    if (!gatewayVisited || visibleTab !== "gateway") {
+      return;
+    }
+    const refreshTimer = window.setTimeout(() => {
+      void refreshGatewayTelemetry();
+      void loadGatewayClients({ staleMs: 30_000 });
+    }, 150);
+    const timer = window.setInterval(() => void refreshGatewayTelemetry(), 5000);
+    return () => {
+      window.clearTimeout(refreshTimer);
+      window.clearInterval(timer);
+    };
+  }, [gatewayVisited, loadGatewayClients, refreshGatewayTelemetry, visibleTab]);
+
+  useEffect(() => {
+    writeGatewayClientVersionCache(runtime.gatewayClients.data ?? []);
+  }, [runtime.gatewayClients.data]);
+
+  const appStatus = runtime.status.data;
+  const settings = runtime.settings.data;
+  const providers = runtime.providers.data ?? [];
+  const gatewayStatus = runtime.gatewayStatus.data;
+  const gatewayUsageSnapshot = runtime.gatewayUsageSnapshot.data;
+  const gatewayEvents = runtime.gatewayEvents.data ?? [];
+  const gatewayClients = runtime.gatewayClients.data ?? [];
+  const catalogModels = runtime.catalogModels.data ?? [];
+  const modelMetadata = runtime.modelMetadata.data ?? [];
+  const visionModels = useMemo(() => visionModelOptions(catalogModels), [catalogModels]);
+
+  useEffect(() => {
+    if (settings?.locale) {
+      void changeAppLocale(settings.locale);
+    }
+  }, [settings?.locale]);
+
+  const runRuntimeAction = useCallback(async (
     label: string,
     action: () => Promise<AppStatus>,
     options?: { toast?: boolean },
-  ) {
+  ) => {
     setBusy(label);
     const toastId =
       options?.toast === false
@@ -418,7 +827,7 @@ export default function App() {
         : showToast(runtimeActionLoadingMessage(label, t), "loading");
     try {
       const status = await action();
-      setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
+      setRuntimeCacheData("status", status);
       setBanner(status.message);
       if (toastId) {
         updateToast(toastId, {
@@ -427,7 +836,7 @@ export default function App() {
           tone: "success",
         });
       }
-      await loadRuntime();
+      await refreshRuntimeStatus({ force: true });
     } catch (err) {
       const message = messageFromError(err);
       setBanner(message);
@@ -444,31 +853,31 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }
+  }, [refreshRuntimeStatus, setRuntimeCacheData, showToast, t, updateToast]);
 
-  async function saveSettings(next: Settings) {
+  const saveSettings = useCallback(async (next: Settings) => {
     setBusy("settings");
     try {
-      const previousUnified = runtime.settings?.unified_codex_history ?? true;
+      const previousUnified = settings?.unified_codex_history ?? true;
       const nextUnified = next.unified_codex_history ?? true;
-      const currentMode = runtime.status?.mode;
+      const currentMode = appStatus?.mode;
       const shouldRestartGateway = Boolean(
-        runtime.status?.proxy_running && gatewayRuntimeSettingsChanged(runtime.settings, next),
+        appStatus?.proxy_running && gatewayRuntimeSettingsChanged(settings, next),
       );
-      if (runtime.settings && next.auto_start_proxy !== runtime.settings.auto_start_proxy) {
-        if (next.auto_start_proxy) {
+      if (settings && next.auto_start_software !== settings.auto_start_software) {
+        if (next.auto_start_software) {
           await api.setAutostart(true);
         } else {
           await api.removeAutostart();
         }
       }
-      const settings = await api.saveSettings(next);
-      setRuntime((currentRuntime) => ({ ...currentRuntime, settings }));
+      const savedSettings = await api.saveSettings(next);
+      setRuntimeCacheData("settings", savedSettings);
       let historyMessage: string | null = null;
       if (previousUnified !== nextUnified) {
         if (currentMode === "official") {
           const status = await api.switchMode("official", false);
-          setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
+          setRuntimeCacheData("status", status);
         }
         if (nextUnified) {
           historyMessage = await api.migrateOfficialHistoryToUnified();
@@ -479,11 +888,11 @@ export default function App() {
       let saveMessage = historyMessage ?? t("settings.settingsSaved");
       if (shouldRestartGateway) {
         const status = await api.restartProxy();
-        setRuntime((currentRuntime) => ({ ...currentRuntime, status }));
+        setRuntimeCacheData("status", status);
         saveMessage = t("gateway.gatewaySettingsSavedRestarted");
       }
       setBanner(null);
-      await loadRuntime();
+      await refreshRuntimeStatus({ force: true });
       return saveMessage;
     } catch (err) {
       const message = messageFromError(err);
@@ -492,9 +901,9 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }
+  }, [appStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
 
-  async function syncHistory(targetProvider: string) {
+  const syncHistory = useCallback(async (targetProvider: string) => {
     setBusy("history");
     try {
       const message = await api.syncHistory(targetProvider);
@@ -507,18 +916,50 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }
+  }, []);
+
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const startProxy = useCallback(() => runRuntimeAction("start", api.startProxy), [runRuntimeAction]);
+  const stopProxy = useCallback(() => runRuntimeAction("stop", api.stopProxy), [runRuntimeAction]);
+  const startProxyQuiet = useCallback(
+    () => runRuntimeAction("start", api.startProxy, { toast: false }),
+    [runRuntimeAction],
+  );
+  const restartProxyQuiet = useCallback(
+    () => runRuntimeAction("restart", api.restartProxy, { toast: false }),
+    [runRuntimeAction],
+  );
+  const stopProxyQuiet = useCallback(
+    () => runRuntimeAction("stop", api.stopProxy, { toast: false }),
+    [runRuntimeAction],
+  );
+  const updateProvidersCache = useCallback(
+    (nextProviders: Provider[]) => setRuntimeCacheData("providers", nextProviders),
+    [setRuntimeCacheData],
+  );
+  const updateSettingsCache = useCallback(
+    (nextSettings: Settings) => setRuntimeCacheData("settings", nextSettings),
+    [setRuntimeCacheData],
+  );
+  const updateStatusCache = useCallback(
+    (status: AppStatus) => setRuntimeCacheData("status", status),
+    [setRuntimeCacheData],
+  );
+  const applyGatewaySettings = useCallback(async (nextSettings: Settings) => {
+    await saveSettings(nextSettings);
+  }, [saveSettings]);
 
   return (
     <div className="grid h-screen min-h-[720px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
       <RuntimeBar
         busy={busy}
         message={banner}
-        settings={runtime.settings}
-        status={runtime.status}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onStart={() => void runRuntimeAction("start", api.startProxy)}
-        onStop={() => void runRuntimeAction("stop", api.stopProxy)}
+        settings={settings}
+        status={appStatus}
+        onOpenSettings={openSettings}
+        onStart={startProxy}
+        onStop={stopProxy}
       />
 
       <nav className="flex min-h-[45px] items-center gap-1 bg-surface px-4 shadow-hairline">
@@ -530,7 +971,7 @@ export default function App() {
               "focus-ring relative h-11 px-3 text-sm font-semibold",
               activeTab === tab.id ? "text-ink" : "text-slate-500 hover:text-ink",
             )}
-            onClick={() => setActiveTab(tab.id as TabId)}
+            onClick={() => selectTab(tab.id as TabId)}
           >
             {t(`common.${tab.id === "codexhub" ? "codexHub" : "gateway"}`)}
             {activeTab === tab.id && (
@@ -543,53 +984,135 @@ export default function App() {
         </span>
       </nav>
 
-      <div className={cx("min-h-0 min-w-0 max-w-full overflow-y-auto p-4", activeTab === "gateway" ? "overflow-x-hidden" : "overflow-x-auto")}>
-        {activeTab === "codexhub" ? (
-          <ProvidersPage
-            gatewayStatus={runtime.gatewayStatus}
-            onGatewayChanged={async () => {
-              await loadRuntime();
-              await loadGatewayClients();
-            }}
-            onStartProxy={() => runRuntimeAction("start", api.startProxy, { toast: false })}
-          />
-        ) : (
-          <GatewayPage
-            settings={runtime.settings}
-            providers={runtime.providers}
-            status={runtime.gatewayStatus}
-            usageSummary={runtime.gatewayUsageSummary}
-            usageEvents={runtime.gatewayUsageEvents}
-            usageStatus={runtime.gatewayUsageStatus}
-            usageError={runtime.usageError}
-            recentEvents={runtime.gatewayEvents}
-            clientInfos={runtime.gatewayClients}
-            busy={busy}
-            clients={contract.gatewayClients as GatewayClientContract[]}
-            onApplySettings={async (settings) => {
-              await saveSettings(settings);
-            }}
-            onRefreshClients={loadGatewayClients}
-            onRestartProxy={() => runRuntimeAction("restart", api.restartProxy, { toast: false })}
-            onStartProxy={() => runRuntimeAction("start", api.startProxy, { toast: false })}
-            onStopProxy={() => runRuntimeAction("stop", api.stopProxy, { toast: false })}
-            onUsageWindowChange={updateUsageWindow}
-          />
+      <div className="relative min-h-0 min-w-0 max-w-full overflow-hidden">
+        {mountedTabs.codexhub && (
+          <section
+            aria-hidden={visibleTab !== "codexhub"}
+            className={tabPaneClass(visibleTab === "codexhub")}
+            data-tab-pane="codexhub"
+          >
+            <div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">
+              <ProvidersPage
+                appStatus={appStatus}
+                catalogModels={catalogModels}
+                gatewayStatus={gatewayStatus}
+                modelMetadata={modelMetadata}
+                providers={providers}
+                settings={settings}
+                onGatewayChanged={refreshProviderRuntime}
+                onProvidersChanged={updateProvidersCache}
+                onSettingsChanged={updateSettingsCache}
+                onStatusChanged={updateStatusCache}
+                onStartProxy={startProxyQuiet}
+              />
+            </div>
+          </section>
+        )}
+        {mountedTabs.gateway && (
+          <section
+            aria-hidden={visibleTab !== "gateway"}
+            className={tabPaneClass(visibleTab === "gateway")}
+            data-tab-pane="gateway"
+          >
+            <div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+              <GatewayPage
+                settings={settings}
+                providers={providers}
+                status={gatewayStatus}
+                usageSummary={gatewayUsageSnapshot?.summary ?? null}
+                usageEvents={gatewayUsageSnapshot?.events ?? []}
+                usageStatus={gatewayUsageSnapshot?.telemetry_status ?? null}
+                usageError={runtime.gatewayUsageSnapshot.error}
+                recentEvents={gatewayEvents}
+                clientInfos={gatewayClients}
+                busy={busy}
+                clients={contract.gatewayClients as GatewayClientContract[]}
+                onApplySettings={applyGatewaySettings}
+                onRefreshClients={loadGatewayClients}
+                onRestartProxy={restartProxyQuiet}
+                onStartProxy={startProxyQuiet}
+                onStopProxy={stopProxyQuiet}
+                onUsageWindowChange={updateUsageWindow}
+              />
+            </div>
+          </section>
         )}
       </div>
 
       <SettingsDrawer
         busy={busy}
+        appVersion={runtime.appVersion.data}
         open={settingsOpen}
-        providers={runtime.providers}
-        settings={runtime.settings}
+        providers={providers}
+        settings={settings}
+        updateInstallStatus={updateInstallStatus}
+        updateBusy={updateBusy}
+        updateStatus={runtime.updateStatus.data}
         visionModels={visionModels}
-        onClose={() => setSettingsOpen(false)}
+        onCheckUpdate={checkForUpdates}
+        onClose={closeSettings}
+        onInstallUpdate={() => startAppUpdateInstall("settings")}
         onSave={saveSettings}
         onSyncHistory={syncHistory}
       />
     </div>
   );
+}
+
+function isUpdateInstallActive(status: AppUpdateInstallStatus | null | undefined) {
+  return Boolean(
+    status &&
+      (status.phase === "checking" ||
+        status.phase === "downloading" ||
+        status.phase === "installing" ||
+        status.phase === "restarting"),
+  );
+}
+
+function updateInstallProgressPercent(status: AppUpdateInstallStatus) {
+  if (status.phase !== "downloading" || !status.total_bytes || status.total_bytes <= 0) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round((status.downloaded_bytes / status.total_bytes) * 100)));
+}
+
+function updateInstallToastText(
+  status: AppUpdateInstallStatus,
+  t: (key: string, options?: Record<string, unknown>) => string,
+) {
+  if (status.phase === "checking") {
+    return t("settings.checkingUpdates");
+  }
+  if (status.phase === "downloading") {
+    const percent = updateInstallProgressPercent(status);
+    return percent === null
+      ? t("settings.downloadingUpdate")
+      : t("settings.downloadingUpdateProgress", { percent });
+  }
+  if (status.phase === "installing" || status.phase === "restarting") {
+    return t("settings.installingUpdateRestarting");
+  }
+  if (status.phase === "failed") {
+    return t("settings.updateInstallFailed", { message: status.message });
+  }
+  return status.target_version ? t("settings.installingUpdateRestarting") : t("settings.updateInstallUnavailable");
+}
+
+function failedUpdateInstallStatus(
+  previous: AppUpdateInstallStatus | null,
+  currentVersion: string,
+  targetVersion: string | null,
+  message: string,
+): AppUpdateInstallStatus {
+  return {
+    phase: "failed",
+    current_version: previous?.current_version || currentVersion,
+    target_version: previous?.target_version ?? targetVersion,
+    downloaded_bytes: previous?.downloaded_bytes ?? 0,
+    total_bytes: previous?.total_bytes ?? null,
+    message,
+    updated_at: new Date().toISOString(),
+  };
 }
 
 function runtimeActionLoadingMessage(label: string, t: (key: string) => string) {

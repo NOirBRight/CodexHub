@@ -1,9 +1,9 @@
 import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, RefreshCcw, Save, Server, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
-import { useToasts } from "../components/PageToast";
+import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
@@ -48,7 +48,11 @@ interface GatewayPageProps {
   onUsageWindowChange: (window: UsageQueryWindow) => void;
 }
 
-export function GatewayPage({
+function isActionableDiagnostic(item: GatewayStatus["diagnostics"][number]) {
+  return item.level !== "ok" && item.level !== "status" && item.category !== "proxy_state";
+}
+
+function GatewayPageImpl({
   busy,
   clients,
   onApplySettings,
@@ -80,6 +84,7 @@ export function GatewayPage({
   const [autoRetryBusy, setAutoRetryBusy] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
+  const running = status?.proxy_running ?? false;
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
@@ -101,6 +106,9 @@ export function GatewayPage({
       lastUsageErrorToast.current = null;
       return;
     }
+    if (!running && isBackendDisconnectedMessage(usageError)) {
+      return;
+    }
     const text = isBackendDisconnectedMessage(usageError)
       ? t("gateway.backendNotConnected")
       : t("gateway.usageTelemetryDelayed", { message: usageError });
@@ -113,7 +121,7 @@ export function GatewayPage({
       return;
     }
     showToast(text, "error");
-  }, [usageError, showToast, t]);
+  }, [running, usageError, showToast, t]);
 
   const endpoints = useMemo(
     () =>
@@ -162,6 +170,7 @@ export function GatewayPage({
   function showBackendDisconnectedToast() {
     let toastId = "";
     toastId = showToast({
+      dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY,
       text: t("gateway.backendNotConnected"),
       tone: "error",
       action: {
@@ -348,8 +357,7 @@ export function GatewayPage({
     }
   }
 
-  const running = status?.proxy_running ?? false;
-  const actionableDiagnostics = status?.diagnostics.filter((item) => item.level !== "ok") ?? [];
+  const actionableDiagnostics = status?.diagnostics.filter(isActionableDiagnostic) ?? [];
   const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 
@@ -608,6 +616,8 @@ export function GatewayPage({
     </main>
   );
 }
+
+export const GatewayPage = memo(GatewayPageImpl);
 
 interface RecoverySummary {
   activeCount: number;

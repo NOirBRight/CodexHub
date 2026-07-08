@@ -106,6 +106,30 @@ export interface AppUpdateInstallResult {
   message: string;
 }
 
+export type AppUpdateInstallPhase =
+  | "idle"
+  | "checking"
+  | "downloading"
+  | "installing"
+  | "restarting"
+  | "failed";
+
+export interface AppUpdateInstallStatus {
+  phase: AppUpdateInstallPhase;
+  current_version: string;
+  target_version?: string | null;
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  message: string;
+  updated_at: string;
+}
+
+export interface AppUpdateCompletionStatus {
+  completed: boolean;
+  current_version: string;
+  target_version: string;
+}
+
 export interface GatewayStatus {
   proxy_running: boolean;
   host: string;
@@ -369,7 +393,8 @@ export interface Settings {
   locale: "zh-CN" | "en-US";
   auto_sync_history: boolean;
   unified_codex_history: boolean;
-  auto_start_proxy: boolean;
+  auto_start_software: boolean;
+  auto_start_gateway: boolean;
   include_official_models: boolean;
   auto_sync_catalog: boolean;
   auto_sync_clients: boolean;

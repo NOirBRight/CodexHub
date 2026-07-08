@@ -2,32 +2,50 @@ import { Check, ChevronDown, Download, RefreshCcw, Save, X } from "lucide-react"
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
-import { runAppUpdateInstall } from "../lib/appUpdates";
 import { cx } from "../lib/format";
-import { api, messageFromError } from "../lib/tauri";
-import type { AppUpdateStatus, AppVersionInfo, Model, Provider, Settings } from "../lib/types";
+import { messageFromError } from "../lib/tauri";
+import type {
+  AppUpdateInstallStatus,
+  AppUpdateStatus,
+  AppVersionInfo,
+  Model,
+  Provider,
+  Settings,
+} from "../lib/types";
 import { useToasts } from "./PageToast";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
 interface SettingsDrawerProps {
+  appVersion: AppVersionInfo | null;
   busy?: string | null;
   open: boolean;
   providers: Provider[];
   settings: Settings | null;
+  updateBusy: "check" | null;
+  updateInstallStatus: AppUpdateInstallStatus | null;
+  updateStatus: AppUpdateStatus | null;
   visionModels: Model[];
+  onCheckUpdate: () => Promise<AppUpdateStatus | null>;
   onClose: () => void;
+  onInstallUpdate: () => Promise<void>;
   onSave: (settings: Settings) => Promise<string | void>;
   onSyncHistory: (targetProvider: string) => Promise<string>;
 }
 
 export function SettingsDrawer({
+  appVersion,
   busy,
+  onCheckUpdate,
   onClose,
+  onInstallUpdate,
   onSave,
   onSyncHistory,
   open,
   providers,
   settings,
+  updateBusy,
+  updateInstallStatus,
+  updateStatus,
   visionModels,
 }: SettingsDrawerProps) {
   const { t } = useTranslation();
@@ -35,9 +53,6 @@ export function SettingsDrawer({
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
-  const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
-  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const hasUnsavedChanges = Boolean(settings && draft && settingsSaveComparable(settings) !== settingsSaveComparable(draft));
 
   useEffect(() => {
@@ -54,13 +69,6 @@ export function SettingsDrawer({
     if (open) {
       setHistoryBusy(false);
     }
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    void loadAppVersion();
   }, [open]);
 
   async function saveDraft(options?: { closeOnSuccess?: boolean }) {
@@ -168,63 +176,6 @@ export function SettingsDrawer({
     }
   }
 
-  async function loadAppVersion() {
-    try {
-      const info = await api.getAppVersion();
-      setVersionInfo(info);
-    } catch {
-      setVersionInfo(null);
-    }
-  }
-
-  async function checkForUpdates() {
-    const toastId = showToast(t("settings.checkingUpdates"), "loading");
-    setUpdateBusy("check");
-    try {
-      const status = await api.checkAppUpdate();
-      if (!status) {
-        updateToast(toastId, {
-          action: null,
-          text: t("settings.desktopUpdatesUnavailable"),
-          tone: "info",
-        });
-        return;
-      }
-      setVersionInfo({ current_version: status.current_version });
-      setUpdateStatus(status);
-      updateToast(toastId, {
-        action: null,
-        text: status.available && status.latest_version
-          ? t("settings.updateAvailable", { version: status.latest_version })
-          : t("settings.noUpdatesAvailable"),
-        tone: status.available ? "info" : "success",
-      });
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: t("settings.updateCheckFailed", { message: messageFromError(err) }),
-        tone: "error",
-      });
-    } finally {
-      setUpdateBusy(null);
-    }
-  }
-
-  async function installUpdate() {
-    if (!updateStatus?.available) {
-      showToast(t("settings.updateInstallUnavailable"), "info");
-      return;
-    }
-    await runAppUpdateInstall({
-      installAppUpdate: () => api.installAppUpdate(),
-      onSettled: () => setUpdateBusy(null),
-      onStart: () => setUpdateBusy("install"),
-      showToast,
-      t,
-      updateToast,
-    });
-  }
-
   function requestClose() {
     if (!hasUnsavedChanges) {
       onClose();
@@ -299,18 +250,15 @@ export function SettingsDrawer({
                     onChange={(value) => void changeLanguage(value)}
                   />
                 </div>
-                <VersionUpdateBlock
-                  busy={updateBusy}
-                  status={updateStatus}
-                  title={t("settings.updates")}
-                  versionInfo={versionInfo}
-                  onCheck={() => void checkForUpdates()}
-                  onInstall={() => void installUpdate()}
+                <Toggle
+                  checked={draft.auto_start_software}
+                  label={t("settings.autoStartSoftware")}
+                  onChange={(value) => setDraft({ ...draft, auto_start_software: value })}
                 />
                 <Toggle
-                  checked={draft.auto_start_proxy}
-                  label={t("settings.autoStartProxy")}
-                  onChange={(value) => setDraft({ ...draft, auto_start_proxy: value })}
+                  checked={draft.auto_start_gateway}
+                  label={t("settings.autoStartGateway")}
+                  onChange={(value) => setDraft({ ...draft, auto_start_gateway: value })}
                 />
                 <Toggle
                   checked={draft.include_official_models}
@@ -389,6 +337,18 @@ export function SettingsDrawer({
                 </div>
               </div>
             </section>
+
+            <section className="grid gap-3">
+              <h3 className="text-sm font-semibold text-ink">{t("settings.updates")}</h3>
+              <VersionUpdateBlock
+                busy={updateBusy}
+                installStatus={updateInstallStatus}
+                status={updateStatus}
+                versionInfo={appVersion}
+                onCheck={() => void onCheckUpdate()}
+                onInstall={() => void onInstallUpdate()}
+              />
+            </section>
           </div>
         )}
       </div>
@@ -453,76 +413,133 @@ function settingsSaveComparable(settings: Settings) {
 
 function VersionUpdateBlock({
   busy,
+  installStatus,
   onCheck,
   onInstall,
   status,
-  title,
   versionInfo,
 }: {
-  busy: "check" | "install" | null;
+  busy: "check" | null;
+  installStatus: AppUpdateInstallStatus | null;
   onCheck: () => void;
   onInstall: () => void;
   status: AppUpdateStatus | null;
-  title: string;
   versionInfo: AppVersionInfo | null;
 }) {
-  const { t } = useTranslation();
-  const currentVersion = status?.current_version ?? versionInfo?.current_version ?? t("common.unknown");
+  const { i18n, t } = useTranslation();
+  const rawCurrentVersion = status?.current_version ?? versionInfo?.current_version ?? null;
+  const currentVersion = rawCurrentVersion ? `v${rawCurrentVersion}` : t("common.unknown");
   const latestVersion = status?.latest_version ?? null;
+  const updateAvailable = Boolean(status?.available && latestVersion);
+  const releaseNotes = status?.notes?.trim() || t("settings.noReleaseNotes");
+  const releaseDate = formatUpdateDate(status?.date, i18n.language);
+  const installActive = isUpdateInstallActive(installStatus);
 
   return (
-    <div className="grid gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
-      <div className="flex min-w-0 items-center justify-between gap-3">
+    <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+      <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
         <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
-          {title}
+          {t("settings.currentVersion")}
         </span>
-        <span className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-600">
-          v{currentVersion}
+        <span
+          className={cx(
+            "shrink-0 rounded-full bg-panel px-2 py-0.5 text-[11px] font-semibold text-slate-600",
+            rawCurrentVersion ? "font-mono tabular-nums" : "",
+          )}
+        >
+          {currentVersion}
         </span>
-      </div>
-      <div className="grid min-w-0 gap-1">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <span className="min-w-0 truncate text-sm text-slate-700">{t("settings.currentVersion")}</span>
-          <span className="shrink-0 font-mono text-xs font-semibold text-ink">{currentVersion}</span>
-        </div>
-        {status?.available && latestVersion && (
-          <p className="min-w-0 text-xs leading-5 text-action">
-            {t("settings.updateAvailable", { version: latestVersion })}
-          </p>
-        )}
-        {status && !status.available && (
-          <p className="min-w-0 text-xs leading-5 text-emerald-700">{t("settings.noUpdatesAvailable")}</p>
-        )}
-        {status?.notes && (
-          <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-500">
-            {status.notes}
-          </p>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className="mini-button"
-          disabled={Boolean(busy)}
+          className="focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:text-ink hover:shadow-raised active:scale-[0.96] disabled:text-slate-400"
+          aria-label={t("settings.checkForUpdates")}
+          title={t("settings.checkForUpdates")}
+          disabled={Boolean(busy) || installActive}
           onClick={onCheck}
         >
           <RefreshCcw size={14} className={busy === "check" ? "animate-spin" : ""} />
-          {t("settings.checkForUpdates")}
         </button>
-        {status?.available && (
+      </div>
+      {updateAvailable && (
+        <div className="grid min-w-0 gap-3 rounded-inner bg-surface px-3 py-2 shadow-control">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+            <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+              {t("settings.latestVersion")}
+            </span>
+            <span className="shrink-0 rounded-full bg-action/10 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-action">
+              {`v${latestVersion}`}
+            </span>
+          </div>
+          {releaseDate && (
+            <p className="min-w-0 truncate text-[11px] leading-4 text-slate-400">{releaseDate}</p>
+          )}
+          <div className="grid min-w-0 gap-1">
+            <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+              {t("settings.releaseNotes")}
+            </span>
+            <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">
+              {releaseNotes}
+            </p>
+          </div>
           <button
             type="button"
-            className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
-            disabled={Boolean(busy)}
+            className="focus-ring inline-flex h-9 min-w-0 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+            disabled={Boolean(busy) || installActive}
             onClick={onInstall}
           >
-            <Download size={14} />
-            {t("settings.installUpdate")}
+            {installActive ? (
+              <RefreshCcw size={14} className={installActive ? "animate-spin" : ""} />
+            ) : (
+              <Download size={14} />
+            )}
+            {updateInstallButtonLabel(installStatus, t)}
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function isUpdateInstallActive(status: AppUpdateInstallStatus | null | undefined) {
+  return Boolean(
+    status &&
+      (status.phase === "checking" ||
+        status.phase === "downloading" ||
+        status.phase === "installing" ||
+        status.phase === "restarting"),
+  );
+}
+
+function updateInstallButtonLabel(
+  status: AppUpdateInstallStatus | null,
+  t: (key: string, options?: Record<string, unknown>) => string,
+) {
+  if (!status) {
+    return t("settings.installUpdate");
+  }
+  if (status.phase === "checking") {
+    return t("settings.checkingUpdates");
+  }
+  if (status.phase === "downloading") {
+    const percent = updateInstallProgressPercent(status);
+    return percent === null
+      ? t("settings.downloadingUpdate")
+      : t("settings.downloadingUpdateProgress", { percent });
+  }
+  if (status.phase === "installing") {
+    return t("settings.installingUpdate");
+  }
+  if (status.phase === "restarting") {
+    return t("settings.restartingUpdate");
+  }
+  return t("settings.installUpdate");
+}
+
+function updateInstallProgressPercent(status: AppUpdateInstallStatus) {
+  if (!status.total_bytes || status.total_bytes <= 0) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round((status.downloaded_bytes / status.total_bytes) * 100)));
 }
 
 function clampRetryAttempts(value: string) {
@@ -531,6 +548,21 @@ function clampRetryAttempts(value: string) {
     return 30;
   }
   return Math.max(1, Math.min(30, Math.round(parsed)));
+}
+
+function formatUpdateDate(value: string | null | undefined, locale: string) {
+  const raw = value?.trim();
+  if (!raw) {
+    return null;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return raw;
+  }
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 interface VisionModelParts {

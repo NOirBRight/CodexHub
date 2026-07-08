@@ -176,7 +176,9 @@ pub struct Settings {
     pub auto_sync_history: bool,
     #[serde(default = "default_enabled")]
     pub unified_codex_history: bool,
-    pub auto_start_proxy: bool,
+    pub auto_start_software: bool,
+    #[serde(default = "default_enabled")]
+    pub auto_start_gateway: bool,
     pub include_official_models: bool,
     pub auto_sync_catalog: bool,
     #[serde(default = "default_enabled")]
@@ -215,7 +217,8 @@ impl Default for Settings {
             locale: String::new(),
             auto_sync_history: false,
             unified_codex_history: true,
-            auto_start_proxy: true,
+            auto_start_software: true,
+            auto_start_gateway: true,
             include_official_models: true,
             auto_sync_catalog: true,
             auto_sync_clients: true,
@@ -258,8 +261,8 @@ where
 }
 
 #[tauri::command]
-fn get_status() -> Result<AppStatus, String> {
-    proxy::status()
+async fn get_status() -> Result<AppStatus, String> {
+    run_blocking("get_status", proxy::status).await
 }
 
 #[tauri::command]
@@ -352,8 +355,8 @@ fn test_model_endpoint(
 }
 
 #[tauri::command]
-fn gateway_status() -> Result<gateway::GatewayStatus, String> {
-    gateway::gateway_status()
+async fn gateway_status() -> Result<gateway::GatewayStatus, String> {
+    run_blocking("gateway_status", gateway::gateway_status).await
 }
 
 #[tauri::command]
@@ -365,37 +368,49 @@ fn gateway_test_request(
 }
 
 #[tauri::command]
-fn gateway_recent_events(
+async fn gateway_recent_events(
     limit: Option<usize>,
     since_ts: Option<String>,
 ) -> Result<Vec<gateway::GatewayEvent>, String> {
-    gateway::gateway_recent_events(limit, since_ts)
+    run_blocking("gateway_recent_events", move || {
+        gateway::gateway_recent_events(limit, since_ts)
+    })
+    .await
 }
 
 #[tauri::command]
-fn gateway_usage_summary(
+async fn gateway_usage_summary(
     start_ts: Option<String>,
     end_ts: Option<String>,
 ) -> Result<gateway::GatewayUsageSummary, String> {
-    gateway::gateway_usage_summary(start_ts, end_ts)
+    run_blocking("gateway_usage_summary", move || {
+        gateway::gateway_usage_summary(start_ts, end_ts)
+    })
+    .await
 }
 
 #[tauri::command]
-fn gateway_usage_snapshot(
+async fn gateway_usage_snapshot(
     limit: Option<usize>,
     start_ts: Option<String>,
     end_ts: Option<String>,
 ) -> Result<gateway::GatewayUsageSnapshot, String> {
-    gateway::gateway_usage_snapshot(limit, start_ts, end_ts)
+    run_blocking("gateway_usage_snapshot", move || {
+        gateway::gateway_usage_snapshot(limit, start_ts, end_ts)
+    })
+    .await
 }
 
 #[tauri::command]
-fn gateway_usage_events(
+async fn gateway_usage_events(
     limit: Option<usize>,
     start_ts: Option<String>,
     end_ts: Option<String>,
 ) -> Result<Vec<gateway::GatewayUsageEvent>, String> {
-    gateway::gateway_usage_events(limit, start_ts, end_ts)
+    run_blocking("gateway_usage_events", move || {
+        gateway::gateway_usage_events(limit, start_ts, end_ts)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -716,6 +731,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_gui() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
@@ -725,6 +743,8 @@ fn run_gui() {
             #[cfg(desktop)]
             setup_tray(app)?;
             gateway::start_telemetry_ingester();
+            web_bridge::start_background(app.handle().clone())?;
+            start_gateway_on_launch();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -736,6 +756,9 @@ fn run_gui() {
         .invoke_handler(tauri::generate_handler![
             app_updates::get_app_version,
             app_updates::check_app_update,
+            app_updates::start_app_update_install,
+            app_updates::get_app_update_install_status,
+            app_updates::consume_app_update_completion,
             app_updates::install_app_update,
             get_status,
             switch_mode,
@@ -784,6 +807,20 @@ fn run_gui() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running CodexHub Tauri application");
+}
+
+fn start_gateway_on_launch() {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Ok(settings) = config::get_settings() else {
+            return;
+        };
+        if !settings.auto_start_gateway {
+            return;
+        }
+        if let Err(error) = proxy::start() {
+            eprintln!("failed to start CodexHub gateway on app launch: {error}");
+        }
+    });
 }
 
 fn main() {

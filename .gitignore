@@ -25,6 +25,8 @@ frontend/dist/
 # Tauri/Rust
 src-tauri/target/
 src-tauri/gen/
+src-tauri/resources/python/
+src-tauri/resources/downloads/
 
 # Local worktrees
 .worktrees/
