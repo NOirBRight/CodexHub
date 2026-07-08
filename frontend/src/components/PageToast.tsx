@@ -1,9 +1,11 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, CheckCircle2, Info, RefreshCcw, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cx } from "../lib/format";
 
 export type PageToastTone = "message" | "info" | "success" | "error" | "loading";
+
+export const BACKEND_DISCONNECTED_TOAST_KEY = "backend-disconnected";
 
 export type PageToastAction = {
   label: string;
@@ -12,18 +14,21 @@ export type PageToastAction = {
 
 export type PageToastState = {
   action?: PageToastAction;
+  dedupeKey?: string;
   id: string;
   timeoutMs?: number | null;
   tone: PageToastTone;
   text: string;
 };
 
-export type ToastPatch = Partial<Omit<PageToastState, "action" | "id">> & {
+export type ToastPatch = Partial<Omit<PageToastState, "action" | "dedupeKey" | "id">> & {
   action?: PageToastAction | null;
+  dedupeKey?: string | null;
 };
 
 type ToastInput = {
   action?: PageToastAction;
+  dedupeKey?: string;
   text: string;
   timeoutMs?: number | null;
   tone?: PageToastTone;
@@ -53,27 +58,42 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 let toastSequence = 0;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<PageToastState[]>([]);
+  const [toasts, setToastState] = useState<PageToastState[]>([]);
+  const toastsRef = useRef<PageToastState[]>([]);
+
+  const setToasts = useCallback((updater: (current: PageToastState[]) => PageToastState[]) => {
+    const next = updater(toastsRef.current);
+    toastsRef.current = next;
+    setToastState(next);
+  }, []);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
-  }, []);
+  }, [setToasts]);
 
   const showToast = useCallback<ToastContextValue["showToast"]>(
     (input: string | ToastInput, tone: PageToastTone = "message", action?: PageToastAction) => {
       const toastInput = typeof input === "string" ? { action, text: input, tone } : input;
-      const id = `toast-${Date.now()}-${toastSequence++}`;
+      const existingToast = toastInput.dedupeKey
+        ? toastsRef.current.find((toast) => toast.dedupeKey === toastInput.dedupeKey)
+        : null;
+      const id = existingToast?.id ?? `toast-${Date.now()}-${toastSequence++}`;
       const toast: PageToastState = {
         id,
         action: toastInput.action,
+        dedupeKey: toastInput.dedupeKey,
         text: toastInput.text,
         timeoutMs: toastInput.timeoutMs,
         tone: toastInput.tone ?? "message",
       };
-      setToasts((current) => [...current, toast]);
+      setToasts((current) =>
+        existingToast
+          ? current.map((item) => (item.id === existingToast.id ? toast : item))
+          : [...current, toast],
+      );
       return id;
     },
-    [],
+    [setToasts],
   );
 
   const updateToast = useCallback((id: string, patch: ToastPatch) => {
@@ -82,15 +102,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         if (toast.id !== id) {
           return toast;
         }
-        const { action, ...rest } = patch;
+        const { action, dedupeKey, ...rest } = patch;
         const next: PageToastState = { ...toast, ...rest };
         if ("action" in patch) {
           next.action = action ?? undefined;
         }
+        if ("dedupeKey" in patch) {
+          next.dedupeKey = dedupeKey ?? undefined;
+        }
         return next;
       }),
     );
-  }, []);
+  }, [setToasts]);
 
   const value = useMemo(
     () => ({ dismissToast, showToast, updateToast }),
@@ -156,10 +179,16 @@ function ToastItem({ dismissToast, toast }: ToastItemProps) {
 export function PageToast({ toast, onDismiss }: PageToastProps) {
   const { t } = useTranslation();
   const dismissible = toast.tone !== "loading";
+  const hasAction = Boolean(toast.action);
   return (
     <div
       className={cx(
-        "grid min-h-10 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-panel px-3 py-2 text-sm shadow-floating transition-[opacity,transform] duration-150 ease-out",
+        "grid min-h-10 w-full items-center gap-2 rounded-panel px-3 py-2 text-sm shadow-floating transition-[opacity,transform] duration-150 ease-out",
+        hasAction && dismissible
+          ? "grid-cols-[auto_minmax(0,1fr)_auto_auto]"
+          : hasAction || dismissible
+            ? "grid-cols-[auto_minmax(0,1fr)_auto]"
+            : "grid-cols-[auto_minmax(0,1fr)]",
         toast.tone === "error"
           ? "bg-red-50 text-danger"
           : toast.tone === "success"
@@ -192,7 +221,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       {toast.action && (
         <button
           type="button"
-          className="focus-ring inline-flex h-7 items-center justify-center rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96]"
+          className="focus-ring inline-flex h-7 shrink-0 items-center justify-center whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96]"
           onClick={toast.action.onClick}
         >
           {toast.action.label}
@@ -201,7 +230,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       {dismissible && (
         <button
           type="button"
-          className="focus-ring grid h-6 w-6 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
+          className="focus-ring grid h-6 w-6 shrink-0 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
           aria-label={t("common.dismissNotification")}
           onClick={onDismiss}
         >

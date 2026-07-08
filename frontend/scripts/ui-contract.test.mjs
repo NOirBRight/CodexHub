@@ -401,12 +401,21 @@ test("backend unavailable errors stay short and can render toast actions", async
   assert.match(tauriSource, /function isBackendDisconnectedMessage\(message: string\)/);
   assert.doesNotMatch(tauriSource, /Start it with: cargo run -- web-bridge --port 1421/);
   assert.match(pageToastSource, /action\?:/);
+  assert.match(pageToastSource, /dedupeKey\?: string/);
   assert.match(pageToastSource, /toast\.action/);
   assert.match(pageToastSource, /\{toast\.action\.label\}/);
+  assert.match(pageToastSource, /existingToast = toastInput\.dedupeKey/);
+  assert.match(pageToastSource, /toast\.dedupeKey === toastInput\.dedupeKey/);
+  assert.match(pageToastSource, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
+  assert.match(pageToastSource, /whitespace-nowrap/);
   assert.match(providersSource, /showBackendDisconnectedToast/);
+  assert.match(providersSource, /BACKEND_DISCONNECTED_TOAST_KEY/);
+  assert.match(providersSource, /dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY/);
   assert.match(providersSource, /label: t\("gateway\.startBackend"\)/);
   assert.match(providersSource, /onStartProxy\?: \(\) => Promise<void>;/);
   assert.match(gatewaySource, /showBackendDisconnectedToast/);
+  assert.match(gatewaySource, /BACKEND_DISCONNECTED_TOAST_KEY/);
+  assert.match(gatewaySource, /dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY/);
   assert.match(gatewaySource, /label: t\("gateway\.startBackend"\)/);
 });
 

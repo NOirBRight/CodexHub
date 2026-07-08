@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
-import { useToasts } from "../components/PageToast";
+import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
@@ -162,6 +162,7 @@ export function GatewayPage({
   function showBackendDisconnectedToast() {
     let toastId = "";
     toastId = showToast({
+      dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY,
       text: t("gateway.backendNotConnected"),
       tone: "error",
       action: {

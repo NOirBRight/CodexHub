@@ -19,7 +19,7 @@ import {
 import type { FocusEvent as ReactFocusEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useToasts } from "../components/PageToast";
+import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
@@ -475,6 +475,7 @@ export function ProvidersPage({
   function showBackendDisconnectedToast() {
     let toastId = "";
     toastId = showToast({
+      dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY,
       text: t("gateway.backendNotConnected"),
       tone: "error",
       action: {
