@@ -6497,7 +6497,7 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
         self.assertNotIn("mcp__node_repl__js", tools_by_name)
 
-    def test_official_browser_context_injects_skill_guidance_without_tools(self):
+    def test_official_browser_context_does_not_inject_skill_guidance_or_tools(self):
         body = json.dumps(
             {
                 "model": "gpt-5.5",
@@ -6518,10 +6518,10 @@ class RoutingTests(unittest.TestCase):
 
         self.assertNotIn("tool_search", tools_by_name)
         self.assertNotIn("mcp__node_repl__js", tools_by_name)
-        self.assertIn("browser:control-in-app-browser", transcript)
-        self.assertIn("node_repl js", transcript)
-        self.assertIn("browser session unavailable", transcript)
-        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertNotIn("browser:control-in-app-browser", transcript)
+        self.assertNotIn("node_repl js", transcript)
+        self.assertNotIn("browser session unavailable", transcript)
+        self.assertEqual(len(payload["input"]), 1)
         self.assertNotIn('"role":"system"', transformed.decode("utf-8"))
 
     def test_external_request_injects_explicit_codex_native_tools(self):
@@ -8947,7 +8947,7 @@ Execution constraints:
         self.assertIn("status: single_step_complete", transcript)
         self.assertIn("required_next_action: write the final answer now", transcript)
 
-    def test_external_browser_comments_injects_browser_guidance_and_node_repl_alias(self):
+    def test_external_browser_comments_keeps_node_repl_alias_without_browser_guidance(self):
         body = json.dumps(
             {
                 "model": "glm-5.2",
@@ -8983,7 +8983,7 @@ Execution constraints:
         self.assertNotIn("tool_search", tools_by_name)
         self.assertIn("mcp__node_repl__js", tools_by_name)
         self.assertIn("mcp__node_repl__js", transcript)
-        self.assertIn("browser:control-in-app-browser", transcript)
+        self.assertNotIn("browser:control-in-app-browser", transcript)
 
     def test_external_browser_context_keeps_node_repl_tools_after_result(self):
         body = json.dumps(
@@ -9024,7 +9024,7 @@ Execution constraints:
 
         self.assertIn("mcp__node_repl__js", tools_by_name)
         self.assertIn("mcp__node_repl__js_reset", tools_by_name)
-        self.assertIn("browser:control-in-app-browser", transcript)
+        self.assertNotIn("browser:control-in-app-browser", transcript)
         self.assertNotIn("status: single_step_complete", transcript)
 
     def test_external_request_hides_tool_search_after_multi_agent_discovery(self):

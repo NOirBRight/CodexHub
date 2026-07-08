@@ -103,6 +103,7 @@ PROXY_FEATURES = [
     "official-upstream-open-retry",
     "compact-text-only-tool-strip",
     "compact-empty-response-guard",
+    "compact-empty-response-retry",
     "stream-read-error-retry-before-downstream",
     "downstream-sse-keepalive",
     "split-transport-model-event-sse-idle-timeouts",
@@ -7848,8 +7849,6 @@ def compatible_request_body(
             changed = True
         if _sanitize_official_invalid_tool_calls(payload):
             changed = True
-        if _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
-            changed = True
         if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
             payload["model"] = upstream_model
             changed = True
@@ -7899,9 +7898,6 @@ def compatible_request_body(
             if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
     input_items = payload.get("input")
-    if not raw_provider_probe and _inject_browser_context_guidance(payload, upstream_name=upstream_name, event_context=event_context):
-        changed = True
-        input_items = payload.get("input")
     include_tool_search = False
     subagent_worker_context = (
         not raw_provider_probe
