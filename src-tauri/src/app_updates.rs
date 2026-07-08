@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Error as UpdaterError, UpdaterExt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppVersionInfo {
@@ -43,7 +43,7 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String>
     let checked_at = checked_at_now();
     let update = app
         .updater()
-        .map_err(|error| operation_error("check for updates", error))?
+        .map_err(|error| updater_setup_error("check for updates", error))?
         .check()
         .await
         .map_err(|error| operation_error("check for updates", error))?;
@@ -68,7 +68,7 @@ pub async fn install_app_update(app: AppHandle) -> Result<AppUpdateInstallResult
     let current = current_version(&app);
     let Some(update) = app
         .updater()
-        .map_err(|error| operation_error("install update", error))?
+        .map_err(|error| updater_setup_error("install update", error))?
         .check()
         .await
         .map_err(|error| operation_error("install update", error))?
@@ -135,6 +135,17 @@ fn update_status(
 
 fn operation_error(action: &str, error: impl std::fmt::Display) -> String {
     format!("Failed to {action}: {error}")
+}
+
+fn updater_setup_error(action: &str, error: UpdaterError) -> String {
+    updater_not_configured_message(&error)
+        .map(str::to_string)
+        .unwrap_or_else(|| operation_error(action, error))
+}
+
+fn updater_not_configured_message(error: &UpdaterError) -> Option<&'static str> {
+    matches!(error, UpdaterError::EmptyEndpoints)
+        .then_some("App updates are not configured in this build.")
 }
 
 fn checked_at_now() -> String {
@@ -206,6 +217,22 @@ mod tests {
         assert_eq!(
             operation_error("install update", "signature rejected"),
             "Failed to install update: signature rejected",
+        );
+    }
+
+    #[test]
+    fn updater_not_configured_message_maps_empty_endpoints() {
+        assert_eq!(
+            updater_not_configured_message(&UpdaterError::EmptyEndpoints),
+            Some("App updates are not configured in this build."),
+        );
+    }
+
+    #[test]
+    fn updater_not_configured_message_ignores_other_errors() {
+        assert_eq!(
+            updater_not_configured_message(&UpdaterError::UnsupportedArch),
+            None,
         );
     }
 
