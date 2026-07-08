@@ -1,5 +1,11 @@
+use crate::runtime_paths;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::AppHandle;
 use tauri_plugin_updater::{Error as UpdaterError, Updater, UpdaterExt};
 
@@ -25,12 +31,49 @@ pub struct AppUpdateInstallResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppUpdateInstallPhase {
+    Idle,
+    Checking,
+    Downloading,
+    Installing,
+    Restarting,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppUpdateInstallStatus {
+    pub phase: AppUpdateInstallPhase,
+    pub current_version: String,
+    pub target_version: Option<String>,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub message: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppUpdateCompletionStatus {
+    pub completed: bool,
+    pub current_version: String,
+    pub target_version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UpdateCandidate {
     version: String,
     notes: Option<String>,
     date: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingUpdate {
+    target_version: String,
+    written_at: String,
+}
+
+static INSTALL_STATUS: OnceLock<Mutex<AppUpdateInstallStatus>> = OnceLock::new();
 
 #[tauri::command]
 pub fn get_app_version(app: AppHandle) -> AppVersionInfo {
@@ -61,24 +104,53 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String>
 
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle) -> Result<AppUpdateInstallResult, String> {
-    let current = current_version(&app);
-    let Some(update) = updater(&app, "install update")?
-        .check()
-        .await
-        .map_err(|error| operation_error("install update", error))?
-    else {
-        return Ok(AppUpdateInstallResult {
-            installed: false,
-            version: current,
-            message: "CodexHub is already up to date.".to_string(),
-        });
-    };
+    let status = start_app_update_install(app)?;
+    Ok(AppUpdateInstallResult {
+        installed: is_active_install_phase(&status.phase),
+        version: status
+            .target_version
+            .clone()
+            .unwrap_or_else(|| status.current_version.clone()),
+        message: status.message,
+    })
+}
 
-    update
-        .download_and_install(|_chunk_length, _content_length| {}, || {})
-        .await
-        .map_err(|error| operation_error("install update", error))?;
-    restart_after_update(app)
+#[tauri::command]
+pub fn start_app_update_install(app: AppHandle) -> Result<AppUpdateInstallStatus, String> {
+    let current = current_version(&app);
+    let status = get_install_status_with_current(&current);
+    if is_active_install_phase(&status.phase) {
+        return Ok(status);
+    }
+
+    let checking = set_install_status(AppUpdateInstallStatus {
+        phase: AppUpdateInstallPhase::Checking,
+        current_version: current,
+        target_version: None,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        message: "Checking for updates...".to_string(),
+        updated_at: checked_at_now(),
+    });
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_app_update_install(app).await {
+            mark_failed(error);
+        }
+    });
+
+    Ok(checking)
+}
+
+#[tauri::command]
+pub fn get_app_update_install_status(app: AppHandle) -> AppUpdateInstallStatus {
+    get_install_status_with_current(&current_version(&app))
+}
+
+#[tauri::command]
+pub fn consume_app_update_completion(
+    app: AppHandle,
+) -> Result<Option<AppUpdateCompletionStatus>, String> {
+    consume_pending_update_completion(&pending_update_path()?, &current_version(&app))
 }
 
 fn current_version(app: &AppHandle) -> String {
@@ -159,6 +231,263 @@ fn status_from_update_check(
         }
         Err(error) => Err(operation_error("check for updates", error)),
     }
+}
+
+async fn run_app_update_install(app: AppHandle) -> Result<(), String> {
+    let current = current_version(&app);
+    let Some(update) = updater(&app, "install update")?
+        .check()
+        .await
+        .map_err(|error| operation_error("install update", error))?
+    else {
+        set_install_status(install_status_idle_with_message(
+            current,
+            "CodexHub is already up to date.",
+        ));
+        return Ok(());
+    };
+
+    let target = update.version.clone();
+    set_install_status(AppUpdateInstallStatus {
+        phase: AppUpdateInstallPhase::Downloading,
+        current_version: current.clone(),
+        target_version: Some(target.clone()),
+        downloaded_bytes: 0,
+        total_bytes: None,
+        message: "Downloading update...".to_string(),
+        updated_at: checked_at_now(),
+    });
+
+    let chunk_current = current.clone();
+    let chunk_target = target.clone();
+    let finish_target = target.clone();
+    let bytes = update
+        .download(
+            move |chunk_length, content_length| {
+                mutate_install_status(|status| {
+                    if status.current_version.is_empty() {
+                        status.current_version = chunk_current.clone();
+                    }
+                    record_download_chunk(status, &chunk_target, chunk_length, content_length);
+                });
+            },
+            move || {
+                mutate_install_status(|status| mark_installing(status, &finish_target));
+            },
+        )
+        .await
+        .map_err(|error| operation_error("download update", error))?;
+
+    write_pending_update(&pending_update_path()?, &target)?;
+    mark_restarting_global(&target);
+
+    if update_e2e_download_only() {
+        return Ok(());
+    }
+
+    update
+        .install(bytes)
+        .map_err(|error| operation_error("install update", error))?;
+    restart_after_update(app)
+}
+
+fn install_status_store() -> &'static Mutex<AppUpdateInstallStatus> {
+    INSTALL_STATUS.get_or_init(|| Mutex::new(install_status_idle("")))
+}
+
+fn get_install_status_with_current(current_version: &str) -> AppUpdateInstallStatus {
+    mutate_install_status(|status| {
+        if status.current_version.is_empty()
+            || matches!(status.phase, AppUpdateInstallPhase::Idle)
+                && status.target_version.is_none()
+        {
+            status.current_version = current_version.to_string();
+        }
+    })
+}
+
+fn set_install_status(status: AppUpdateInstallStatus) -> AppUpdateInstallStatus {
+    let mut guard = install_status_store()
+        .lock()
+        .expect("app update install status lock poisoned");
+    *guard = status;
+    guard.clone()
+}
+
+fn mutate_install_status(
+    mutate: impl FnOnce(&mut AppUpdateInstallStatus),
+) -> AppUpdateInstallStatus {
+    let mut guard = install_status_store()
+        .lock()
+        .expect("app update install status lock poisoned");
+    mutate(&mut guard);
+    guard.updated_at = checked_at_now();
+    guard.clone()
+}
+
+fn install_status_idle(current_version: impl Into<String>) -> AppUpdateInstallStatus {
+    install_status_idle_with_message(current_version, "Idle")
+}
+
+fn install_status_idle_with_message(
+    current_version: impl Into<String>,
+    message: impl Into<String>,
+) -> AppUpdateInstallStatus {
+    AppUpdateInstallStatus {
+        phase: AppUpdateInstallPhase::Idle,
+        current_version: current_version.into(),
+        target_version: None,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        message: message.into(),
+        updated_at: checked_at_now(),
+    }
+}
+
+fn record_download_chunk(
+    status: &mut AppUpdateInstallStatus,
+    target_version: &str,
+    chunk_length: usize,
+    content_length: Option<u64>,
+) {
+    status.phase = AppUpdateInstallPhase::Downloading;
+    status.target_version = Some(target_version.to_string());
+    status.downloaded_bytes = status
+        .downloaded_bytes
+        .saturating_add(u64::try_from(chunk_length).unwrap_or(u64::MAX));
+    status.total_bytes = content_length;
+    status.message = "Downloading update...".to_string();
+    status.updated_at = checked_at_now();
+}
+
+fn mark_installing(status: &mut AppUpdateInstallStatus, target_version: &str) {
+    status.phase = AppUpdateInstallPhase::Installing;
+    status.target_version = Some(target_version.to_string());
+    status.message = "Installing update...".to_string();
+    status.updated_at = checked_at_now();
+}
+
+fn mark_restarting(status: &mut AppUpdateInstallStatus, target_version: &str) {
+    status.phase = AppUpdateInstallPhase::Restarting;
+    status.target_version = Some(target_version.to_string());
+    status.message = "Installing update, the app will restart automatically...".to_string();
+    status.updated_at = checked_at_now();
+}
+
+fn mark_restarting_global(target_version: &str) {
+    mutate_install_status(|status| mark_restarting(status, target_version));
+}
+
+fn mark_failed(message: String) {
+    mutate_install_status(|status| {
+        status.phase = AppUpdateInstallPhase::Failed;
+        status.message = message;
+        status.updated_at = checked_at_now();
+    });
+}
+
+fn is_active_install_phase(phase: &AppUpdateInstallPhase) -> bool {
+    matches!(
+        phase,
+        AppUpdateInstallPhase::Checking
+            | AppUpdateInstallPhase::Downloading
+            | AppUpdateInstallPhase::Installing
+            | AppUpdateInstallPhase::Restarting
+    )
+}
+
+#[cfg(debug_assertions)]
+fn update_e2e_download_only() -> bool {
+    std::env::var_os("CODEXHUB_UPDATE_E2E_SKIP_INSTALL")
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
+#[cfg(not(debug_assertions))]
+fn update_e2e_download_only() -> bool {
+    false
+}
+
+fn pending_update_path() -> Result<PathBuf, String> {
+    Ok(runtime_paths::codex_home_dir()?
+        .join("proxy")
+        .join("app-update-pending.json"))
+}
+
+fn write_pending_update(path: &Path, target_version: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| operation_error("write pending update", error))?;
+    }
+    let pending = PendingUpdate {
+        target_version: target_version.to_string(),
+        written_at: checked_at_now(),
+    };
+    let body = serde_json::to_vec_pretty(&pending)
+        .map_err(|error| operation_error("write pending update", error))?;
+    fs::write(path, body).map_err(|error| operation_error("write pending update", error))
+}
+
+fn read_pending_update(path: &Path) -> Result<Option<PendingUpdate>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read(path).map_err(|error| operation_error("read pending update", error))?;
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|error| operation_error("read pending update", error))
+}
+
+fn consume_pending_update_completion(
+    path: &Path,
+    current_version: &str,
+) -> Result<Option<AppUpdateCompletionStatus>, String> {
+    let Some(pending) = read_pending_update(path)? else {
+        return Ok(None);
+    };
+    clear_pending_update(path)?;
+    Ok(Some(AppUpdateCompletionStatus {
+        completed: version_reaches_target(current_version, &pending.target_version),
+        current_version: current_version.to_string(),
+        target_version: pending.target_version,
+    }))
+}
+
+fn clear_pending_update(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(operation_error("clear pending update", error)),
+    }
+}
+
+fn version_reaches_target(current_version: &str, target_version: &str) -> bool {
+    if current_version == target_version {
+        return true;
+    }
+    match (
+        parse_semver_triplet(current_version),
+        parse_semver_triplet(target_version),
+    ) {
+        (Some(current), Some(target)) => current >= target,
+        _ => false,
+    }
+}
+
+fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
+    let normalized = version
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    let mut parts = normalized.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 async fn update_feed_is_missing(update: &Result<Option<UpdateCandidate>, UpdaterError>) -> bool {
@@ -340,7 +669,89 @@ mod tests {
     }
 
     #[test]
+    fn download_chunks_accumulate_into_install_status() {
+        let mut status = install_status_idle("0.1.0");
+
+        record_download_chunk(&mut status, "0.1.1", 512, Some(2048));
+        record_download_chunk(&mut status, "0.1.1", 256, Some(2048));
+
+        assert_eq!(status.phase, AppUpdateInstallPhase::Downloading);
+        assert_eq!(status.current_version, "0.1.0");
+        assert_eq!(status.target_version.as_deref(), Some("0.1.1"));
+        assert_eq!(status.downloaded_bytes, 768);
+        assert_eq!(status.total_bytes, Some(2048));
+    }
+
+    #[test]
+    fn download_finish_moves_through_installing_and_restarting() {
+        let mut status = install_status_idle("0.1.0");
+
+        mark_installing(&mut status, "0.1.1");
+        assert_eq!(status.phase, AppUpdateInstallPhase::Installing);
+        assert_eq!(status.target_version.as_deref(), Some("0.1.1"));
+
+        mark_restarting(&mut status, "0.1.1");
+        assert_eq!(status.phase, AppUpdateInstallPhase::Restarting);
+        assert_eq!(status.target_version.as_deref(), Some("0.1.1"));
+    }
+
+    #[test]
+    fn pending_update_version_is_consumed_after_successful_restart() {
+        let path = unique_pending_update_path("success");
+
+        write_pending_update(&path, "0.1.1").expect("write pending update");
+        assert_eq!(
+            read_pending_update(&path)
+                .expect("read pending update")
+                .as_ref()
+                .map(|pending| pending.target_version.as_str()),
+            Some("0.1.1"),
+        );
+
+        let completion =
+            consume_pending_update_completion(&path, "0.1.1").expect("consume pending update");
+
+        assert_eq!(
+            completion,
+            Some(AppUpdateCompletionStatus {
+                completed: true,
+                current_version: "0.1.1".to_string(),
+                target_version: "0.1.1".to_string(),
+            }),
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn pending_update_mismatch_is_consumed_without_success() {
+        let path = unique_pending_update_path("mismatch");
+
+        write_pending_update(&path, "0.1.1").expect("write pending update");
+        let completion =
+            consume_pending_update_completion(&path, "0.1.0").expect("consume pending update");
+
+        assert_eq!(
+            completion,
+            Some(AppUpdateCompletionStatus {
+                completed: false,
+                current_version: "0.1.0".to_string(),
+                target_version: "0.1.1".to_string(),
+            }),
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn checked_at_now_is_unix_timestamp_string() {
         assert!(checked_at_now().starts_with("unix:"));
+    }
+
+    fn unique_pending_update_path(name: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "codexhub-pending-update-{name}-{}-{}.json",
+            std::process::id(),
+            checked_at_now().replace(':', "_"),
+        );
+        std::env::temp_dir().join(unique)
     }
 }

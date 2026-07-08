@@ -756,6 +756,9 @@ fn run_gui() {
         .invoke_handler(tauri::generate_handler![
             app_updates::get_app_version,
             app_updates::check_app_update,
+            app_updates::start_app_update_install,
+            app_updates::get_app_update_install_status,
+            app_updates::consume_app_update_completion,
             app_updates::install_app_update,
             get_status,
             switch_mode,

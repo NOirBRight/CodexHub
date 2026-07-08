@@ -233,6 +233,15 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "check_app_update" => to_value(tauri::async_runtime::block_on(
             app_updates::check_app_update(desktop_app(&app)?),
         )),
+        "start_app_update_install" => {
+            to_value(app_updates::start_app_update_install(desktop_app(&app)?))
+        }
+        "get_app_update_install_status" => to_value(Ok(
+            app_updates::get_app_update_install_status(desktop_app(&app)?),
+        )),
+        "consume_app_update_completion" => to_value(app_updates::consume_app_update_completion(
+            desktop_app(&app)?,
+        )),
         "install_app_update" => to_value(tauri::async_runtime::block_on(
             app_updates::install_app_update(desktop_app(&app)?),
         )),

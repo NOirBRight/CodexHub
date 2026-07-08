@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppStatus,
+  AppUpdateCompletionStatus,
   AppUpdateInstallResult,
+  AppUpdateInstallStatus,
   AppUpdateStatus,
   AppVersionInfo,
   GatewayClientConfig,
@@ -139,6 +141,10 @@ function openaiUsageWindowArgs(window?: OpenAIUsageQueryWindow | null) {
 export const api = {
   getAppVersion: () => call<AppVersionInfo>("get_app_version"),
   checkAppUpdate: () => call<AppUpdateStatus>("check_app_update"),
+  startAppUpdateInstall: () => call<AppUpdateInstallStatus>("start_app_update_install"),
+  getAppUpdateInstallStatus: () => call<AppUpdateInstallStatus>("get_app_update_install_status"),
+  consumeAppUpdateCompletion: () =>
+    call<AppUpdateCompletionStatus | null>("consume_app_update_completion"),
   installAppUpdate: () => call<AppUpdateInstallResult>("install_app_update"),
   getStatus: () => call<AppStatus>("get_status"),
   switchMode: (mode: string, autoSync: boolean) =>

@@ -4,7 +4,14 @@ import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
-import type { AppUpdateStatus, AppVersionInfo, Model, Provider, Settings } from "../lib/types";
+import type {
+  AppUpdateInstallStatus,
+  AppUpdateStatus,
+  AppVersionInfo,
+  Model,
+  Provider,
+  Settings,
+} from "../lib/types";
 import { useToasts } from "./PageToast";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
@@ -14,7 +21,8 @@ interface SettingsDrawerProps {
   open: boolean;
   providers: Provider[];
   settings: Settings | null;
-  updateBusy: "check" | "install" | null;
+  updateBusy: "check" | null;
+  updateInstallStatus: AppUpdateInstallStatus | null;
   updateStatus: AppUpdateStatus | null;
   visionModels: Model[];
   onCheckUpdate: () => Promise<AppUpdateStatus | null>;
@@ -36,6 +44,7 @@ export function SettingsDrawer({
   providers,
   settings,
   updateBusy,
+  updateInstallStatus,
   updateStatus,
   visionModels,
 }: SettingsDrawerProps) {
@@ -333,6 +342,7 @@ export function SettingsDrawer({
               <h3 className="text-sm font-semibold text-ink">{t("settings.updates")}</h3>
               <VersionUpdateBlock
                 busy={updateBusy}
+                installStatus={updateInstallStatus}
                 status={updateStatus}
                 versionInfo={appVersion}
                 onCheck={() => void onCheckUpdate()}
@@ -403,12 +413,14 @@ function settingsSaveComparable(settings: Settings) {
 
 function VersionUpdateBlock({
   busy,
+  installStatus,
   onCheck,
   onInstall,
   status,
   versionInfo,
 }: {
-  busy: "check" | "install" | null;
+  busy: "check" | null;
+  installStatus: AppUpdateInstallStatus | null;
   onCheck: () => void;
   onInstall: () => void;
   status: AppUpdateStatus | null;
@@ -421,6 +433,7 @@ function VersionUpdateBlock({
   const updateAvailable = Boolean(status?.available && latestVersion);
   const releaseNotes = status?.notes?.trim() || t("settings.noReleaseNotes");
   const releaseDate = formatUpdateDate(status?.date, i18n.language);
+  const installActive = isUpdateInstallActive(installStatus);
 
   return (
     <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
@@ -441,7 +454,7 @@ function VersionUpdateBlock({
           className="focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:text-ink hover:shadow-raised active:scale-[0.96] disabled:text-slate-400"
           aria-label={t("settings.checkForUpdates")}
           title={t("settings.checkForUpdates")}
-          disabled={Boolean(busy)}
+          disabled={Boolean(busy) || installActive}
           onClick={onCheck}
         >
           <RefreshCcw size={14} className={busy === "check" ? "animate-spin" : ""} />
@@ -471,11 +484,15 @@ function VersionUpdateBlock({
           <button
             type="button"
             className="focus-ring inline-flex h-9 min-w-0 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
-            disabled={Boolean(busy)}
+            disabled={Boolean(busy) || installActive}
             onClick={onInstall}
           >
-            <Download size={14} />
-            {t("settings.installUpdate")}
+            {installActive ? (
+              <RefreshCcw size={14} className={installActive ? "animate-spin" : ""} />
+            ) : (
+              <Download size={14} />
+            )}
+            {updateInstallButtonLabel(installStatus, t)}
           </button>
         </div>
       )}
@@ -486,6 +503,48 @@ function VersionUpdateBlock({
       )}
     </div>
   );
+}
+
+function isUpdateInstallActive(status: AppUpdateInstallStatus | null | undefined) {
+  return Boolean(
+    status &&
+      (status.phase === "checking" ||
+        status.phase === "downloading" ||
+        status.phase === "installing" ||
+        status.phase === "restarting"),
+  );
+}
+
+function updateInstallButtonLabel(
+  status: AppUpdateInstallStatus | null,
+  t: (key: string, options?: Record<string, unknown>) => string,
+) {
+  if (!status) {
+    return t("settings.installUpdate");
+  }
+  if (status.phase === "checking") {
+    return t("settings.checkingUpdates");
+  }
+  if (status.phase === "downloading") {
+    const percent = updateInstallProgressPercent(status);
+    return percent === null
+      ? t("settings.downloadingUpdate")
+      : t("settings.downloadingUpdateProgress", { percent });
+  }
+  if (status.phase === "installing") {
+    return t("settings.installingUpdate");
+  }
+  if (status.phase === "restarting") {
+    return t("settings.restartingUpdate");
+  }
+  return t("settings.installUpdate");
+}
+
+function updateInstallProgressPercent(status: AppUpdateInstallStatus) {
+  if (!status.total_bytes || status.total_bytes <= 0) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round((status.downloaded_bytes / status.total_bytes) * 100)));
 }
 
 function clampRetryAttempts(value: string) {

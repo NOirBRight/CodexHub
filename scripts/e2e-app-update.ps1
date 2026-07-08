@@ -10,6 +10,7 @@ param(
     [string]$NextVersion = "",
     [switch]$Launch,
     [switch]$Install,
+    [switch]$DownloadOnly,
     [switch]$KeepAlive,
     [switch]$ValidateOnly
 )
@@ -187,6 +188,27 @@ function Wait-Bridge([int]$TimeoutSeconds = 30) {
     throw "Timed out waiting for CodexHub bridge at $BridgeUrl"
 }
 
+function Wait-InstallStatusPhase {
+    param(
+        [string[]]$ExpectedPhases,
+        [int]$TimeoutSeconds = 120
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $status = Invoke-BridgeCommand "get_app_update_install_status"
+        if ($status.phase -eq "failed") {
+            throw "Update install failed: $($status.message)"
+        }
+        if ($ExpectedPhases -contains $status.phase) {
+            return $status
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for update install phase '$($ExpectedPhases -join ", ")'."
+}
+
 function Start-AppForE2E([string]$Endpoint) {
     if ([string]::IsNullOrWhiteSpace($AppExe)) {
         $script:AppExe = Join-Path $repoRoot "src-tauri\target\debug\codexhub.exe"
@@ -199,6 +221,9 @@ function Start-AppForE2E([string]$Endpoint) {
     $info.FileName = (Resolve-Path -LiteralPath $AppExe).Path
     $info.UseShellExecute = $false
     $info.Environment["CODEXHUB_UPDATE_E2E_ENDPOINT"] = $Endpoint
+    if ($DownloadOnly) {
+        $info.Environment["CODEXHUB_UPDATE_E2E_SKIP_INSTALL"] = "1"
+    }
     [System.Diagnostics.Process]::Start($info)
 }
 
@@ -242,14 +267,49 @@ try {
     }
     Write-Host "Detected virtual CodexHub update $($status.current_version) -> $($status.latest_version)."
 
+    if ($DownloadOnly) {
+        Invoke-BridgeCommand "start_app_update_install" | Out-Null
+        $installStatus = Wait-InstallStatusPhase -ExpectedPhases @("restarting") -TimeoutSeconds 180
+        if ($installStatus.target_version -ne $NextVersion) {
+            throw "Expected download-only target $NextVersion, got $($installStatus.target_version)."
+        }
+        if ($installStatus.downloaded_bytes -le 0) {
+            throw "Expected downloaded bytes to be recorded."
+        }
+        Write-Host "Download-only update path reached $($installStatus.phase) after $($installStatus.downloaded_bytes) bytes."
+    }
+
     if ($Install) {
         try {
-            Invoke-BridgeCommand "install_app_update" | Out-Null
+            Invoke-BridgeCommand "start_app_update_install" | Out-Null
+            try {
+                Wait-InstallStatusPhase -ExpectedPhases @("restarting") -TimeoutSeconds 180 | Out-Null
+            }
+            catch {
+                Write-Host "Install status polling ended while the app restarted: $($_.Exception.Message)"
+            }
         }
         catch {
             Write-Host "Install request ended while the app restarted: $($_.Exception.Message)"
         }
-        Write-Host "Install path was invoked. Reopen CodexHub and verify the installed version if the updater did not restart automatically."
+        if ($Launch -and $null -ne $appProcess) {
+            $appProcess.WaitForExit(180000) | Out-Null
+        }
+        Wait-Bridge 120
+        $versionInfo = Invoke-BridgeCommand "get_app_version"
+        if ($versionInfo.current_version -ne $NextVersion) {
+            throw "Expected installed version $NextVersion after quiet update, got $($versionInfo.current_version)."
+        }
+        try {
+            $completion = Invoke-BridgeCommand "consume_app_update_completion"
+            if ($null -ne $completion -and $completion.completed -ne $true) {
+                throw "Pending update completion did not validate target $($completion.target_version)."
+            }
+        }
+        catch {
+            Write-Host "Completion status was already consumed or unavailable: $($_.Exception.Message)"
+        }
+        Write-Host "Quiet install verified. CodexHub restarted at $($versionInfo.current_version)."
     }
 
     if ($KeepAlive -and -not $Install) {

@@ -45,7 +45,7 @@
         "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json"
       ],
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       },
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBNDc5QjIxOUI4OUNFMUEKUldRYXpvbWJJWnRIU3FZUmoycFE1bnpjVklrOU5ZK3gwakpRaFpzM1YrTm9JcWdydDRTNWlrZjIK"
     }

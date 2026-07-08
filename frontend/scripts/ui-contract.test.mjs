@@ -295,7 +295,7 @@ test("tauri config enables Windows updater packaging", async () => {
   assert.deepEqual(tauriConfig.plugins.updater.endpoints, [
     "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
   ]);
-  assert.equal(tauriConfig.plugins.updater.windows.installMode, "passive");
+  assert.equal(tauriConfig.plugins.updater.windows.installMode, "quiet");
   assert.equal(typeof tauriConfig.plugins.updater.pubkey, "string");
   assert.ok(tauriConfig.plugins.updater.pubkey.length > 80);
 });
@@ -2020,6 +2020,36 @@ test("app owns version cache and settings drawer only receives update actions", 
   assert.doesNotMatch(drawerSource, /api\.installAppUpdate\(\)/);
 });
 
+test("app update flow separates silent automatic checks from settings checks and install state", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const installAction = appSource.match(/const startAppUpdateInstall = useCallback[\s\S]*?const checkForUpdates = useCallback/)?.[0] ?? "";
+  const settingsCheck = appSource.match(/const checkForUpdates = useCallback[\s\S]*?const runAutomaticUpdateCheck = useCallback/)?.[0] ?? "";
+  const automaticCheck = appSource.match(/const runAutomaticUpdateCheck = useCallback[\s\S]*?const updateUsageWindow = useCallback/)?.[0] ?? "";
+
+  assert.match(appSource, /const \{ dismissToast, showToast, updateToast \} = useToasts\(\)/);
+  assert.match(appSource, /const updateAvailableToastId = useRef<string \| null>\(null\)/);
+  assert.match(appSource, /APP_UPDATE_CHECK_INTERVAL_MS\s*=\s*24 \* 60 \* 60 \* 1000/);
+  assert.match(appSource, /UPDATE_INSTALL_STATUS_POLL_MS\s*=\s*500/);
+  assert.match(automaticCheck, /updateAvailableToastId\.current = showToast\(\{/);
+  assert.match(automaticCheck, /label: t\("settings\.update"\)/);
+  assert.match(automaticCheck, /timeoutMs: null/);
+  assert.doesNotMatch(automaticCheck, /settings\.checkForUpdates/);
+  assert.doesNotMatch(automaticCheck, /tone: "loading"/);
+  assert.doesNotMatch(settingsCheck, /showToast\(t\("settings\.checkForUpdates"\), "loading"\)/);
+  assert.match(settingsCheck, /t\("settings\.noUpdatesAvailable"\)/);
+  assert.match(settingsCheck, /t\("settings\.updateAvailable", \{ version: status\.latest_version \}\)/);
+  assert.doesNotMatch(settingsCheck, /action:\s*\{/);
+  assert.match(installAction, /const toastId = updateAvailableToastId\.current/);
+  assert.match(installAction, /if \(toastId\) \{[\s\S]*dismissToast\(toastId\);[\s\S]*updateAvailableToastId\.current = null;[\s\S]*\}/);
+  assert.match(installAction, /api\.startAppUpdateInstall\(\)/);
+  assert.match(installAction, /settings\.downloadingUpdate/);
+  assert.match(appSource, /settings\.installingUpdateRestarting/);
+  assert.ok(
+    installAction.indexOf("dismissToast(toastId)") < installAction.indexOf("api.startAppUpdateInstall()"),
+    "the stale update-available toast should be removed before the install loading toast settles",
+  );
+});
+
 test("app update APIs use the web bridge fallback and bridge dispatches updater commands", async () => {
   const [tauriSource, typesSource, bridgeSource, mainSource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
@@ -2033,15 +2063,24 @@ test("app update APIs use the web bridge fallback and bridge dispatches updater 
   assert.match(typesSource, /export interface AppUpdateStatus/);
   assert.match(typesSource, /available: boolean/);
   assert.match(typesSource, /latest_version\?: string \| null/);
-  assert.match(typesSource, /export interface AppUpdateInstallResult/);
-  assert.match(typesSource, /installed: boolean/);
+  assert.match(typesSource, /export type AppUpdateInstallPhase =[\s\S]*"idle"[\s\S]*"checking"[\s\S]*"downloading"[\s\S]*"installing"[\s\S]*"restarting"[\s\S]*"failed"/);
+  assert.match(typesSource, /export interface AppUpdateInstallStatus/);
+  assert.match(typesSource, /phase: AppUpdateInstallPhase/);
+  assert.match(typesSource, /target_version\?: string \| null/);
+  assert.match(typesSource, /downloaded_bytes: number/);
+  assert.match(typesSource, /total_bytes\?: number \| null/);
+  assert.match(typesSource, /export interface AppUpdateCompletionStatus/);
   assert.match(tauriSource, /getAppVersion: \(\) => call<AppVersionInfo>\("get_app_version"\)/);
   assert.match(tauriSource, /checkAppUpdate: \(\) => call<AppUpdateStatus>\("check_app_update"\)/);
-  assert.match(tauriSource, /installAppUpdate: \(\) => call<AppUpdateInstallResult>\("install_app_update"\)/);
+  assert.match(tauriSource, /startAppUpdateInstall: \(\) => call<AppUpdateInstallStatus>\("start_app_update_install"\)/);
+  assert.match(tauriSource, /getAppUpdateInstallStatus: \(\) => call<AppUpdateInstallStatus>\("get_app_update_install_status"\)/);
+  assert.match(tauriSource, /consumeAppUpdateCompletion: \(\) =>\s*call<AppUpdateCompletionStatus \| null>\("consume_app_update_completion"\)/);
   assert.match(mainSource, /web_bridge::start_background\(app\.handle\(\)\.clone\(\)\)/);
   assert.match(bridgeSource, /"get_app_version"\s*=>\s*to_value\(Ok\(app_updates::get_app_version\(desktop_app\(&app\)\?\)\)\)/);
   assert.match(bridgeSource, /"check_app_update"\s*=>\s*to_value\(tauri::async_runtime::block_on\([\s\S]*app_updates::check_app_update\(desktop_app\(&app\)\?\)/);
-  assert.match(bridgeSource, /"install_app_update"\s*=>\s*to_value\(tauri::async_runtime::block_on\([\s\S]*app_updates::install_app_update\(desktop_app\(&app\)\?\)/);
+  assert.match(bridgeSource, /"start_app_update_install"\s*=>\s*\{?\s*to_value\(app_updates::start_app_update_install\(desktop_app\(&app\)\?\)\)\s*\}?/);
+  assert.match(bridgeSource, /"get_app_update_install_status"\s*=>\s*to_value\(Ok\(\s*app_updates::get_app_update_install_status\(desktop_app\(&app\)\?\),\s*\)\)/);
+  assert.match(bridgeSource, /"consume_app_update_completion"\s*=>\s*to_value\(app_updates::consume_app_update_completion\(\s*desktop_app\(&app\)\?,\s*\)\)/);
 });
 
 test("settings drawer version updates use the design-system grouped settings surface", async () => {
@@ -2072,13 +2111,15 @@ test("settings drawer update-available state shows version, release notes, and i
   const blockSource = drawerSource.match(/function VersionUpdateBlock[\s\S]*?function clampRetryAttempts/)?.[0] ?? "";
 
   assert.match(blockSource, /const updateAvailable = Boolean\(status\?\.available && latestVersion\)/);
+  assert.match(blockSource, /const installActive = isUpdateInstallActive\(installStatus\)/);
   assert.match(blockSource, /\{updateAvailable && \(/);
   assert.match(blockSource, /t\("settings\.latestVersion"\)/);
   assert.match(blockSource, /`v\$\{latestVersion\}`/);
   assert.match(blockSource, /t\("settings\.releaseNotes"\)/);
   assert.match(blockSource, /status\?\.notes\?\.trim\(\) \|\| t\("settings\.noReleaseNotes"\)/);
   assert.match(blockSource, /onClick=\{onInstall\}/);
-  assert.match(blockSource, /<Download size=\{14\}/);
+  assert.match(blockSource, /installActive \? "animate-spin" : ""/);
+  assert.match(blockSource, /updateInstallButtonLabel\(installStatus, t\)/);
   assert.match(enSource, /latestVersion: "New version"/);
   assert.match(enSource, /releaseNotes: "Release notes"/);
   assert.match(enSource, /noReleaseNotes: "No release notes provided."/);
@@ -2096,14 +2137,18 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(script, /latest\.json/);
   assert.match(script, /virtual CodexHub update/);
   assert.match(script, /check_app_update/);
-  assert.match(script, /install_app_update/);
+  assert.match(script, /start_app_update_install/);
+  assert.match(script, /get_app_update_install_status/);
+  assert.match(script, /CODEXHUB_UPDATE_E2E_SKIP_INSTALL/);
   assert.match(script, /\[switch\]\$Install/);
+  assert.match(script, /\[switch\]\$DownloadOnly/);
   assert.match(script, /\[switch\]\$KeepAlive/);
   assert.match(script, /\[switch\]\$ValidateOnly/);
   assert.match(script, /KeepAlive enabled/);
   assert.match(script, /windows-x86_64/);
   assert.match(script, /windows-x86_64-nsis/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_ENDPOINT/);
+  assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_SKIP_INSTALL/);
   assert.match(appUpdatesSource, /app\.updater_builder\(\)/);
   assert.match(appUpdatesSource, /builder[\s\S]*\.endpoints\(vec!\[endpoint\]\)/);
   assert.match(appUpdatesSource, /cfg\(debug_assertions\)/);
@@ -2138,12 +2183,14 @@ test("startup update check is delayed and silent on failure", async () => {
   const appSource = await readFile(appPath, "utf8");
 
   assert.match(appSource, /STARTUP_UPDATE_CHECK_DELAY_MS\s*=\s*2500/);
+  assert.match(appSource, /APP_UPDATE_CHECK_INTERVAL_MS\s*=\s*24 \* 60 \* 60 \* 1000/);
   assert.match(appSource, /startupUpdateCheckStarted/);
   assert.match(appSource, /api\.checkAppUpdate\(\)/);
   assert.match(appSource, /settings\.updateAvailable/);
-  assert.match(appSource, /settings\.installUpdate/);
-  assert.match(appSource, /api\.installAppUpdate\(\)/);
-  assert.match(appSource, /Startup update checks are best-effort/);
+  assert.match(appSource, /settings\.update/);
+  assert.match(appSource, /api\.startAppUpdateInstall\(\)/);
+  assert.match(appSource, /window\.setInterval\(\(\) => void runAutomaticUpdateCheck\(\), APP_UPDATE_CHECK_INTERVAL_MS\)/);
+  assert.match(appSource, /Automatic update checks are best-effort/);
   assert.doesNotMatch(appSource, /setBanner\(messageFromError\(err\)\)[\s\S]*Startup update/);
 });
 
