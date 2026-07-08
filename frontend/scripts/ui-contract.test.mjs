@@ -1864,6 +1864,19 @@ test("settings drawer places version updates below language and above behavior t
   assert.match(zhSource, /installUpdate: "安装更新"/);
 });
 
+test("startup update check is delayed and silent on failure", async () => {
+  const appSource = await readFile(appPath, "utf8");
+
+  assert.match(appSource, /STARTUP_UPDATE_CHECK_DELAY_MS\s*=\s*2500/);
+  assert.match(appSource, /startupUpdateCheckStarted/);
+  assert.match(appSource, /api\.checkAppUpdate\(\)/);
+  assert.match(appSource, /settings\.updateAvailable/);
+  assert.match(appSource, /settings\.installUpdate/);
+  assert.match(appSource, /api\.installAppUpdate\(\)/);
+  assert.match(appSource, /Startup update checks are best-effort/);
+  assert.doesNotMatch(appSource, /setBanner\(messageFromError\(err\)\)[\s\S]*Startup update/);
+});
+
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {
   const [typesSource, formatSource, appSource, providersSource, modelsSource] = await Promise.all([
     readFile(new URL("../src/lib/types.ts", import.meta.url), "utf8"),

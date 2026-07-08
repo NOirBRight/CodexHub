@@ -53,6 +53,7 @@ type GatewayClientVersionCacheEntry = {
 
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
 const BACKGROUND_VERSION_PROBE_DELAY_MS = 1000;
+const STARTUP_UPDATE_CHECK_DELAY_MS = 2500;
 
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
@@ -225,6 +226,7 @@ export default function App() {
   const [banner, setBanner] = useState<string | null>(null);
   const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() => defaultUsageWindow());
   const gatewayClientLoadSeq = useRef(0);
+  const startupUpdateCheckStarted = useRef(false);
 
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
     const requestSeq = ++gatewayClientLoadSeq.current;
@@ -251,7 +253,8 @@ export default function App() {
       if (requestSeq !== gatewayClientLoadSeq.current) {
         return;
       }
-      setBanner(messageFromError(err));
+      const message = messageFromError(err);
+      setBanner(message);
       throw err;
     }
   }, []);
@@ -317,11 +320,67 @@ export default function App() {
         setBanner(messageFromError(rejected.reason));
       }
     } catch (err) {
-      setBanner(messageFromError(err));
+      const message = messageFromError(err);
+      setBanner(message);
     } finally {
       setBusy((current) => (current === "load" ? null : current));
     }
   }, [usageWindow]);
+
+  const installAppUpdate = useCallback(async () => {
+    if (!window.confirm(t("settings.updateInstallConfirm"))) {
+      return;
+    }
+    const toastId = showToast({
+      text: t("settings.installingUpdate"),
+      tone: "loading",
+      timeoutMs: null,
+    });
+    try {
+      const result = await api.installAppUpdate();
+      if (!result) {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.desktopUpdatesUnavailable"),
+          tone: "info",
+        });
+        return;
+      }
+      if (!result.installed) {
+        updateToast(toastId, {
+          action: null,
+          text: result.message,
+          tone: "info",
+        });
+      }
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    }
+  }, [showToast, t, updateToast]);
+
+  const runStartupUpdateCheck = useCallback(async () => {
+    try {
+      const status = await api.checkAppUpdate();
+      if (!status?.available || !status.latest_version) {
+        return;
+      }
+      showToast({
+        action: {
+          label: t("settings.installUpdate"),
+          onClick: () => void installAppUpdate(),
+        },
+        text: t("settings.updateAvailable", { version: status.latest_version }),
+        timeoutMs: null,
+        tone: "info",
+      });
+    } catch {
+      // Startup update checks are best-effort and should not create noisy banners.
+    }
+  }, [installAppUpdate, showToast, t]);
 
   const updateUsageWindow = useCallback((nextWindow: UsageQueryWindow) => {
     setUsageWindow((current) => {
@@ -347,6 +406,18 @@ export default function App() {
       window.clearInterval(clientTimer);
     };
   }, [loadGatewayClients, loadRuntime]);
+
+  useEffect(() => {
+    if (startupUpdateCheckStarted.current || !runtime.settings) {
+      return;
+    }
+    startupUpdateCheckStarted.current = true;
+    const timer = window.setTimeout(
+      () => void runStartupUpdateCheck(),
+      STARTUP_UPDATE_CHECK_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [runStartupUpdateCheck, runtime.settings]);
 
   useEffect(() => {
     writeGatewayClientVersionCache(runtime.gatewayClients);
@@ -440,7 +511,8 @@ export default function App() {
       await loadRuntime();
       return saveMessage;
     } catch (err) {
-      setBanner(messageFromError(err));
+      const message = messageFromError(err);
+      setBanner(message);
       throw err;
     } finally {
       setBusy(null);
