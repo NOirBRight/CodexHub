@@ -1,12 +1,14 @@
 use crate::{autostart, catalog, config, gateway, history, models, openai_usage, proxy};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:1421";
 const INVOKE_PATH: &str = "/api/invoke";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+static BACKGROUND_BRIDGE_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 struct InvokeRequest {
@@ -21,19 +23,49 @@ pub fn run(args: &[String]) -> i32 {
     match TcpListener::bind(&addr) {
         Ok(listener) => {
             println!("CodexHub web bridge listening on http://{addr}");
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        std::thread::spawn(move || handle_stream(stream));
-                    }
-                    Err(error) => eprintln!("web bridge connection failed: {error}"),
-                }
-            }
+            serve(listener);
             0
         }
         Err(error) => {
             eprintln!("failed to bind CodexHub web bridge on {addr}: {error}");
             1
+        }
+    }
+}
+
+pub fn start_background() -> Result<(), String> {
+    if BACKGROUND_BRIDGE_STARTED.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+
+    std::thread::Builder::new()
+        .name("codexhub-web-bridge".to_string())
+        .spawn(|| {
+            gateway::start_telemetry_ingester();
+            match TcpListener::bind(DEFAULT_ADDR) {
+                Ok(listener) => serve(listener),
+                Err(error) if error.kind() == ErrorKind::AddrInUse => {
+                    eprintln!("CodexHub web bridge already listening on http://{DEFAULT_ADDR}");
+                }
+                Err(error) => {
+                    eprintln!("failed to bind CodexHub web bridge on {DEFAULT_ADDR}: {error}");
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            BACKGROUND_BRIDGE_STARTED.store(false, Ordering::Release);
+            format!("failed to start CodexHub web bridge thread: {error}")
+        })
+}
+
+fn serve(listener: TcpListener) {
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                std::thread::spawn(move || handle_stream(stream));
+            }
+            Err(error) => eprintln!("web bridge connection failed: {error}"),
         }
     }
 }

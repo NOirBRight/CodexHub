@@ -304,6 +304,23 @@ test("release desktop binary does not allocate a Windows console", async () => {
   assert.match(mainSource, /not\(debug_assertions\)/);
 });
 
+test("desktop exe starts the web bridge in the background", async () => {
+  const [mainSource, bridgeSource] = await Promise.all([
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriWebBridgePath, "utf8"),
+  ]);
+  const setupSource = mainSource.match(/\.setup\(\|app\| \{[\s\S]*?Ok\(\(\)\)/)?.[0] ?? "";
+
+  assert.match(setupSource, /web_bridge::start_background\(\)/);
+  assert.ok(
+    setupSource.indexOf("web_bridge::start_background()") < setupSource.indexOf("Ok(())"),
+    "web bridge should start during GUI setup before setup succeeds",
+  );
+  assert.match(bridgeSource, /pub fn start_background\(\) -> Result<\(\), String>/);
+  assert.match(bridgeSource, /std::thread::Builder::new\(\)[\s\S]*\.name\("codexhub-web-bridge"/);
+  assert.match(bridgeSource, /ErrorKind::AddrInUse/);
+});
+
 test("global cursor contract marks interactive controls as pointer and disabled controls as unavailable", async () => {
   const css = await readFile(indexCssPath, "utf8");
 

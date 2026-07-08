@@ -737,6 +737,7 @@ fn run_gui() {
             #[cfg(desktop)]
             setup_tray(app)?;
             gateway::start_telemetry_ingester();
+            web_bridge::start_background()?;
             Ok(())
         })
         .on_window_event(|window, event| {
