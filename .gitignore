@@ -10,6 +10,8 @@ __pycache__/
 *.bak
 *.bak-*
 test-results/
+diagnostics/
+docs/superpowers/
 
 # Local secrets
 config/local.toml

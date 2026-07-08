@@ -604,7 +604,7 @@ pub fn gateway_copy_client_config(
     let json_text = serde_json::to_string_pretty(&body)
         .map_err(|error| format!("failed to serialize client config: {error}"))?;
     let curl_test = format!(
-        "curl -s -X POST {base_url}/chat/completions -H \"Content-Type: application/json\" -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"Say hello in one word.\"}}],\"stream\":false}}'"
+        "curl -s -X POST {base_url}/chat/completions -H \"Authorization: Bearer {api_key}\" -H \"Content-Type: application/json\" -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"Say hello in one word.\"}}],\"stream\":false}}'"
     );
 
     Ok(GatewayClientConfig {
@@ -944,7 +944,7 @@ pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSu
     Ok(sync_gateway_clients_from_infos(
         clients,
         model,
-        |client_id, model| apply_gateway_client_config(client_id, model),
+        apply_gateway_client_config,
     ))
 }
 
@@ -3005,7 +3005,7 @@ fn read_usage_summary_from_events_with_pricing(
     } else {
         None
     };
-    let cost = estimate_usage_cost(&events, pricing, &cache_capable_providers);
+    let cost = estimate_usage_cost(events, pricing, &cache_capable_providers);
 
     GatewayUsageSummary {
         requests,
@@ -4682,7 +4682,7 @@ fn restore_zcode_config_with_targets(
     }
 }
 
-fn zcode_target_files<'a>(targets: &'a ZcodeConfigTargets) -> [(&'static str, &'a Path); 3] {
+fn zcode_target_files(targets: &ZcodeConfigTargets) -> [(&'static str, &Path); 3] {
     [
         ("codexhub.json", targets.catalog_path.as_path()),
         ("config.json", targets.v2_config_path.as_path()),

@@ -1,3 +1,4 @@
+use crate::runtime_paths;
 use crate::AppStatus;
 use crate::Settings;
 use serde::{Deserialize, Serialize};
@@ -47,16 +48,8 @@ struct ProxyPaths {
 
 impl ProxyPaths {
     fn runtime() -> Result<Self, String> {
-        let codex_dir = match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
-            Some(value) => PathBuf::from(value),
-            None => dirs::home_dir()
-                .ok_or_else(|| "failed to resolve user home directory".to_string())?
-                .join(".codex"),
-        };
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or_else(|| "failed to resolve CodexHub repo root".to_string())?
-            .to_path_buf();
+        let codex_dir = runtime_paths::codex_home_dir()?;
+        let repo_root = runtime_paths::resource_root()?;
 
         Ok(Self::new(codex_dir, repo_root))
     }
@@ -414,7 +407,12 @@ fn stop_with_paths_and_controls(
     }
 
     let Some(pid_record) = pid_record else {
-        return stop_running_proxy_without_pid(paths, mode, settings.proxy_port);
+        return stop_running_proxy_without_pid(
+            paths,
+            mode,
+            settings.proxy_port,
+            &settings.gateway_client_key,
+        );
     };
 
     match verify_proxy_process(&pid_record, paths, settings.proxy_port, inspector)? {
@@ -426,6 +424,7 @@ fn stop_with_paths_and_controls(
                 mode,
                 settings.proxy_port,
                 pid,
+                &settings.gateway_client_key,
                 "PID no longer exists".to_string(),
             );
         }
@@ -436,12 +435,13 @@ fn stop_with_paths_and_controls(
                 mode,
                 settings.proxy_port,
                 pid,
+                &settings.gateway_client_key,
                 format!("ownership could not be verified: {reason}"),
             );
         }
     };
 
-    let _ = request_shutdown(settings.proxy_port);
+    let _ = request_shutdown(settings.proxy_port, &settings.gateway_client_key);
     if wait_for_stopped(settings.proxy_port, GRACEFUL_STOP_TIMEOUT)? {
         remove_pid(paths)?;
         return Ok(AppStatus {
@@ -464,6 +464,7 @@ fn stop_with_paths_and_controls(
                 mode,
                 settings.proxy_port,
                 pid,
+                &settings.gateway_client_key,
                 "PID disappeared before force kill".to_string(),
             );
         }
@@ -474,6 +475,7 @@ fn stop_with_paths_and_controls(
                 mode,
                 settings.proxy_port,
                 pid,
+                &settings.gateway_client_key,
                 format!("ownership could not be verified before force kill: {reason}"),
             );
         }
@@ -504,9 +506,10 @@ fn stop_running_proxy_with_stale_pid(
     mode: String,
     port: u16,
     pid: u32,
+    gateway_client_key: &str,
     reason: String,
 ) -> Result<AppStatus, String> {
-    let _ = request_shutdown(port);
+    let _ = request_shutdown(port, gateway_client_key);
     if wait_for_stopped(port, GRACEFUL_STOP_TIMEOUT)? {
         return Ok(AppStatus {
             mode,
@@ -532,8 +535,9 @@ fn stop_running_proxy_without_pid(
     paths: &ProxyPaths,
     mode: String,
     port: u16,
+    gateway_client_key: &str,
 ) -> Result<AppStatus, String> {
-    let _ = request_shutdown(port);
+    let _ = request_shutdown(port, gateway_client_key);
     if wait_for_stopped(port, GRACEFUL_STOP_TIMEOUT)? {
         return Ok(AppStatus {
             mode,
@@ -609,6 +613,10 @@ fn build_start_command(
         .current_dir(paths.proxy_script_dir())
         .env("PYTHONPATH", paths.proxy_script_dir())
         .env("CODEX_HOME", paths.codex_dir.clone())
+        .env(
+            "CODEX_PROXY_GATEWAY_CLIENT_KEY",
+            settings.gateway_client_key.trim(),
+        )
         .env(
             "CODEX_PROXY_UPSTREAM_TIMEOUT_SECONDS",
             settings
@@ -1121,13 +1129,18 @@ fn health(port: u16) -> Result<Option<HealthResponse>, String> {
     Ok(response.json::<HealthResponse>().ok())
 }
 
-fn request_shutdown(port: u16) -> Result<(), String> {
+fn request_shutdown(port: u16, gateway_client_key: &str) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(SHUTDOWN_TIMEOUT)
         .build()
         .map_err(|error| format!("failed to build HTTP client: {error}"))?;
     let url = format!("http://127.0.0.1:{port}/shutdown");
-    let _ = client.post(url).send();
+    let mut request = client.post(url);
+    let gateway_client_key = gateway_client_key.trim();
+    if !gateway_client_key.is_empty() {
+        request = request.bearer_auth(gateway_client_key);
+    }
+    let _ = request.send();
     Ok(())
 }
 
@@ -1774,6 +1787,12 @@ time.sleep(10)
                 .and_then(|value| value.as_ref())
                 .and_then(|value| value.to_str()),
             Some("1")
+        );
+        assert_eq!(
+            envs.get("CODEX_PROXY_GATEWAY_CLIENT_KEY")
+                .and_then(|value| value.as_ref())
+                .and_then(|value| value.to_str()),
+            Some(settings.gateway_client_key.as_str())
         );
         assert_eq!(
             envs.get("CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS")

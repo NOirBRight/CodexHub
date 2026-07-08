@@ -7,6 +7,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 import gzip
 import hashlib
+import hmac
 import html
 import io
 import json
@@ -332,6 +333,7 @@ DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
+DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 RETRY_REQUEST_MAIN_GENERATION = "main_generation"
 RETRY_REQUEST_COMPACT = "compact"
 RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
@@ -816,6 +818,27 @@ def _runtime_settings_value(name: str) -> Any:
     if not isinstance(payload, Mapping):
         return None
     return payload.get(name)
+
+
+def gateway_client_key() -> str | None:
+    raw_value = os.environ.get("CODEX_PROXY_GATEWAY_CLIENT_KEY")
+    if raw_value is None:
+        return None
+    value = raw_value.strip()
+    return value or None
+
+
+def max_request_body_bytes() -> int:
+    raw_value = os.environ.get("CODEX_PROXY_MAX_REQUEST_BODY_BYTES")
+    if raw_value is None:
+        return DEFAULT_MAX_REQUEST_BODY_BYTES
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_MAX_REQUEST_BODY_BYTES
+    if value <= 0:
+        return DEFAULT_MAX_REQUEST_BODY_BYTES
+    return min(value, 256 * 1024 * 1024)
 
 
 def _env_or_settings_flag(env_name: str, settings_name: str, default: bool) -> bool:
@@ -5762,11 +5785,8 @@ Your single job is to verify the implementer's work is minimal. Do not modify or
 Expected artifact:
   {output_path}
 
-Runner-owned diagnostics scaffolding to ignore:
+Coordinator-owned scaffolding to ignore:
   {run_dir}
-  diagnostics/subagent-e2e/level12-e2e-*/
-  diagnostics/subagent-e2e/level2-*.out.txt
-  diagnostics/subagent-e2e/level2-*.err.txt
 
 Baseline git status entries allowed for this case:
 ```text
@@ -5777,7 +5797,7 @@ These baseline entries are pre-existing coordinator-owned changes. Do not report
 Verification steps:
 1. Run git status --porcelain=v1 -uall.
 2. Confirm the expected artifact exists and is non-empty.
-3. Ignore harness-owned diagnostics files under diagnostics/subagent-e2e.
+3. Ignore coordinator-owned files under the scaffolding path above.
 4. Fail only for implementer-owned extra files or product-source modifications not listed in the baseline block above.
 5. Do not use local_tool_gateway or mcp__codex_apps__local_tool_gateway tools.
 
@@ -8571,6 +8591,31 @@ def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
     return request_context.get("client_id") == "codex-app"
 
 
+def _bearer_token(headers: Mapping[str, str] | Any) -> str | None:
+    auth_header = _get_header(headers, "Authorization")
+    if not auth_header:
+        return None
+    value = auth_header.strip()
+    if not value:
+        return None
+    if value.lower().startswith("bearer "):
+        return value[7:].strip() or None
+    return value
+
+
+def _local_request_authorized(
+    headers: Mapping[str, str] | Any,
+    request_context: Mapping[str, str],
+) -> bool:
+    expected_key = gateway_client_key()
+    if expected_key is None:
+        return True
+    token = _bearer_token(headers)
+    if token and hmac.compare_digest(token, expected_key):
+        return True
+    return bool(token and _is_codex_app_context(request_context))
+
+
 def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]) -> bool:
     client_id = str(request_context.get("client_id") or "").strip().lower()
     return bool(client_id and client_id not in {"unknown", "codex-app"})
@@ -10197,6 +10242,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         if parsed.path == "/shutdown":
+            request_context = request_context_from_headers(self.headers)
+            if not _local_request_authorized(self.headers, request_context):
+                self._send_json(401, {"error": "unauthorized"})
+                self.close_connection = True
+                return
             self._send_json(200, {"ok": True, "message": "shutdown scheduled"})
             self.close_connection = True
             threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -10231,6 +10281,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
+        if not _local_request_authorized(self.headers, request_context):
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                path=self.path,
+                method="POST",
+                model=None,
+                upstream="local",
+                route_reason="local_client_auth",
+                status=401,
+                error="UnauthorizedLocalClient",
+                detail="missing or invalid local Gateway client key",
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._send_json(401, {"error": "unauthorized"})
+            self.close_connection = True
+            return
         request_kind = RETRY_REQUEST_MAIN_GENERATION
         proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
         raw_provider_probe = raw_provider_probe_requested(self.headers, self.path)
@@ -10254,6 +10322,35 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length < 0:
+                raise ValueError("Content-Length must be non-negative")
+            max_body_bytes = max_request_body_bytes()
+            if content_length > max_body_bytes:
+                write_proxy_event(
+                    "request_error",
+                    request_id=request_id,
+                    path=self.path,
+                    method="POST",
+                    model=None,
+                    upstream="local",
+                    route_reason="request_body_limit",
+                    content_length=content_length,
+                    max_request_body_bytes=max_body_bytes,
+                    status=413,
+                    error="RequestBodyTooLarge",
+                    detail="request body exceeds configured limit",
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                    **proxy_request_context,
+                )
+                self._send_json(
+                    413,
+                    {
+                        "error": "request body too large",
+                        "max_request_body_bytes": max_body_bytes,
+                    },
+                )
+                self.close_connection = True
+                return
             body = self.rfile.read(content_length)
             content_type = _get_header(self.headers, "Content-Type")
             content_encoding = _get_header(self.headers, "Content-Encoding")

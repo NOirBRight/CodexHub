@@ -1,4 +1,4 @@
-use crate::{AppStatus, Provider, Settings};
+use crate::{runtime_paths, AppStatus, Provider, Settings};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
@@ -37,16 +37,8 @@ pub(crate) struct ConfigPaths {
 
 impl ConfigPaths {
     pub(crate) fn runtime() -> Result<Self, String> {
-        let codex_dir = match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
-            Some(value) => PathBuf::from(value),
-            None => dirs::home_dir()
-                .ok_or_else(|| "failed to resolve user home directory".to_string())?
-                .join(".codex"),
-        };
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or_else(|| "failed to resolve CodexHub repo root".to_string())?
-            .to_path_buf();
+        let codex_dir = runtime_paths::codex_home_dir()?;
+        let repo_root = runtime_paths::resource_root()?;
 
         Ok(Self::new(codex_dir, repo_root))
     }

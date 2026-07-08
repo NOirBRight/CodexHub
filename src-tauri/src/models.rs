@@ -1,4 +1,4 @@
-use crate::{MetadataProvenance, Model, ModelPricing, UpstreamFormat};
+use crate::{runtime_paths, MetadataProvenance, Model, ModelPricing, UpstreamFormat};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
@@ -1319,16 +1319,8 @@ struct ModelPaths {
 
 impl ModelPaths {
     fn runtime() -> Result<Self, String> {
-        let codex_dir = match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
-            Some(value) => PathBuf::from(value),
-            None => dirs::home_dir()
-                .ok_or_else(|| "failed to resolve user home directory".to_string())?
-                .join(".codex"),
-        };
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or_else(|| "failed to resolve CodexHub repo root".to_string())?
-            .to_path_buf();
+        let codex_dir = runtime_paths::codex_home_dir()?;
+        let repo_root = runtime_paths::resource_root()?;
 
         Ok(Self::new(codex_dir, repo_root))
     }

@@ -72,7 +72,7 @@ The proxy and desktop app run independently — closing the app does not affect 
 4. Switch to Custom Provider in Codex — start using
 5. Want to connect other coding tools? One-click configure in the Gateway page
 
-> CodexHub bundles a Python runtime — no separate Python installation required.
+> v0.1.0 beta bundles the proxy scripts and default configuration, but requires Python 3.11+ on `PATH` or configured through `CODEXHUB_PYTHON` / `CODEXHUB_PROXY_PYTHON`.
 
 ## More Highlights
 

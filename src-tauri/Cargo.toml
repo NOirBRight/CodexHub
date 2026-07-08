@@ -3,6 +3,7 @@ name = "codexhub"
 version = "0.1.0"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]

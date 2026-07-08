@@ -341,7 +341,7 @@ After the implementer reports DONE, run a spec reviewer and then a code quality 
 You are a Codex native code-quality reviewer subagent.
 
 READ FIRST:
-1. C:\Users\noirb\.codex\plugins\cache\openai-curated-remote\superpowers\5.1.4\skills\subagent-driven-development\SKILL.md
+1. C:\Users\codexhub\.codex\plugins\cache\openai-curated-remote\superpowers\5.1.4\skills\subagent-driven-development\SKILL.md
 
 Verify minimal implementation hygiene and absence of product-source modifications for one diagnostic artifact produced by a prior implementer subagent.
 The overall chain is implementer, spec reviewer, and code quality reviewer.
@@ -884,7 +884,7 @@ Required sequence:
     def test_workflow_task_count_comes_from_real_plan_read_output_not_skill_examples(self):
         workflow_prompt = (
             "Use subagent-driven-development with the short diagnostic plan at "
-            "diagnostics/subagent-e2e-cli/short-subagent-development-plan.md."
+            ".tmp/subagent-e2e-cli/short-subagent-development-plan.md."
         )
         plan_read = {
             "type": "function_call_output",

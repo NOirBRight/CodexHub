@@ -10,6 +10,7 @@ mod history;
 mod models;
 mod openai_usage;
 mod proxy;
+mod runtime_paths;
 mod web_bridge;
 
 use serde::{Deserialize, Serialize};
@@ -718,6 +719,9 @@ fn run_gui() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                runtime_paths::set_resource_root(resource_dir);
+            }
             #[cfg(desktop)]
             setup_tray(app)?;
             gateway::start_telemetry_ingester();

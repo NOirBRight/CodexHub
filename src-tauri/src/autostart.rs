@@ -516,7 +516,7 @@ mod tests {
     fn windows_set_autostart_creates_or_updates_logon_task() {
         let paths = FakePaths::new(
             PathBuf::from(r"C:\Program Files\CodexHub\codexhub.exe"),
-            PathBuf::from(r"C:\Users\noirb"),
+            PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
         let runner = RecordingRunner::successful();
@@ -579,7 +579,7 @@ mod tests {
     fn windows_set_autostart_false_tolerates_missing_logon_task() {
         let paths = FakePaths::new_with_current_exe_error(
             "current exe should not be needed".to_string(),
-            PathBuf::from(r"C:\Users\noirb"),
+            PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
         let runner =
@@ -990,7 +990,7 @@ mod tests {
     fn command_runner_failure_includes_exit_code_stdout_and_stderr() {
         let paths = FakePaths::new(
             PathBuf::from(r"C:\CodexHub\codexhub.exe"),
-            PathBuf::from(r"C:\Users\noirb"),
+            PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
         let runner = RecordingRunner::failed(42, "printed stdout", "printed stderr");

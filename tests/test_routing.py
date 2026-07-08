@@ -352,6 +352,57 @@ class RoutingTests(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_PROXY_OFFICIAL_HTTP_PASSTHROUGH_ENABLED": "0"}, clear=True):
             self.assertFalse(codex_proxy.gateway_official_http_passthrough_enabled())
 
+    def test_local_request_auth_defaults_open_without_gateway_key(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("codex_proxy._runtime_settings_value", return_value=None),
+        ):
+            self.assertTrue(codex_proxy._local_request_authorized({}, {"client_id": "unknown"}))
+
+    def test_local_request_auth_requires_matching_gateway_key(self):
+        with patch.dict(os.environ, {"CODEX_PROXY_GATEWAY_CLIENT_KEY": "local-key"}, clear=True):
+            self.assertTrue(
+                codex_proxy._local_request_authorized(
+                    {"Authorization": "Bearer local-key"},
+                    {"client_id": "unknown"},
+                )
+            )
+            self.assertFalse(
+                codex_proxy._local_request_authorized(
+                    {},
+                    {"client_id": "unknown"},
+                )
+            )
+            self.assertFalse(
+                codex_proxy._local_request_authorized(
+                    {"Authorization": "Bearer wrong"},
+                    {"client_id": "unknown"},
+                )
+            )
+
+    def test_local_request_auth_allows_codex_app_authorization_fallback(self):
+        with patch.dict(os.environ, {"CODEX_PROXY_GATEWAY_CLIENT_KEY": "local-key"}, clear=True):
+            self.assertTrue(
+                codex_proxy._local_request_authorized(
+                    {"Authorization": "Bearer codex-app-token"},
+                    {"client_id": "codex-app"},
+                )
+            )
+            self.assertFalse(
+                codex_proxy._local_request_authorized(
+                    {},
+                    {"client_id": "codex-app"},
+                )
+            )
+
+    def test_max_request_body_bytes_defaults_and_env_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(codex_proxy.max_request_body_bytes(), 64 * 1024 * 1024)
+        with patch.dict(os.environ, {"CODEX_PROXY_MAX_REQUEST_BODY_BYTES": "1024"}, clear=True):
+            self.assertEqual(codex_proxy.max_request_body_bytes(), 1024)
+        with patch.dict(os.environ, {"CODEX_PROXY_MAX_REQUEST_BODY_BYTES": "bad"}, clear=True):
+            self.assertEqual(codex_proxy.max_request_body_bytes(), 64 * 1024 * 1024)
+
     def test_official_codex_app_responses_uses_http_passthrough_profile(self):
         upstream = {"name": "official"}
         context = {"client_id": "codex-app"}
