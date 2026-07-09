@@ -192,6 +192,28 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("# owner = release", text)
             self.assertNotIn("# BEGIN CODEX PROXY SESSION CONFIG", text)
 
+    def test_restore_overlay_without_backup_strips_managed_overlay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "backup.toml"
+            catalog = tmp / "catalog.json"
+
+            apply_overlay(
+                config,
+                backup,
+                catalog,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            backup.unlink()
+
+            restore_overlay(config, backup, unified_history=False)
+
+            text = config.read_text(encoding="utf-8")
+            self.assertNotIn("# owner = release", text)
+            self.assertNotIn("# BEGIN CODEX PROXY SESSION CONFIG", text)
+
     def test_restore_overlay_can_inject_unified_official_history_bucket(self):
         original = "\n".join(
             [

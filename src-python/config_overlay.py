@@ -282,7 +282,7 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
         restored = backup_path.read_text(encoding="utf-8")
         restore_from_backup = True
     elif config_path.exists():
-        restored = config_path.read_text(encoding="utf-8")
+        restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
         restore_from_backup = False
     else:
         restored = ""
