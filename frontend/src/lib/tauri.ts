@@ -7,6 +7,7 @@ import type {
   AppUpdateInstallStatus,
   AppUpdateStatus,
   AppVersionInfo,
+  CodexHubError,
   GatewayClientConfig,
   GatewayClientApplyResult,
   GatewayClientConfigPreview,
@@ -43,6 +44,17 @@ interface BridgeResponse<T> {
   ok: boolean;
   value?: T;
   error?: string;
+  codexhub_error?: CodexHubError | null;
+}
+
+export class CodexHubBridgeError extends Error {
+  readonly codexhubError: CodexHubError | null;
+
+  constructor(message: string, codexhubError: CodexHubError | null) {
+    super(message);
+    this.name = "CodexHubBridgeError";
+    this.codexhubError = codexhubError;
+  }
 }
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:1421/api/invoke";
@@ -79,7 +91,10 @@ async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>):
 
   const payload = (await response.json().catch(() => null)) as BridgeResponse<T> | null;
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`);
+    throw new CodexHubBridgeError(
+      payload?.codexhub_error?.message || payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`,
+      payload?.codexhub_error ?? null,
+    );
   }
   return payload.value as T;
 }

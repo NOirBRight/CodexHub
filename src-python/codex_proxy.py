@@ -10339,6 +10339,12 @@ def _typed_error_code(
     exc: BaseException | None,
     status: int | None,
 ) -> str:
+    if error_type == "gateway_auth_error":
+        return "gateway.auth"
+    if error_type == "backend_error":
+        return "backend.command"
+    if error_type == "config_error":
+        return "config.origin"
     if error_type in {"invalid_request_error", "validation_error"}:
         return "provider.request"
     if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
@@ -11652,7 +11658,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._safe_send_downstream_json_error(
                 400,
                 inbound_format=inbound_format,
-                upstream_name=upstream_name or "upstream_error",
+                upstream_name=upstream_name or provider_hint or "gateway",
                 request_id=request_id,
                 exc=exc,
                 error=type(exc).__name__,

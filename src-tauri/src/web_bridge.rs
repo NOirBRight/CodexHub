@@ -514,6 +514,26 @@ fn to_value<T: serde::Serialize>(result: Result<T, String>) -> Result<Value, Str
     })
 }
 
+fn bridge_error_code(status: u16, error: &str) -> &'static str {
+    let lowered = error.to_ascii_lowercase();
+    if status == 403 && lowered.contains("origin") {
+        return "config.origin";
+    }
+    "backend.command"
+}
+
+fn bridge_error_payload(status: u16, error: &str) -> Value {
+    json!({
+        "code": bridge_error_code(status, error),
+        "message": error,
+        "source": "web_bridge",
+        "retryable": false,
+        "details": {
+            "status": status,
+        },
+    })
+}
+
 fn string_arg(args: &Value, name: &str) -> Result<String, String> {
     args.get(name)
         .and_then(Value::as_str)
@@ -579,7 +599,15 @@ impl BridgeResponse {
     }
 
     fn error(status: u16, error: String) -> Self {
-        Self::json(status, json!({ "ok": false, "error": error }))
+        let codexhub_error = bridge_error_payload(status, &error);
+        Self::json(
+            status,
+            json!({
+                "ok": false,
+                "error": error,
+                "codexhub_error": codexhub_error,
+            }),
+        )
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -649,7 +677,40 @@ mod tests {
         .expect("invoke");
 
         assert_eq!(response.status, 500);
-        assert!(String::from_utf8_lossy(&response.body).contains("missing_command"));
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+        assert_eq!(body["error"], "unknown CodexHub command: missing_command");
+        assert_eq!(body["codexhub_error"]["code"], "backend.command");
+        assert_eq!(
+            body["codexhub_error"]["message"],
+            "unknown CodexHub command: missing_command"
+        );
+        assert_eq!(body["codexhub_error"]["source"], "web_bridge");
+        assert_eq!(body["codexhub_error"]["retryable"], false);
+        assert_eq!(body["codexhub_error"]["details"]["status"], 500);
+    }
+
+    #[test]
+    fn disallowed_origin_returns_config_origin_error() {
+        let response = handle_request(
+            BridgeRequest {
+                method: "POST".to_string(),
+                path: "/api/invoke".to_string(),
+                origin: Some("http://example.com".to_string()),
+                body: serde_json::to_vec(&json!({
+                    "command": "get_app_flavor",
+                    "args": {}
+                }))
+                .unwrap(),
+            },
+            None,
+        )
+        .expect("invoke");
+
+        assert_eq!(response.status, 403);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+        assert_eq!(body["codexhub_error"]["code"], "config.origin");
+        assert_eq!(body["codexhub_error"]["source"], "web_bridge");
+        assert_eq!(body["codexhub_error"]["retryable"], false);
     }
 
     #[test]
