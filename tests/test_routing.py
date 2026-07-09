@@ -1009,6 +1009,38 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(relayed[0]["defer_stream_errors"])
         self.assert_no_official_passthrough_gateway_events()
 
+    def test_official_http_passthrough_converts_compaction_input_before_upstream(self):
+        input_items = [
+            {"type": "message", "role": "user", "content": f"message {index}"}
+            for index in range(68)
+        ]
+        input_items.append({"type": "compaction", "summary": "release thread summary"})
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": input_items,
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, _fake = post_handler("/v1/responses", body)
+        handler._relay_upstream_response = lambda response, upstream_name, **kwargs: 200
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", return_value=FakeContextResponse(b'{"id":"resp_official","output":[]}')) as open_response,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = open_response.call_args.args[0]
+        sent_payload = json.loads(request.data)
+        sent_raw = request.data.decode("utf-8")
+
+        self.assertEqual(sent_payload["input"][68]["type"], "message")
+        self.assertEqual(sent_payload["input"][68]["role"], "developer")
+        self.assertIn("release thread summary", sent_payload["input"][68]["content"])
+        self.assertNotIn('"type":"compaction"', sent_raw)
+
     def test_official_http_passthrough_does_not_call_image_proxy(self):
         body = json.dumps(
             {
@@ -4124,13 +4156,18 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(transformed)["reasoning"]["effort"], "xhigh")
 
-    def test_official_body_keeps_compaction_input_unchanged(self):
+    def test_official_body_converts_compaction_input_to_developer_message(self):
         upstream = choose_upstream("gpt-5.5")
         body = b'{"model":"gpt-5.5","input":[{"type":"compaction","summary":"keep official shape"}]}'
 
         transformed = compatible_request_body(body, upstream)
+        payload = json.loads(transformed)
 
-        self.assertEqual(json.loads(transformed)["input"][0]["type"], "compaction")
+        self.assertEqual(payload["input"][0]["type"], "message")
+        self.assertEqual(payload["input"][0]["role"], "developer")
+        self.assertIn("Compacted conversation context", payload["input"][0]["content"])
+        self.assertIn("keep official shape", payload["input"][0]["content"])
+        self.assertNotIn('"type":"compaction"', transformed.decode("utf-8"))
 
     def test_official_body_keeps_custom_tool_items_unchanged(self):
         upstream = choose_upstream("gpt-5.5")
