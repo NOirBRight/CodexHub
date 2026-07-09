@@ -153,3 +153,31 @@ npm run test:ui-contract -- --test-name-pattern "release build scripts support s
 - Cleanup stays narrow by targeting only the canonical `releaseAssetPrefix` name plus likely product-name variants for the current flavor/version; it does not remove directories or unrelated release files.
 - Post-build resolution no longer depends on canonical files being absent. The script resolves the freshly generated installer/signature pair from the current flavor/version candidates, then canonicalizes to `releaseAssetPrefix` naming when needed.
 - The UI contract now asserts both pieces of the regression fix: pre-build invalidation of flavor/version-specific artifacts and the removal of the old missing-canonical-only gate.
+
+## Fix After Remaining Review Blocker
+
+### Changed Files
+
+- `scripts/build-windows-release.ps1`
+- `frontend/scripts/ui-contract.test.mjs`
+- `.superpowers/sdd/task-1-report.md`
+
+### Test Command
+
+```powershell
+cd frontend
+npm run test:ui-contract -- --test-name-pattern "release build scripts support stable and beta flavor configuration"
+```
+
+### Output Summary
+
+- PASS
+- `release build scripts support stable and beta flavor configuration`
+- Full run result: `103` passed, `0` failed
+
+### Self-Review
+
+- The release script now resolves post-build artifacts only from `$installerNameCandidates`, which are derived from the current flavor's canonical prefix plus current product-name variants.
+- The broad same-version wildcard scan and `LastWriteTimeUtc` sorting fallback are removed, so a leftover stable installer cannot be selected for a beta publish.
+- Missing installer/signature pairs now fail with a direct error that lists every expected candidate filename instead of silently scanning the bundle directory.
+- The explicit `cargo tauri build --config $generatedTauriConfigPath --bundles nsis --ci` invocation and the narrow pre-build cleanup of current flavor/version candidate `.exe` and `.sig` paths are preserved.

@@ -168,6 +168,7 @@ finally {
 
 $installerPath = Join-Path $bundleDir $canonicalInstallerName
 $signaturePath = "$installerPath.sig"
+$expectedCandidateList = ($installerNameCandidates | ForEach-Object { "$_ (+ .sig)" }) -join ", "
 
 $resolvedInstaller = foreach ($installerName in $installerNameCandidates) {
     $candidateInstallerPath = Join-Path $bundleDir $installerName
@@ -183,26 +184,11 @@ $resolvedInstaller = foreach ($installerName in $installerNameCandidates) {
 }
 
 if ($null -eq $resolvedInstaller) {
-    $generatedInstaller = Get-ChildItem -LiteralPath $bundleDir -Filter "*_${version}_x64-setup.exe" -File |
-        Where-Object {
-            (Test-Path -LiteralPath "$($_.FullName).sig" -PathType Leaf)
-        } |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1
-    if ($null -eq $generatedInstaller) {
-        throw "Expected NSIS installer was not generated: $installerPath"
-    }
-
-    $resolvedInstaller = [pscustomobject]@{
-        InstallerPath = $generatedInstaller.FullName
-        SignaturePath = "$($generatedInstaller.FullName).sig"
-        IsCanonical = ($generatedInstaller.Name -eq $canonicalInstallerName)
-    }
+    throw "Expected NSIS installer/signature pair was not generated for flavor '$Flavor'. Looked for: $expectedCandidateList"
 }
-else {
-    $resolvedInstaller = $resolvedInstaller |
-        Sort-Object @{ Expression = "IsCanonical"; Descending = $true } |
-        Select-Object -First 1
+
+if ($resolvedInstaller -is [array]) {
+    $resolvedInstaller = $resolvedInstaller | Select-Object -First 1
 }
 
 if (-not $resolvedInstaller.IsCanonical) {
