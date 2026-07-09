@@ -1,6 +1,7 @@
 use crate::config;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
+use std::cmp::Reverse;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -327,7 +328,7 @@ fn latest_local_rate_limit_usage_limits(codex_dir: &Path) -> Option<Vec<CodexAcc
     let mut files = Vec::new();
     collect_rate_limit_log_files(&codex_dir.join("sessions"), &mut files);
     collect_rate_limit_log_files(&codex_dir.join("archived_sessions"), &mut files);
-    files.sort_by(|left, right| right.modified.cmp(&left.modified));
+    files.sort_by_key(|file| Reverse(file.modified));
     files.truncate(RATE_LIMIT_LOG_FILE_LIMIT);
 
     let mut latest: Option<(u8, String, Vec<CodexAccountUsageLimit>)> = None;
