@@ -6287,7 +6287,10 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn write_text_replace_does_not_clobber_existing_stale_temp_file() {
@@ -8667,6 +8670,41 @@ mod tests {
     }
 
     #[test]
+    fn public_apply_rejects_other_channel_managed_config_without_takeover() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
+        let root = unique_temp_dir("codexhub-opencode-public-apply-owner");
+        let config_path = root.join("opencode.json");
+        write_beta_owned_opencode_config(&config_path);
+        std::env::set_var("CODEXHUB_OPENCODE_CONFIG", &config_path);
+
+        let error = super::apply_gateway_client_config(
+            "opencode".to_string(),
+            Some("openai/gpt-5.5".to_string()),
+        )
+        .expect_err("public apply must not overwrite beta-owned config");
+
+        restore_env("CODEXHUB_OPENCODE_CONFIG", previous);
+        assert!(error.contains("Managed by Beta"));
+    }
+
+    #[test]
+    fn public_restore_rejects_other_channel_managed_config_without_takeover() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
+        let root = unique_temp_dir("codexhub-opencode-public-restore-owner");
+        let config_path = root.join("opencode.json");
+        write_beta_owned_opencode_config(&config_path);
+        std::env::set_var("CODEXHUB_OPENCODE_CONFIG", &config_path);
+
+        let error = super::restore_gateway_client_config("opencode".to_string())
+            .expect_err("public restore must not disconnect beta-owned config");
+
+        restore_env("CODEXHUB_OPENCODE_CONFIG", previous);
+        assert!(error.contains("Managed by Beta"));
+    }
+
+    #[test]
     fn takeover_allows_cross_channel_owner_change_when_explicit() {
         super::ensure_route_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Release,
@@ -9103,5 +9141,35 @@ mod tests {
             .unwrap()
             .as_millis();
         std::env::temp_dir().join(format!("{prefix}-{millis}-{}", std::process::id()))
+    }
+
+    fn write_beta_owned_opencode_config(path: &PathBuf) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            r#"{
+  "codexhub_managed": true,
+  "provider": {
+    "codexhub-openai": {
+      "options": {
+        "baseURL": "http://127.0.0.1:9109/v1"
+      },
+      "models": {
+        "gpt-5.5": {}
+      }
+    }
+  },
+  "model": "codexhub-openai/gpt-5.5"
+}
+"#,
+        )
+        .unwrap();
+    }
+
+    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
     }
 }
