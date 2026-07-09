@@ -2213,6 +2213,63 @@ def _responses_event_commits_downstream_output(event: Mapping[str, Any], upstrea
     return False
 
 
+def _responses_output_item_has_visible_or_tool_output(item: Mapping[str, Any]) -> bool:
+    item_type = item.get("type")
+    if item_type in {"function_call", "custom_tool_call"}:
+        return _responses_completed_tool_item(item) is not None
+    if item_type == "message":
+        return bool(_message_item_visible_text(item))
+    return False
+
+
+def _responses_completed_event_has_visible_or_tool_output(event: Mapping[str, Any]) -> bool:
+    if event.get("type") != "response.completed":
+        return False
+    response = event.get("response")
+    if not isinstance(response, Mapping):
+        return False
+    output = response.get("output")
+    if not isinstance(output, list):
+        return False
+    for item in output:
+        if isinstance(item, Mapping) and _responses_output_item_has_visible_or_tool_output(item):
+            return True
+    return False
+
+
+def _responses_event_has_visible_or_tool_output(event: Mapping[str, Any], upstream_name: str) -> bool:
+    event_type = event.get("type")
+    if upstream_name != "official":
+        if _is_reasoning_text_stream_event(event):
+            return False
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            item = event.get("item")
+            if isinstance(item, Mapping) and item.get("type") == "reasoning":
+                return False
+    if _responses_event_commits_downstream_output(event, upstream_name):
+        return True
+    if _is_reasoning_text_stream_event(event):
+        delta = event.get("delta")
+        return upstream_name == "official" and isinstance(delta, str) and bool(delta)
+    if event_type in {
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+    }:
+        delta = event.get("delta")
+        return isinstance(delta, str) and bool(delta)
+    if event_type in {
+        "response.function_call_arguments.done",
+        "response.custom_tool_call_input.done",
+    }:
+        return True
+    if event_type in {"response.output_item.added", "response.output_item.done"}:
+        item = event.get("item")
+        return isinstance(item, Mapping) and _responses_output_item_has_visible_or_tool_output(item)
+    if event_type == "response.completed":
+        return _responses_completed_event_has_visible_or_tool_output(event)
+    return False
+
+
 def _responses_event_is_tool_call_construction(event: Mapping[str, Any]) -> bool:
     event_type = event.get("type")
     if event_type in {
@@ -3922,6 +3979,10 @@ class UpstreamStreamIncompleteError(RuntimeError):
     """Raised when an upstream stream ends without a terminal event."""
 
 
+class UpstreamEmptyCompletedResponseError(UpstreamStreamIncompleteError):
+    """Raised when a third-party Responses stream completes with no visible output."""
+
+
 class UpstreamStreamErrorEvent(RuntimeError):
     """Raised when an upstream Responses SSE stream emits an error event."""
 
@@ -5216,17 +5277,34 @@ def _rewrite_structured_tool_input_items(
 
     changed = False
     rewritten_items: list[Any] = []
+    preserved_structured_call_ids: set[str] = set()
     for item in input_items:
         if not isinstance(item, dict):
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
-            rewritten = _structured_tool_function_call_item(item)
-            rewritten_items.append(rewritten if rewritten is not None else item)
-            changed = changed or rewritten != item
+            if _multi_agent_function_call_name(item) is not None or _node_repl_function_call_name(item) is not None:
+                call_id = item.get("call_id")
+                if isinstance(call_id, str):
+                    preserved_structured_call_ids.add(call_id)
+                rewritten = _structured_tool_function_call_item(item)
+                rewritten_items.append(rewritten if rewritten is not None else item)
+                changed = changed or rewritten != item
+            else:
+                replacement = _compatible_internal_message(item)
+                if replacement is not None:
+                    rewritten_items.append(replacement)
+                changed = True
             continue
         if item.get("type") == "function_call_output":
-            rewritten_items.append(dict(item))
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id in preserved_structured_call_ids:
+                rewritten_items.append(dict(item))
+            else:
+                replacement = _compatible_internal_message(item)
+                if replacement is not None:
+                    rewritten_items.append(replacement)
+                changed = True
             continue
         item_type = item.get("type")
         replacement = _compatible_internal_message(item)
@@ -5774,8 +5852,7 @@ def _joined_text(value: Any) -> str:
 def _active_user_request_text(value: Any) -> str:
     if not isinstance(value, list):
         return _joined_text(value)
-    messages: list[str] = []
-    for item in value:
+    for item in reversed(value):
         if not isinstance(item, Mapping) or item.get("type") != "message":
             continue
         if item.get("role") != "user":
@@ -5785,8 +5862,8 @@ def _active_user_request_text(value: Any) -> str:
         if first_line.startswith("Previous real Codex native ") or first_line.startswith("Codex native "):
             continue
         if text.strip():
-            messages.append(text)
-    return "\n".join(messages)
+            return text
+    return ""
 
 
 def _exact_child_prompts_from_request_text(text: str) -> list[str]:
@@ -6530,6 +6607,36 @@ def _rewrite_internal_input_items(
                 rewritten_items.append(replacement)
             changed = True
             continue
+        rewritten_items.append(item)
+
+    if changed:
+        payload["input"] = rewritten_items
+    return changed
+
+
+def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    changed = False
+    rewritten_items: list[Any] = []
+    for item in input_items:
+        if not isinstance(item, dict):
+            rewritten_items.append(item)
+            continue
+
+        item_type = item.get("type")
+        if item_type == "compaction":
+            replacement = _compatible_compaction_message(item)
+            if replacement is not None:
+                rewritten_items.append(replacement)
+            changed = True
+            continue
+        if item_type == "compaction_trigger":
+            changed = True
+            continue
+
         rewritten_items.append(item)
 
     if changed:
@@ -7857,6 +7964,8 @@ def official_passthrough_request_body(
     if isinstance(service_tier, str) and service_tier and next_payload.get("service_tier") != service_tier:
         next_payload["service_tier"] = service_tier
         changed = True
+    if _sanitize_unsupported_compaction_input_items(next_payload):
+        changed = True
     if next_payload.get("store") is not False:
         next_payload["store"] = False
         changed = True
@@ -7888,6 +7997,8 @@ def transparent_request_body(
             next_payload = dict(payload)
             changed = False
             if _normalize_responses_message_input_items(next_payload):
+                changed = True
+            if official_responses_backend and _sanitize_unsupported_compaction_input_items(next_payload):
                 changed = True
             if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
                 changed = True
@@ -7925,6 +8036,8 @@ def transparent_request_body(
         next_payload["stream"] = True
         changed = True
     if official_responses_backend and _normalize_responses_string_input(next_payload):
+        changed = True
+    if official_responses_backend and _sanitize_unsupported_compaction_input_items(next_payload):
         changed = True
     if _normalize_responses_message_input_items(next_payload):
         changed = True
@@ -7968,6 +8081,8 @@ def compatible_request_body(
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
         if _sanitize_official_reasoning_items(payload):
+            changed = True
+        if _sanitize_unsupported_compaction_input_items(payload):
             changed = True
         if _normalize_responses_string_input(payload):
             changed = True
@@ -8371,23 +8486,24 @@ def compatible_request_body(
                 )
                 changed = True
             required_tool_choice_name = None
-            if (
-                subagent_workflow_plan_read_required
-                and include_node_repl_for_subagent_workflow
-                and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
-            ):
-                required_tool_choice_name = "mcp__node_repl__js"
-            else:
-                required_tool_choice_name = _required_subagent_tool_choice(
-                    tool_protocol=tool_protocol,
-                    lifecycle_complete=lifecycle_complete,
-                    include_spawn_agent=include_spawn_agent,
-                    include_wait_agent=include_wait_agent,
-                    include_close_agent=include_close_agent,
-                    include_resume_agent=include_resume_agent,
-                    include_send_input=include_send_input,
-                    include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
-                )
+            if subagent_state_active:
+                if (
+                    subagent_workflow_plan_read_required
+                    and include_node_repl_for_subagent_workflow
+                    and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
+                ):
+                    required_tool_choice_name = "mcp__node_repl__js"
+                else:
+                    required_tool_choice_name = _required_subagent_tool_choice(
+                        tool_protocol=tool_protocol,
+                        lifecycle_complete=lifecycle_complete,
+                        include_spawn_agent=include_spawn_agent,
+                        include_wait_agent=include_wait_agent,
+                        include_close_agent=include_close_agent,
+                        include_resume_agent=include_resume_agent,
+                        include_send_input=include_send_input,
+                        include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
+                    )
             if semantic_repair_enabled and _restrict_tools_to_required_tool(payload, required_tool_choice_name):
                 _write_adapter_event(
                     event_context,
@@ -11286,6 +11402,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     explicit_max_attempts=False,
                                     stream_failure=stream_failure,
                                 )
+                                if isinstance(retry_exc, UpstreamEmptyCompletedResponseError):
+                                    relay_attempts = min(relay_attempts, 2)
                                 max_relay_attempts = relay_attempts + lifecycle_final_extra_attempts
                                 retry_limit = relay_attempts
                                 if relay_attempt >= retry_limit or failure_class == RETRY_FAILURE_PERMANENT:
@@ -13658,6 +13776,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "delta_chars": 0,
             }
             saw_terminal_event = False
+            saw_completed_event = False
+            visible_or_tool_output_seen = False
             downstream_output_started = False
             pending_sse_event_metadata: list[bytes] = []
             pending_downstream_lines: list[bytes] = []
@@ -13799,6 +13919,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             return 502
                         if _responses_events_have_terminal([usage_payload]):
                             saw_terminal_event = True
+                        if event_type == "response.completed":
+                            saw_completed_event = True
+                        if _responses_event_has_visible_or_tool_output(usage_payload, upstream_name):
+                            visible_or_tool_output_seen = True
+                        empty_completed_candidate = (
+                            upstream_name != "official"
+                            and event_type == "response.completed"
+                            and not visible_or_tool_output_seen
+                        )
                         is_tool_construction = _responses_event_is_tool_call_construction(usage_payload)
                         if (
                             is_tool_construction
@@ -13816,6 +13945,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 downstream_output_started = True
                         buffer_current_line = (
                             buffer_current_line
+                            or empty_completed_candidate
                             or not downstream_output_started
                             and not saw_terminal_event
                         )
@@ -13847,7 +13977,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if saw_terminal_event:
                         separator = _sse_event_separator_after_line(line)
                         if separator:
-                            write_or_queue_downstream_line(separator, force=True)
+                            flush_terminal = not (
+                                upstream_name != "official"
+                                and isinstance(usage_payload, Mapping)
+                                and usage_payload.get("type") == "response.completed"
+                                and not visible_or_tool_output_seen
+                            )
+                            write_or_queue_downstream_line(
+                                separator,
+                                buffer=not flush_terminal,
+                                force=flush_terminal,
+                            )
                     if saw_terminal_event:
                         break
             except UpstreamStreamIdleTimeoutError as exc:
@@ -13928,6 +14068,46 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     detail="Upstream Responses stream ended without a terminal event.",
                 )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                return 502
+            if (
+                status < 400
+                and upstream_name != "official"
+                and saw_completed_event
+                and not visible_or_tool_output_seen
+            ):
+                pending_line_count = len(pending_downstream_lines)
+                pending_byte_count = sum(len(pending_line) for pending_line in pending_downstream_lines)
+                pending_downstream_lines.clear()
+                detail = "Upstream Responses stream completed without visible output or tool calls."
+                if defer_stream_errors:
+                    raise UpstreamEmptyCompletedResponseError(
+                        f"Responses stream returned empty completed response: {detail}"
+                    )
+                self.close_connection = True
+                write_proxy_event(
+                    "upstream_empty_completed_response",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=502,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    terminal_seen=saw_terminal_event,
+                    completed_seen=saw_completed_event,
+                    visible_or_tool_output_seen=visible_or_tool_output_seen,
+                    completed_tool_calls=len(completed_tool_output_items),
+                    pending_downstream_lines=pending_line_count,
+                    pending_downstream_bytes=pending_byte_count,
+                    last_event_type=last_response_event_type,
+                )
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=502,
+                    error="upstream_empty_completed_response",
+                    detail=detail,
+                )
+                _capture_usage(usage_capture, None, missing_reason="empty_completed_response")
                 return 502
             if upstream_name != "official" and reasoning_stats["seen"]:
                 write_proxy_event(

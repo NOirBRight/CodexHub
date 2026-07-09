@@ -3,6 +3,8 @@ import json
 import shutil
 from pathlib import Path
 
+from atomic_io import atomic_write_bytes
+
 
 def equivalent_line_key(line: bytes) -> bytes:
     try:
@@ -62,14 +64,19 @@ def merged_jsonl_bytes(source: Path, destination: Path) -> bytes | None:
     return b"".join(merged)
 
 
+def copy_file_atomic(source: Path, destination: Path) -> None:
+    atomic_write_bytes(destination, source.read_bytes())
+    shutil.copystat(source, destination)
+
+
 def sync_file(source: Path, destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
-        shutil.copy2(source, destination)
+        copy_file_atomic(source, destination)
         return "copied"
 
     if source.suffix.lower() != ".jsonl":
-        shutil.copy2(source, destination)
+        copy_file_atomic(source, destination)
         return "overwritten"
 
     if (
@@ -82,7 +89,7 @@ def sync_file(source: Path, destination: Path) -> str:
     if merged is None:
         return "kept-destination"
 
-    destination.write_bytes(merged)
+    atomic_write_bytes(destination, merged)
     return "merged"
 
 

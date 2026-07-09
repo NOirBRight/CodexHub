@@ -60,6 +60,14 @@ CodexHub Desktop App
 
 发布版安装包随附普通使用所需的运行时；普通用户不需要额外安装 Python、Node.js 或 Rust。从源码开发时仍需要本机具备 Node.js、Rust/Tauri 工具链和 Python 运行环境。
 
+## Release 与 Beta 通道
+
+CodexHub 正式版默认使用前端端口 `1420`、桥接端口 `1421`、Gateway 端口 `9099`，并使用 `%USERPROFILE%\.codex`。
+
+CodexHub Beta 默认使用前端端口 `1430`、桥接端口 `1431`、Gateway 端口 `9109`，并使用 `%USERPROFILE%\.codexhub-beta\codex-home`。Beta 不会在首次启动时自动接管正式版 Codex 配置。
+
+客户端路由状态以目标配置为准：`Official`、`Release` 或 `Beta`。当某个目标由另一个通道管理时，当前 App 会显示 `Managed by Release` 或 `Managed by Beta`，需要显式确认后才会接管。
+
 ## 使用说明
 
 ### 连接 Codex

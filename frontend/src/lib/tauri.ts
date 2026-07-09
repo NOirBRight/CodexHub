@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppFlavorInfo,
   AppStatus,
   AppUpdateCompletionStatus,
   AppUpdateInstallResult,
@@ -23,6 +24,7 @@ import type {
   OpenAIUsageQueryWindow,
   OpenAIUsageSnapshot,
   Provider,
+  RoutingOwner,
   Settings,
   SubagentMatrixStatus,
   UpstreamFormat,
@@ -139,6 +141,7 @@ function openaiUsageWindowArgs(window?: OpenAIUsageQueryWindow | null) {
 }
 
 export const api = {
+  getAppFlavor: () => call<AppFlavorInfo>("get_app_flavor"),
   getAppVersion: () => call<AppVersionInfo>("get_app_version"),
   checkAppUpdate: () => call<AppUpdateStatus>("check_app_update"),
   startAppUpdateInstall: () => call<AppUpdateInstallStatus>("start_app_update_install"),
@@ -230,11 +233,18 @@ export const api = {
     }),
   restoreGatewayClientConfig: (clientId: string) =>
     call<GatewayClientApplyResult>("restore_gateway_client_config", { clientId }),
-  switchGatewayClientRoute: (clientId: string, mode: string, model?: string | null) =>
+  switchGatewayClientRoute: (
+    clientId: string,
+    mode: RoutingOwner | "hub",
+    model?: string | null,
+    forceTakeover = false,
+  ) =>
     call<GatewayClientApplyResult>("switch_gateway_client_route", {
       clientId,
       mode,
       model: model ?? null,
+      forceTakeover,
+      force_takeover: forceTakeover,
     }),
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>("sync_gateway_clients", { model: model ?? null }),

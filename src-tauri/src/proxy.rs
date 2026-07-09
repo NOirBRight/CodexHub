@@ -1,6 +1,6 @@
-use crate::runtime_paths;
 use crate::AppStatus;
 use crate::Settings;
+use crate::{runtime_paths, safe_file};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read};
@@ -1247,7 +1247,7 @@ fn write_pid(paths: &ProxyPaths, pid: u32, port: u16, script: &Path) -> Result<(
     let metadata = ProxyPidMetadata::new(pid, port, script);
     let text = serde_json::to_string_pretty(&metadata)
         .map_err(|error| format!("failed to encode proxy PID metadata: {error}"))?;
-    fs::write(paths.pid_path(), format!("{text}\n")).map_err(|error| {
+    safe_file::write_text_atomic(&paths.pid_path(), &format!("{text}\n")).map_err(|error| {
         format!(
             "failed to write proxy PID file {}: {error}",
             paths.pid_path().display()
@@ -1566,6 +1566,20 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
     }
 
     #[test]
+    fn pid_file_write_recovers_stale_atomic_lock() {
+        let root = temp_root("pid-stale-lock");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.proxy_dir()).unwrap();
+        let lock = stale_lock_path(&paths.pid_path());
+        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").expect("write stale lock");
+
+        write_pid(&paths, 42, 4555, &paths.proxy_script_path()).expect("write pid");
+
+        assert!(!lock.exists());
+        assert_eq!(read_pid(&paths).expect("read pid"), Some(42));
+    }
+
+    #[test]
     fn legacy_numeric_pid_file_is_read_conservatively() {
         let root = temp_root("legacy-pid");
         let paths = test_paths(&root);
@@ -1859,6 +1873,15 @@ time.sleep(10)
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn stale_lock_path(path: &Path) -> PathBuf {
+        path.with_file_name(format!(
+            "{}.lock",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("pid")
+        ))
     }
 
     fn free_port() -> u16 {

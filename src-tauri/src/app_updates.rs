@@ -1,4 +1,4 @@
-use crate::runtime_paths;
+use crate::{runtime_paths, safe_file};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -423,9 +423,10 @@ fn write_pending_update(path: &Path, target_version: &str) -> Result<(), String>
         target_version: target_version.to_string(),
         written_at: checked_at_now(),
     };
-    let body = serde_json::to_vec_pretty(&pending)
+    let body = serde_json::to_string_pretty(&pending)
         .map_err(|error| operation_error("write pending update", error))?;
-    fs::write(path, body).map_err(|error| operation_error("write pending update", error))
+    safe_file::write_text_atomic(path, &body)
+        .map_err(|error| operation_error("write pending update", error))
 }
 
 fn read_pending_update(path: &Path) -> Result<Option<PendingUpdate>, String> {
@@ -742,8 +743,35 @@ mod tests {
     }
 
     #[test]
+    fn pending_update_write_recovers_stale_atomic_lock() {
+        let path = unique_pending_update_path("stale-lock");
+        let lock = stale_lock_path(&path);
+        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").expect("write stale lock");
+
+        write_pending_update(&path, "0.1.1").expect("write pending update");
+
+        assert!(!lock.exists());
+        assert_eq!(
+            read_pending_update(&path)
+                .expect("read pending update")
+                .as_ref()
+                .map(|pending| pending.target_version.as_str()),
+            Some("0.1.1"),
+        );
+    }
+
+    #[test]
     fn checked_at_now_is_unix_timestamp_string() {
         assert!(checked_at_now().starts_with("unix:"));
+    }
+
+    fn stale_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+        path.with_file_name(format!(
+            "{}.lock",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("pending-update")
+        ))
     }
 
     fn unique_pending_update_path(name: &str) -> std::path::PathBuf {

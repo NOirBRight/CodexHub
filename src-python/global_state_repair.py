@@ -7,6 +7,8 @@ import shutil
 import sys
 from typing import Any
 
+from atomic_io import atomic_write_text
+
 
 REMOTE_SELECTION_KEYS = (
     "selected-remote-host-id",
@@ -60,7 +62,11 @@ def repair_global_state(state_path: Path, backup_path: Path) -> dict[str, Any]:
 
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(state_path, backup_path)
-    state_path.write_text(json.dumps(state, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    atomic_write_text(
+        state_path,
+        json.dumps(state, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
     return {
         "path": str(state_path),
         "changed": True,

@@ -8,10 +8,13 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::AppHandle;
 
-const DEFAULT_ADDR: &str = "127.0.0.1:1421";
 const INVOKE_PATH: &str = "/api/invoke";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 static BACKGROUND_BRIDGE_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn default_addr() -> String {
+    crate::app_flavor::bridge_addr()
+}
 
 #[derive(Debug, Deserialize)]
 struct InvokeRequest {
@@ -21,7 +24,7 @@ struct InvokeRequest {
 }
 
 pub fn run(args: &[String]) -> i32 {
-    let addr = parse_addr(args).unwrap_or_else(|| DEFAULT_ADDR.to_string());
+    let addr = parse_addr(args).unwrap_or_else(default_addr);
     gateway::start_telemetry_ingester();
     match TcpListener::bind(&addr) {
         Ok(listener) => {
@@ -45,13 +48,14 @@ pub fn start_background(app: AppHandle) -> Result<(), String> {
         .name("codexhub-web-bridge".to_string())
         .spawn(move || {
             gateway::start_telemetry_ingester();
-            match TcpListener::bind(DEFAULT_ADDR) {
+            let addr = default_addr();
+            match TcpListener::bind(&addr) {
                 Ok(listener) => serve(listener, Some(app)),
                 Err(error) if error.kind() == ErrorKind::AddrInUse => {
-                    eprintln!("CodexHub web bridge already listening on http://{DEFAULT_ADDR}");
+                    eprintln!("CodexHub web bridge already listening on http://{addr}");
                 }
                 Err(error) => {
-                    eprintln!("failed to bind CodexHub web bridge on {DEFAULT_ADDR}: {error}");
+                    eprintln!("failed to bind CodexHub web bridge on {addr}: {error}");
                 }
             }
         })
@@ -267,6 +271,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             to_value(config::save_providers(providers))
         }
         "get_settings" => to_value(config::get_settings()),
+        "get_app_flavor" => to_value(Ok(crate::app_flavor::current_info())),
         "save_settings" => {
             let settings = serde_json::from_value(
                 request
@@ -440,7 +445,14 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            to_value(gateway::switch_gateway_client_route(client_id, mode, model))
+            let force_takeover =
+                optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"]);
+            to_value(gateway::switch_gateway_client_route(
+                client_id,
+                mode,
+                model,
+                force_takeover,
+            ))
         }
         "sync_gateway_clients" => {
             let model = request
@@ -659,5 +671,28 @@ mod tests {
 
         assert_eq!(response.status, 500);
         assert!(String::from_utf8_lossy(&response.body).contains("desktop app context"));
+    }
+
+    #[test]
+    fn get_app_flavor_returns_runtime_metadata() {
+        let response = handle_request(
+            BridgeRequest {
+                method: "POST".to_string(),
+                path: "/api/invoke".to_string(),
+                origin: Some("http://127.0.0.1:1420".to_string()),
+                body: serde_json::to_vec(&json!({
+                    "command": "get_app_flavor",
+                    "args": {}
+                }))
+                .unwrap(),
+            },
+            None,
+        )
+        .expect("invoke");
+
+        assert_eq!(response.status, 200);
+        let text = String::from_utf8_lossy(&response.body);
+        assert!(text.contains("\"product_name\":\"CodexHub\""));
+        assert!(text.contains("\"gateway_port\":9099"));
     }
 }

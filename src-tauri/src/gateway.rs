@@ -1,4 +1,6 @@
-use crate::{config, models, safe_file, Provider, Settings, UpstreamFormat};
+use crate::{
+    app_flavor::RoutingOwner, config, models, safe_file, Provider, Settings, UpstreamFormat,
+};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -311,6 +313,9 @@ pub struct GatewayClientInfo {
     pub installed: bool,
     pub auto_apply_supported: bool,
     pub config_path: Option<PathBuf>,
+    pub route_owner: RoutingOwner,
+    pub route_endpoint: Option<String>,
+    pub managed_by_current_app: bool,
     pub route_mode: String,
     pub status: String,
     pub versions_checked: bool,
@@ -619,12 +624,14 @@ pub fn gateway_copy_client_config(
 pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientInfo>, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
+    let current_owner = crate::app_flavor::current().routing_owner();
     let opencode_path = detect_opencode_config_path();
     let opencode_installed = opencode_path
         .as_ref()
         .map(|path| path.exists())
         .unwrap_or(false)
         || command_exists(&["opencode"]);
+    let generic_route_owner = current_owner;
     let mut clients = vec![GatewayClientInfo {
         id: "generic".to_string(),
         name: "Generic OpenAI-compatible".to_string(),
@@ -632,23 +639,30 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         installed: true,
         auto_apply_supported: false,
         config_path: None,
-        route_mode: "copy_only".to_string(),
+        route_owner: generic_route_owner,
+        route_endpoint: Some(endpoints(settings.proxy_port).base_url),
+        managed_by_current_app: generic_route_owner == current_owner,
+        route_mode: route_mode_for_owner(generic_route_owner, current_owner, false).to_string(),
         status: "Copy config is always available.".to_string(),
         versions_checked: false,
         current_version: None,
         latest_version: None,
     }];
-    let opencode_route_mode = opencode_path
+    let opencode_owner_details = opencode_path
         .as_ref()
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|text| {
-            if is_opencode_codexhub_config(&text) {
-                "hub"
-            } else {
-                "official"
-            }
+            detect_route_details_from_json_provider_object(
+                &text,
+                "/provider",
+                is_opencode_codexhub_config(&text),
+                true,
+                current_owner,
+                settings.proxy_port,
+            )
         })
-        .unwrap_or("unknown");
+        .unwrap_or((RoutingOwner::UnknownExternal, None));
+    let opencode_route_mode = route_mode_for_owner(opencode_owner_details.0, current_owner, false);
     clients.push(GatewayClientInfo {
         id: "opencode".to_string(),
         name: "OpenCode".to_string(),
@@ -659,6 +673,9 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .map(|path| path.exists())
             .unwrap_or(false),
         config_path: opencode_path,
+        route_owner: opencode_owner_details.0,
+        route_endpoint: opencode_owner_details.1,
+        managed_by_current_app: opencode_owner_details.0 == current_owner,
         route_mode: opencode_route_mode.to_string(),
         status: "Managed overwrite with backup is supported when config exists.".to_string(),
         versions_checked: include_versions && opencode_installed,
@@ -683,8 +700,12 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || zcode_store_path.exists()
         || zcode_executable.is_some()
         || command_exists(&["zcode", "ZCode", "ZCode.exe"]);
-    let zcode_route_mode =
-        zcode_route_mode_with_expected(&zcode_targets, &settings, &providers, DEFAULT_MODEL);
+    let zcode_stale =
+        zcode_route_mode_with_expected(&zcode_targets, &settings, &providers, DEFAULT_MODEL)
+            == "stale";
+    let zcode_route_details =
+        detect_zcode_route_details(&zcode_targets, current_owner, settings.proxy_port);
+    let zcode_route_mode = route_mode_for_owner(zcode_route_details.0, current_owner, zcode_stale);
     clients.push(GatewayClientInfo {
         id: "zcode".to_string(),
         name: "ZCode".to_string(),
@@ -692,6 +713,9 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         installed: zcode_installed,
         auto_apply_supported: zcode_installed,
         config_path: Some(zcode_targets.v2_config_path.clone()),
+        route_owner: zcode_route_details.0,
+        route_endpoint: zcode_route_details.1,
+        managed_by_current_app: zcode_route_details.0 == current_owner,
         route_mode: zcode_route_mode.to_string(),
         status: gateway_client_status(zcode_installed, zcode_route_mode),
         versions_checked: include_versions && zcode_installed,
@@ -715,7 +739,8 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .map(Path::exists)
             .unwrap_or(false)
         || command_exists(&["pi"]);
-    let pi_route_mode = pi_route_mode(&pi_paths);
+    let pi_route_details = detect_pi_route_details(&pi_paths, current_owner, settings.proxy_port);
+    let pi_route_mode = route_mode_for_owner(pi_route_details.0, current_owner, false);
     clients.push(GatewayClientInfo {
         id: "pi".to_string(),
         name: "Pi".to_string(),
@@ -723,6 +748,9 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         installed: pi_installed,
         auto_apply_supported: pi_installed,
         config_path: Some(pi_paths.settings_path),
+        route_owner: pi_route_details.0,
+        route_endpoint: pi_route_details.1,
+        managed_by_current_app: pi_route_details.0 == current_owner,
         route_mode: pi_route_mode.to_string(),
         status: gateway_client_status(pi_installed, pi_route_mode),
         versions_checked: include_versions && pi_installed,
@@ -741,7 +769,9 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .map(Path::exists)
             .unwrap_or(false)
         || command_exists(&["omp"]);
-    let omp_route_mode = omp_route_mode(&omp_paths);
+    let omp_route_details =
+        detect_omp_route_details(&omp_paths, current_owner, settings.proxy_port);
+    let omp_route_mode = route_mode_for_owner(omp_route_details.0, current_owner, false);
     clients.push(GatewayClientInfo {
         id: "omp".to_string(),
         name: "OMP".to_string(),
@@ -749,6 +779,9 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         installed: omp_installed,
         auto_apply_supported: omp_installed,
         config_path: Some(omp_paths.config_path),
+        route_owner: omp_route_details.0,
+        route_endpoint: omp_route_details.1,
+        managed_by_current_app: omp_route_details.0 == current_owner,
         route_mode: omp_route_mode.to_string(),
         status: gateway_client_status(omp_installed, omp_route_mode),
         versions_checked: include_versions && omp_installed,
@@ -816,14 +849,33 @@ pub fn apply_gateway_client_config(
     client_id: String,
     model: Option<String>,
 ) -> Result<GatewayClientApplyResult, String> {
+    let id = normalize_client_id(&client_id);
+    if !gateway_client_supports_native_apply(&id) {
+        return Ok(GatewayClientApplyResult {
+            client_id: id,
+            applied: false,
+            config_path: None,
+            backup_path: None,
+            message: "This client is copy-only; no native adapter is registered.".to_string(),
+        });
+    }
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    with_gateway_client_mutation_owner_gate(id, current_app_owner, false, move |id| {
+        apply_gateway_client_config_locked(id, model)
+    })
+}
+
+fn apply_gateway_client_config_locked(
+    client_id: String,
+    model: Option<String>,
+) -> Result<GatewayClientApplyResult, String> {
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let id = normalize_client_id(&client_id);
-    match id.as_str() {
+    match client_id.as_str() {
         "opencode" => {
             let path = detect_opencode_config_path()
                 .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
@@ -868,7 +920,7 @@ pub fn apply_gateway_client_config(
             )
         }
         _ => Ok(GatewayClientApplyResult {
-            client_id: id,
+            client_id,
             applied: false,
             config_path: None,
             backup_path: None,
@@ -880,11 +932,28 @@ pub fn apply_gateway_client_config(
 pub fn restore_gateway_client_config(
     client_id: String,
 ) -> Result<GatewayClientApplyResult, String> {
+    let id = normalize_client_id(&client_id);
+    if !gateway_client_supports_native_apply(&id) {
+        return Ok(GatewayClientApplyResult {
+            client_id: id,
+            applied: false,
+            config_path: None,
+            backup_path: None,
+            message: "Restore is not available for this copy-only client.".to_string(),
+        });
+    }
+    with_gateway_client_mutation_owner_gate(id, RoutingOwner::Official, false, |id| {
+        restore_gateway_client_config_locked(id)
+    })
+}
+
+fn restore_gateway_client_config_locked(
+    client_id: String,
+) -> Result<GatewayClientApplyResult, String> {
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
-    let id = normalize_client_id(&client_id);
-    match id.as_str() {
+    match client_id.as_str() {
         "opencode" => {
             let path = detect_opencode_config_path()
                 .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
@@ -911,7 +980,7 @@ pub fn restore_gateway_client_config(
             restore_zcode_config_with_targets(&targets, &client_backup_root("zcode"))
         }
         _ => Ok(GatewayClientApplyResult {
-            client_id: id,
+            client_id,
             applied: false,
             config_path: None,
             backup_path: None,
@@ -928,12 +997,34 @@ pub fn switch_gateway_client_route(
     client_id: String,
     mode: String,
     model: Option<String>,
+    force_takeover: Option<bool>,
 ) -> Result<GatewayClientApplyResult, String> {
-    if mode == "official" {
-        restore_gateway_client_config(client_id)
-    } else {
-        apply_gateway_client_config(client_id, model)
-    }
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    let next_owner = match mode.as_str() {
+        "official" => RoutingOwner::Official,
+        "release" => RoutingOwner::Release,
+        "beta" => RoutingOwner::Beta,
+        "hub" => current_app_owner,
+        other => return Err(format!("unsupported routing owner: {other}")),
+    };
+    with_gateway_client_mutation_owner_gate(
+        normalize_client_id(&client_id),
+        next_owner,
+        force_takeover.unwrap_or(false),
+        move |id| {
+            if next_owner == RoutingOwner::Official {
+                restore_gateway_client_config_locked(id)
+            } else if next_owner == current_app_owner {
+                apply_gateway_client_config_locked(id, model)
+            } else {
+                Err(format!(
+                    "{} builds can only apply {} routes.",
+                    owner_label(current_app_owner),
+                    owner_label(current_app_owner)
+                ))
+            }
+        },
+    )
 }
 
 pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSummary, String> {
@@ -1089,10 +1180,68 @@ fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String>
     if !client.auto_apply_supported {
         return Some("Client does not support automatic config sync.".to_string());
     }
+    if !client.managed_by_current_app {
+        return Some("Client is managed by another CodexHub channel.".to_string());
+    }
     if client.route_mode != "hub" && client.route_mode != "stale" {
         return Some("Client is not bound to CodexHub.".to_string());
     }
     None
+}
+
+fn gateway_client_supports_native_apply(client_id: &str) -> bool {
+    matches!(client_id, "opencode" | "pi" | "omp" | "zcode")
+}
+
+fn with_gateway_client_mutation_owner_gate<F>(
+    client_id: String,
+    next_owner: RoutingOwner,
+    force_takeover: bool,
+    operation: F,
+) -> Result<GatewayClientApplyResult, String>
+where
+    F: FnOnce(String) -> Result<GatewayClientApplyResult, String>,
+{
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    let current_target_owner = list_gateway_clients(false)?
+        .into_iter()
+        .find(|client| client.id == client_id)
+        .map(|client| client.route_owner)
+        .ok_or_else(|| format!("unknown gateway client: {client_id}"))?;
+    if !gateway_client_has_existing_config(&client_id) {
+        return operation(client_id);
+    }
+    ensure_route_owner_mutation_allowed(
+        current_app_owner,
+        current_target_owner,
+        next_owner,
+        force_takeover,
+    )?;
+    operation(client_id)
+}
+
+fn gateway_client_has_existing_config(client_id: &str) -> bool {
+    match client_id {
+        "opencode" => detect_opencode_config_path()
+            .as_ref()
+            .map(|path| path.exists())
+            .unwrap_or(false),
+        "pi" => {
+            let paths = detect_pi_config_paths();
+            paths.settings_path.exists() || paths.models_path.exists()
+        }
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            paths.config_path.exists() || paths.models_path.exists()
+        }
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            targets.v2_config_path.exists()
+                || targets.catalog_path.exists()
+                || targets.v2_cache_path.exists()
+        }
+        _ => false,
+    }
 }
 
 pub fn provider_probe_upstream_format(
@@ -1732,6 +1881,49 @@ fn is_codexhub_client_model_selector(model: &str) -> bool {
 fn is_local_gateway_url(url: &str) -> bool {
     let value = url.trim().trim_matches('"').trim_matches('\'');
     value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:")
+}
+
+fn routing_owner_from_gateway_url(url: &str) -> RoutingOwner {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.starts_with("http://127.0.0.1:9099") || trimmed.starts_with("http://localhost:9099")
+    {
+        return RoutingOwner::Release;
+    }
+    if trimmed.starts_with("http://127.0.0.1:9109") || trimmed.starts_with("http://localhost:9109")
+    {
+        return RoutingOwner::Beta;
+    }
+    if trimmed.contains("127.0.0.1") || trimmed.contains("localhost") {
+        return RoutingOwner::UnknownExternal;
+    }
+    RoutingOwner::UnknownExternal
+}
+
+fn owner_label(owner: RoutingOwner) -> &'static str {
+    match owner {
+        RoutingOwner::Official => "Official",
+        RoutingOwner::Release => "Release",
+        RoutingOwner::Beta => "Beta",
+        RoutingOwner::UnknownExternal => "Unknown external",
+    }
+}
+
+fn ensure_route_owner_mutation_allowed(
+    current_app_owner: RoutingOwner,
+    current_target_owner: RoutingOwner,
+    next_owner: RoutingOwner,
+    force_takeover: bool,
+) -> Result<(), String> {
+    if current_target_owner == RoutingOwner::Official || current_target_owner == current_app_owner {
+        return Ok(());
+    }
+    if force_takeover && next_owner != RoutingOwner::Official {
+        return Ok(());
+    }
+    Err(format!(
+        "Managed by {}; explicit takeover is required before changing this target.",
+        owner_label(current_target_owner)
+    ))
 }
 
 fn provider_entry_base_url(entry: &Value) -> Option<&str> {
@@ -3708,6 +3900,323 @@ fn route_mode_from_text_file(path: &Path, is_hub: fn(&str) -> bool) -> &'static 
         .ok()
         .map(|text| if is_hub(&text) { "hub" } else { "official" })
         .unwrap_or("unknown")
+}
+
+fn route_mode_for_owner(owner: RoutingOwner, current: RoutingOwner, stale: bool) -> &'static str {
+    if stale {
+        return "stale";
+    }
+    match owner {
+        RoutingOwner::Official => "official",
+        RoutingOwner::Release | RoutingOwner::Beta if owner == current => "hub",
+        RoutingOwner::Release | RoutingOwner::Beta => "other_channel",
+        RoutingOwner::UnknownExternal => "unknown",
+    }
+}
+
+fn route_owner_from_endpoint(
+    endpoint: Option<&str>,
+    managed: bool,
+    existing_config: bool,
+    current_owner: RoutingOwner,
+    current_port: u16,
+) -> RoutingOwner {
+    if !existing_config {
+        return RoutingOwner::UnknownExternal;
+    }
+    let Some(endpoint) = endpoint else {
+        return if managed {
+            current_owner
+        } else {
+            RoutingOwner::Official
+        };
+    };
+    let owner = routing_owner_from_gateway_url(endpoint);
+    if owner != RoutingOwner::UnknownExternal {
+        return owner;
+    }
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    if trimmed.starts_with(&format!("http://127.0.0.1:{current_port}"))
+        || trimmed.starts_with(&format!("http://localhost:{current_port}"))
+    {
+        return current_owner;
+    }
+    if is_local_gateway_url(trimmed) {
+        return if managed {
+            current_owner
+        } else {
+            RoutingOwner::UnknownExternal
+        };
+    }
+    if managed {
+        current_owner
+    } else {
+        RoutingOwner::Official
+    }
+}
+
+fn first_provider_base_url_from_object(
+    providers: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    providers
+        .values()
+        .find_map(provider_entry_base_url)
+        .map(ToOwned::to_owned)
+}
+
+fn managed_provider_base_url_from_object(
+    providers: &serde_json::Map<String, Value>,
+) -> Option<Option<String>> {
+    providers
+        .iter()
+        .find(|(provider_id, entry)| is_managed_codexhub_provider_entry(provider_id, entry))
+        .map(|(_, entry)| provider_entry_base_url(entry).map(ToOwned::to_owned))
+}
+
+fn first_provider_base_url_from_json_object_text(text: &str, pointer: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(Value::as_object)
+        .and_then(first_provider_base_url_from_object)
+}
+
+fn managed_provider_base_url_from_json_object_text(
+    text: &str,
+    pointer: &str,
+) -> Option<Option<String>> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(Value::as_object)
+        .and_then(managed_provider_base_url_from_object)
+}
+
+fn first_provider_base_url_from_json_array_text(text: &str, pointer: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .and_then(|providers| providers.iter().find_map(provider_entry_base_url))
+        .map(ToOwned::to_owned)
+}
+
+fn managed_provider_base_url_from_json_array_text(
+    text: &str,
+    pointer: &str,
+) -> Option<Option<String>> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .and_then(|providers| {
+            providers
+                .iter()
+                .find(|provider| is_managed_zcode_catalog_provider_entry(provider))
+                .map(|provider| provider_entry_base_url(provider).map(ToOwned::to_owned))
+        })
+}
+
+fn detect_route_details_from_json_provider_object(
+    text: &str,
+    pointer: &str,
+    managed: bool,
+    existing_config: bool,
+    current_owner: RoutingOwner,
+    current_port: u16,
+) -> (RoutingOwner, Option<String>) {
+    let route_endpoint = managed_provider_base_url_from_json_object_text(text, pointer)
+        .unwrap_or_else(|| first_provider_base_url_from_json_object_text(text, pointer));
+    let route_owner = route_owner_from_endpoint(
+        route_endpoint.as_deref(),
+        managed,
+        existing_config,
+        current_owner,
+        current_port,
+    );
+    (route_owner, route_endpoint)
+}
+
+fn detect_route_details_from_json_provider_array(
+    text: &str,
+    pointer: &str,
+    managed: bool,
+    existing_config: bool,
+    current_owner: RoutingOwner,
+    current_port: u16,
+) -> (RoutingOwner, Option<String>) {
+    let route_endpoint = managed_provider_base_url_from_json_array_text(text, pointer)
+        .unwrap_or_else(|| first_provider_base_url_from_json_array_text(text, pointer));
+    let route_owner = route_owner_from_endpoint(
+        route_endpoint.as_deref(),
+        managed,
+        existing_config,
+        current_owner,
+        current_port,
+    );
+    (route_owner, route_endpoint)
+}
+
+fn detect_pi_route_details(
+    paths: &PiConfigPaths,
+    current_owner: RoutingOwner,
+    current_port: u16,
+) -> (RoutingOwner, Option<String>) {
+    let settings_text = fs::read_to_string(&paths.settings_path).ok();
+    let models_text = fs::read_to_string(&paths.models_path).ok();
+    let managed = pi_route_mode(paths) == "hub";
+    let route_endpoint = models_text
+        .as_deref()
+        .and_then(|text| {
+            managed_provider_base_url_from_json_object_text(text, "/providers").unwrap_or_else(
+                || first_provider_base_url_from_json_object_text(text, "/providers"),
+            )
+        });
+    let existing_config = settings_text.is_some() || models_text.is_some();
+    (
+        route_owner_from_endpoint(
+            route_endpoint.as_deref(),
+            managed,
+            existing_config,
+            current_owner,
+            current_port,
+        ),
+        route_endpoint,
+    )
+}
+
+fn detect_omp_route_details(
+    paths: &OmpConfigPaths,
+    current_owner: RoutingOwner,
+    current_port: u16,
+) -> (RoutingOwner, Option<String>) {
+    let config_text = fs::read_to_string(&paths.config_path).ok();
+    let models_text = fs::read_to_string(&paths.models_path).ok();
+    let managed = omp_route_mode(paths) == "hub";
+    let route_endpoint = models_text
+        .as_deref()
+        .and_then(|text| {
+            managed_omp_provider_base_url(text).unwrap_or_else(|| first_omp_provider_base_url(text))
+        });
+    let existing_config = config_text.is_some() || models_text.is_some();
+    (
+        route_owner_from_endpoint(
+            route_endpoint.as_deref(),
+            managed,
+            existing_config,
+            current_owner,
+            current_port,
+        ),
+        route_endpoint,
+    )
+}
+
+fn first_omp_provider_base_url(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("baseUrl:")
+            .map(str::trim)
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn managed_omp_provider_base_url(text: &str) -> Option<Option<String>> {
+    let mut current_provider_id: Option<String> = None;
+    let mut current_base_url: Option<String> = None;
+    let mut current_has_local_gateway_url = false;
+    let mut current_has_codexhub_name = false;
+
+    let finalize = |provider_id: &Option<String>,
+                    base_url: &Option<String>,
+                    has_local_gateway_url: bool,
+                    has_codexhub_name: bool|
+     -> Option<Option<String>> {
+        provider_id
+            .as_deref()
+            .filter(|provider_id| is_codexhub_client_provider_id(provider_id))
+            .filter(|_| has_local_gateway_url || has_codexhub_name)
+            .map(|_| base_url.clone())
+    };
+
+    for line in text.lines() {
+        let starts_provider_entry =
+            line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':');
+        if starts_provider_entry {
+            if let Some(endpoint) = finalize(
+                &current_provider_id,
+                &current_base_url,
+                current_has_local_gateway_url,
+                current_has_codexhub_name,
+            ) {
+                return Some(endpoint);
+            }
+            current_provider_id = Some(line.trim().trim_end_matches(':').to_string());
+            current_base_url = None;
+            current_has_local_gateway_url = false;
+            current_has_codexhub_name = false;
+            continue;
+        }
+
+        if current_provider_id.is_some() {
+            let trimmed = line.trim();
+            if let Some(url) = trimmed.strip_prefix("baseUrl:") {
+                let url = url.trim().to_string();
+                current_has_local_gateway_url = is_local_gateway_url(&url)
+                    && (url.contains("/v1/providers/")
+                        || url.trim().trim_end_matches('/').ends_with("/v1"));
+                current_base_url = Some(url);
+            }
+            if trimmed.contains("CodexHub Gateway") || trimmed.contains("CodexHub ") {
+                current_has_codexhub_name = true;
+            }
+        }
+    }
+
+    finalize(
+        &current_provider_id,
+        &current_base_url,
+        current_has_local_gateway_url,
+        current_has_codexhub_name,
+    )
+}
+
+fn detect_zcode_route_details(
+    targets: &ZcodeConfigTargets,
+    current_owner: RoutingOwner,
+    current_port: u16,
+) -> (RoutingOwner, Option<String>) {
+    let v2_text = fs::read_to_string(&targets.v2_config_path).ok();
+    if let Some(text) = v2_text.as_deref() {
+        return detect_route_details_from_json_provider_object(
+            text,
+            "/provider",
+            is_zcode_v2_codexhub_config(text),
+            true,
+            current_owner,
+            current_port,
+        );
+    }
+    if let Ok(text) = fs::read_to_string(&targets.catalog_path) {
+        return detect_route_details_from_json_provider_array(
+            &text,
+            "/providers",
+            is_zcode_codexhub_config(&text),
+            true,
+            current_owner,
+            current_port,
+        );
+    }
+    if let Ok(text) = fs::read_to_string(&targets.v2_cache_path) {
+        return detect_route_details_from_json_provider_array(
+            &text,
+            "/providers",
+            is_zcode_codexhub_config(&text),
+            true,
+            current_owner,
+            current_port,
+        );
+    }
+    (RoutingOwner::UnknownExternal, None)
 }
 
 fn zcode_route_mode(targets: &ZcodeConfigTargets) -> &'static str {
@@ -5776,7 +6285,10 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn write_text_replace_does_not_clobber_existing_stale_temp_file() {
@@ -5959,6 +6471,12 @@ mod tests {
         auto_apply_supported: bool,
         route_mode: &str,
     ) -> super::GatewayClientInfo {
+        let route_owner = match route_mode {
+            "hub" | "stale" => crate::app_flavor::RoutingOwner::Release,
+            "official" => crate::app_flavor::RoutingOwner::Official,
+            "other_channel" => crate::app_flavor::RoutingOwner::Beta,
+            _ => crate::app_flavor::RoutingOwner::UnknownExternal,
+        };
         super::GatewayClientInfo {
             id: id.to_string(),
             name: name.to_string(),
@@ -5966,6 +6484,9 @@ mod tests {
             installed,
             auto_apply_supported,
             config_path: Some(PathBuf::from(format!("{id}.json"))),
+            route_owner,
+            route_endpoint: None,
+            managed_by_current_app: route_owner == crate::app_flavor::RoutingOwner::Release,
             route_mode: route_mode.to_string(),
             status: "test".to_string(),
             versions_checked: false,
@@ -6011,9 +6532,29 @@ mod tests {
             sync_test_client("official", "Official Client", true, true, "official"),
             sync_test_client("missing", "Missing Client", false, true, "hub"),
             sync_test_client("hub-ok", "Hub OK", true, true, "hub"),
-            sync_test_client("hub-stale", "Hub Stale", true, true, "stale"),
+            sync_test_client(
+                "hub-stale-managed",
+                "Hub Stale Managed",
+                true,
+                true,
+                "stale",
+            ),
+            sync_test_client(
+                "hub-stale-other-channel",
+                "Hub Stale Other Channel",
+                true,
+                true,
+                "stale",
+            ),
             sync_test_client("hub-fail", "Hub Fail", true, true, "hub"),
         ];
+        let stale_index = clients
+            .iter()
+            .position(|client| client.id == "hub-stale-other-channel")
+            .expect("stale client index");
+        let mut clients = clients;
+        clients[stale_index].managed_by_current_app = false;
+        clients[stale_index].route_owner = crate::app_flavor::RoutingOwner::Beta;
         let mut attempted = Vec::new();
 
         let summary = super::sync_gateway_clients_from_infos(
@@ -6038,17 +6579,21 @@ mod tests {
             attempted,
             vec![
                 ("hub-ok".to_string(), Some("openai/gpt-5.5".to_string())),
-                ("hub-stale".to_string(), Some("openai/gpt-5.5".to_string())),
+                (
+                    "hub-stale-managed".to_string(),
+                    Some("openai/gpt-5.5".to_string())
+                ),
                 ("hub-fail".to_string(), Some("openai/gpt-5.5".to_string())),
             ]
         );
         assert_eq!(summary.applied, 2);
-        assert_eq!(summary.skipped, 3);
+        assert_eq!(summary.skipped, 4);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.results[0].status, "skipped");
         assert_eq!(summary.results[3].status, "applied");
         assert_eq!(summary.results[4].status, "applied");
-        assert_eq!(summary.results[5].status, "failed");
+        assert_eq!(summary.results[5].status, "skipped");
+        assert_eq!(summary.results[6].status, "failed");
         assert!(summary.message.contains("1 failed"));
     }
 
@@ -8080,6 +8625,129 @@ mod tests {
     }
 
     #[test]
+    fn local_gateway_owner_detects_release_and_beta_ports() {
+        assert_eq!(
+            super::routing_owner_from_gateway_url("http://127.0.0.1:9099/v1"),
+            crate::app_flavor::RoutingOwner::Release
+        );
+        assert_eq!(
+            super::routing_owner_from_gateway_url("http://127.0.0.1:9109/v1"),
+            crate::app_flavor::RoutingOwner::Beta
+        );
+        assert_eq!(
+            super::routing_owner_from_gateway_url("https://api.openai.com/v1"),
+            crate::app_flavor::RoutingOwner::UnknownExternal
+        );
+    }
+
+    #[test]
+    fn owner_safe_disconnect_rejects_other_channel_without_takeover() {
+        let current = crate::app_flavor::RoutingOwner::Release;
+        let target = crate::app_flavor::RoutingOwner::Beta;
+        let error = super::ensure_route_owner_mutation_allowed(
+            current,
+            target,
+            crate::app_flavor::RoutingOwner::Official,
+            false,
+        )
+        .expect_err("release must not disconnect beta-owned config");
+        assert!(error.contains("Managed by Beta"));
+    }
+
+    #[test]
+    fn owner_safe_apply_rejects_other_channel_without_takeover() {
+        let error = super::ensure_route_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Release,
+            crate::app_flavor::RoutingOwner::Beta,
+            crate::app_flavor::RoutingOwner::Release,
+            false,
+        )
+        .expect_err("release must not apply over beta-owned config");
+
+        assert!(error.contains("Managed by Beta"));
+    }
+
+    #[test]
+    fn public_apply_rejects_other_channel_managed_config_without_takeover() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
+        let root = unique_temp_dir("codexhub-opencode-public-apply-owner");
+        let config_path = root.join("opencode.json");
+        write_beta_owned_opencode_config(&config_path);
+        std::env::set_var("CODEXHUB_OPENCODE_CONFIG", &config_path);
+
+        let error = super::apply_gateway_client_config(
+            "opencode".to_string(),
+            Some("openai/gpt-5.5".to_string()),
+        )
+        .expect_err("public apply must not overwrite beta-owned config");
+
+        restore_env("CODEXHUB_OPENCODE_CONFIG", previous);
+        assert!(error.contains("Managed by Beta"));
+    }
+
+    #[test]
+    fn public_restore_rejects_other_channel_managed_config_without_takeover() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
+        let root = unique_temp_dir("codexhub-opencode-public-restore-owner");
+        let config_path = root.join("opencode.json");
+        write_beta_owned_opencode_config(&config_path);
+        std::env::set_var("CODEXHUB_OPENCODE_CONFIG", &config_path);
+
+        let error = super::restore_gateway_client_config("opencode".to_string())
+            .expect_err("public restore must not disconnect beta-owned config");
+
+        restore_env("CODEXHUB_OPENCODE_CONFIG", previous);
+        assert!(error.contains("Managed by Beta"));
+    }
+
+    #[test]
+    fn takeover_allows_cross_channel_owner_change_when_explicit() {
+        super::ensure_route_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Release,
+            crate::app_flavor::RoutingOwner::Beta,
+            crate::app_flavor::RoutingOwner::Release,
+            true,
+        )
+        .expect("explicit takeover should be allowed");
+    }
+
+    #[test]
+    fn managed_route_owner_scans_later_provider_entries() {
+        let text = r#"{
+  "provider": {
+    "aaa-provider": {
+      "options": {
+        "baseURL": "https://api.openai.com/v1"
+      }
+    },
+    "codexhub-openai": {
+      "name": "CodexHub OpenAI",
+      "options": {
+        "baseURL": "http://127.0.0.1:9109/v1/providers/openai"
+      }
+    }
+  }
+}"#;
+
+        let (owner, endpoint) = super::detect_route_details_from_json_provider_object(
+            text,
+            "/provider",
+            true,
+            true,
+            crate::app_flavor::RoutingOwner::Release,
+            9099,
+        );
+
+        assert_eq!(owner, crate::app_flavor::RoutingOwner::Beta);
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("http://127.0.0.1:9109/v1/providers/openai")
+        );
+    }
+
+    #[test]
     fn zcode_route_mode_prefers_v2_config_over_stale_catalog() {
         let root = unique_temp_dir("codexhub-zcode-route-mode");
         let catalog_path = root.join("model-providers").join("codexhub.json");
@@ -8471,5 +9139,35 @@ mod tests {
             .unwrap()
             .as_millis();
         std::env::temp_dir().join(format!("{prefix}-{millis}-{}", std::process::id()))
+    }
+
+    fn write_beta_owned_opencode_config(path: &PathBuf) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            r#"{
+  "codexhub_managed": true,
+  "provider": {
+    "codexhub-openai": {
+      "options": {
+        "baseURL": "http://127.0.0.1:9109/v1"
+      },
+      "models": {
+        "gpt-5.5": {}
+      }
+    }
+  },
+  "model": "codexhub-openai/gpt-5.5"
+}
+"#,
+        )
+        .unwrap();
+    }
+
+    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
     }
 }

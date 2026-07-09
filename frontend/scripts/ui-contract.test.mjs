@@ -314,6 +314,58 @@ test("Windows release build vendors a pinned Python runtime", async () => {
   assert.match(prepareScript, /src-python\\codex_proxy\.py/);
 });
 
+test("release build scripts support stable and beta flavor configuration", async () => {
+  const [buildScript, packageSource, viteSource] = await Promise.all([
+    readFile(buildWindowsReleasePath, "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(viteConfigPath, "utf8"),
+  ]);
+  const packageJson = JSON.parse(packageSource);
+  const flavorManifest = JSON.parse(await readFile(new URL("../../config/build-flavors.json", import.meta.url), "utf8"));
+
+  assert.deepEqual(Object.keys(flavorManifest).sort(), ["beta", "stable"]);
+  assert.equal(flavorManifest.stable.productName, "CodexHub");
+  assert.equal(flavorManifest.stable.identifier, "com.codexhub.app");
+  assert.equal(flavorManifest.stable.frontendPort, 1420);
+  assert.equal(flavorManifest.stable.bridgePort, 1421);
+  assert.equal(flavorManifest.stable.gatewayPort, 9099);
+  assert.equal(flavorManifest.stable.routingOwner, "release");
+  assert.equal(flavorManifest.beta.productName, "CodexHub Beta");
+  assert.equal(flavorManifest.beta.identifier, "com.codexhub.beta");
+  assert.equal(flavorManifest.beta.frontendPort, 1430);
+  assert.equal(flavorManifest.beta.bridgePort, 1431);
+  assert.equal(flavorManifest.beta.gatewayPort, 9109);
+  assert.equal(flavorManifest.beta.routingOwner, "beta");
+  assert.equal(flavorManifest.beta.updaterManifestName, "latest-beta.json");
+  assert.match(buildScript, /ValidateSet\("stable",\s*"beta"\)/);
+  assert.match(buildScript, /Build-TauriConfig\.ps1/);
+  assert.match(buildScript, /CODEXHUB_BUILD_FLAVOR/);
+  assert.match(buildScript, /CODEXHUB_FRONTEND_PORT/);
+  assert.match(buildScript, /cargo tauri build --config \$generatedTauriConfigPath --bundles nsis --ci/);
+  assert.match(buildScript, /releaseAssetPrefix/);
+  assert.match(buildScript, /\$installerNameCandidates = \[System\.Collections\.Generic\.List\[string\]\]::new\(\)/);
+  assert.match(buildScript, /foreach \(\$nameCandidate in @\(\s*\$assetPrefix,\s*\$productName,\s*\(\$productName -replace "\\s\+", ""\),\s*\(\$productName -replace "\\s\+", "_"\)\s*\)\)/s);
+  assert.match(buildScript, /\$installerName = "\{0\}_\{1\}_x64-setup\.exe" -f \$nameCandidate, \$version/);
+  assert.match(buildScript, /Remove-Item -LiteralPath \$artifactPath -Force -ErrorAction SilentlyContinue/);
+  assert.match(buildScript, /Remove-Item -LiteralPath "\$artifactPath\.sig" -Force -ErrorAction SilentlyContinue/);
+  assert.match(buildScript, /\$expectedCandidateList = \(\$installerNameCandidates \| ForEach-Object \{ "\$_ \(\+ \.sig\)" \}\) -join ", "/);
+  assert.match(buildScript, /\$resolvedInstaller = foreach \(\$installerName in \$installerNameCandidates\)/);
+  assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.InstallerPath -Destination \$installerPath -Force/);
+  assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.SignaturePath -Destination \$signaturePath -Force/);
+  assert.match(buildScript, /throw "Expected NSIS installer\/signature pair was not generated for flavor '\$Flavor'\. Looked for: \$expectedCandidateList"/);
+  assert.match(buildScript, /\$manifestName = \[System\.IO\.Path\]::GetFileName\(\$manifestPath\)/);
+  assert.match(buildScript, /throw "Generated \$manifestName failed validation: \$manifestPath"/);
+  assert.doesNotMatch(buildScript, /if \(\(-not \(Test-Path -LiteralPath \$installerPath -PathType Leaf\)\) -or \(-not \(Test-Path -LiteralPath \$signaturePath -PathType Leaf\)\)\) \{/);
+  assert.doesNotMatch(buildScript, /Get-ChildItem -LiteralPath \$bundleDir -Filter "\*_\$\{version\}_x64-setup\.exe" -File/);
+  assert.doesNotMatch(buildScript, /LastWriteTimeUtc/);
+  assert.match(viteSource, /CODEXHUB_FRONTEND_PORT/);
+  assert.match(viteSource, /const validatedFrontendPort = Number\.isInteger\(frontendPort\) \? frontendPort : 1420;/);
+  assert.match(viteSource, /server:\s*\{[\s\S]*host:\s*"127\.0\.0\.1",[\s\S]*port:\s*validatedFrontendPort,[\s\S]*strictPort:\s*true,[\s\S]*\}/);
+  assert.match(viteSource, /preview:\s*\{[\s\S]*host:\s*"127\.0\.0\.1",[\s\S]*port:\s*validatedFrontendPort,[\s\S]*strictPort:\s*true,[\s\S]*\}/);
+  assert.doesNotMatch(packageJson.scripts.dev, /--port\s+1420/);
+  assert.doesNotMatch(packageJson.scripts.preview, /--port\s+1420/);
+});
+
 test("release desktop binary does not allocate a Windows console", async () => {
   const mainSource = await readFile(tauriMainPath, "utf8");
 
@@ -991,10 +1043,10 @@ test("gateway client route switching reports completion", async () => {
 
   assert.match(gatewaySource, /t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
   assert.match(gatewaySource, /showToast\(t\("gateway\.switchClient", \{ clientName, routeName \}\), "loading"\)/);
-  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
+  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, forceTakeover\)/);
   assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDone", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
   assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
-  assert.match(cardSource, /const pendingRouteValue = busy \? busyMode \?\? null : null;/);
+  assert.match(cardSource, /const pendingRouteValue = busy && busyMode !== "takeover" \? busyMode \?\? null : null;/);
   assert.match(cardSource, /pendingValue=\{pendingRouteValue\}/);
   assert.doesNotMatch(cardSource, /busyMode \?\? routeModeFromInfo\(info\)/);
   assert.match(segmentedSource, /pendingValue\?: T \| null;/);
@@ -1006,18 +1058,18 @@ test("gateway client route switching reports completion", async () => {
 test("gateway client stale CodexHub route is shown as reapply state", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
-  assert.match(cardSource, /type DisplayRouteMode = RouteMode \| "stale" \| "unknown";/);
+  assert.match(cardSource, /type DisplayRouteMode = RoutingOwner \| "hub" \| "stale" \| "unknown";/);
   assert.match(cardSource, /type ClientStatusKind = "checking" \| "not_installed" \| "installed" \| "ready" \| "pending_sync" \| "unknown";/);
-  assert.match(cardSource, /const routeValue = routeMode === "stale" \? "hub" : routeMode === "unknown" \? null : routeMode;/);
+  assert.match(cardSource, /const routeValue = routeOwner === "official" \? "official" : "current_owner";/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*\? "pending_sync"/);
   assert.match(cardSource, /statusKind === "pending_sync"[\s\S]*t\("gateway\.routePendingSync"\)/);
   assert.match(cardSource, /statusKind === "ready"[\s\S]*t\("gateway\.routeReady"\)/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*t\("gateway\.routePendingSyncTitle"\)/);
-  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("hub"\)\}/);
+  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("current_owner"\)\}/);
   assert.match(cardSource, /statusKind === "not_installed" \? "bg-panel opacity-75 grayscale" : "bg-surface"/);
   assert.match(cardSource, /grid-cols-\[56px_minmax\(0,1fr\)\]/);
   assert.match(cardSource, /<code className="truncate text-left font-mono">/);
-  assert.match(cardSource, /info\?\.route_mode === "official" \|\| info\?\.route_mode === "hub" \|\| info\?\.route_mode === "stale"/);
+  assert.match(cardSource, /info\?\.route_mode === "official" \|\|[\s\S]*info\?\.route_mode === "release" \|\|[\s\S]*info\?\.route_mode === "beta" \|\|[\s\S]*info\?\.route_mode === "hub" \|\|[\s\S]*info\?\.route_mode === "stale"/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -2185,6 +2237,16 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(appUpdatesSource, /cfg\(debug_assertions\)/);
 });
 
+test("app update e2e script supports beta manifest and bridge ports", async () => {
+  const script = await readFile(appUpdateE2ePath, "utf8");
+
+  assert.match(script, /ValidateSet\("stable",\s*"beta"\)/);
+  assert.match(script, /latest-beta\.json/);
+  assert.match(script, /CodexHubBeta_/);
+  assert.match(script, /1421/);
+  assert.match(script, /1431/);
+});
+
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
   const [settingsDrawerSource, enSource, zhSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
@@ -2206,6 +2268,44 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.match(zhSource, /updates: "版本与更新"/);
   assert.match(enSource, /installUpdate: "Install update"/);
   assert.match(zhSource, /installUpdate: "安装更新"/);
+});
+
+test("gateway client cards render tri-state routing owner colors", async () => {
+  const [cardSource, typesSource, tauriSource, gatewaySource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayClientCardPath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export type RoutingOwner = "official" \| "release" \| "beta" \| "unknown_external"/);
+  assert.match(typesSource, /route_owner: RoutingOwner/);
+  assert.match(tauriSource, /getAppFlavor/);
+  assert.match(tauriSource, /forceTakeover/);
+  assert.match(cardSource, /ROUTING_OWNER_STYLES/);
+  assert.match(cardSource, /release:[\s\S]*border-sky-300[\s\S]*bg-sky-50[\s\S]*text-sky-800/);
+  assert.match(cardSource, /beta:[\s\S]*border-amber-300[\s\S]*bg-amber-50[\s\S]*text-amber-800/);
+  assert.match(cardSource, /Managed by/);
+  assert.match(cardSource, /runtimeOwner: RoutingOwner \| null/);
+  assert.match(cardSource, /ownerUnavailable/);
+  assert.match(gatewaySource, /takeover/i);
+  assert.match(gatewaySource, /newEndpoint:/);
+  assert.match(gatewaySource, /oldEndpoint:/);
+  assert.match(gatewaySource, /const port = settings\?\.proxy_port \?\? status\?\.port \?\? appFlavor\?\.gateway_port;/);
+  assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{port\}\/v1/);
+  assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
+  assert.match(enSource, /managedByRelease/);
+  assert.match(enSource, /managedByBeta/);
+  assert.match(enSource, /ownerUnavailable/);
+  assert.match(enSource, /oldEndpoint/);
+  assert.match(enSource, /newEndpoint/);
+  assert.match(zhSource, /managedByRelease/);
+  assert.match(zhSource, /managedByBeta/);
+  assert.match(zhSource, /ownerUnavailable/);
+  assert.match(zhSource, /oldEndpoint/);
+  assert.match(zhSource, /newEndpoint/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {
