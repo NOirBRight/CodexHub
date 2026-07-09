@@ -513,12 +513,43 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
         .take()
         .ok_or_else(|| "Failed to open codex app-server stdout.".to_string())?;
     let receiver = spawn_app_server_line_reader(stdout);
-    let deadline = Instant::now() + CODEX_APP_SERVER_RESPONSE_TIMEOUT;
+    let collected =
+        collect_codex_usage_and_rate_limit_results(receiver, CODEX_APP_SERVER_RESPONSE_TIMEOUT);
+    kill_child(&mut child);
+    let collected = collected?;
+
+    let mut usage: CodexAccountUsageResponse = collected
+        .usage_result
+        .ok_or_else(|| "Codex account usage response did not include a result.".to_string())
+        .and_then(|result| {
+            serde_json::from_value(result).map_err(|error| {
+                format!("Codex account usage response had unexpected JSON: {error}")
+            })
+        })?;
+
+    if let Some(result) = collected.rate_limits_result {
+        merge_rate_limits_into_usage(&mut usage, result);
+    }
+
+    Ok(usage)
+}
+
+struct CodexAccountAppServerResults {
+    usage_result: Option<Value>,
+    rate_limits_result: Option<Value>,
+}
+
+fn collect_codex_usage_and_rate_limit_results(
+    receiver: mpsc::Receiver<Result<Option<String>, String>>,
+    timeout: Duration,
+) -> Result<CodexAccountAppServerResults, String> {
+    let deadline = Instant::now() + timeout;
     let mut usage_result: Option<Value> = None;
     let mut rate_limits_result: Option<Value> = None;
+    let mut rate_limits_done = false;
 
     loop {
-        if usage_result.is_some() && rate_limits_result.is_some() {
+        if usage_result.is_some() && rate_limits_done {
             break;
         }
         let now = Instant::now();
@@ -539,7 +570,6 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
                 match message.id.as_ref().and_then(|id| id.as_u64()) {
                     Some(2) => {
                         if let Some(error) = message.error {
-                            kill_child(&mut child);
                             return Err(codex_app_server_error_message(
                                 error.message.as_deref().unwrap_or("request failed"),
                             ));
@@ -547,9 +577,7 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
                         usage_result = message.result;
                     }
                     Some(3) => {
-                        // Rate limits is best-effort: silently ignore errors
-                        // (e.g. older Codex versions that don't support the
-                        // method) and fall back to local JSONL enrichment.
+                        rate_limits_done = true;
                         if message.error.is_none() {
                             rate_limits_result = message.result;
                         }
@@ -557,42 +585,22 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
                     _ => continue,
                 }
             }
-            Ok(Ok(None)) => {
-                let _ = child.wait();
-                break;
-            }
+            Ok(Ok(None)) => break,
             Ok(Err(error)) => {
                 if usage_result.is_some() {
                     break;
                 }
-                kill_child(&mut child);
                 return Err(format!("Failed to read codex app-server response: {error}"));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.wait();
-                break;
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    kill_child(&mut child);
-
-    let mut usage: CodexAccountUsageResponse = usage_result
-        .ok_or_else(|| "Codex account usage response did not include a result.".to_string())
-        .and_then(|result| {
-            serde_json::from_value(result).map_err(|error| {
-                format!("Codex account usage response had unexpected JSON: {error}")
-            })
-        })?;
-
-    if let Some(result) = rate_limits_result {
-        merge_rate_limits_into_usage(&mut usage, result);
-    }
-
-    Ok(usage)
+    Ok(CodexAccountAppServerResults {
+        usage_result,
+        rate_limits_result,
+    })
 }
 
 fn merge_rate_limits_into_usage(usage: &mut CodexAccountUsageResponse, result: Value) {
@@ -1432,6 +1440,50 @@ mod tests {
         };
         merge_rate_limits_into_usage(&mut usage, json!({ "rateLimitResetCredits": null }));
         assert!(usage.usage_limits.is_none());
+    }
+
+    #[test]
+    fn account_usage_reader_finishes_when_rate_limits_request_errors() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(Some(
+                json!({
+                    "id": 2,
+                    "result": {
+                        "summary": { "lifetimeTokens": 41 },
+                        "dailyUsageBuckets": []
+                    }
+                })
+                .to_string(),
+            )))
+            .unwrap();
+        sender
+            .send(Ok(Some(
+                json!({
+                    "id": 3,
+                    "error": { "message": "method not found" }
+                })
+                .to_string(),
+            )))
+            .unwrap();
+        drop(sender);
+
+        let started = Instant::now();
+        let collected =
+            collect_codex_usage_and_rate_limit_results(receiver, Duration::from_secs(30))
+                .expect("usage result survives best-effort rate limit errors");
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(collected.rate_limits_result.is_none());
+        assert_eq!(
+            collected.usage_result.and_then(|result| {
+                result
+                    .get("summary")
+                    .and_then(|summary| summary.get("lifetimeTokens"))
+                    .and_then(Value::as_u64)
+            }),
+            Some(41),
+        );
     }
 
     #[test]
