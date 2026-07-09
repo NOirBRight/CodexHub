@@ -2238,12 +2238,19 @@ def _responses_completed_event_has_visible_or_tool_output(event: Mapping[str, An
 
 
 def _responses_event_has_visible_or_tool_output(event: Mapping[str, Any], upstream_name: str) -> bool:
+    event_type = event.get("type")
+    if upstream_name != "official":
+        if _is_reasoning_text_stream_event(event):
+            return False
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            item = event.get("item")
+            if isinstance(item, Mapping) and item.get("type") == "reasoning":
+                return False
     if _responses_event_commits_downstream_output(event, upstream_name):
         return True
-    event_type = event.get("type")
     if _is_reasoning_text_stream_event(event):
         delta = event.get("delta")
-        return isinstance(delta, str) and bool(delta)
+        return upstream_name == "official" and isinstance(delta, str) and bool(delta)
     if event_type in {
         "response.function_call_arguments.delta",
         "response.custom_tool_call_input.delta",
@@ -13976,7 +13983,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 and usage_payload.get("type") == "response.completed"
                                 and not visible_or_tool_output_seen
                             )
-                            write_or_queue_downstream_line(separator, force=flush_terminal)
+                            write_or_queue_downstream_line(
+                                separator,
+                                buffer=not flush_terminal,
+                                force=flush_terminal,
+                            )
                     if saw_terminal_event:
                         break
             except UpstreamStreamIdleTimeoutError as exc:

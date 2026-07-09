@@ -5207,9 +5207,10 @@ class RoutingTests(unittest.TestCase):
         status = CodexProxyHandler._relay_upstream_response(handler, response, "ollama_cloud")
 
         data = b"".join(handler.wfile.writes)
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 502)
         self.assertNotIn(b"streamed raw thinking", data)
-        self.assertIn(b"response.completed", data)
+        self.assertNotIn(b"response.completed", data)
+        self.assertIn(b"upstream_empty_completed_response", data)
 
     def test_external_responses_sse_relay_drops_named_reasoning_summary_event_frame(self):
         handler = FakeHandler()
@@ -12558,6 +12559,33 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 response,
                 "ollama_cloud",
                 request_id="req-empty-retryable",
+                model="glm-5.2",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                usage_capture={},
+                defer_stream_errors=True,
+            )
+
+        self.assertEqual(fake.wfile.writes, [])
+
+    def test_external_provider_reasoning_only_completed_sse_is_retryable_as_empty_output(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.reasoning_text.delta","delta":"hidden reasoning"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}\n\n',
+                b"",
+            ]
+        )
+
+        with self.assertRaisesRegex(codex_proxy.UpstreamStreamIncompleteError, "empty completed"):
+            CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "ollama_cloud",
+                request_id="req-hidden-reasoning-empty",
                 model="glm-5.2",
                 upstream_format="responses",
                 inbound_format="responses",
