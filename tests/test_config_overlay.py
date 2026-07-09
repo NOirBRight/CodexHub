@@ -152,6 +152,46 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("responses_websockets_v2 = false", updated)
             self.assertNotIn("supports_websockets = true", updated)
 
+    def test_apply_overlay_writes_owner_marker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "backup.toml"
+            catalog = tmp / "catalog.json"
+
+            apply_overlay(
+                config,
+                backup,
+                catalog,
+                "http://127.0.0.1:9109",
+                owner="beta",
+            )
+
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("# owner = beta", text)
+            self.assertIn("http://127.0.0.1:9109/v1", text)
+
+    def test_restore_overlay_removes_owner_marker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "backup.toml"
+            catalog = tmp / "catalog.json"
+
+            apply_overlay(
+                config,
+                backup,
+                catalog,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+
+            restore_overlay(config, backup, unified_history=False)
+
+            text = config.read_text(encoding="utf-8")
+            self.assertNotIn("# owner = release", text)
+            self.assertNotIn("# BEGIN CODEX PROXY SESSION CONFIG", text)
+
     def test_restore_overlay_can_inject_unified_official_history_bucket(self):
         original = "\n".join(
             [
