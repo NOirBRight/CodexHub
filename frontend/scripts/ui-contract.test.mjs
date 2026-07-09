@@ -1041,10 +1041,10 @@ test("gateway client route switching reports completion", async () => {
 
   assert.match(gatewaySource, /t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
   assert.match(gatewaySource, /showToast\(t\("gateway\.switchClient", \{ clientName, routeName \}\), "loading"\)/);
-  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
+  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, forceTakeover\)/);
   assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDone", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
   assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
-  assert.match(cardSource, /const pendingRouteValue = busy \? busyMode \?\? null : null;/);
+  assert.match(cardSource, /const pendingRouteValue = busy && busyMode !== "takeover" \? busyMode \?\? null : null;/);
   assert.match(cardSource, /pendingValue=\{pendingRouteValue\}/);
   assert.doesNotMatch(cardSource, /busyMode \?\? routeModeFromInfo\(info\)/);
   assert.match(segmentedSource, /pendingValue\?: T \| null;/);
@@ -1056,18 +1056,18 @@ test("gateway client route switching reports completion", async () => {
 test("gateway client stale CodexHub route is shown as reapply state", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
-  assert.match(cardSource, /type DisplayRouteMode = RouteMode \| "stale" \| "unknown";/);
+  assert.match(cardSource, /type DisplayRouteMode = RoutingOwner \| "hub" \| "stale" \| "unknown";/);
   assert.match(cardSource, /type ClientStatusKind = "checking" \| "not_installed" \| "installed" \| "ready" \| "pending_sync" \| "unknown";/);
-  assert.match(cardSource, /const routeValue = routeMode === "stale" \? "hub" : routeMode === "unknown" \? null : routeMode;/);
+  assert.match(cardSource, /const routeValue = routeOwner === "official" \? "official" : "current_owner";/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*\? "pending_sync"/);
   assert.match(cardSource, /statusKind === "pending_sync"[\s\S]*t\("gateway\.routePendingSync"\)/);
   assert.match(cardSource, /statusKind === "ready"[\s\S]*t\("gateway\.routeReady"\)/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*t\("gateway\.routePendingSyncTitle"\)/);
-  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("hub"\)\}/);
+  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("current_owner"\)\}/);
   assert.match(cardSource, /statusKind === "not_installed" \? "bg-panel opacity-75 grayscale" : "bg-surface"/);
   assert.match(cardSource, /grid-cols-\[56px_minmax\(0,1fr\)\]/);
   assert.match(cardSource, /<code className="truncate text-left font-mono">/);
-  assert.match(cardSource, /info\?\.route_mode === "official" \|\| info\?\.route_mode === "hub" \|\| info\?\.route_mode === "stale"/);
+  assert.match(cardSource, /info\?\.route_mode === "official" \|\|[\s\S]*info\?\.route_mode === "release" \|\|[\s\S]*info\?\.route_mode === "beta" \|\|[\s\S]*info\?\.route_mode === "hub" \|\|[\s\S]*info\?\.route_mode === "stale"/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -2256,6 +2256,31 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.match(zhSource, /updates: "版本与更新"/);
   assert.match(enSource, /installUpdate: "Install update"/);
   assert.match(zhSource, /installUpdate: "安装更新"/);
+});
+
+test("gateway client cards render tri-state routing owner colors", async () => {
+  const [cardSource, typesSource, tauriSource, gatewaySource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayClientCardPath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export type RoutingOwner = "official" \| "release" \| "beta" \| "unknown_external"/);
+  assert.match(typesSource, /route_owner: RoutingOwner/);
+  assert.match(tauriSource, /getAppFlavor/);
+  assert.match(tauriSource, /forceTakeover/);
+  assert.match(cardSource, /ROUTING_OWNER_STYLES/);
+  assert.match(cardSource, /release:[\s\S]*border-sky-300[\s\S]*bg-sky-50[\s\S]*text-sky-800/);
+  assert.match(cardSource, /beta:[\s\S]*border-amber-300[\s\S]*bg-amber-50[\s\S]*text-amber-800/);
+  assert.match(cardSource, /Managed by/);
+  assert.match(gatewaySource, /takeover/i);
+  assert.match(enSource, /managedByRelease/);
+  assert.match(enSource, /managedByBeta/);
+  assert.match(zhSource, /managedByRelease/);
+  assert.match(zhSource, /managedByBeta/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {
