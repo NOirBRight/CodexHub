@@ -357,6 +357,9 @@ test("release build scripts support stable and beta flavor configuration", async
   assert.doesNotMatch(buildScript, /Get-ChildItem -LiteralPath \$bundleDir -Filter "\*_\$\{version\}_x64-setup\.exe" -File/);
   assert.doesNotMatch(buildScript, /LastWriteTimeUtc/);
   assert.match(viteSource, /CODEXHUB_FRONTEND_PORT/);
+  assert.match(viteSource, /const validatedFrontendPort = Number\.isInteger\(frontendPort\) \? frontendPort : 1420;/);
+  assert.match(viteSource, /server:\s*\{[\s\S]*host:\s*"127\.0\.0\.1",[\s\S]*port:\s*validatedFrontendPort,[\s\S]*strictPort:\s*true,[\s\S]*\}/);
+  assert.match(viteSource, /preview:\s*\{[\s\S]*host:\s*"127\.0\.0\.1",[\s\S]*port:\s*validatedFrontendPort,[\s\S]*strictPort:\s*true,[\s\S]*\}/);
   assert.doesNotMatch(packageJson.scripts.dev, /--port\s+1420/);
   assert.doesNotMatch(packageJson.scripts.preview, /--port\s+1420/);
 });

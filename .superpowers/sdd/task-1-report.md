@@ -181,3 +181,28 @@ npm run test:ui-contract -- --test-name-pattern "release build scripts support s
 - The broad same-version wildcard scan and `LastWriteTimeUtc` sorting fallback are removed, so a leftover stable installer cannot be selected for a beta publish.
 - Missing installer/signature pairs now fail with a direct error that lists every expected candidate filename instead of silently scanning the bundle directory.
 - The explicit `cargo tauri build --config $generatedTauriConfigPath --bundles nsis --ci` invocation and the narrow pre-build cleanup of current flavor/version candidate `.exe` and `.sig` paths are preserved.
+
+## Fix After Final Task 1 Review Miss
+
+### Changed Files
+
+- `frontend/vite.config.ts`
+- `frontend/scripts/ui-contract.test.mjs`
+- `.superpowers/sdd/task-1-report.md`
+
+### Test Command
+
+```powershell
+cd frontend
+npm run test:ui-contract -- --test-name-pattern "release build scripts support stable and beta flavor configuration"
+```
+
+### Output Summary
+
+- PASS
+- `release build scripts support stable and beta flavor configuration`
+
+### Self-Review
+
+- Vite now uses one validated frontend port value for both `server` and `preview`, with `host: "127.0.0.1"` and `strictPort: true` on each surface.
+- The Task 1 contract now asserts the preview wiring directly, including reuse of the validated port constant and `strictPort` in the preview block.
