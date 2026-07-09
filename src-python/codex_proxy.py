@@ -5216,17 +5216,34 @@ def _rewrite_structured_tool_input_items(
 
     changed = False
     rewritten_items: list[Any] = []
+    preserved_structured_call_ids: set[str] = set()
     for item in input_items:
         if not isinstance(item, dict):
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
-            rewritten = _structured_tool_function_call_item(item)
-            rewritten_items.append(rewritten if rewritten is not None else item)
-            changed = changed or rewritten != item
+            if _multi_agent_function_call_name(item) is not None or _node_repl_function_call_name(item) is not None:
+                call_id = item.get("call_id")
+                if isinstance(call_id, str):
+                    preserved_structured_call_ids.add(call_id)
+                rewritten = _structured_tool_function_call_item(item)
+                rewritten_items.append(rewritten if rewritten is not None else item)
+                changed = changed or rewritten != item
+            else:
+                replacement = _compatible_internal_message(item)
+                if replacement is not None:
+                    rewritten_items.append(replacement)
+                changed = True
             continue
         if item.get("type") == "function_call_output":
-            rewritten_items.append(dict(item))
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id in preserved_structured_call_ids:
+                rewritten_items.append(dict(item))
+            else:
+                replacement = _compatible_internal_message(item)
+                if replacement is not None:
+                    rewritten_items.append(replacement)
+                changed = True
             continue
         item_type = item.get("type")
         replacement = _compatible_internal_message(item)
