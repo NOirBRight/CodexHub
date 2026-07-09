@@ -341,6 +341,11 @@ test("release build scripts support stable and beta flavor configuration", async
   assert.match(buildScript, /Build-TauriConfig\.ps1/);
   assert.match(buildScript, /CODEXHUB_BUILD_FLAVOR/);
   assert.match(buildScript, /CODEXHUB_FRONTEND_PORT/);
+  assert.match(buildScript, /cargo tauri build --config \$generatedTauriConfigPath --bundles nsis --ci/);
+  assert.match(buildScript, /releaseAssetPrefix/);
+  assert.match(buildScript, /Get-ChildItem -LiteralPath \$bundleDir -Filter "\*_\$\{version\}_x64-setup\.exe" -File/);
+  assert.match(buildScript, /Move-Item -LiteralPath \$generatedInstallerPath -Destination \$installerPath -Force/);
+  assert.match(buildScript, /Move-Item -LiteralPath \$generatedSignaturePath -Destination \$signaturePath -Force/);
   assert.match(viteSource, /CODEXHUB_FRONTEND_PORT/);
   assert.doesNotMatch(packageJson.scripts.dev, /--port\s+1420/);
   assert.doesNotMatch(packageJson.scripts.preview, /--port\s+1420/);

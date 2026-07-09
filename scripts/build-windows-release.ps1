@@ -101,7 +101,7 @@ try {
 
     Push-Location $tauriDir
     try {
-        & cargo tauri build --bundles nsis --ci
+        & cargo tauri build --config $generatedTauriConfigPath --bundles nsis --ci
         if ($LASTEXITCODE -ne 0) {
             throw "Tauri Windows release build failed with exit code $LASTEXITCODE."
         }
@@ -146,12 +146,30 @@ $installerName = "{0}_{1}_x64-setup.exe" -f $assetPrefix, $version
 $installerPath = Join-Path $bundleDir $installerName
 $signaturePath = "$installerPath.sig"
 
+if ((-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf))) {
+    $generatedInstaller = Get-ChildItem -LiteralPath $bundleDir -Filter "*_${version}_x64-setup.exe" -File |
+        Where-Object {
+            $_.FullName -ne $installerPath -and
+            (Test-Path -LiteralPath "$($_.FullName).sig" -PathType Leaf)
+        } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -eq $generatedInstaller) {
+        throw "Expected NSIS installer was not generated: $installerPath"
+    }
+
+    $generatedInstallerPath = $generatedInstaller.FullName
+    $generatedSignaturePath = "$generatedInstallerPath.sig"
+    Move-Item -LiteralPath $generatedInstallerPath -Destination $installerPath -Force
+    Move-Item -LiteralPath $generatedSignaturePath -Destination $signaturePath -Force
+}
+
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
-    throw "Expected NSIS installer was not generated: $installerPath"
+    throw "Expected NSIS installer was not generated after canonicalization: $installerPath"
 }
 
 if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
-    throw "Expected updater signature was not generated: $signaturePath"
+    throw "Expected updater signature was not generated after canonicalization: $signaturePath"
 }
 
 $signature = (Get-Content -Raw -LiteralPath $signaturePath).Trim()
