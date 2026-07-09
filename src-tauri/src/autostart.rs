@@ -2,10 +2,21 @@ use crate::config::{self, CommandOutcome, CommandRunner, ProcessCommandRunner};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const WINDOWS_TASK_NAME: &str = "CodexHubProxy";
-const MACOS_LABEL: &str = "com.codexhub.proxy";
-const MACOS_PLIST_FILE: &str = "com.codexhub.proxy.plist";
-const LINUX_SERVICE_FILE: &str = "codexhub-proxy.service";
+fn windows_task_name() -> &'static str {
+    crate::app_flavor::current().autostart_task_name()
+}
+
+fn macos_label() -> &'static str {
+    crate::app_flavor::current().macos_label()
+}
+
+fn macos_plist_file() -> &'static str {
+    crate::app_flavor::current().macos_plist_file()
+}
+
+fn linux_service_file() -> &'static str {
+    crate::app_flavor::current().linux_service_file()
+}
 
 pub fn set_autostart(enabled: bool) -> Result<String, String> {
     let paths = RuntimePathProvider;
@@ -150,7 +161,7 @@ fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<
     let args = vec![
         "/Create".to_string(),
         "/TN".to_string(),
-        WINDOWS_TASK_NAME.to_string(),
+        windows_task_name().to_string(),
         "/TR".to_string(),
         windows_task_command(exe),
         "/SC".to_string(),
@@ -162,7 +173,8 @@ fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<
     run_autostart_command("create Windows autostart task", program, &args, runner)?;
 
     Ok(format!(
-        "Autostart enabled via Windows Task Scheduler task {WINDOWS_TASK_NAME}"
+        "Autostart enabled via Windows Task Scheduler task {}",
+        windows_task_name()
     ))
 }
 
@@ -171,7 +183,7 @@ fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String
     let args = vec![
         "/Delete".to_string(),
         "/TN".to_string(),
-        WINDOWS_TASK_NAME.to_string(),
+        windows_task_name().to_string(),
         "/F".to_string(),
     ];
     let label = "delete Windows autostart task";
@@ -186,7 +198,8 @@ fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String
     }
 
     Ok(format!(
-        "Autostart removed from Windows Task Scheduler task {WINDOWS_TASK_NAME}"
+        "Autostart removed from Windows Task Scheduler task {}",
+        windows_task_name()
     ))
 }
 
@@ -308,7 +321,7 @@ fn linux_systemctl_args(command: &str) -> Vec<String> {
 
 fn linux_systemctl_args_with_unit(command: &str) -> Vec<String> {
     let mut args = linux_systemctl_args(command);
-    args.push(LINUX_SERVICE_FILE.to_string());
+    args.push(linux_service_file().to_string());
     args
 }
 
@@ -369,7 +382,7 @@ fn macos_plist_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, String
         .home_dir()?
         .join("Library")
         .join("LaunchAgents")
-        .join(MACOS_PLIST_FILE))
+        .join(macos_plist_file()))
 }
 
 fn linux_service_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, String> {
@@ -378,7 +391,7 @@ fn linux_service_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, Stri
         .join(".config")
         .join("systemd")
         .join("user")
-        .join(LINUX_SERVICE_FILE))
+        .join(linux_service_file()))
 }
 
 fn windows_task_command(exe: &Path) -> String {
@@ -393,7 +406,7 @@ fn macos_plist_content(exe: &Path) -> String {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{MACOS_LABEL}</string>
+  <string>{}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{exe}</string>
@@ -405,7 +418,8 @@ fn macos_plist_content(exe: &Path) -> String {
   <false/>
 </dict>
 </plist>
-"#
+"#,
+        macos_label()
     )
 }
 
@@ -477,10 +491,10 @@ fn is_nonfatal_systemctl_cleanup_failure(
         && command_output_contains(
             outcome,
             &[
-                "unit codexhub-proxy.service does not exist",
-                "unit file codexhub-proxy.service does not exist",
-                "codexhub-proxy.service does not exist",
-                "codexhub-proxy.service not found",
+                &format!("unit {} does not exist", linux_service_file()),
+                &format!("unit file {} does not exist", linux_service_file()),
+                &format!("{} does not exist", linux_service_file()),
+                &format!("{} not found", linux_service_file()),
                 "not enabled",
             ],
         )
@@ -504,8 +518,7 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::{
         remove_autostart_with_dependencies, set_autostart_with_dependencies, AutostartFileSystem,
-        AutostartPathProvider, OperatingSystem, LINUX_SERVICE_FILE, MACOS_PLIST_FILE,
-        WINDOWS_TASK_NAME,
+        AutostartPathProvider, OperatingSystem,
     };
     use crate::config::{CommandOutcome, CommandRunner};
     use std::cell::RefCell;
@@ -530,7 +543,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(message.contains(WINDOWS_TASK_NAME));
+        assert!(message.contains(super::windows_task_name()));
         assert_eq!(filesystem.writes.borrow().len(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
@@ -539,7 +552,7 @@ mod tests {
                 args: vec![
                     "/Create".to_string(),
                     "/TN".to_string(),
-                    WINDOWS_TASK_NAME.to_string(),
+                    super::windows_task_name().to_string(),
                     "/TR".to_string(),
                     r#""C:\Program Files\CodexHub\codexhub.exe" start"#.to_string(),
                     "/SC".to_string(),
@@ -568,7 +581,7 @@ mod tests {
                 args: vec![
                     "/Delete".to_string(),
                     "/TN".to_string(),
-                    WINDOWS_TASK_NAME.to_string(),
+                    super::windows_task_name().to_string(),
                     "/F".to_string(),
                 ],
             }]
@@ -602,7 +615,7 @@ mod tests {
                 args: vec![
                     "/Delete".to_string(),
                     "/TN".to_string(),
-                    WINDOWS_TASK_NAME.to_string(),
+                    super::windows_task_name().to_string(),
                     "/F".to_string(),
                 ],
             }]
@@ -626,14 +639,17 @@ mod tests {
         let plist_path = home
             .join("Library")
             .join("LaunchAgents")
-            .join(MACOS_PLIST_FILE);
+            .join(super::macos_plist_file());
         assert!(filesystem
             .created_dirs
             .borrow()
             .contains(&home.join("Library").join("LaunchAgents")));
         let writes = filesystem.writes.borrow();
         let plist = writes.get(&plist_path).unwrap();
-        assert!(plist.contains("<string>com.codexhub.proxy</string>"));
+        assert!(plist.contains(&format!(
+            "<string>{}</string>",
+            super::macos_label()
+        )));
         assert!(plist.contains("CodexHub &amp; Tools"));
         assert!(plist.contains("<string>start</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
@@ -656,7 +672,7 @@ mod tests {
             &[home
                 .join("Library")
                 .join("LaunchAgents")
-                .join(MACOS_PLIST_FILE)]
+                .join(super::macos_plist_file())]
         );
     }
 
@@ -675,7 +691,7 @@ mod tests {
             .join(".config")
             .join("systemd")
             .join("user")
-            .join(LINUX_SERVICE_FILE);
+            .join(super::linux_service_file());
         assert!(filesystem
             .created_dirs
             .borrow()
@@ -699,7 +715,7 @@ mod tests {
                     args: vec![
                         "--user".to_string(),
                         "enable".to_string(),
-                        LINUX_SERVICE_FILE.to_string(),
+                        super::linux_service_file().to_string(),
                     ],
                 }
             ]
@@ -721,7 +737,7 @@ mod tests {
             .join(".config")
             .join("systemd")
             .join("user")
-            .join(LINUX_SERVICE_FILE);
+            .join(super::linux_service_file());
         let writes = filesystem.writes.borrow();
         let service = writes.get(&service_path).unwrap();
         assert!(service.contains("ExecStart=\"opt/Codex Hub/quoted\\\"dir/codex%%hub\" start"));
@@ -772,7 +788,7 @@ mod tests {
                     args: vec![
                         "--user".to_string(),
                         "disable".to_string(),
-                        LINUX_SERVICE_FILE.to_string(),
+                        super::linux_service_file().to_string(),
                     ],
                 },
                 RecordedCommand {
@@ -787,7 +803,7 @@ mod tests {
                 .join(".config")
                 .join("systemd")
                 .join("user")
-                .join(LINUX_SERVICE_FILE)]
+                .join(super::linux_service_file())]
         );
     }
 
@@ -800,7 +816,10 @@ mod tests {
             Ok(command_outcome(
                 Some(1),
                 "",
-                "Failed to disable unit: Unit file codexhub-proxy.service does not exist.",
+                &format!(
+                    "Failed to disable unit: Unit file {} does not exist.",
+                    super::linux_service_file()
+                ),
             )),
             Ok(command_outcome(Some(0), "", "")),
         ]);
@@ -814,7 +833,7 @@ mod tests {
                 .join(".config")
                 .join("systemd")
                 .join("user")
-                .join(LINUX_SERVICE_FILE)]
+                .join(super::linux_service_file())]
         );
         assert_eq!(
             runner.commands.borrow().as_slice(),
@@ -824,7 +843,7 @@ mod tests {
                     args: vec![
                         "--user".to_string(),
                         "disable".to_string(),
-                        LINUX_SERVICE_FILE.to_string(),
+                        super::linux_service_file().to_string(),
                     ],
                 },
                 RecordedCommand {
@@ -854,7 +873,7 @@ mod tests {
                 .join(".config")
                 .join("systemd")
                 .join("user")
-                .join(LINUX_SERVICE_FILE)]
+                .join(super::linux_service_file())]
         );
     }
 
@@ -867,7 +886,7 @@ mod tests {
             Ok(command_outcome(
                 Some(1),
                 "",
-                "Unit codexhub-proxy.service is not enabled.",
+                &format!("Unit {} is not enabled.", super::linux_service_file()),
             )),
             Ok(command_outcome(Some(0), "", "")),
         ]);
@@ -881,7 +900,7 @@ mod tests {
                 .join(".config")
                 .join("systemd")
                 .join("user")
-                .join(LINUX_SERVICE_FILE)]
+                .join(super::linux_service_file())]
         );
     }
 
@@ -912,7 +931,7 @@ mod tests {
                 .join(".config")
                 .join("systemd")
                 .join("user")
-                .join(LINUX_SERVICE_FILE)]
+                .join(super::linux_service_file())]
         );
     }
 
@@ -967,7 +986,7 @@ mod tests {
                     args: vec![
                         "--user".to_string(),
                         "disable".to_string(),
-                        LINUX_SERVICE_FILE.to_string(),
+                        super::linux_service_file().to_string(),
                     ],
                 },
                 RecordedCommand {
@@ -982,7 +1001,7 @@ mod tests {
                 .join(".config")
                 .join("systemd")
                 .join("user")
-                .join(LINUX_SERVICE_FILE)]
+                .join(super::linux_service_file())]
         );
     }
 

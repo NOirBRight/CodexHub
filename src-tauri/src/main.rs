@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_flavor;
 mod app_updates;
 mod autostart;
 mod catalog;
@@ -161,7 +162,7 @@ impl AppStatus {
         Self {
             mode: "unknown".to_string(),
             proxy_running: false,
-            proxy_port: 9099,
+            proxy_port: app_flavor::default_gateway_port(),
             proxy_build: None,
             message: message.into(),
             history_sync_status: None,
@@ -238,7 +239,7 @@ impl Default for Settings {
             official_disabled_models: Vec::new(),
             official_model_sort_order: Vec::new(),
             official_provider_sort_order: 0,
-            proxy_port: 9099,
+            proxy_port: app_flavor::default_gateway_port(),
         }
     }
 }
@@ -299,6 +300,11 @@ fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
 #[tauri::command]
 fn get_settings() -> Result<Settings, String> {
     config::get_settings()
+}
+
+#[tauri::command]
+fn get_app_flavor() -> app_flavor::AppFlavorInfo {
+    app_flavor::current_info()
 }
 
 #[tauri::command]
@@ -769,6 +775,7 @@ fn run_gui() {
             get_providers,
             save_providers,
             get_settings,
+            get_app_flavor,
             save_settings,
             refresh_official_models,
             openai_usage_completions,

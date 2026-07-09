@@ -702,6 +702,10 @@ sort_order = 7
 
         let defaults = get_settings_with_paths(&paths).expect("default settings");
         assert_settings_eq(&defaults, &Settings::default());
+        assert_eq!(
+            defaults.proxy_port,
+            crate::app_flavor::default_gateway_port()
+        );
 
         let custom = Settings {
             locale: "zh-CN".to_string(),
