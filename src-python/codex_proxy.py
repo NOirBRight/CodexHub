@@ -8882,9 +8882,7 @@ def _local_request_authorized(
     if expected_key is None:
         return True
     token = _bearer_token(headers)
-    if token and hmac.compare_digest(token, expected_key):
-        return True
-    return bool(token and _is_codex_app_context(request_context))
+    return bool(token and hmac.compare_digest(token, expected_key))
 
 
 def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]) -> bool:
@@ -10407,6 +10405,21 @@ def _codexhub_error_payload(
     }
 
 
+def _local_gateway_auth_error_payload() -> dict[str, Any]:
+    message = "missing or invalid local Gateway client key"
+    return {
+        "error": "unauthorized",
+        "codexhub_error": _codexhub_error_payload(
+            source="gateway",
+            message=message,
+            status=401,
+            error="UnauthorizedLocalClient",
+            error_type="gateway_auth_error",
+            failure_class=RETRY_FAILURE_PERMANENT,
+        ),
+    }
+
+
 def _downstream_stream_error_payload(
     *,
     upstream_name: str,
@@ -10780,7 +10793,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if parsed.path == "/shutdown":
             request_context = request_context_from_headers(self.headers)
             if not _local_request_authorized(self.headers, request_context):
-                self._send_json(401, {"error": "unauthorized"})
+                self._send_json(401, _local_gateway_auth_error_payload())
                 self.close_connection = True
                 return
             self._send_json(200, {"ok": True, "message": "shutdown scheduled"})
@@ -10832,7 +10845,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
-            self._send_json(401, {"error": "unauthorized"})
+            self._send_json(401, _local_gateway_auth_error_payload())
             self.close_connection = True
             return
         request_kind = RETRY_REQUEST_MAIN_GENERATION

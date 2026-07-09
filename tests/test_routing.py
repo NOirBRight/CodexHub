@@ -403,9 +403,9 @@ class RoutingTests(unittest.TestCase):
                 )
             )
 
-    def test_local_request_auth_allows_codex_app_authorization_fallback(self):
+    def test_local_request_auth_rejects_spoofed_codex_app_context(self):
         with patch.dict(os.environ, {"CODEX_PROXY_GATEWAY_CLIENT_KEY": "local-key"}, clear=True):
-            self.assertTrue(
+            self.assertFalse(
                 codex_proxy._local_request_authorized(
                     {"Authorization": "Bearer codex-app-token"},
                     {"client_id": "codex-app"},
@@ -414,6 +414,24 @@ class RoutingTests(unittest.TestCase):
             self.assertFalse(
                 codex_proxy._local_request_authorized(
                     {},
+                    {"client_id": "codex-app"},
+                )
+            )
+            self.assertFalse(
+                codex_proxy._local_request_authorized(
+                    {
+                        "Authorization": "Bearer wrong",
+                        "User-Agent": "codex-app/0.1.3",
+                    },
+                    {"client_id": "codex-app"},
+                )
+            )
+            self.assertFalse(
+                codex_proxy._local_request_authorized(
+                    {
+                        "Authorization": "Bearer wrong",
+                        "X-Codex-Client-Id": "codex-app",
+                    },
                     {"client_id": "codex-app"},
                 )
             )
@@ -894,6 +912,10 @@ class RoutingTests(unittest.TestCase):
             CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
 
         self.assertEqual(fake.status, 401)
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertEqual(payload["codexhub_error"]["code"], "gateway.auth")
+        self.assertEqual(payload["codexhub_error"]["source"], "gateway")
+        self.assertFalse(payload["codexhub_error"]["retryable"])
         self.assertTrue(handler.close_connection)
         event = self.write_proxy_event.call_args_list[-1]
         self.assertEqual(event.args[0], "request_error")
