@@ -17,9 +17,12 @@ from typing import Any
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
+from atomic_io import atomic_write_text
+
 CODEX_HOME_ENV = "CODEX_HOME"
 DEFAULT_CODEX_HOME = Path.home() / ".codex"
 AUTH_FILENAME = "auth.json"
+PRIVATE_AUTH_FILE_MODE = 0o600
 
 # Refresh when the access token has less than this many seconds of life left.
 REFRESH_SAFETY_MARGIN_SECONDS = 60
@@ -106,9 +109,11 @@ def load_auth_json(path: Path | None = None) -> dict[str, Any]:
 
 def _persist_auth_json(path: Path, data: dict[str, Any]) -> None:
     """Write ``auth.json`` back, preserving the original structure shape."""
-    path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
+        mode=PRIVATE_AUTH_FILE_MODE,
     )
 
 

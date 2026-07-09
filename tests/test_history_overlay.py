@@ -59,10 +59,14 @@ class HistoryOverlayTests(unittest.TestCase):
 
             backup_root = root / "backup"
             ledger_path = backup_root / "ledger.json"
+            backup_root.mkdir(parents=True)
+            ledger_lock_path = ledger_path.with_name("ledger.json.lock")
+            ledger_lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
             ledger = apply_history_overlay(codex_dir, backup_root, ledger_path)
 
             self.assertEqual(len(ledger["state"][0]["thread_ids"]), 1)
             self.assertEqual(len(ledger["jsonl"]), 1)
+            self.assertFalse(ledger_lock_path.exists())
             connection = sqlite3.connect(db_path)
             try:
                 providers = dict(connection.execute("SELECT id, model_provider FROM threads"))

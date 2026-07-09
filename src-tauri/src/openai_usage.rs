@@ -1,4 +1,4 @@
-use crate::config;
+use crate::{config, safe_file};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::cmp::Reverse;
@@ -288,7 +288,8 @@ fn write_usage_cache(path: &Path, cache: &CodexAccountUsageCache) -> Result<(), 
     }
     let body = serde_json::to_string(cache)
         .map_err(|error| format!("Failed to encode OpenAI usage cache: {error}"))?;
-    fs::write(path, body).map_err(|error| format!("Failed to write OpenAI usage cache: {error}"))
+    safe_file::write_text_atomic(path, &body)
+        .map_err(|error| format!("Failed to write OpenAI usage cache: {error}"))
 }
 
 fn enrich_usage_with_local_rate_limits(
@@ -1671,6 +1672,34 @@ mod tests {
     }
 
     #[test]
+    fn write_usage_cache_recovers_stale_atomic_lock() {
+        let root = temp_root("openai-usage-stale-lock");
+        let cache_path = root.join("usage-cache.json");
+        let lock = stale_lock_path(&cache_path);
+        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").expect("write stale lock");
+        let usage: CodexAccountUsageResponse = serde_json::from_str(
+            r#"{
+              "summary": { "lifetimeTokens": 84 },
+              "dailyUsageBuckets": [
+                {"startDate": "2026-07-07", "tokens": 84}
+              ]
+            }"#,
+        )
+        .expect("usage parses");
+        let cache = CodexAccountUsageCache {
+            fetched_at: 10_300,
+            usage,
+        };
+
+        write_usage_cache(&cache_path, &cache).expect("write usage cache");
+
+        assert!(!lock.exists());
+        let written = fs::read_to_string(&cache_path).expect("cache text");
+        assert!(written.contains(r#""fetched_at":10300"#));
+        assert!(written.contains("2026-07-07"));
+    }
+
+    #[test]
     fn local_account_dates_are_not_filtered_out_by_utc_end_time() {
         let response: CodexAccountUsageResponse = serde_json::from_str(
             r#"{
@@ -1755,6 +1784,15 @@ mod tests {
         let usage: CodexAccountUsageResponse = serde_json::from_str(usage_json).unwrap();
         let cache = CodexAccountUsageCache { fetched_at, usage };
         fs::write(path, serde_json::to_string(&cache).unwrap()).unwrap();
+    }
+
+    fn stale_lock_path(path: &Path) -> PathBuf {
+        path.with_file_name(format!(
+            "{}.lock",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("cache")
+        ))
     }
 
     fn temp_root(name: &str) -> PathBuf {

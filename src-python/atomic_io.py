@@ -6,7 +6,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 LOCK_WAIT_TIMEOUT_SECONDS = 10.0
 LOCK_RETRY_DELAY_SECONDS = 0.025
@@ -25,20 +25,18 @@ def file_lock_for(path: Path) -> Iterator[None]:
             fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
             if _lock_is_stale(lock_path):
-                with contextlib.suppress(OSError):
-                    lock_path.unlink()
+                _remove_lock_file_best_effort(lock_path)
                 continue
             if time.monotonic() - started >= LOCK_WAIT_TIMEOUT_SECONDS:
-                raise TimeoutError(f"timed out waiting for config lock {lock_path}")
+                raise TimeoutError(f"timed out waiting for file lock {lock_path}")
             time.sleep(LOCK_RETRY_DELAY_SECONDS)
         except OSError as exc:
-            if exc.errno == errno.EEXIST:
+            if exc.errno in (errno.EEXIST, errno.EACCES):
                 if _lock_is_stale(lock_path):
-                    with contextlib.suppress(OSError):
-                        lock_path.unlink()
+                    _remove_lock_file_best_effort(lock_path)
                     continue
                 if time.monotonic() - started >= LOCK_WAIT_TIMEOUT_SECONDS:
-                    raise TimeoutError(f"timed out waiting for config lock {lock_path}") from exc
+                    raise TimeoutError(f"timed out waiting for file lock {lock_path}") from exc
                 time.sleep(LOCK_RETRY_DELAY_SECONDS)
                 continue
             raise
@@ -47,29 +45,66 @@ def file_lock_for(path: Path) -> Iterator[None]:
         yield
     finally:
         os.close(fd)
-        with contextlib.suppress(OSError):
-            lock_path.unlink()
+        _remove_lock_file_best_effort(lock_path)
 
 
-def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    atomic_write_bytes(path, text.encode(encoding))
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", mode: int | None = None) -> None:
+    atomic_write_bytes(path, text.encode(encoding), mode=mode)
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with file_lock_for(path):
-        temp_path = _unique_temp_path(path)
+        _atomic_write_bytes_unlocked(path, data, mode=mode)
+
+
+def atomic_read_or_create_text(
+    path: Path,
+    create_text: Callable[[], str],
+    *,
+    encoding: str = "utf-8",
+    mode: int | None = None,
+) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock_for(path):
         try:
-            with temp_path.open("wb") as temp_file:
-                temp_file.write(data)
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-            os.replace(temp_path, path)
-            _fsync_directory_best_effort(path.parent)
-        except Exception:
-            with contextlib.suppress(OSError):
-                temp_path.unlink()
-            raise
+            raw = path.read_text(encoding=encoding).strip()
+            if raw:
+                return raw
+        except OSError:
+            pass
+        text = create_text()
+        _atomic_write_bytes_unlocked(path, text.encode(encoding), mode=mode)
+        return text
+
+
+def _atomic_write_bytes_unlocked(path: Path, data: bytes, *, mode: int | None = None) -> None:
+    temp_path = _unique_temp_path(path)
+    try:
+        with temp_path.open("wb") as temp_file:
+            if mode is not None and os.name != "nt":
+                with contextlib.suppress(AttributeError, OSError):
+                    os.fchmod(temp_file.fileno(), mode)
+            temp_file.write(data)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)
+        _fsync_directory_best_effort(path.parent)
+    except Exception:
+        with contextlib.suppress(OSError):
+            temp_path.unlink()
+        raise
+
+
+def _remove_lock_file_best_effort(lock_path: Path) -> None:
+    for _ in range(50):
+        try:
+            lock_path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.01)
 
 
 def _unique_temp_path(path: Path) -> Path:

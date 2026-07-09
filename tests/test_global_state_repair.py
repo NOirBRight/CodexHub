@@ -59,6 +59,28 @@ class GlobalStateRepairTests(unittest.TestCase):
             self.assertFalse(result["changed"])
             self.assertFalse(backup_path.exists())
 
+    def test_repair_write_recovers_stale_atomic_lock(self):
+        original = {
+            "selected-remote-host-id": "remote-control:env_123",
+            "project-order": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            state_path = tmp / ".codex-global-state.json"
+            backup_path = tmp / "backup" / ".codex-global-state.json"
+            state_path.write_text(json.dumps(original), encoding="utf-8")
+            lock_path = state_path.with_name(".codex-global-state.json.lock")
+            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+
+            result = repair_global_state(state_path, backup_path)
+
+            self.assertTrue(result["changed"])
+            self.assertFalse(lock_path.exists())
+            self.assertNotIn(
+                "selected-remote-host-id",
+                json.loads(state_path.read_text(encoding="utf-8")),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

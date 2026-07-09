@@ -1,5 +1,7 @@
 import base64
 import json
+import os
+import stat
 import tempfile
 import time
 import unittest
@@ -160,6 +162,24 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(written["tokens"]["access_token"], new_token)
             self.assertEqual(written["tokens"]["refresh_token"], "rt.fresh")
             self.assertIn("last_refresh", written)
+
+    def test_refresh_writes_back_with_atomic_lock_recovery(self):
+        old_token = _make_jwt({"exp": int(time.time()) - 100, "client_id": "app_x", "scp": ["openid"]})
+        new_token = _make_jwt({"exp": int(time.time()) + 3600, "client_id": "app_x"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _make_auth_json(Path(tmp), access_token=old_token, refresh_token="rt.orig")
+            lock_path = path.with_name("auth.json.lock")
+            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            auth_data = json.loads(path.read_text(encoding="utf-8"))
+            fake = _FakeResponse({"access_token": new_token, "refresh_token": "rt.fresh"})
+
+            with patch("codex_auth.urlopen", return_value=fake):
+                codex_auth.refresh(auth_data, path)
+
+            self.assertFalse(lock_path.exists())
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tokens"]["access_token"], new_token)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_refresh_without_refresh_token_raises(self):
         token = _make_jwt({"exp": int(time.time()) + 3600, "client_id": "app_x"})

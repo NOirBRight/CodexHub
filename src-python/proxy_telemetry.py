@@ -9,9 +9,12 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from atomic_io import atomic_read_or_create_text
+
 EVENT_SCHEMA_VERSION = 2
 TELEMETRY_DB_FILENAME = "codex-proxy-telemetry.sqlite"
 TELEMETRY_SECRET_FILENAME = "telemetry-secret"
+PRIVATE_TELEMETRY_SECRET_MODE = 0o600
 REQUEST_PREFIX_BYTES = 65536
 RUNTIME_SQLITE_TIMEOUT_SECONDS = 0.25
 RUNTIME_SQLITE_BUSY_TIMEOUT_MS = 250
@@ -501,15 +504,12 @@ def _apply_field_defaults(payload: dict[str, Any], codex_home: Path) -> None:
 
 def _load_or_create_secret(codex_home: Path) -> bytes:
     path = telemetry_secret_path(codex_home)
-    try:
-        raw = path.read_text(encoding="utf-8").strip()
-        if raw:
-            return raw.encode("utf-8")
-    except OSError:
-        pass
-    secret = secrets.token_hex(32)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(secret, encoding="utf-8")
+    secret = atomic_read_or_create_text(
+        path,
+        lambda: secrets.token_hex(32),
+        encoding="utf-8",
+        mode=PRIVATE_TELEMETRY_SECRET_MODE,
+    ).strip()
     return secret.encode("utf-8")
 
 

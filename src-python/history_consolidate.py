@@ -12,6 +12,8 @@ import sqlite3
 import tempfile
 from typing import Any, Iterable
 
+from atomic_io import atomic_write_text
+
 
 OPENAI_PROVIDER = "openai"
 CUSTOM_PROVIDER = "custom"
@@ -410,7 +412,11 @@ def merge_global_state(codex_dir: Path, source_dir: Path, backup_root: Path) -> 
         active_path.parent.mkdir(parents=True, exist_ok=True)
         source = json.loads(source_path.read_text(encoding="utf-8-sig"))
         removed_remote_keys = sanitize_global_state_remote_selection(source) if isinstance(source, dict) else 0
-        active_path.write_text(json.dumps(source, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+        atomic_write_text(
+            active_path,
+            json.dumps(source, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
         return {"copied": 1, "removed_remote_keys": removed_remote_keys}
 
     source = json.loads(source_path.read_text(encoding="utf-8-sig"))
@@ -464,7 +470,11 @@ def merge_global_state(codex_dir: Path, source_dir: Path, backup_root: Path) -> 
 
     if changed:
         backup_file(active_path, codex_dir, backup_root, "active-before")
-        active_path.write_text(json.dumps(active, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+        atomic_write_text(
+            active_path,
+            json.dumps(active, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
     return {"changed_fields": changed}
 
 
@@ -518,7 +528,11 @@ def official_main(codex_dir: Path, source_dir: Path, backup_root: Path, target_p
         "source_dir": str(source_dir),
         "target_provider": target_provider,
     }
-    (backup_root / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    atomic_write_text(
+        backup_root / "meta.json",
+        json.dumps(meta, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
 
     jsonl_counts = merge_source_jsonl(source_dir, codex_dir, backup_root, target_provider)
     normalized = normalize_active_jsonl_files(codex_dir, backup_root, target_provider)

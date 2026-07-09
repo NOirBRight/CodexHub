@@ -14,6 +14,8 @@ import tempfile
 import time
 from typing import Any, Iterable
 
+from atomic_io import atomic_write_text
+
 
 SOURCE_PROVIDER = "openai"
 TARGET_PROVIDER = "custom"
@@ -29,6 +31,14 @@ def utc_now_iso() -> str:
 
 def default_codex_dir() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    atomic_write_text(
+        path,
+        json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def read_config_sqlite_home(codex_dir: Path) -> Path | None:
@@ -462,7 +472,7 @@ def apply_history_overlay(codex_dir: Path, backup_root: Path, ledger_path: Path)
         },
     }
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json_atomic(ledger_path, ledger)
     return ledger
 
 
@@ -1000,7 +1010,7 @@ def repair_history_bucket(
         },
     }
     if status not in {"already-unified", "already-openai"}:
-        ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        write_json_atomic(ledger_path, ledger)
     return ledger
 
 
@@ -1038,7 +1048,7 @@ def ensure_unified_history_bucket(codex_dir: Path, backup_root: Path) -> dict[st
     result["status"] = "already-unified" if result.get("status") == "already-unified" else result.get("status", "completed")
     if result.get("status") != "already-unified":
         ledger_path = backup_root / "ledger.json"
-        ledger_path.write_text(json.dumps(result, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        write_json_atomic(ledger_path, result)
     return result
 
 
@@ -1061,7 +1071,7 @@ def migrate_official_history_to_unified(codex_dir: Path, backup_root: Path) -> d
     if result.get("status") == "already-unified":
         return result
     ledger_path = backup_root / "ledger.json"
-    ledger_path.write_text(json.dumps(result, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json_atomic(ledger_path, result)
     return result
 
 
@@ -1074,7 +1084,7 @@ def restore_official_history_from_unified(
     result["mode"] = "restore-official-from-unified"
     if result.get("status") not in {"already-openai", "no-ledger"}:
         ledger_path = backup_root / "ledger.json"
-        ledger_path.write_text(json.dumps(result, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        write_json_atomic(ledger_path, result)
     return result
 
 
@@ -1225,7 +1235,7 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
             "plan_seconds": round(time.perf_counter() - started_at, 3),
         },
     }
-    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json_atomic(ledger_path, ledger)
 
     written_entries: list[dict[str, str]] = []
     jsonl_results: list[dict[str, str]] = []
@@ -1255,7 +1265,7 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
         ledger["rolled_back_jsonl"] = len(written_entries)
         ledger["restored_state_backups"] = restored_states
         ledger["failed_at"] = utc_now_iso()
-        ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        write_json_atomic(ledger_path, ledger)
         raise
 
     jsonl_applied = sum(1 for entry in jsonl_results if entry.get("status") == "applied")
@@ -1273,7 +1283,7 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
         "jsonl_seconds": round(jsonl_done_at - state_done_at, 3),
         "total_seconds": round(jsonl_done_at - started_at, 3),
     }
-    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json_atomic(ledger_path, ledger)
     return ledger
 
 

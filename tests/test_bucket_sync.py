@@ -74,6 +74,44 @@ class BucketSyncTests(unittest.TestCase):
             )
             self.assertEqual(counts, {"merged": 1})
 
+    def test_merged_jsonl_write_recovers_stale_atomic_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            destination.mkdir()
+            (source / "session.jsonl").write_bytes(b"a\nb\nc\n")
+            target = destination / "session.jsonl"
+            target.write_bytes(b"a\nb\n")
+            lock_path = target.with_name("session.jsonl.lock")
+            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+
+            counts = sync_dir(source, destination)
+
+            self.assertEqual(target.read_bytes(), b"a\nb\nc\n")
+            self.assertEqual(counts, {"merged": 1})
+            self.assertFalse(lock_path.exists())
+
+    def test_non_jsonl_overwrite_recovers_stale_atomic_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            destination.mkdir()
+            (source / "state.json").write_bytes(b'{"new":true}\n')
+            target = destination / "state.json"
+            target.write_bytes(b'{"old":true}\n')
+            lock_path = target.with_name("state.json.lock")
+            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+
+            counts = sync_dir(source, destination)
+
+            self.assertEqual(target.read_bytes(), b'{"new":true}\n')
+            self.assertEqual(counts, {"overwritten": 1})
+            self.assertFalse(lock_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

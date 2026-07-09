@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import queue
 import sqlite3
+import stat
 import tempfile
+import threading
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -129,6 +132,55 @@ class ProxyEventLoggingTests(TestCase):
                 )
             finally:
                 connection.close()
+
+    def test_telemetry_secret_creation_recovers_stale_atomic_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import proxy_telemetry
+
+            codex_home = Path(tmpdir) / "codex-home"
+            secret_path = proxy_telemetry.telemetry_secret_path(codex_home)
+            secret_path.parent.mkdir(parents=True)
+            lock_path = secret_path.with_name("telemetry-secret.lock")
+            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+
+            digest = proxy_telemetry.telemetry_hmac(codex_home, b"test", b"payload")
+
+            self.assertEqual(len(digest), 64)
+            self.assertFalse(lock_path.exists())
+            self.assertTrue(secret_path.read_text(encoding="utf-8").strip())
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)
+
+    def test_telemetry_secret_concurrent_creation_uses_one_secret(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import proxy_telemetry
+
+            codex_home = Path(tmpdir) / "codex-home"
+            barrier = threading.Barrier(8)
+            digests: list[str] = []
+            errors: list[BaseException] = []
+            digests_lock = threading.Lock()
+
+            def worker() -> None:
+                try:
+                    barrier.wait()
+                    digest = proxy_telemetry.telemetry_hmac(codex_home, b"test", b"payload")
+                    with digests_lock:
+                        digests.append(digest)
+                except BaseException as error:
+                    with digests_lock:
+                        errors.append(error)
+
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(digests), 8)
+            self.assertEqual(len(set(digests)), 1)
+            self.assertTrue(proxy_telemetry.telemetry_secret_path(codex_home).read_text(encoding="utf-8").strip())
 
     def test_usage_observed_updates_existing_gateway_request_usage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
