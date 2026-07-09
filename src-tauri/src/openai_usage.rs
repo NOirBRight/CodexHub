@@ -330,7 +330,7 @@ fn latest_local_rate_limit_usage_limits(codex_dir: &Path) -> Option<Vec<CodexAcc
     files.sort_by(|left, right| right.modified.cmp(&left.modified));
     files.truncate(RATE_LIMIT_LOG_FILE_LIMIT);
 
-    let mut latest: Option<(String, Vec<CodexAccountUsageLimit>)> = None;
+    let mut latest: Option<(u8, String, Vec<CodexAccountUsageLimit>)> = None;
     for file in files {
         if file.len > RATE_LIMIT_LOG_MAX_BYTES {
             continue;
@@ -360,16 +360,50 @@ fn latest_local_rate_limit_usage_limits(codex_dir: &Path) -> Option<Vec<CodexAcc
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let priority = local_rate_limit_priority(rate_limits);
             if latest
                 .as_ref()
-                .map(|(seen_timestamp, _)| timestamp > *seen_timestamp)
+                .map(|(seen_priority, seen_timestamp, _)| {
+                    priority > *seen_priority
+                        || (priority == *seen_priority && timestamp > *seen_timestamp)
+                })
                 .unwrap_or(true)
             {
-                latest = Some((timestamp, limits));
+                latest = Some((priority, timestamp, limits));
             }
         }
     }
-    latest.map(|(_, limits)| limits)
+    latest.map(|(_, _, limits)| limits)
+}
+
+fn local_rate_limit_priority(rate_limits: &Value) -> u8 {
+    let Some(map) = rate_limits.as_object() else {
+        return 0;
+    };
+    let limit_id = map
+        .get("limit_id")
+        .or_else(|| map.get("limitId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let has_limit_name = map
+        .get("limit_name")
+        .or_else(|| map.get("limitName"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_plan_type = map
+        .get("plan_type")
+        .or_else(|| map.get("planType"))
+        .is_some_and(|value| !value.is_null());
+
+    if limit_id == "codex" || (has_plan_type && !has_limit_name) {
+        2
+    } else if has_limit_name || limit_id.starts_with("codex_") {
+        0
+    } else {
+        1
+    }
 }
 
 fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) {
@@ -1202,6 +1236,52 @@ mod tests {
         assert_eq!(snapshot.limits[0].used, Some(26.0));
         assert_eq!(snapshot.limits[1].period, "week");
         assert_eq!(snapshot.limits[1].remaining, Some(96.0));
+    }
+
+    #[test]
+    fn local_rate_limit_enrichment_prefers_subscription_limits_over_model_limits() {
+        let root = temp_root("openai-usage-prefers-subscription-limits");
+        let cache_path = root.join("proxy").join("usage-cache.json");
+        let sessions_dir = root.join("sessions").join("2026").join("07").join("09");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-09T01:21:59.538Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26,"window_minutes":300,"resets_at":1783577639},"secondary":{"used_percent":56,"window_minutes":10080,"resets_at":1783993293},"plan_type":"pro"}}}"#,
+                r#"{"timestamp":"2026-07-09T01:22:12.340Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":0,"window_minutes":300,"resets_at":1783577657},"secondary":{"used_percent":0,"window_minutes":10080,"resets_at":1783901315},"plan_type":null}}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        write_test_cache(
+            &cache_path,
+            10_000,
+            r#"{
+              "summary": { "lifetimeTokens": 41 },
+              "dailyUsageBuckets": [
+                {"startDate": "2026-07-08", "tokens": 41}
+              ]
+            }"#,
+        );
+
+        let snapshot = openai_usage_completions_with_cache_and_rate_limit_dir(
+            1_783_468_800,
+            1_783_555_200,
+            false,
+            &cache_path,
+            Some(&root),
+            10_000,
+            || panic!("fresh cache should not refresh"),
+        )
+        .expect("fresh cached usage with local rate limits");
+
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].used, Some(26.0));
+        assert_eq!(snapshot.limits[0].remaining, Some(74.0));
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(snapshot.limits[1].used, Some(56.0));
+        assert_eq!(snapshot.limits[1].remaining, Some(44.0));
     }
 
     #[test]
