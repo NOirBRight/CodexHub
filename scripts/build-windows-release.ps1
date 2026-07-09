@@ -1,8 +1,10 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("stable", "beta")]
+    [string]$Flavor = "stable",
     [string]$PrivateKeyPath = (Join-Path $env:USERPROFILE ".codexhub\codexhub-updater.key"),
     [string]$PrivateKeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
-    [string]$ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/latest/download",
+    [string]$ReleaseBaseUrl = "",
     [string]$Notes = "",
     [switch]$SkipFrontendBuild
 )
@@ -13,8 +15,23 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $frontendDir = Join-Path $repoRoot "frontend"
 $tauriDir = Join-Path $repoRoot "src-tauri"
-$tauriConfigPath = Join-Path $tauriDir "tauri.conf.json"
 $preparePythonRuntimePath = Join-Path $PSScriptRoot "Prepare-PythonRuntime.ps1"
+$flavorManifestPath = Join-Path $repoRoot "config\build-flavors.json"
+$flavorManifest = Get-Content -Raw -LiteralPath $flavorManifestPath | ConvertFrom-Json
+$flavorConfig = $flavorManifest.$Flavor
+if ($null -eq $flavorConfig) {
+    throw "Unknown build flavor: $Flavor"
+}
+if ([string]::IsNullOrWhiteSpace($ReleaseBaseUrl)) {
+    if ($Flavor -eq "beta") {
+        $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/download/beta"
+    }
+    else {
+        $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/latest/download"
+    }
+}
+$generatedTauriConfigPath = (& (Join-Path $PSScriptRoot "Build-TauriConfig.ps1") -Flavor $Flavor -RepoRoot $repoRoot).Trim()
+$tauriConfigPath = $generatedTauriConfigPath
 
 if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
     throw "Updater private key was not found: $PrivateKeyPath"
@@ -46,20 +63,30 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipFrontendBuild) {
+    $previousFrontendPort = $env:CODEXHUB_FRONTEND_PORT
     Push-Location $frontendDir
     try {
+        $env:CODEXHUB_FRONTEND_PORT = [string]$flavorConfig.frontendPort
         & npm run build
         if ($LASTEXITCODE -ne 0) {
             throw "Frontend build failed with exit code $LASTEXITCODE."
         }
     }
     finally {
+        if ($null -eq $previousFrontendPort) {
+            Remove-Item Env:\CODEXHUB_FRONTEND_PORT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:CODEXHUB_FRONTEND_PORT = $previousFrontendPort
+        }
         Pop-Location
     }
 }
 
 $previousSigningKey = $env:TAURI_SIGNING_PRIVATE_KEY
 $previousSigningPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+$previousBuildFlavor = $env:CODEXHUB_BUILD_FLAVOR
+$previousTauriConfig = $env:TAURI_CONFIG
 
 try {
     $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path -LiteralPath $PrivateKeyPath).Path
@@ -69,6 +96,8 @@ try {
     else {
         $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $PrivateKeyPassword
     }
+    $env:CODEXHUB_BUILD_FLAVOR = $Flavor
+    $env:TAURI_CONFIG = $generatedTauriConfigPath
 
     Push-Location $tauriDir
     try {
@@ -95,10 +124,25 @@ finally {
     else {
         $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $previousSigningPassword
     }
+
+    if ($null -eq $previousBuildFlavor) {
+        Remove-Item Env:\CODEXHUB_BUILD_FLAVOR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:CODEXHUB_BUILD_FLAVOR = $previousBuildFlavor
+    }
+
+    if ($null -eq $previousTauriConfig) {
+        Remove-Item Env:\TAURI_CONFIG -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:TAURI_CONFIG = $previousTauriConfig
+    }
 }
 
 $bundleDir = Join-Path $tauriDir "target\release\bundle\nsis"
-$installerName = "{0}_{1}_x64-setup.exe" -f $productName, $version
+$assetPrefix = [string]$flavorConfig.releaseAssetPrefix
+$installerName = "{0}_{1}_x64-setup.exe" -f $assetPrefix, $version
 $installerPath = Join-Path $bundleDir $installerName
 $signaturePath = "$installerPath.sig"
 
@@ -132,7 +176,7 @@ $manifest = [ordered]@{
     }
 }
 
-$manifestPath = Join-Path $bundleDir "latest.json"
+$manifestPath = Join-Path $bundleDir ([string]$flavorConfig.updaterManifestName)
 $manifestJson = $manifest | ConvertTo-Json -Depth 8
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($manifestPath, $manifestJson + [Environment]::NewLine, $utf8NoBom)

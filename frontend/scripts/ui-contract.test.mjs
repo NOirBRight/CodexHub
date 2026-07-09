@@ -314,6 +314,38 @@ test("Windows release build vendors a pinned Python runtime", async () => {
   assert.match(prepareScript, /src-python\\codex_proxy\.py/);
 });
 
+test("release build scripts support stable and beta flavor configuration", async () => {
+  const [buildScript, packageSource, viteSource] = await Promise.all([
+    readFile(buildWindowsReleasePath, "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(viteConfigPath, "utf8"),
+  ]);
+  const packageJson = JSON.parse(packageSource);
+  const flavorManifest = JSON.parse(await readFile(new URL("../../config/build-flavors.json", import.meta.url), "utf8"));
+
+  assert.deepEqual(Object.keys(flavorManifest).sort(), ["beta", "stable"]);
+  assert.equal(flavorManifest.stable.productName, "CodexHub");
+  assert.equal(flavorManifest.stable.identifier, "com.codexhub.app");
+  assert.equal(flavorManifest.stable.frontendPort, 1420);
+  assert.equal(flavorManifest.stable.bridgePort, 1421);
+  assert.equal(flavorManifest.stable.gatewayPort, 9099);
+  assert.equal(flavorManifest.stable.routingOwner, "release");
+  assert.equal(flavorManifest.beta.productName, "CodexHub Beta");
+  assert.equal(flavorManifest.beta.identifier, "com.codexhub.beta");
+  assert.equal(flavorManifest.beta.frontendPort, 1430);
+  assert.equal(flavorManifest.beta.bridgePort, 1431);
+  assert.equal(flavorManifest.beta.gatewayPort, 9109);
+  assert.equal(flavorManifest.beta.routingOwner, "beta");
+  assert.equal(flavorManifest.beta.updaterManifestName, "latest-beta.json");
+  assert.match(buildScript, /ValidateSet\("stable",\s*"beta"\)/);
+  assert.match(buildScript, /Build-TauriConfig\.ps1/);
+  assert.match(buildScript, /CODEXHUB_BUILD_FLAVOR/);
+  assert.match(buildScript, /CODEXHUB_FRONTEND_PORT/);
+  assert.match(viteSource, /CODEXHUB_FRONTEND_PORT/);
+  assert.doesNotMatch(packageJson.scripts.dev, /--port\s+1420/);
+  assert.doesNotMatch(packageJson.scripts.preview, /--port\s+1420/);
+});
+
 test("release desktop binary does not allocate a Windows console", async () => {
   const mainSource = await readFile(tauriMainPath, "utf8");
 
