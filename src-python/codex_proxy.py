@@ -338,6 +338,7 @@ BROWSER_CONTEXT_GUIDANCE = (
 )
 INTERNAL_INPUT_ITEM_TYPES = {
     "compaction",
+    "compaction_trigger",
     "reasoning",
     "function_call",
     "function_call_output",
@@ -4747,7 +4748,9 @@ def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | 
             fragments.append(fragment)
 
     if not fragments:
-        return None
+        return _developer_text_message(
+            "[Compacted conversation context — opaque, details unavailable]"
+        )
 
     return _developer_text_message("[Compacted conversation context]\n" + "\n\n".join(fragments))
 
@@ -5225,9 +5228,14 @@ def _rewrite_structured_tool_input_items(
         if item.get("type") == "function_call_output":
             rewritten_items.append(dict(item))
             continue
+        item_type = item.get("type")
         replacement = _compatible_internal_message(item)
         if replacement is not None:
             rewritten_items.append(replacement)
+            changed = True
+        elif isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
+            # Internal item (e.g. reasoning, compaction_trigger) with no text
+            # replacement — drop it instead of leaking the raw item upstream.
             changed = True
         else:
             rewritten_items.append(item)
@@ -7874,11 +7882,14 @@ def transparent_request_body(
     upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
     official_responses_backend = upstream_name == "official"
+    upstream_is_third_party = upstream_name != "official"
     if not isinstance(upstream_model, str) or not upstream_model:
         if isinstance(payload, Mapping):
             next_payload = dict(payload)
             changed = False
             if _normalize_responses_message_input_items(next_payload):
+                changed = True
+            if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
                 changed = True
             if official_responses_backend and "max_output_tokens" in next_payload:
                 del next_payload["max_output_tokens"]
@@ -7916,6 +7927,8 @@ def transparent_request_body(
     if official_responses_backend and _normalize_responses_string_input(next_payload):
         changed = True
     if _normalize_responses_message_input_items(next_payload):
+        changed = True
+    if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
         changed = True
     if not changed:
         return body
@@ -8007,6 +8020,8 @@ def compatible_request_body(
                 if len(filtered_tools) != len(tools):
                     payload["tools"] = filtered_tools
                     changed = True
+            if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+                changed = True
         else:
             if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True

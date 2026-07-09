@@ -4410,6 +4410,135 @@ class RoutingTests(unittest.TestCase):
                 self.assertIn("Earlier external-provider context.", payload["input"][1]["content"])
                 self.assertNotIn('"type":"compaction"', transformed.decode("utf-8"))
 
+    def test_external_text_compat_body_replaces_opaque_compaction_input(self):
+        upstream = dict(choose_upstream("volc/glm-5.2"))
+        upstream["tool_protocol"] = "text_compat"
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "test"},
+                    {
+                        "type": "compaction",
+                        "encrypted_content": "gAAAA-opaque-context",
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, upstream)
+        payload = json.loads(transformed)
+        raw = transformed.decode("utf-8")
+
+        self.assertEqual(payload["input"][1]["type"], "message")
+        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertIn("opaque", payload["input"][1]["content"])
+        self.assertNotIn('"type":"compaction"', raw)
+        self.assertNotIn("gAAAA", raw)
+
+    def test_external_responses_structured_body_sanitizes_internal_input_items(self):
+        upstream = {
+            "name": "xunfei",
+            "upstream_model": "xopglm52",
+            "upstream_format": "responses",
+        }
+        body = json.dumps(
+            {
+                "model": "xunfei/xopglm52",
+                "input": [
+                    {"type": "message", "role": "user", "content": "test"},
+                    {
+                        "type": "compaction",
+                        "encrypted_content": "gAAAA-opaque-context",
+                    },
+                    {"type": "compaction_trigger", "threshold": 200000},
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "gAAAA-reasoning",
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, upstream, model_id="xunfei/xopglm52")
+        payload = json.loads(transformed)
+        raw = transformed.decode("utf-8")
+
+        self.assertEqual(payload["model"], "xopglm52")
+        self.assertEqual([item["type"] for item in payload["input"]], ["message", "message"])
+        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertIn("opaque", payload["input"][1]["content"])
+        for forbidden in ('"type":"compaction"', '"type":"compaction_trigger"', '"type":"reasoning"', "gAAAA"):
+            self.assertNotIn(forbidden, raw)
+
+    def test_external_no_tool_protocol_body_sanitizes_internal_input_items(self):
+        upstream = {
+            "name": "no_tools",
+            "upstream_model": "glm-5.2",
+            "tool_protocol": "none",
+        }
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "tools": [
+                    {"type": "function", "name": "normal_tool", "parameters": {"type": "object"}},
+                    {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
+                ],
+                "input": [
+                    {"type": "message", "role": "user", "content": "test"},
+                    {"type": "compaction_trigger", "threshold": 200000},
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "gAAAA-reasoning",
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, upstream, model_id="volc/glm-5.2")
+        payload = json.loads(transformed)
+        raw = transformed.decode("utf-8")
+
+        self.assertEqual(payload["model"], "glm-5.2")
+        self.assertEqual(payload["tools"], [{"type": "function", "name": "normal_tool", "parameters": {"type": "object"}}])
+        self.assertEqual(payload["input"], [{"type": "message", "role": "user", "content": "test"}])
+        self.assertNotIn('"type":"compaction_trigger"', raw)
+        self.assertNotIn('"type":"reasoning"', raw)
+        self.assertNotIn("gAAAA", raw)
+
+    def test_third_party_transparent_body_sanitizes_internal_input_items(self):
+        upstream = {"name": "ollama_cloud", "upstream_model": "glm-5.2"}
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "test"},
+                    {
+                        "type": "compaction",
+                        "encrypted_content": "gAAAA-opaque-context",
+                    },
+                    {"type": "compaction_trigger", "threshold": 200000},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = codex_proxy.transparent_request_body(
+            body,
+            json.loads(body),
+            upstream,
+            model_id="volc/glm-5.2",
+        )
+        payload = json.loads(transformed)
+        raw = transformed.decode("utf-8")
+
+        self.assertEqual(payload["model"], "glm-5.2")
+        self.assertEqual([item["type"] for item in payload["input"]], ["message", "message"])
+        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertIn("opaque", payload["input"][1]["content"])
+        self.assertNotIn('"type":"compaction"', raw)
+        self.assertNotIn('"type":"compaction_trigger"', raw)
+        self.assertNotIn("gAAAA", raw)
+
     def test_external_body_converts_custom_tool_items_to_developer_messages(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
