@@ -146,7 +146,7 @@ function GatewayPageImpl({
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
-  const currentAppGatewayUrl = currentAppGatewayEndpoint(appFlavor);
+  const currentAppGatewayUrl = currentAppGatewayEndpoint(appFlavor, settings, status);
 
   function markCopied(target: string) {
     setCopiedTarget(target);
@@ -1101,11 +1101,16 @@ function recoveryEventTime(event: GatewayEvent) {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function currentAppGatewayEndpoint(appFlavor?: AppFlavorInfo | null) {
-  if (!appFlavor?.gateway_port) {
+function currentAppGatewayEndpoint(
+  appFlavor?: AppFlavorInfo | null,
+  settings?: Settings | null,
+  status?: GatewayStatus | null,
+) {
+  const port = settings?.proxy_port ?? status?.port ?? appFlavor?.gateway_port;
+  if (!port) {
     return null;
   }
-  return `http://127.0.0.1:${appFlavor.gateway_port}/v1`;
+  return `http://127.0.0.1:${port}/v1`;
 }
 
 function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {

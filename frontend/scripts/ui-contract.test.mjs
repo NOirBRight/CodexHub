@@ -353,6 +353,8 @@ test("release build scripts support stable and beta flavor configuration", async
   assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.InstallerPath -Destination \$installerPath -Force/);
   assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.SignaturePath -Destination \$signaturePath -Force/);
   assert.match(buildScript, /throw "Expected NSIS installer\/signature pair was not generated for flavor '\$Flavor'\. Looked for: \$expectedCandidateList"/);
+  assert.match(buildScript, /\$manifestName = \[System\.IO\.Path\]::GetFileName\(\$manifestPath\)/);
+  assert.match(buildScript, /throw "Generated \$manifestName failed validation: \$manifestPath"/);
   assert.doesNotMatch(buildScript, /if \(\(-not \(Test-Path -LiteralPath \$installerPath -PathType Leaf\)\) -or \(-not \(Test-Path -LiteralPath \$signaturePath -PathType Leaf\)\)\) \{/);
   assert.doesNotMatch(buildScript, /Get-ChildItem -LiteralPath \$bundleDir -Filter "\*_\$\{version\}_x64-setup\.exe" -File/);
   assert.doesNotMatch(buildScript, /LastWriteTimeUtc/);
@@ -2291,7 +2293,8 @@ test("gateway client cards render tri-state routing owner colors", async () => {
   assert.match(gatewaySource, /takeover/i);
   assert.match(gatewaySource, /newEndpoint:/);
   assert.match(gatewaySource, /oldEndpoint:/);
-  assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{appFlavor\.gateway_port\}\/v1/);
+  assert.match(gatewaySource, /const port = settings\?\.proxy_port \?\? status\?\.port \?\? appFlavor\?\.gateway_port;/);
+  assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{port\}\/v1/);
   assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
   assert.match(enSource, /managedByRelease/);
   assert.match(enSource, /managedByBeta/);

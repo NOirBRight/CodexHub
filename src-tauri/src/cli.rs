@@ -128,7 +128,11 @@ fn print_result<T: Serialize>(result: Result<T, String>) -> i32 {
 }
 
 fn print_help() {
-    println!(
+    println!("{}", help_text());
+}
+
+fn help_text() -> String {
+    format!(
         "\
 CodexHub CLI
 
@@ -146,13 +150,14 @@ Usage:
   codexhub list-models
   codexhub set-autostart [true|false]
   codexhub remove-autostart
-  codexhub web-bridge [--port 1421]"
-    );
+  codexhub web-bridge [--port {bridge_port}] [--addr HOST:PORT]",
+        bridge_port = crate::app_flavor::current().bridge_port()
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_set_autostart_enabled, run, run_switch_command};
+    use super::{help_text, parse_set_autostart_enabled, run, run_switch_command};
     use crate::config::{self, CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
     use std::fs;
@@ -164,6 +169,16 @@ mod tests {
         let args = vec!["help".to_string()];
 
         assert_eq!(run(&args), 0);
+    }
+
+    #[test]
+    fn help_text_uses_current_flavor_bridge_port() {
+        let help = help_text();
+
+        assert!(help.contains(&format!(
+            "codexhub web-bridge [--port {}] [--addr HOST:PORT]",
+            crate::app_flavor::current().bridge_port()
+        )));
     }
 
     #[test]

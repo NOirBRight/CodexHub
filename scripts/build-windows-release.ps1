@@ -227,6 +227,7 @@ $manifest = [ordered]@{
 }
 
 $manifestPath = Join-Path $bundleDir ([string]$flavorConfig.updaterManifestName)
+$manifestName = [System.IO.Path]::GetFileName($manifestPath)
 $manifestJson = $manifest | ConvertTo-Json -Depth 8
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($manifestPath, $manifestJson + [Environment]::NewLine, $utf8NoBom)
@@ -234,7 +235,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $roundTrip = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $platform = $roundTrip.platforms."windows-x86_64"
 if ($roundTrip.version -ne $version -or $platform.signature -ne $signature -or [string]::IsNullOrWhiteSpace($platform.url)) {
-    throw "Generated latest.json failed validation: $manifestPath"
+    throw "Generated $manifestName failed validation: $manifestPath"
 }
 
 $installerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath).Hash.ToLowerInvariant()
