@@ -18,7 +18,6 @@ const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.
 const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
 const settingsLibPath = new URL("../src/lib/settings.ts", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
-const settingsPagePath = new URL("../src/pages/SettingsPage.tsx", import.meta.url);
 const sortableListPath = new URL("../src/components/SortableList.tsx", import.meta.url);
 const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
 const tauriSourcePath = new URL("../src/lib/tauri.ts", import.meta.url);
@@ -1119,15 +1118,11 @@ test("settings drawer hides non-functional route and endpoint toggles", async ()
 });
 
 test("settings exposes bound client auto-sync instead of catalog auto-sync", async () => {
-  const [drawerSource, settingsSource] = await Promise.all([
-    readFile(settingsDrawerPath, "utf8"),
-    readFile(new URL("../src/pages/SettingsPage.tsx", import.meta.url), "utf8"),
-  ]);
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
 
   assert.match(drawerSource, /t\("settings\.autoSyncBoundClients"\)/);
   assert.match(drawerSource, /auto_sync_clients/);
   assert.doesNotMatch(drawerSource, /Auto-sync catalog/);
-  assert.match(settingsSource, /t\("settings\.autoSyncBoundClients"\)/);
 });
 
 test("settings normalization restores default-on fields when persisted settings omit them", async () => {
@@ -2191,9 +2186,8 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
 });
 
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
-  const [settingsDrawerSource, settingsPageSource, enSource, zhSource] = await Promise.all([
+  const [settingsDrawerSource, enSource, zhSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
-    readFile(settingsPagePath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -2208,7 +2202,6 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.ok(updatesIndex > imageProxyIndex, "version updates should be below image proxy settings");
   assert.match(settingsDrawerSource, /backdrop-blur-\[1px\]/);
   assert.match(settingsDrawerSource, /function VersionUpdateBlock/);
-  assert.doesNotMatch(settingsPageSource, /settings\.updates/);
   assert.match(enSource, /updates: "Version & Updates"/);
   assert.match(zhSource, /updates: "版本与更新"/);
   assert.match(enSource, /installUpdate: "Install update"/);
@@ -2231,17 +2224,15 @@ test("startup update check is delayed and silent on failure", async () => {
 });
 
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {
-  const [typesSource, formatSource, appSource, providersSource, modelsSource] = await Promise.all([
+  const [typesSource, formatSource, appSource, providersSource] = await Promise.all([
     readFile(new URL("../src/lib/types.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/lib/format.ts", import.meta.url), "utf8"),
     readFile(appPath, "utf8"),
     readFile(providersPagePath, "utf8"),
-    readFile(new URL("../src/pages/ModelsPage.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.doesNotMatch(typesSource, /hidden\?: boolean/);
   assert.doesNotMatch(formatSource, /hidden:/);
   assert.doesNotMatch(appSource, /provider\.hidden/);
-  assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false/);
-  assert.doesNotMatch(modelsSource, /label="Hidden"|hidden: checked/);
+  assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false|label="Hidden"|hidden: checked/);
 });

@@ -325,10 +325,7 @@ CodexHub/
       App.tsx
       pages/
         ProvidersPage.tsx
-        ModelsPage.tsx
-        SettingsPage.tsx
       components/
-        ProviderCard.tsx
         ModelList.tsx
         SortableList.tsx
         ProxyStatus.tsx
@@ -344,7 +341,6 @@ CodexHub/
       global_state_repair.py
       history_overlay.py
       history_consolidate.py
-      probe_provider_endpoints.py
       bucket_sync.py
     config/
       catalog_policy.toml
