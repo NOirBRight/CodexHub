@@ -2276,11 +2276,23 @@ test("gateway client cards render tri-state routing owner colors", async () => {
   assert.match(cardSource, /release:[\s\S]*border-sky-300[\s\S]*bg-sky-50[\s\S]*text-sky-800/);
   assert.match(cardSource, /beta:[\s\S]*border-amber-300[\s\S]*bg-amber-50[\s\S]*text-amber-800/);
   assert.match(cardSource, /Managed by/);
+  assert.match(cardSource, /runtimeOwner: RoutingOwner \| null/);
+  assert.match(cardSource, /ownerUnavailable/);
   assert.match(gatewaySource, /takeover/i);
+  assert.match(gatewaySource, /newEndpoint:/);
+  assert.match(gatewaySource, /oldEndpoint:/);
+  assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{appFlavor\.gateway_port\}\/v1/);
+  assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
   assert.match(enSource, /managedByRelease/);
   assert.match(enSource, /managedByBeta/);
+  assert.match(enSource, /ownerUnavailable/);
+  assert.match(enSource, /oldEndpoint/);
+  assert.match(enSource, /newEndpoint/);
   assert.match(zhSource, /managedByRelease/);
   assert.match(zhSource, /managedByBeta/);
+  assert.match(zhSource, /ownerUnavailable/);
+  assert.match(zhSource, /oldEndpoint/);
+  assert.match(zhSource, /newEndpoint/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {

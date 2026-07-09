@@ -141,11 +141,12 @@ function GatewayPageImpl({
     [status, t],
   );
   const defaultModel = status?.official_models[0]?.id ?? null;
-  const runtimeOwner = appFlavor?.routing_owner ?? "release";
+  const runtimeOwner = appFlavor?.routing_owner ?? null;
   const clientInfoById = useMemo(
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
+  const currentAppGatewayUrl = currentAppGatewayEndpoint(appFlavor);
 
   function markCopied(target: string) {
     setCopiedTarget(target);
@@ -302,12 +303,18 @@ function GatewayPageImpl({
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const client = clientInfoById.get(clientId);
     if (!forceTakeover && client && client.managed_by_current_app === false) {
+      if (!runtimeOwner) {
+        setClientBusy(null);
+        showToast(t("gateway.ownerUnavailable"), "error");
+        return;
+      }
       const confirmText = t("gateway.takeoverConfirm", {
         name: client.name,
         path: client.config_path ?? t("common.unknown"),
         current: ownerDisplayName(client.route_owner, t),
         next: ownerDisplayName(runtimeOwner, t),
-        endpoint: client.route_endpoint ?? t("common.unknown"),
+        oldEndpoint: client.route_endpoint ?? t("common.unknown"),
+        newEndpoint: currentAppGatewayUrl ?? t("common.unknown"),
       });
       if (!window.confirm(confirmText)) {
         setClientBusy(null);
@@ -385,6 +392,10 @@ function GatewayPageImpl({
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 
   function handleRouteAction(clientId: string, action: RouteAction) {
+    if (!runtimeOwner) {
+      showToast(t("gateway.ownerUnavailable"), "error");
+      return;
+    }
     if (action === "official") {
       return void switchClientMode(clientId, "official");
     }
@@ -1088,6 +1099,13 @@ function isRecoveryRetryStillActive(event: GatewayEvent) {
 function recoveryEventTime(event: GatewayEvent) {
   const timestamp = event.ts ? Date.parse(event.ts) : NaN;
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function currentAppGatewayEndpoint(appFlavor?: AppFlavorInfo | null) {
+  if (!appFlavor?.gateway_port) {
+    return null;
+  }
+  return `http://127.0.0.1:${appFlavor.gateway_port}/v1`;
 }
 
 function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {

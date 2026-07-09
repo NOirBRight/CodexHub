@@ -27,7 +27,7 @@ interface GatewayClientCardProps {
   client: GatewayClientContract;
   info?: GatewayClientInfo;
   onSwitchMode: (mode: RouteAction) => void;
-  runtimeOwner: RoutingOwner;
+  runtimeOwner: RoutingOwner | null;
 }
 
 export function GatewayClientCard({
@@ -41,6 +41,7 @@ export function GatewayClientCard({
   const { t } = useTranslation();
   const routeMode = routeModeFromInfo(info);
   const routeOwner = info?.route_owner ?? "unknown_external";
+  const runtimeOwnerAvailable = runtimeOwner !== null;
   const routeValue = routeOwner === "official" ? "official" : "current_owner";
   const pendingRouteValue = busy && busyMode !== "takeover" ? busyMode ?? null : null;
   const hasInfo = Boolean(info);
@@ -53,17 +54,22 @@ export function GatewayClientCard({
   const kindLabel = info?.kind ?? t(`gateway.clientKind.${client.id}`);
   const routeOptions: Array<SegmentedOption<RouteAction>> = [
     { value: "official", label: t("common.official") },
-    { value: "current_owner", label: ownerDisplayName(runtimeOwner, t) },
+    {
+      value: "current_owner",
+      label: runtimeOwnerAvailable ? ownerDisplayName(runtimeOwner, t) : t("gateway.ownerUnavailable"),
+    },
   ];
   const takeoverRequired = info?.managed_by_current_app === false;
   const managedLabel = takeoverRequired && (routeOwner === "release" || routeOwner === "beta")
     ? managedByLabel(routeOwner, t)
     : ownerLabel(routeOwner, info?.route_endpoint, t);
-  const routeDisabledReason = !installed
-    ? t("gateway.notInstalled")
-    : !autoApplySupported
-      ? t("gateway.configUnavailable")
-      : undefined;
+  const routeDisabledReason = !runtimeOwnerAvailable
+    ? t("gateway.ownerUnavailable")
+    : !installed
+      ? t("gateway.notInstalled")
+      : !autoApplySupported
+        ? t("gateway.configUnavailable")
+        : undefined;
   const routeTitle = busy
     ? t("gateway.switchingRoute", { name: info?.name ?? client.name })
     : routeDisabledReason ??
