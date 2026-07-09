@@ -3877,12 +3877,32 @@ fn first_provider_base_url_from_object(providers: &serde_json::Map<String, Value
         .map(ToOwned::to_owned)
 }
 
+fn managed_provider_base_url_from_object(
+    providers: &serde_json::Map<String, Value>,
+) -> Option<Option<String>> {
+    providers
+        .iter()
+        .find(|(provider_id, entry)| is_managed_codexhub_provider_entry(provider_id, entry))
+        .map(|(_, entry)| provider_entry_base_url(entry).map(ToOwned::to_owned))
+}
+
 fn first_provider_base_url_from_json_object_text(text: &str, pointer: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(text).ok()?;
     value
         .pointer(pointer)
         .and_then(Value::as_object)
         .and_then(first_provider_base_url_from_object)
+}
+
+fn managed_provider_base_url_from_json_object_text(
+    text: &str,
+    pointer: &str,
+) -> Option<Option<String>> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(Value::as_object)
+        .and_then(managed_provider_base_url_from_object)
 }
 
 fn first_provider_base_url_from_json_array_text(text: &str, pointer: &str) -> Option<String> {
@@ -3894,6 +3914,22 @@ fn first_provider_base_url_from_json_array_text(text: &str, pointer: &str) -> Op
         .map(ToOwned::to_owned)
 }
 
+fn managed_provider_base_url_from_json_array_text(
+    text: &str,
+    pointer: &str,
+) -> Option<Option<String>> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .and_then(|providers| {
+            providers
+                .iter()
+                .find(|provider| is_managed_zcode_catalog_provider_entry(provider))
+                .map(|provider| provider_entry_base_url(provider).map(ToOwned::to_owned))
+        })
+}
+
 fn detect_route_details_from_json_provider_object(
     text: &str,
     pointer: &str,
@@ -3902,7 +3938,8 @@ fn detect_route_details_from_json_provider_object(
     current_owner: RoutingOwner,
     current_port: u16,
 ) -> (RoutingOwner, Option<String>) {
-    let route_endpoint = first_provider_base_url_from_json_object_text(text, pointer);
+    let route_endpoint = managed_provider_base_url_from_json_object_text(text, pointer)
+        .unwrap_or_else(|| first_provider_base_url_from_json_object_text(text, pointer));
     let route_owner = route_owner_from_endpoint(
         route_endpoint.as_deref(),
         managed,
@@ -3921,7 +3958,8 @@ fn detect_route_details_from_json_provider_array(
     current_owner: RoutingOwner,
     current_port: u16,
 ) -> (RoutingOwner, Option<String>) {
-    let route_endpoint = first_provider_base_url_from_json_array_text(text, pointer);
+    let route_endpoint = managed_provider_base_url_from_json_array_text(text, pointer)
+        .unwrap_or_else(|| first_provider_base_url_from_json_array_text(text, pointer));
     let route_owner = route_owner_from_endpoint(
         route_endpoint.as_deref(),
         managed,
@@ -3942,7 +3980,11 @@ fn detect_pi_route_details(
     let managed = pi_route_mode(paths) == "hub";
     let route_endpoint = models_text
         .as_deref()
-        .and_then(|text| first_provider_base_url_from_json_object_text(text, "/providers"));
+        .map(|text| {
+            managed_provider_base_url_from_json_object_text(text, "/providers")
+                .unwrap_or_else(|| first_provider_base_url_from_json_object_text(text, "/providers"))
+        })
+        .flatten();
     let existing_config = settings_text.is_some() || models_text.is_some();
     (
         route_owner_from_endpoint(
@@ -3966,7 +4008,10 @@ fn detect_omp_route_details(
     let managed = omp_route_mode(paths) == "hub";
     let route_endpoint = models_text
         .as_deref()
-        .and_then(first_omp_provider_base_url);
+        .map(|text| {
+            managed_omp_provider_base_url(text).unwrap_or_else(|| first_omp_provider_base_url(text))
+        })
+        .flatten();
     let existing_config = config_text.is_some() || models_text.is_some();
     (
         route_owner_from_endpoint(
@@ -3987,6 +4032,66 @@ fn first_omp_provider_base_url(text: &str) -> Option<String> {
             .map(str::trim)
             .map(ToOwned::to_owned)
     })
+}
+
+fn managed_omp_provider_base_url(text: &str) -> Option<Option<String>> {
+    let mut current_provider_id: Option<String> = None;
+    let mut current_base_url: Option<String> = None;
+    let mut current_has_local_gateway_url = false;
+    let mut current_has_codexhub_name = false;
+
+    let finalize = |provider_id: &Option<String>,
+                    base_url: &Option<String>,
+                    has_local_gateway_url: bool,
+                    has_codexhub_name: bool|
+     -> Option<Option<String>> {
+        provider_id
+            .as_deref()
+            .filter(|provider_id| is_codexhub_client_provider_id(provider_id))
+            .filter(|_| has_local_gateway_url || has_codexhub_name)
+            .map(|_| base_url.clone())
+    };
+
+    for line in text.lines() {
+        let starts_provider_entry =
+            line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':');
+        if starts_provider_entry {
+            if let Some(endpoint) = finalize(
+                &current_provider_id,
+                &current_base_url,
+                current_has_local_gateway_url,
+                current_has_codexhub_name,
+            ) {
+                return Some(endpoint);
+            }
+            current_provider_id = Some(line.trim().trim_end_matches(':').to_string());
+            current_base_url = None;
+            current_has_local_gateway_url = false;
+            current_has_codexhub_name = false;
+            continue;
+        }
+
+        if current_provider_id.is_some() {
+            let trimmed = line.trim();
+            if let Some(url) = trimmed.strip_prefix("baseUrl:") {
+                let url = url.trim().to_string();
+                current_has_local_gateway_url = is_local_gateway_url(&url)
+                    && (url.contains("/v1/providers/")
+                        || url.trim().trim_end_matches('/').ends_with("/v1"));
+                current_base_url = Some(url);
+            }
+            if trimmed.contains("CodexHub Gateway") || trimmed.contains("CodexHub ") {
+                current_has_codexhub_name = true;
+            }
+        }
+    }
+
+    finalize(
+        &current_provider_id,
+        &current_base_url,
+        current_has_local_gateway_url,
+        current_has_codexhub_name,
+    )
 }
 
 fn detect_zcode_route_details(
@@ -8445,6 +8550,40 @@ mod tests {
             true,
         )
         .expect("explicit takeover should be allowed");
+    }
+
+    #[test]
+    fn managed_route_owner_scans_later_provider_entries() {
+        let text = r#"{
+  "provider": {
+    "aaa-provider": {
+      "options": {
+        "baseURL": "https://api.openai.com/v1"
+      }
+    },
+    "codexhub-openai": {
+      "name": "CodexHub OpenAI",
+      "options": {
+        "baseURL": "http://127.0.0.1:9109/v1/providers/openai"
+      }
+    }
+  }
+}"#;
+
+        let (owner, endpoint) = super::detect_route_details_from_json_provider_object(
+            text,
+            "/provider",
+            true,
+            true,
+            crate::app_flavor::RoutingOwner::Release,
+            9099,
+        );
+
+        assert_eq!(owner, crate::app_flavor::RoutingOwner::Beta);
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("http://127.0.0.1:9109/v1/providers/openai")
+        );
     }
 
     #[test]
