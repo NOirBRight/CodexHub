@@ -5767,7 +5767,8 @@ mod tests {
 
     #[test]
     fn write_text_replace_does_not_clobber_existing_stale_temp_file() {
-        let root = version_probe_test_root("write-text-replace-stale-temp");
+        let root = unique_temp_dir("write-text-replace-stale-temp");
+        fs::create_dir_all(root.as_path()).unwrap();
         let target = root.join("config.toml");
         let stale_temp = target.with_extension("tmp-codexhub");
         fs::write(&target, "old").unwrap();

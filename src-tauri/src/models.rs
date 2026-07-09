@@ -1,4 +1,5 @@
-use crate::{runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, UpstreamFormat};`nuse reqwest::blocking::Client;
+use crate::{runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, UpstreamFormat};
+use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use std::collections::HashSet;
