@@ -2882,6 +2882,146 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(retry_events), 4)
         self.assertEqual([event["max_attempts"] for event in retry_events], [5, 5, 5, 5])
 
+    def test_post_responses_streaming_retries_empty_completed_once_then_relays_visible_success(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        empty_stream = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_empty","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_empty","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}\n\n',
+                b"",
+            ]
+        )
+        success = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_visible","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_visible","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":8}}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "5",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[empty_stream, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(2)
+        self.assertEqual(fake.status, 200)
+        written = b"".join(fake.wfile.writes)
+        self.assertIn(b"resp_visible", written)
+        self.assertIn(b'"delta":"ok"', written)
+        self.assertNotIn(b"resp_empty", written)
+        self.assertNotIn(b"upstream_empty_completed_response", written)
+        retry_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["error"], "UpstreamEmptyCompletedResponseError")
+        self.assertEqual(retry_events[0]["max_attempts"], 2)
+
+    def test_post_responses_streaming_empty_completed_retry_is_bounded_to_one_extra_attempt(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        empty_streams = [
+            FakeSseResponse(
+                [
+                    f'data: {{"type":"response.created","response":{{"id":"resp_empty_{index}","status":"in_progress"}}}}\n\n'.encode("utf-8"),
+                    f'data: {{"type":"response.completed","response":{{"id":"resp_empty_{index}","status":"completed","output":[],"usage":{{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}}}}\n\n'.encode("utf-8"),
+                    b"",
+                ]
+            )
+            for index in range(2)
+        ]
+        should_not_be_used = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_unwanted_success","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"late ok"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_unwanted_success","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"late ok"}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "5",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[*empty_streams, should_not_be_used]) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(2)
+        self.assertEqual(fake.status, 200)
+        written = b"".join(fake.wfile.writes)
+        self.assertIn(b"upstream_empty_completed_response", written)
+        self.assertNotIn(b'"type":"response.completed"', written)
+        self.assertNotIn(b"resp_empty_0", written)
+        self.assertNotIn(b"resp_empty_1", written)
+        self.assertNotIn(b"resp_unwanted_success", written)
+        retry_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["error"], "UpstreamEmptyCompletedResponseError")
+        self.assertEqual(retry_events[0]["max_attempts"], 2)
+
     def test_post_responses_streaming_synthesizes_terminal_after_buffered_tool_call_done(self):
         body = json.dumps(
             {
@@ -12402,12 +12542,38 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(call["name"], "read_file")
         self.assertEqual(json.loads(call["arguments"])["path"], "docs/plan.md")
 
-    def test_external_provider_sse_relay_still_uses_gateway_adapter(self):
+    def test_external_provider_empty_completed_sse_is_retryable_before_downstream_output(self):
         fake = FakeHandler()
         response = FakeSseResponse(
             [
                 b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}\n\n',
+                b"",
+            ]
+        )
+
+        with self.assertRaisesRegex(codex_proxy.UpstreamStreamIncompleteError, "empty completed"):
+            CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "ollama_cloud",
+                request_id="req-empty-retryable",
+                model="glm-5.2",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                usage_capture={},
+                defer_stream_errors=True,
+            )
+
+        self.assertEqual(fake.wfile.writes, [])
+
+    def test_external_provider_empty_completed_sse_writes_explicit_error_when_retry_exhausted(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}\n\n',
                 b"",
             ]
         )
@@ -12417,7 +12583,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 fake,
                 response,
                 "ollama_cloud",
-                request_id="req-1",
+                request_id="req-empty-final",
                 model="glm-5.2",
                 upstream_format="responses",
                 inbound_format="responses",
@@ -12425,8 +12591,55 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 usage_capture={},
             )
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 502)
+        body = b"".join(fake.wfile.writes)
+        self.assertIn(b"upstream_empty_completed_response", body)
+        self.assertNotIn(b'"type":"response.completed"', body)
         self.assertGreaterEqual(rewrite.call_count, 1)
+
+    def test_external_provider_tool_call_only_sse_is_not_treated_as_empty_completed(self):
+        fake = FakeHandler()
+        call_item = {
+            "type": "function_call",
+            "call_id": "call_tool",
+            "name": "multi_agent_v1__spawn_agent",
+            "arguments": json.dumps({"message": "return ok"}),
+        }
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b"data: "
+                + json.dumps({"type": "response.output_item.done", "output_index": 0, "item": call_item}).encode("utf-8")
+                + b"\n\n",
+                b"data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_1", "status": "completed", "output": [call_item]},
+                    }
+                ).encode("utf-8")
+                + b"\n\n",
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "ollama_cloud",
+            request_id="req-tool-only",
+            model="glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            usage_capture={},
+            defer_stream_errors=True,
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.completed", body)
+        self.assertNotIn(b"upstream_empty_completed_response", body)
 
     def test_external_sse_keeps_codex_apps_flat_alias(self):
         payload = {
