@@ -285,6 +285,19 @@ Expected stable/beta artifacts:
 - Beta installer: `src-tauri\target\release\bundle\nsis\CodexHubBeta_0.1.1_x64-setup.exe`
 - Beta manifest: `src-tauri\target\release\bundle\nsis\latest-beta.json`
 
+Manual side-by-side smoke checklist:
+
+- Launch or install the release build and beta build at the same time.
+- Verify release window title is `CodexHub`.
+- Verify beta window title is `CodexHub Beta`.
+- Verify release bridge responds at `http://127.0.0.1:1421/api/invoke`.
+- Verify beta bridge responds at `http://127.0.0.1:1431/api/invoke`.
+- Verify release gateway responds at `http://127.0.0.1:9099/v1/models`.
+- Verify beta gateway responds at `http://127.0.0.1:9109/v1/models`.
+- Verify release uses `%USERPROFILE%\.codex` when `CODEX_HOME` is unset.
+- Verify beta uses `%USERPROFILE%\.codexhub-beta\codex-home` when `CODEX_HOME` is unset.
+- Open the Gateway page in both apps. Verify a third-party target can show `Release`, the beta app shows `Managed by Release`, and beta takeover requires explicit confirmation before writing.
+
 ## Rollout Plan
 
 1. Add flavor manifest and script support for generated Tauri config.
