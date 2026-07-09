@@ -389,7 +389,7 @@ Add `mod app_flavor;` to `src-tauri/src/main.rs` and run:
 
 ```powershell
 cd src-tauri
-cargo test app_flavor --lib
+cargo test app_flavor
 ```
 
 Expected: FAIL until the module is implemented.
@@ -597,7 +597,7 @@ Run:
 
 ```powershell
 cd src-tauri
-cargo test app_flavor runtime_paths::tests autostart::tests web_bridge::tests config::tests --lib
+cargo test app_flavor runtime_paths::tests autostart::tests web_bridge::tests config::tests
 ```
 
 Expected: PASS.
@@ -618,7 +618,7 @@ git commit -m "feat: add runtime flavor defaults"
 - Modify: `tests/test_config_overlay.py`
 - Modify: `src-tauri/src/config.rs`
 - Test: `pytest tests/test_config_overlay.py`
-- Test: `cargo test config::tests --lib`
+- Test: `cargo test config::tests`
 
 **Interfaces:**
 - Produces: Codex overlay marker lines containing `# owner = release|beta`.
@@ -755,7 +755,7 @@ Run:
 ```powershell
 pytest tests/test_config_overlay.py -q
 cd src-tauri
-cargo test config::tests --lib
+cargo test config::tests
 ```
 
 Expected: PASS.
@@ -829,7 +829,7 @@ Run:
 
 ```powershell
 cd src-tauri
-cargo test "routing_owner" --lib
+cargo test "routing_owner"
 ```
 
 Expected: FAIL because helpers do not exist.
@@ -995,7 +995,7 @@ Run:
 
 ```powershell
 cd src-tauri
-cargo test gateway::tests --lib
+cargo test gateway::tests
 ```
 
 Expected: PASS.
@@ -1439,7 +1439,7 @@ Run:
 ```powershell
 pytest -q
 cd src-tauri
-cargo test --lib
+cargo test
 cd ..\frontend
 npm run test:ui-contract
 npm run build
