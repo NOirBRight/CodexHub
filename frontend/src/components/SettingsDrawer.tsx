@@ -325,7 +325,7 @@ export function SettingsDrawer({
                   label={t("common.enabled")}
                   onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
                 />
-                <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
+                <div className="relative grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
                   <span className="min-w-0 truncate">{t("settings.visionModel")}</span>
                   <VisionModelSelect
                     models={visionModels}
@@ -756,7 +756,7 @@ function VisionModelSelect({
   }
 
   return (
-    <div ref={ref} className="relative min-w-0">
+    <div ref={ref} className="min-w-0">
       <button
         type="button"
         className="focus-ring flex h-7 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-control bg-transparent px-2 text-left text-sm font-medium text-ink transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:text-slate-400"
@@ -782,22 +782,18 @@ function VisionModelSelect({
 
       {open && (
         <div
-          className="absolute bottom-[calc(100%+6px)] left-0 right-0 z-[80] max-h-56 min-w-0 overflow-auto overscroll-contain rounded-overlay bg-surface p-1 shadow-overlay"
-          role="listbox"
+          className="absolute bottom-[calc(100%+6px)] left-1/2 z-[80] w-[min(340px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay"
         >
-          <VisionModelOption
-            label={t("common.selectModel")}
-            selected={!value}
-            onSelect={() => selectModel("")}
-          />
-          {models.map((model) => (
-            <VisionModelOption
-              key={model.id}
-              parts={visionModelParts(model, providerLabels)}
-              selected={model.id === value}
-              onSelect={() => selectModel(model.id)}
-            />
-          ))}
+          <div className="vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1" role="listbox">
+            {models.map((model) => (
+              <VisionModelOption
+                key={model.id}
+                parts={visionModelParts(model, providerLabels)}
+                selected={model.id === value}
+                onSelect={() => selectModel(model.id)}
+              />
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -807,27 +803,23 @@ function VisionModelSelect({
 function VisionModelValue({ parts }: { parts: VisionModelParts }) {
   return (
     <span className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-      <span className="min-w-0 truncate font-mono text-[12px] font-semibold leading-5 text-ink">
+      <span className="min-w-0 truncate font-mono text-sm font-semibold leading-5 text-ink">
         {parts.modelId}
       </span>
-      <span className="shrink-0 truncate text-[11px] font-medium leading-5 text-slate-500">{parts.provider}</span>
+      <span className="shrink-0 truncate text-sm font-medium leading-5 text-slate-500">{parts.provider}</span>
     </span>
   );
 }
 
 function VisionModelOption({
-  label,
   onSelect,
   parts,
   selected,
 }: {
-  label?: string;
   onSelect: () => void;
-  parts?: VisionModelParts;
+  parts: VisionModelParts;
   selected: boolean;
 }) {
-  const title = parts?.title ?? label ?? "";
-
   return (
     <button
       type="button"
@@ -837,14 +829,10 @@ function VisionModelOption({
       )}
       role="option"
       aria-selected={selected}
-      title={title}
+      title={parts.title}
       onClick={onSelect}
     >
-      {parts ? (
-        <VisionModelValue parts={parts} />
-      ) : (
-        <span className="min-w-0 flex-1 truncate text-slate-500">{label}</span>
-      )}
+      <VisionModelValue parts={parts} />
       {selected && <Check size={15} className="shrink-0 text-action" />}
     </button>
   );

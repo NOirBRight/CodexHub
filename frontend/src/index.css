@@ -116,6 +116,37 @@ html.sortable-list-dragging * {
   @apply focus-ring flex min-h-9 w-full items-center justify-between gap-2 rounded-control px-2.5 py-1.5 text-left text-sm text-ink transition-[background-color,color] duration-150 ease-out hover:bg-panel aria-selected:bg-action/10 aria-selected:text-action;
 }
 
+.vision-model-listbox {
+  scrollbar-color: #c7c2bb transparent;
+  scrollbar-width: thin;
+}
+
+.vision-model-listbox::-webkit-scrollbar {
+  width: 10px;
+}
+
+.vision-model-listbox::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 4px 0;
+}
+
+.vision-model-listbox::-webkit-scrollbar-thumb {
+  background-clip: padding-box;
+  background-color: #c7c2bb;
+  border: 3px solid #ffffff;
+  border-radius: 999px;
+}
+
+.vision-model-listbox::-webkit-scrollbar-thumb:hover {
+  background-color: #9ca3af;
+}
+
+.vision-model-listbox::-webkit-scrollbar-button {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
 .mini-button {
   @apply focus-ring h-8 rounded-control border border-line bg-surface px-2 text-xs font-medium text-slate-700 shadow-control transition-[box-shadow,border-color,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96];
 }
