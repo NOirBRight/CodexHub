@@ -13,6 +13,7 @@ This design defines a full beta channel, not only alternate ports. The goal is t
 - Give beta its own app identity, install directory, app data directory, updater endpoint, bridge port, gateway port, `CODEX_HOME`, telemetry store, autostart registration, and UI labeling.
 - Keep stable defaults unchanged for existing users.
 - Make beta routing explicit enough that test runs do not accidentally overwrite the user's stable Codex or third-party client routing.
+- Replace binary "connected/disconnected" routing controls with an owner-state model that distinguishes `Official`, `Release`, and `Beta`.
 - Keep release scripts deterministic and auditable.
 
 ## Non-Goals
@@ -107,7 +108,53 @@ For beta:
 - Any action that writes to real Codex/OpenCode/Pi/OMP/ZCode config must be explicit and visibly show the target path and gateway URL.
 - Backup names for beta-managed config rewrites should be distinct from stable where practical.
 
-Stable behavior can remain unchanged.
+Stable defaults can remain unchanged, but stable and beta must share the same routing owner rules before both channels can be installed side by side.
+
+## Routing State Model
+
+Routing state is per managed target, not per app instance. A target is a concrete config destination such as:
+
+- Codex App `%USERPROFILE%\.codex\config.toml`
+- Beta-isolated Codex `%USERPROFILE%\.codexhub-beta\codex-home\config.toml`
+- OpenCode config
+- Pi config
+- OMP config
+- ZCode config
+
+Each target should resolve to one visible owner state:
+
+| Owner state | Meaning | Expected endpoint |
+| --- | --- | --- |
+| `Official` | CodexHub is not managing this target; the client should use its official/default upstream configuration. | No CodexHub gateway URL |
+| `Release` | Stable CodexHub is managing this target. | Release gateway, default `http://127.0.0.1:9099` |
+| `Beta` | CodexHub Beta is managing this target. | Beta gateway, default `http://127.0.0.1:9109` |
+
+Implementation should also support an internal `UnknownExternal` classification for configs that are neither official nor recognized CodexHub-managed configs. The UI should present this as an unsafe external state and require explicit confirmation before overwrite. `UnknownExternal` is not one of the main user-facing connection choices.
+
+The stable build should use the user-facing routing label `Release`. The beta build should use `Beta`. "Stable" can remain an internal build flavor name, but routing UI should not call the stable owner `Stable` because the user-facing state set is `Official`, `Release`, and `Beta`.
+
+Owner detection should prefer explicit markers written by CodexHub-managed config blocks. When markers are unavailable, detection may fall back to gateway URL matching:
+
+- Release if the target points at the configured release gateway URL.
+- Beta if the target points at the configured beta gateway URL.
+- Official if the target has no CodexHub gateway URL and matches the known official/default shape.
+- Unknown external if the target has a custom endpoint or an unrecognized mutation.
+
+Disconnect behavior must be owner-safe:
+
+- In the release app, "Disconnect Release" may restore `Official` only when the current target owner is `Release`.
+- In the release app, a target owned by `Beta` must display `Managed by Beta` and must not be overwritten by a normal disconnect action.
+- In the beta app, "Disconnect Beta" may restore `Official` only when the current target owner is `Beta`.
+- In the beta app, a target owned by `Release` must display `Managed by Release` and must not be overwritten by a normal disconnect action.
+
+Takeover behavior must be explicit:
+
+- Switching `Release -> Beta` or `Beta -> Release` should be a separate "Take over" action.
+- The confirmation must show the target config path, current owner, new owner, old gateway URL, and new gateway URL.
+- The action should create a channel-specific backup before writing.
+- The result should update both the owner marker and gateway URL atomically where the file format allows it.
+
+This model also applies to third-party client settings. The release app and beta app must not each maintain independent binary flags such as "OpenCode connected". They must read the target config and render the resolved owner state.
 
 ## Updater Channels
 
@@ -138,6 +185,34 @@ The beta app should be visibly labeled:
 
 This reduces the chance that testing actions are performed in stable by mistake.
 
+## Routing UI
+
+Connection controls should use the same three owner states everywhere the app can rewrite a client target:
+
+- `Official`
+- `Release`
+- `Beta`
+
+Recommended color tokens:
+
+| State | Foreground | Background | Border | Use |
+| --- | --- | --- | --- | --- |
+| `Official` | `#4b5563` | `#f3f4f6` | `#d1d5db` | Neutral/default upstream |
+| `Release` | `#075985` | `#e0f2fe` | `#38bdf8` | Stable release gateway |
+| `Beta` | `#92400e` | `#fef3c7` | `#f59e0b` | Beta gateway |
+
+Routing chips and primary routing buttons should include both label and endpoint when connected:
+
+- `Official`
+- `Release 127.0.0.1:9099`
+- `Beta 127.0.0.1:9109`
+- `Managed by Release`
+- `Managed by Beta`
+
+Release and Beta connected states must use visibly different button and chip colors. Official should use the neutral style. A target managed by the other channel should use that channel's color and disable normal disconnect/connect actions until the user chooses explicit takeover.
+
+The routing UI should show target-level state, not only app-level state. For example, Codex may be `Release` while OpenCode remains `Official`, and the UI should make that mixed state scannable.
+
 ## Scripts
 
 Update scripts should support:
@@ -166,6 +241,11 @@ Minimum automated coverage:
 - Unit test beta `CODEX_HOME` default does not equal stable `CODEX_HOME`.
 - Unit test autostart names differ by flavor.
 - Unit test generated Tauri config contains beta identifier/product/updater endpoint.
+- Unit test routing owner detection for `Official`, `Release`, `Beta`, and `UnknownExternal`.
+- Unit test release disconnect restores only release-owned targets.
+- Unit test beta disconnect restores only beta-owned targets.
+- Unit test takeover requires explicit owner change data and writes a channel-specific backup.
+- UI test or component test that Release and Beta chips/buttons use different color tokens and labels.
 - E2E updater test for beta manifest detection and quiet install.
 
 Manual release validation:
@@ -183,10 +263,12 @@ Manual release validation:
 1. Add flavor manifest and script support for generated Tauri config.
 2. Add runtime flavor resolution and use it for bridge/gateway/autostart defaults.
 3. Isolate beta `CODEX_HOME` and runtime paths.
-4. Add beta UI labeling.
-5. Add beta release and updater manifest generation.
-6. Extend E2E update tests to cover beta.
-7. Produce one beta installer and manually verify stable/beta side-by-side operation.
+4. Add routing owner detection and owner-safe disconnect/takeover operations for Codex and third-party client targets.
+5. Replace binary routing controls with `Official` / `Release` / `Beta` UI states and color tokens.
+6. Add beta UI labeling.
+7. Add beta release and updater manifest generation.
+8. Extend E2E update tests to cover beta.
+9. Produce one beta installer and manually verify stable/beta side-by-side operation.
 
 ## Open Decisions
 
