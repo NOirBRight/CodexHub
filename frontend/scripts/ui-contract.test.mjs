@@ -563,8 +563,21 @@ test("gateway page is wired to real usage and client backend APIs", async () => 
 });
 
 test("web preview falls back to the bridge when host Tauri IPC is unavailable", async () => {
-  const tauriSource = await readFile(tauriSourcePath, "utf8");
+  const [tauriSource, typesSource] = await Promise.all([
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
 
+  assert.match(typesSource, /export interface CodexHubError/);
+  assert.match(typesSource, /code: string;/);
+  assert.match(typesSource, /message: string;/);
+  assert.match(typesSource, /source: string;/);
+  assert.match(typesSource, /retryable: boolean;/);
+  assert.match(typesSource, /details\?: Record<string, unknown> \| null;/);
+  assert.match(tauriSource, /codexhub_error\?: CodexHubError \| null;/);
+  assert.match(tauriSource, /class CodexHubBridgeError extends Error/);
+  assert.match(tauriSource, /this\.codexhubError = codexhubError/);
+  assert.match(tauriSource, /throw new CodexHubBridgeError\(/);
   assert.match(tauriSource, /function shouldFallbackToBridge\(error: unknown\)/);
   assert.match(tauriSource, /catch \(error\)/);
   assert.match(tauriSource, /if \(!shouldFallbackToBridge\(error\)\) \{\s*throw error;\s*\}/s);

@@ -349,6 +349,14 @@ export interface GatewayClientApplyResult {
   message: string;
 }
 
+export interface CodexHubError {
+  code: string;
+  message: string;
+  source: string;
+  retryable: boolean;
+  details?: Record<string, unknown> | null;
+}
+
 export interface GatewayEvent {
   ts?: string | null;
   event?: string | null;
