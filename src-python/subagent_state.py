@@ -1242,8 +1242,7 @@ def _active_request_text(value: Any) -> str:
 def _active_user_request_text(value: Any) -> str:
     if not isinstance(value, list):
         return _request_text(value)
-    messages: list[str] = []
-    for item in value:
+    for item in reversed(value):
         if not isinstance(item, Mapping) or item.get("type") != "message":
             continue
         if item.get("role") != "user":
@@ -1253,8 +1252,8 @@ def _active_user_request_text(value: Any) -> str:
         if first_line.startswith("Previous real Codex native ") or first_line.startswith("Codex native "):
             continue
         if text.strip():
-            messages.append(text)
-    return "\n".join(messages) if messages else _request_text(value)
+            return text
+    return _request_text(value)
 
 
 def _infer_role(text: str) -> str:

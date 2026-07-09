@@ -5216,17 +5216,34 @@ def _rewrite_structured_tool_input_items(
 
     changed = False
     rewritten_items: list[Any] = []
+    preserved_structured_call_ids: set[str] = set()
     for item in input_items:
         if not isinstance(item, dict):
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
-            rewritten = _structured_tool_function_call_item(item)
-            rewritten_items.append(rewritten if rewritten is not None else item)
-            changed = changed or rewritten != item
+            if _multi_agent_function_call_name(item) is not None or _node_repl_function_call_name(item) is not None:
+                call_id = item.get("call_id")
+                if isinstance(call_id, str):
+                    preserved_structured_call_ids.add(call_id)
+                rewritten = _structured_tool_function_call_item(item)
+                rewritten_items.append(rewritten if rewritten is not None else item)
+                changed = changed or rewritten != item
+            else:
+                replacement = _compatible_internal_message(item)
+                if replacement is not None:
+                    rewritten_items.append(replacement)
+                changed = True
             continue
         if item.get("type") == "function_call_output":
-            rewritten_items.append(dict(item))
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id in preserved_structured_call_ids:
+                rewritten_items.append(dict(item))
+            else:
+                replacement = _compatible_internal_message(item)
+                if replacement is not None:
+                    rewritten_items.append(replacement)
+                changed = True
             continue
         item_type = item.get("type")
         replacement = _compatible_internal_message(item)
@@ -5774,8 +5791,7 @@ def _joined_text(value: Any) -> str:
 def _active_user_request_text(value: Any) -> str:
     if not isinstance(value, list):
         return _joined_text(value)
-    messages: list[str] = []
-    for item in value:
+    for item in reversed(value):
         if not isinstance(item, Mapping) or item.get("type") != "message":
             continue
         if item.get("role") != "user":
@@ -5785,8 +5801,8 @@ def _active_user_request_text(value: Any) -> str:
         if first_line.startswith("Previous real Codex native ") or first_line.startswith("Codex native "):
             continue
         if text.strip():
-            messages.append(text)
-    return "\n".join(messages)
+            return text
+    return ""
 
 
 def _exact_child_prompts_from_request_text(text: str) -> list[str]:
@@ -8409,23 +8425,24 @@ def compatible_request_body(
                 )
                 changed = True
             required_tool_choice_name = None
-            if (
-                subagent_workflow_plan_read_required
-                and include_node_repl_for_subagent_workflow
-                and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
-            ):
-                required_tool_choice_name = "mcp__node_repl__js"
-            else:
-                required_tool_choice_name = _required_subagent_tool_choice(
-                    tool_protocol=tool_protocol,
-                    lifecycle_complete=lifecycle_complete,
-                    include_spawn_agent=include_spawn_agent,
-                    include_wait_agent=include_wait_agent,
-                    include_close_agent=include_close_agent,
-                    include_resume_agent=include_resume_agent,
-                    include_send_input=include_send_input,
-                    include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
-                )
+            if subagent_state_active:
+                if (
+                    subagent_workflow_plan_read_required
+                    and include_node_repl_for_subagent_workflow
+                    and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
+                ):
+                    required_tool_choice_name = "mcp__node_repl__js"
+                else:
+                    required_tool_choice_name = _required_subagent_tool_choice(
+                        tool_protocol=tool_protocol,
+                        lifecycle_complete=lifecycle_complete,
+                        include_spawn_agent=include_spawn_agent,
+                        include_wait_agent=include_wait_agent,
+                        include_close_agent=include_close_agent,
+                        include_resume_agent=include_resume_agent,
+                        include_send_input=include_send_input,
+                        include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
+                    )
             if semantic_repair_enabled and _restrict_tools_to_required_tool(payload, required_tool_choice_name):
                 _write_adapter_event(
                     event_context,

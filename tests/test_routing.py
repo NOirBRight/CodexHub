@@ -4508,6 +4508,57 @@ class RoutingTests(unittest.TestCase):
         for forbidden in ('"type":"compaction"', '"type":"compaction_trigger"', '"type":"reasoning"', "gAAAA"):
             self.assertNotIn(forbidden, raw)
 
+    def test_external_responses_structured_body_transcripts_ordinary_tool_history(self):
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Run echo first."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_shell",
+                        "name": "shell_command",
+                        "arguments": "{\"command\":\"echo hi\"}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_shell",
+                        "output": "Exit code: 0\nOutput:\nhi",
+                    },
+                    {"type": "message", "role": "user", "content": "Now answer normally."},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell_command",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                "stream": True,
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(body, upstream, model_id="glm-5.2")
+        payload = json.loads(transformed)
+        raw = transformed.decode("utf-8")
+
+        self.assertEqual(payload["model"], "glm-5.2")
+        self.assertEqual([item["type"] for item in payload["input"][:4]], ["message", "message", "message", "message"])
+        self.assertEqual(payload["input"][1]["role"], "developer")
+        self.assertIn("Read-only Codex function call transcript", payload["input"][1]["content"])
+        self.assertIn("shell_command", payload["input"][1]["content"])
+        self.assertEqual(payload["input"][2]["role"], "developer")
+        self.assertIn("Read-only Codex function result transcript", payload["input"][2]["content"])
+        self.assertIn("Output", payload["input"][2]["content"])
+        self.assertNotIn('"type":"function_call"', raw)
+        self.assertNotIn('"type":"function_call_output"', raw)
+
     def test_external_no_tool_protocol_body_sanitizes_internal_input_items(self):
         upstream = {
             "name": "no_tools",
@@ -7082,8 +7133,14 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["input"][1]["type"], "message")
         self.assertEqual(payload["input"][1]["role"], "user")
         self.assertEqual(payload["input"][1]["content"], [{"type": "input_text", "text": "test"}])
-        self.assertEqual(payload["input"][2]["type"], "function_call")
-        self.assertEqual(payload["input"][3]["type"], "function_call_output")
+        self.assertEqual(payload["input"][2]["type"], "message")
+        self.assertEqual(payload["input"][2]["role"], "developer")
+        self.assertIn("Read-only Codex function call transcript", payload["input"][2]["content"])
+        self.assertIn("known_tool", payload["input"][2]["content"])
+        self.assertEqual(payload["input"][3]["type"], "message")
+        self.assertEqual(payload["input"][3]["role"], "developer")
+        self.assertIn("Read-only Codex function result transcript", payload["input"][3]["content"])
+        self.assertIn("ok", payload["input"][3]["content"])
 
     def test_responses_structured_provider_preserves_multi_agent_tool_history(self):
         body = json.dumps(
@@ -8331,6 +8388,82 @@ Required sequence:
             payload["tool_choice"],
             {"type": "function", "name": "multi_agent_v1__spawn_agent"},
         )
+
+    def test_stale_subagent_request_does_not_force_spawn_tool_for_latest_plain_user_turn(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请 spawn 1 个 subagent 来检查代码",
+                    },
+                    {"type": "message", "role": "assistant", "content": "好的。"},
+                    {"type": "message", "role": "user", "content": "test\n"},
+                ],
+                "tools": [],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+
+        payload = json.loads(transformed)
+        tool_names = [tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)]
+        self.assertNotEqual(
+            payload.get("tool_choice"),
+            {"type": "function", "name": "multi_agent_v1__spawn_agent"},
+        )
+        self.assertIn("multi_agent_v1__spawn_agent", tool_names)
+        self.assertFalse(event_context["subagent_workflow_active"])
+
+    def test_latest_explicit_subagent_request_still_forces_spawn_tool(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "上一轮只是普通聊天。"},
+                    {"type": "message", "role": "assistant", "content": "好的。"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请 spawn 1 个 subagent 来检查代码",
+                    },
+                ],
+                "tools": [],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+
+        payload = json.loads(transformed)
+        tool_names = [tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)]
+        self.assertIn("multi_agent_v1__spawn_agent", tool_names)
+        self.assertEqual(
+            payload.get("tool_choice"),
+            {"type": "function", "name": "multi_agent_v1__spawn_agent"},
+        )
+        self.assertTrue(event_context["subagent_spawn_allowed"])
 
     def test_chat_tools_workflow_failed_node_repl_plan_read_still_blocks_spawn(self):
         workflow_prompt = """
