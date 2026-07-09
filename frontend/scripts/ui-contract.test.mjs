@@ -343,9 +343,15 @@ test("release build scripts support stable and beta flavor configuration", async
   assert.match(buildScript, /CODEXHUB_FRONTEND_PORT/);
   assert.match(buildScript, /cargo tauri build --config \$generatedTauriConfigPath --bundles nsis --ci/);
   assert.match(buildScript, /releaseAssetPrefix/);
-  assert.match(buildScript, /Get-ChildItem -LiteralPath \$bundleDir -Filter "\*_\$\{version\}_x64-setup\.exe" -File/);
-  assert.match(buildScript, /Move-Item -LiteralPath \$generatedInstallerPath -Destination \$installerPath -Force/);
-  assert.match(buildScript, /Move-Item -LiteralPath \$generatedSignaturePath -Destination \$signaturePath -Force/);
+  assert.match(buildScript, /\$installerNameCandidates = \[System\.Collections\.Generic\.List\[string\]\]::new\(\)/);
+  assert.match(buildScript, /foreach \(\$nameCandidate in @\(\s*\$assetPrefix,\s*\$productName,\s*\(\$productName -replace "\\s\+", ""\),\s*\(\$productName -replace "\\s\+", "_"\)\s*\)\)/s);
+  assert.match(buildScript, /\$installerName = "\{0\}_\{1\}_x64-setup\.exe" -f \$nameCandidate, \$version/);
+  assert.match(buildScript, /Remove-Item -LiteralPath \$artifactPath -Force -ErrorAction SilentlyContinue/);
+  assert.match(buildScript, /Remove-Item -LiteralPath "\$artifactPath\.sig" -Force -ErrorAction SilentlyContinue/);
+  assert.match(buildScript, /\$resolvedInstaller = foreach \(\$installerName in \$installerNameCandidates\)/);
+  assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.InstallerPath -Destination \$installerPath -Force/);
+  assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.SignaturePath -Destination \$signaturePath -Force/);
+  assert.doesNotMatch(buildScript, /if \(\(-not \(Test-Path -LiteralPath \$installerPath -PathType Leaf\)\) -or \(-not \(Test-Path -LiteralPath \$signaturePath -PathType Leaf\)\)\) \{/);
   assert.match(viteSource, /CODEXHUB_FRONTEND_PORT/);
   assert.doesNotMatch(packageJson.scripts.dev, /--port\s+1420/);
   assert.doesNotMatch(packageJson.scripts.preview, /--port\s+1420/);

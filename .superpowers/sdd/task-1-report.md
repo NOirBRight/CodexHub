@@ -125,3 +125,31 @@ npm run test:ui-contract -- --test-name-pattern "release build scripts support s
 - Canonical artifact naming is conservative: if the canonical files already exist they are left alone; fallback rename/move runs only when the expected canonical pair is missing.
 - Stable naming remains intact because the canonical asset name still derives from `releaseAssetPrefix`, which stays `CodexHub` for stable and `CodexHubBeta` for beta.
 - I did not run packaging; the new artifact canonicalization path is covered by script-level contract assertions and limited to the release script requested in this fix.
+
+## Fix After Re-Review
+
+### Changed Files
+
+- `scripts/build-windows-release.ps1`
+- `frontend/scripts/ui-contract.test.mjs`
+- `.superpowers/sdd/task-1-report.md`
+
+### Test Command
+
+```powershell
+cd frontend
+npm run test:ui-contract -- --test-name-pattern "release build scripts support stable and beta flavor configuration"
+```
+
+### Output Summary
+
+- PASS
+- `release build scripts support stable and beta flavor configuration`
+- Full run result: `103` passed, `0` failed
+
+### Self-Review
+
+- The release script now deletes only exact flavor/version NSIS installer and `.sig` candidates in `src-tauri\target\release\bundle\nsis` before the Tauri build, which prevents stale same-version canonical artifacts from surviving into the publish step.
+- Cleanup stays narrow by targeting only the canonical `releaseAssetPrefix` name plus likely product-name variants for the current flavor/version; it does not remove directories or unrelated release files.
+- Post-build resolution no longer depends on canonical files being absent. The script resolves the freshly generated installer/signature pair from the current flavor/version candidates, then canonicalizes to `releaseAssetPrefix` naming when needed.
+- The UI contract now asserts both pieces of the regression fix: pre-build invalidation of flavor/version-specific artifacts and the removal of the old missing-canonical-only gate.

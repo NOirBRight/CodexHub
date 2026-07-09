@@ -40,6 +40,24 @@ if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
 $tauriConfig = Get-Content -Raw -LiteralPath $tauriConfigPath | ConvertFrom-Json
 $productName = [string]$tauriConfig.productName
 $version = [string]$tauriConfig.version
+$bundleDir = Join-Path $tauriDir "target\release\bundle\nsis"
+$assetPrefix = [string]$flavorConfig.releaseAssetPrefix
+$canonicalInstallerName = "{0}_{1}_x64-setup.exe" -f $assetPrefix, $version
+
+$installerNameCandidates = [System.Collections.Generic.List[string]]::new()
+foreach ($nameCandidate in @(
+    $assetPrefix,
+    $productName,
+    ($productName -replace "\s+", ""),
+    ($productName -replace "\s+", "_")
+)) {
+    if (-not [string]::IsNullOrWhiteSpace($nameCandidate)) {
+        $installerName = "{0}_{1}_x64-setup.exe" -f $nameCandidate, $version
+        if (-not $installerNameCandidates.Contains($installerName)) {
+            $installerNameCandidates.Add($installerName)
+        }
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($productName)) {
     throw "tauri.conf.json is missing productName."
@@ -99,6 +117,14 @@ try {
     $env:CODEXHUB_BUILD_FLAVOR = $Flavor
     $env:TAURI_CONFIG = $generatedTauriConfigPath
 
+    if (Test-Path -LiteralPath $bundleDir -PathType Container) {
+        foreach ($installerName in $installerNameCandidates) {
+            $artifactPath = Join-Path $bundleDir $installerName
+            Remove-Item -LiteralPath $artifactPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "$artifactPath.sig" -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     Push-Location $tauriDir
     try {
         & cargo tauri build --config $generatedTauriConfigPath --bundles nsis --ci
@@ -140,16 +166,25 @@ finally {
     }
 }
 
-$bundleDir = Join-Path $tauriDir "target\release\bundle\nsis"
-$assetPrefix = [string]$flavorConfig.releaseAssetPrefix
-$installerName = "{0}_{1}_x64-setup.exe" -f $assetPrefix, $version
-$installerPath = Join-Path $bundleDir $installerName
+$installerPath = Join-Path $bundleDir $canonicalInstallerName
 $signaturePath = "$installerPath.sig"
 
-if ((-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf))) {
+$resolvedInstaller = foreach ($installerName in $installerNameCandidates) {
+    $candidateInstallerPath = Join-Path $bundleDir $installerName
+    $candidateSignaturePath = "$candidateInstallerPath.sig"
+    if ((Test-Path -LiteralPath $candidateInstallerPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $candidateSignaturePath -PathType Leaf)) {
+        [pscustomobject]@{
+            InstallerPath = $candidateInstallerPath
+            SignaturePath = $candidateSignaturePath
+            IsCanonical = ($installerName -eq $canonicalInstallerName)
+        }
+    }
+}
+
+if ($null -eq $resolvedInstaller) {
     $generatedInstaller = Get-ChildItem -LiteralPath $bundleDir -Filter "*_${version}_x64-setup.exe" -File |
         Where-Object {
-            $_.FullName -ne $installerPath -and
             (Test-Path -LiteralPath "$($_.FullName).sig" -PathType Leaf)
         } |
         Sort-Object LastWriteTimeUtc -Descending |
@@ -158,10 +193,21 @@ if ((-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) -or (-not (Tes
         throw "Expected NSIS installer was not generated: $installerPath"
     }
 
-    $generatedInstallerPath = $generatedInstaller.FullName
-    $generatedSignaturePath = "$generatedInstallerPath.sig"
-    Move-Item -LiteralPath $generatedInstallerPath -Destination $installerPath -Force
-    Move-Item -LiteralPath $generatedSignaturePath -Destination $signaturePath -Force
+    $resolvedInstaller = [pscustomobject]@{
+        InstallerPath = $generatedInstaller.FullName
+        SignaturePath = "$($generatedInstaller.FullName).sig"
+        IsCanonical = ($generatedInstaller.Name -eq $canonicalInstallerName)
+    }
+}
+else {
+    $resolvedInstaller = $resolvedInstaller |
+        Sort-Object @{ Expression = "IsCanonical"; Descending = $true } |
+        Select-Object -First 1
+}
+
+if (-not $resolvedInstaller.IsCanonical) {
+    Move-Item -LiteralPath $resolvedInstaller.InstallerPath -Destination $installerPath -Force
+    Move-Item -LiteralPath $resolvedInstaller.SignaturePath -Destination $signaturePath -Force
 }
 
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
@@ -189,7 +235,7 @@ $manifest = [ordered]@{
     platforms = [ordered]@{
         "windows-x86_64" = [ordered]@{
             signature = $signature
-            url = "$releaseBaseUrl/$([Uri]::EscapeDataString($installerName))"
+            url = "$releaseBaseUrl/$([Uri]::EscapeDataString($canonicalInstallerName))"
         }
     }
 }
