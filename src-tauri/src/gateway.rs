@@ -4067,12 +4067,11 @@ fn detect_pi_route_details(
     let managed = pi_route_mode(paths) == "hub";
     let route_endpoint = models_text
         .as_deref()
-        .map(|text| {
+        .and_then(|text| {
             managed_provider_base_url_from_json_object_text(text, "/providers").unwrap_or_else(
                 || first_provider_base_url_from_json_object_text(text, "/providers"),
             )
-        })
-        .flatten();
+        });
     let existing_config = settings_text.is_some() || models_text.is_some();
     (
         route_owner_from_endpoint(
@@ -4096,10 +4095,9 @@ fn detect_omp_route_details(
     let managed = omp_route_mode(paths) == "hub";
     let route_endpoint = models_text
         .as_deref()
-        .map(|text| {
+        .and_then(|text| {
             managed_omp_provider_base_url(text).unwrap_or_else(|| first_omp_provider_base_url(text))
-        })
-        .flatten();
+        });
     let existing_config = config_text.is_some() || models_text.is_some();
     (
         route_owner_from_endpoint(
