@@ -15,3 +15,7 @@ Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `
 ### CI and manual verification
 
 Use GitHub Actions PR checks for `dev` and `main`; when unavailable, run the documented fallback commands. See `docs/agents/ci.md`.
+
+### Report-only quality gates
+
+Use `python scripts/report_quality_gates.py` for non-blocking dead-code and duplicate-name reports. See `docs/agents/report-only-quality-gates.md`.

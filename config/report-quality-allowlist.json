@@ -1,0 +1,19 @@
+{
+  "python_unused_imports": [],
+  "python_dead_functions": [
+    {
+      "name": "main",
+      "reason": "CLI entrypoints are invoked by __main__ guards or external scripts."
+    }
+  ],
+  "duplicate_function_names": [
+    {
+      "name": "main",
+      "reason": "Conventional entrypoint name across Python and Rust modules."
+    },
+    {
+      "name": "run",
+      "reason": "Conventional command/worker entrypoint name across small modules."
+    }
+  ]
+}
