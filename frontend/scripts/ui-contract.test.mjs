@@ -2235,6 +2235,16 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(appUpdatesSource, /cfg\(debug_assertions\)/);
 });
 
+test("app update e2e script supports beta manifest and bridge ports", async () => {
+  const script = await readFile(appUpdateE2ePath, "utf8");
+
+  assert.match(script, /ValidateSet\("stable",\s*"beta"\)/);
+  assert.match(script, /latest-beta\.json/);
+  assert.match(script, /CodexHubBeta_/);
+  assert.match(script, /1421/);
+  assert.match(script, /1431/);
+});
+
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
   const [settingsDrawerSource, enSource, zhSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),

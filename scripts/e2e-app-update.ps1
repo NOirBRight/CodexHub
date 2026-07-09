@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("stable", "beta")]
+    [string]$Flavor = "stable",
     [int]$Port = 18765,
-    [string]$BridgeUrl = "http://127.0.0.1:1421/api/invoke",
+    [string]$BridgeUrl = "",
     [string]$AppExe = "",
     [string]$InstallerPath = "",
     [string]$SignaturePath = "",
@@ -19,6 +21,15 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$flavorManifest = Get-Content -Raw -LiteralPath (Join-Path $repoRoot "config\build-flavors.json") | ConvertFrom-Json
+$flavorConfig = $flavorManifest.$Flavor
+# Stable defaults remain latest.json / CodexHub_ / 1421; beta defaults remain latest-beta.json / CodexHubBeta_ / 1431.
+if ($null -eq $flavorConfig) {
+    throw "Unknown update E2E flavor: $Flavor"
+}
+if ([string]::IsNullOrWhiteSpace($BridgeUrl)) {
+    $BridgeUrl = "http://127.0.0.1:$($flavorConfig.bridgePort)/api/invoke"
+}
 $tauriConfigPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
 
 function Get-TauriVersion {
@@ -43,7 +54,8 @@ function Get-ReleaseAsset {
     }
 
     $bundleDir = Join-Path $repoRoot "src-tauri\target\release\bundle\nsis"
-    $candidate = Get-ChildItem -LiteralPath $bundleDir -Filter "CodexHub_*_x64-setup.exe" -ErrorAction SilentlyContinue |
+    $assetPrefix = [string]$flavorConfig.releaseAssetPrefix
+    $candidate = Get-ChildItem -LiteralPath $bundleDir -Filter "${assetPrefix}_*_x64-setup.exe" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime |
         Select-Object -Last 1
 
@@ -52,7 +64,7 @@ function Get-ReleaseAsset {
     }
 
     if ($AllowDummy) {
-        $dummy = Join-Path $ReleaseRoot "CodexHub_${NextVersion}_x64-setup.exe"
+        $dummy = Join-Path $ReleaseRoot "${assetPrefix}_${NextVersion}_x64-setup.exe"
         [System.IO.File]::WriteAllText($dummy, "virtual CodexHub update asset")
         return $dummy
     }
@@ -101,7 +113,8 @@ function Write-VirtualRelease {
         }
     }
 
-    $manifestPath = Join-Path $ReleaseRoot "latest.json"
+    $manifestName = [string]$flavorConfig.updaterManifestName
+    $manifestPath = Join-Path $ReleaseRoot $manifestName
     $json = $manifest | ConvertTo-Json -Depth 8
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($manifestPath, $json + [Environment]::NewLine, $utf8NoBom)
@@ -235,14 +248,15 @@ if ([string]::IsNullOrWhiteSpace($NextVersion)) {
 }
 
 $manifestPath = Write-VirtualRelease
-$manifestUrl = "http://127.0.0.1:$Port/latest.json"
+$manifestName = [string]$flavorConfig.updaterManifestName
+$manifestUrl = "http://127.0.0.1:$Port/$manifestName"
 Write-Host "Virtual release manifest: $manifestPath"
 Write-Host "Virtual release endpoint: $manifestUrl"
 
 if ($ValidateOnly) {
     $roundTrip = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
     if ($roundTrip.version -ne $NextVersion -or -not $roundTrip.platforms."windows-x86_64") {
-        throw "Generated latest.json failed validation."
+        throw "Generated $manifestName failed validation."
     }
     Write-Host "Virtual release manifest validated."
     exit 0
