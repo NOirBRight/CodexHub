@@ -8332,6 +8332,44 @@ Required sequence:
             {"type": "function", "name": "multi_agent_v1__spawn_agent"},
         )
 
+    def test_stale_subagent_request_does_not_force_spawn_tool_for_latest_plain_user_turn(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "请 spawn 1 个 subagent 来检查代码",
+                    },
+                    {"type": "message", "role": "assistant", "content": "好的。"},
+                    {"type": "message", "role": "user", "content": "test\n"},
+                ],
+                "tools": [],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        event_context = {"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+
+        payload = json.loads(transformed)
+        tool_names = [tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)]
+        self.assertNotEqual(
+            payload.get("tool_choice"),
+            {"type": "function", "name": "multi_agent_v1__spawn_agent"},
+        )
+        self.assertIn("multi_agent_v1__spawn_agent", tool_names)
+        self.assertFalse(event_context["subagent_workflow_active"])
+
     def test_chat_tools_workflow_failed_node_repl_plan_read_still_blocks_spawn(self):
         workflow_prompt = """
 Use the real subagent-driven-development skill.
