@@ -1062,6 +1062,19 @@ fn default_gateway_client_sync_model(
     if models.iter().any(|model| model.id == DEFAULT_MODEL) {
         return Ok(DEFAULT_MODEL.to_string());
     }
+    for (id, _, _) in OFFICIAL_MODELS {
+        if *id == DEFAULT_MODEL {
+            continue;
+        }
+        if models.iter().any(|model| model.id == *id) {
+            return Ok((*id).to_string());
+        }
+    }
+    for (_, id, _, _) in OFFICIAL_FAST_VARIANTS {
+        if models.iter().any(|model| model.id == *id) {
+            return Ok((*id).to_string());
+        }
+    }
     models
         .into_iter()
         .map(|model| model.id)
