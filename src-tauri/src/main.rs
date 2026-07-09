@@ -466,8 +466,9 @@ fn switch_gateway_client_route(
     client_id: String,
     mode: String,
     model: Option<String>,
+    force_takeover: Option<bool>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
-    gateway::switch_gateway_client_route(client_id, mode, model)
+    gateway::switch_gateway_client_route(client_id, mode, model, force_takeover)
 }
 
 #[tauri::command]

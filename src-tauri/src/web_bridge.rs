@@ -445,7 +445,14 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            to_value(gateway::switch_gateway_client_route(client_id, mode, model))
+            let force_takeover =
+                optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"]);
+            to_value(gateway::switch_gateway_client_route(
+                client_id,
+                mode,
+                model,
+                force_takeover,
+            ))
         }
         "sync_gateway_clients" => {
             let model = request
