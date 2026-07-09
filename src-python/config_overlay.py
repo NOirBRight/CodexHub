@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
+from atomic_io import atomic_write_text
 import re
 import sys
 
@@ -255,7 +257,7 @@ def insert_provider_section(text: str, provider_section: str) -> str:
 def apply_overlay(config_path: Path, backup_path: Path, catalog_path: Path, base_url: str) -> None:
     original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     cleaned = strip_marked_overlay(original)
-    backup_path.write_text(cleaned if cleaned != original else original, encoding="utf-8")
+    atomic_write_text(backup_path, cleaned if cleaned != original else original, encoding="utf-8")
 
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
@@ -263,17 +265,19 @@ def apply_overlay(config_path: Path, backup_path: Path, catalog_path: Path, base
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
     updated = build_overlay(catalog_config_value(config_path, catalog_path)) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url))
-    config_path.write_text(updated, encoding="utf-8")
+    atomic_write_text(config_path, updated, encoding="utf-8")
 
 
 def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
     if backup_path.exists():
         restored = backup_path.read_text(encoding="utf-8")
-        backup_path.unlink()
+        restore_from_backup = True
     elif config_path.exists():
         restored = config_path.read_text(encoding="utf-8")
+        restore_from_backup = False
     else:
         restored = ""
+        restore_from_backup = False
 
     if unified_history:
         restored, status = inject_unified_history_config(restored)
@@ -282,7 +286,9 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
         status = "disabled"
 
     if restored or config_path.exists() or unified_history:
-        config_path.write_text(restored, encoding="utf-8")
+        atomic_write_text(config_path, restored, encoding="utf-8")
+    if restore_from_backup:
+        backup_path.unlink()
     return status
 
 

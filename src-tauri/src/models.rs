@@ -1,4 +1,4 @@
-use crate::{runtime_paths, MetadataProvenance, Model, ModelPricing, UpstreamFormat};
+use crate::{runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, UpstreamFormat};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
@@ -708,7 +708,7 @@ fn write_official_subscription_seed(
     });
     let text = serde_json::to_string_pretty(&payload)
         .map_err(|error| format!("failed to serialize official model cache: {error}"))?;
-    fs::write(path, format!("{text}\n")).map_err(|error| {
+    safe_file::write_text_atomic(path, &format!("{text}\n")).map_err(|error| {
         format!(
             "failed to write official model cache {}: {error}",
             path.display()
@@ -1522,7 +1522,7 @@ fn write_models_json(path: &Path, models: &[Model]) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(models)
         .map_err(|error| format!("failed to serialize model metadata: {error}"))?;
-    fs::write(path, format!("{text}\n"))
+    safe_file::write_text_atomic(path, &format!("{text}\n"))
         .map_err(|error| format!("failed to write model metadata {}: {error}", path.display()))
 }
 

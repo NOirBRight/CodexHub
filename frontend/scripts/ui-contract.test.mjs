@@ -18,7 +18,6 @@ const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.
 const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
 const settingsLibPath = new URL("../src/lib/settings.ts", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
-const settingsPagePath = new URL("../src/pages/SettingsPage.tsx", import.meta.url);
 const sortableListPath = new URL("../src/components/SortableList.tsx", import.meta.url);
 const stackedUsagePath = new URL("../src/components/StackedUsageChartShell.tsx", import.meta.url);
 const tauriSourcePath = new URL("../src/lib/tauri.ts", import.meta.url);
@@ -405,6 +404,7 @@ test("global controls use polished radius, shadow, and exact transitions", async
   assert.match(css, /\.select-trigger\s*\{[\s\S]*rounded-control[\s\S]*shadow-field[\s\S]*transition-\[box-shadow,border-color,background-color\]/);
   assert.match(css, /\.select-popover\s*\{[\s\S]*rounded-inner[\s\S]*shadow-floating/);
   assert.match(css, /\.select-option\s*\{[\s\S]*rounded-control[\s\S]*aria-selected:bg-action\/10/);
+  assert.match(css, /\.vision-model-listbox::-webkit-scrollbar-button\s*\{[\s\S]*display:\s*none;[\s\S]*height:\s*0;[\s\S]*width:\s*0;/);
   assert.match(css, /\.mini-button\s*\{[\s\S]*rounded-control[\s\S]*shadow-control[\s\S]*active:scale-\[0\.96\]/);
   assert.doesNotMatch(css, /\.field\s*\{[\s\S]*rounded-md[\s\S]*shadow-subtle/);
 });
@@ -1118,15 +1118,11 @@ test("settings drawer hides non-functional route and endpoint toggles", async ()
 });
 
 test("settings exposes bound client auto-sync instead of catalog auto-sync", async () => {
-  const [drawerSource, settingsSource] = await Promise.all([
-    readFile(settingsDrawerPath, "utf8"),
-    readFile(new URL("../src/pages/SettingsPage.tsx", import.meta.url), "utf8"),
-  ]);
+  const drawerSource = await readFile(settingsDrawerPath, "utf8");
 
   assert.match(drawerSource, /t\("settings\.autoSyncBoundClients"\)/);
   assert.match(drawerSource, /auto_sync_clients/);
   assert.doesNotMatch(drawerSource, /Auto-sync catalog/);
-  assert.match(settingsSource, /t\("settings\.autoSyncBoundClients"\)/);
 });
 
 test("settings normalization restores default-on fields when persisted settings omit them", async () => {
@@ -1263,20 +1259,32 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(drawerSource, /<h3 className="text-sm font-semibold text-ink">\{t\("settings\.imageProxy"\)\}<\/h3>/);
   assert.match(drawerSource, /t\("settings\.visionModel"\)/);
   assert.match(drawerSource, /function VisionModelSelect/);
-  assert.match(drawerSource, /grid min-h-9 min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(0,190px\)\] items-center gap-3 rounded-inner bg-surface/);
+  assert.match(drawerSource, /relative grid min-h-9 min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(0,190px\)\] items-center gap-3 rounded-inner bg-surface/);
   assert.match(drawerSource, /function visionModelParts\(model: Model, providerLabels: Map<string, string>\): VisionModelParts/);
   assert.match(drawerSource, /const modelId = slashIndex > 0 \? rawId\.slice\(slashIndex \+ 1\) : rawId/);
   assert.match(drawerSource, /providerLabel\(providerFromDisplayName\(model\.display_name, modelId\), providerLabels\)/);
   assert.match(drawerSource, /provider\.display_prefix\?\.trim\(\)/);
   assert.match(drawerSource, /labels\.set\(displayPrefix\.toLowerCase\(\), name\)/);
   assert.match(drawerSource, /function VisionModelValue/);
-  assert.match(drawerSource, /rounded-overlay bg-surface p-1 shadow-overlay/);
+  assert.match(drawerSource, /w-\[min\(340px,calc\(100vw-2rem\)\)\] -translate-x-1\/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay/);
+  assert.match(drawerSource, /vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1/);
   assert.match(drawerSource, /role="listbox"/);
-  assert.match(drawerSource, /absolute bottom-\[calc\(100%\+6px\)\] left-0 right-0/);
+  assert.doesNotMatch(drawerSource, /label=\{t\("common\.selectModel"\)\}/);
+  assert.doesNotMatch(drawerSource, /selected=\{!value\}/);
+  assert.doesNotMatch(drawerSource, /onSelect=\{\(\) => selectModel\(""\)\}/);
+  assert.match(drawerSource, /absolute bottom-\[calc\(100%\+6px\)\] left-1\/2/);
+  assert.match(drawerSource, /-translate-x-1\/2 overflow-hidden rounded-overlay/);
+  assert.doesNotMatch(drawerSource, /absolute bottom-\[calc\(100%\+6px\)\] right-0/);
+  assert.doesNotMatch(drawerSource, /absolute bottom-\[calc\(100%\+6px\)\] left-0 right-0/);
   assert.doesNotMatch(drawerSource, /top-\[calc\(100%\+6px\)\]/);
-  assert.match(drawerSource, /relative min-w-0/);
+  assert.match(drawerSource, /<div ref=\{ref\} className="min-w-0">/);
+  assert.doesNotMatch(drawerSource, /<div ref=\{ref\} className="relative min-w-0">/);
   assert.match(drawerSource, /flex h-7 w-full min-w-0/);
   assert.match(drawerSource, /grid min-w-0 flex-1 grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-2/);
+  assert.match(drawerSource, /truncate font-mono text-sm font-semibold leading-5 text-ink/);
+  assert.match(drawerSource, /truncate text-sm font-medium leading-5 text-slate-500/);
+  assert.doesNotMatch(drawerSource, /font-mono text-\[12px\]/);
+  assert.doesNotMatch(drawerSource, /truncate text-\[11px\] font-medium leading-5 text-slate-500/);
   assert.doesNotMatch(drawerSource, /visionModelLabel/);
   assert.doesNotMatch(drawerSource, /\$\{name\} \(\$\{model\.id\}\)/);
   assert.doesNotMatch(drawerSource, /<select/);
@@ -2178,9 +2186,8 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
 });
 
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
-  const [settingsDrawerSource, settingsPageSource, enSource, zhSource] = await Promise.all([
+  const [settingsDrawerSource, enSource, zhSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
-    readFile(settingsPagePath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -2195,7 +2202,6 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.ok(updatesIndex > imageProxyIndex, "version updates should be below image proxy settings");
   assert.match(settingsDrawerSource, /backdrop-blur-\[1px\]/);
   assert.match(settingsDrawerSource, /function VersionUpdateBlock/);
-  assert.doesNotMatch(settingsPageSource, /settings\.updates/);
   assert.match(enSource, /updates: "Version & Updates"/);
   assert.match(zhSource, /updates: "版本与更新"/);
   assert.match(enSource, /installUpdate: "Install update"/);
@@ -2218,17 +2224,15 @@ test("startup update check is delayed and silent on failure", async () => {
 });
 
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {
-  const [typesSource, formatSource, appSource, providersSource, modelsSource] = await Promise.all([
+  const [typesSource, formatSource, appSource, providersSource] = await Promise.all([
     readFile(new URL("../src/lib/types.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/lib/format.ts", import.meta.url), "utf8"),
     readFile(appPath, "utf8"),
     readFile(providersPagePath, "utf8"),
-    readFile(new URL("../src/pages/ModelsPage.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.doesNotMatch(typesSource, /hidden\?: boolean/);
   assert.doesNotMatch(formatSource, /hidden:/);
   assert.doesNotMatch(appSource, /provider\.hidden/);
-  assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false/);
-  assert.doesNotMatch(modelsSource, /label="Hidden"|hidden: checked/);
+  assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false|label="Hidden"|hidden: checked/);
 });

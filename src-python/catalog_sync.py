@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from atomic_io import atomic_write_text
 from catalog import (
     CatalogPolicy,
     canonical_model_id,
@@ -828,7 +829,7 @@ def load_previous_visible_models(path: Path = GENERATED_STATE_PATH) -> set[str]:
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
 def load_cached_state(path: Path = GENERATED_STATE_PATH) -> dict[str, Any]:

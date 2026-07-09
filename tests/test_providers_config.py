@@ -318,6 +318,32 @@ enabled = true
         self.assertEqual(index["case-provider/alias-model"]["default_reasoning_level"], "high")
         self.assertEqual(index["case-provider/Fallback-Model"]["upstream_model"], "Fallback-Model")
 
+    def test_save_providers_uses_atomic_writer(self):
+        providers = [
+            ProviderConfig(
+                id="atomic-provider",
+                name="Atomic Provider",
+                base_url="https://atomic.example/v1",
+                api_key="secret",
+                models=[ModelConfig(id="atomic-model")],
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            calls: list[tuple[Path, str, str]] = []
+
+            def capture_atomic_write(target: Path, text: str, *, encoding: str = "utf-8") -> None:
+                calls.append((target, text, encoding))
+
+            with patch("providers_config.atomic_write_text", capture_atomic_write, create=True):
+                save_providers(providers, path)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], path)
+        self.assertEqual(calls[0][2], "utf-8")
+        self.assertIn("[[providers]]", calls[0][1])
+        self.assertIn('id = "atomic-provider"', calls[0][1])
+
     def test_anthropic_endpoint_selection_load_save_and_index(self):
         providers = [
             ProviderConfig(

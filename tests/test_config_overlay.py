@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from config_overlay import (
     MARKER_BEGIN,
@@ -182,6 +183,26 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn('wire_api = "responses"', updated)
             self.assertIn('model_reasoning_effort = "high"', updated)
             self.assertIn("[features]", updated)
+
+    def test_restore_overlay_keeps_backup_when_config_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text("overlay", encoding="utf-8")
+            backup_path.write_text("original", encoding="utf-8")
+
+            def fail_atomic_write(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+                if path == config_path:
+                    raise OSError("simulated config write failure")
+                path.write_text(text, encoding=encoding)
+
+            with patch("config_overlay.atomic_write_text", fail_atomic_write, create=True):
+                with self.assertRaisesRegex(OSError, "simulated config write failure"):
+                    restore_overlay(config_path, backup_path)
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), "overlay")
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), "original")
 
     def test_unified_history_injection_replaces_explicit_openai_provider(self):
         original = "\n".join(

@@ -1,6 +1,7 @@
 use crate::config;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
+use std::cmp::Reverse;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ const DAY_SECONDS: u64 = 86_400;
 const DEFAULT_WINDOW_DAYS: u64 = 365;
 const RATE_LIMIT_LOG_FILE_LIMIT: usize = 64;
 const RATE_LIMIT_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const CODEX_RATE_LIMITS_METHOD: &str = "account/rateLimits/read";
 const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;
 const CODEX_APP_SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -327,10 +329,10 @@ fn latest_local_rate_limit_usage_limits(codex_dir: &Path) -> Option<Vec<CodexAcc
     let mut files = Vec::new();
     collect_rate_limit_log_files(&codex_dir.join("sessions"), &mut files);
     collect_rate_limit_log_files(&codex_dir.join("archived_sessions"), &mut files);
-    files.sort_by(|left, right| right.modified.cmp(&left.modified));
+    files.sort_by_key(|file| Reverse(file.modified));
     files.truncate(RATE_LIMIT_LOG_FILE_LIMIT);
 
-    let mut latest: Option<(String, Vec<CodexAccountUsageLimit>)> = None;
+    let mut latest: Option<(u8, String, Vec<CodexAccountUsageLimit>)> = None;
     for file in files {
         if file.len > RATE_LIMIT_LOG_MAX_BYTES {
             continue;
@@ -360,16 +362,50 @@ fn latest_local_rate_limit_usage_limits(codex_dir: &Path) -> Option<Vec<CodexAcc
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let priority = local_rate_limit_priority(rate_limits);
             if latest
                 .as_ref()
-                .map(|(seen_timestamp, _)| timestamp > *seen_timestamp)
+                .map(|(seen_priority, seen_timestamp, _)| {
+                    priority > *seen_priority
+                        || (priority == *seen_priority && timestamp > *seen_timestamp)
+                })
                 .unwrap_or(true)
             {
-                latest = Some((timestamp, limits));
+                latest = Some((priority, timestamp, limits));
             }
         }
     }
-    latest.map(|(_, limits)| limits)
+    latest.map(|(_, _, limits)| limits)
+}
+
+fn local_rate_limit_priority(rate_limits: &Value) -> u8 {
+    let Some(map) = rate_limits.as_object() else {
+        return 0;
+    };
+    let limit_id = map
+        .get("limit_id")
+        .or_else(|| map.get("limitId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let has_limit_name = map
+        .get("limit_name")
+        .or_else(|| map.get("limitName"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_plan_type = map
+        .get("plan_type")
+        .or_else(|| map.get("planType"))
+        .is_some_and(|value| !value.is_null());
+
+    if limit_id == "codex" || (has_plan_type && !has_limit_name) {
+        2
+    } else if has_limit_name || limit_id.starts_with("codex_") {
+        0
+    } else {
+        1
+    }
 }
 
 fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) {
@@ -450,6 +486,10 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
         }),
     )?;
     write_json_line(&mut stdin, &json!({ "method": "initialized" }))?;
+    // Send both token-usage and rate-limits requests in a single app-server
+    // session.  The rate-limits response carries real-time usedPercent values
+    // that match the Codex desktop app; account/usage/read alone returns only
+    // token-activity summary and daily buckets — no rate limits.
     write_json_line(
         &mut stdin,
         &json!({
@@ -457,33 +497,129 @@ fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
             "method": CODEX_ACCOUNT_USAGE_METHOD
         }),
     )?;
+    write_json_line(
+        &mut stdin,
+        &json!({
+            "id": 3,
+            "method": CODEX_RATE_LIMITS_METHOD
+        }),
+    )?;
     stdin
         .flush()
-        .map_err(|error| format!("Failed to flush codex app-server usage request: {error}"))?;
+        .map_err(|error| format!("Failed to flush codex app-server requests: {error}"))?;
 
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "Failed to open codex app-server stdout.".to_string())?;
-    let message = read_codex_app_server_response(
-        &mut child,
-        stdout,
-        json!(2),
-        CODEX_APP_SERVER_RESPONSE_TIMEOUT,
-    )?;
+    let receiver = spawn_app_server_line_reader(stdout);
+    let collected =
+        collect_codex_usage_and_rate_limit_results(receiver, CODEX_APP_SERVER_RESPONSE_TIMEOUT);
     kill_child(&mut child);
-    if let Some(error) = message.error {
-        return Err(codex_app_server_error_message(
-            error.message.as_deref().unwrap_or("request failed"),
-        ));
+    let collected = collected?;
+
+    let mut usage: CodexAccountUsageResponse = collected
+        .usage_result
+        .ok_or_else(|| "Codex account usage response did not include a result.".to_string())
+        .and_then(|result| {
+            serde_json::from_value(result).map_err(|error| {
+                format!("Codex account usage response had unexpected JSON: {error}")
+            })
+        })?;
+
+    if let Some(result) = collected.rate_limits_result {
+        merge_rate_limits_into_usage(&mut usage, result);
     }
-    let result = message
-        .result
-        .ok_or_else(|| "Codex account usage response did not include a result.".to_string())?;
-    serde_json::from_value(result)
-        .map_err(|error| format!("Codex account usage response had unexpected JSON: {error}"))
+
+    Ok(usage)
 }
 
+struct CodexAccountAppServerResults {
+    usage_result: Option<Value>,
+    rate_limits_result: Option<Value>,
+}
+
+fn collect_codex_usage_and_rate_limit_results(
+    receiver: mpsc::Receiver<Result<Option<String>, String>>,
+    timeout: Duration,
+) -> Result<CodexAccountAppServerResults, String> {
+    let deadline = Instant::now() + timeout;
+    let mut usage_result: Option<Value> = None;
+    let mut rate_limits_result: Option<Value> = None;
+    let mut rate_limits_done = false;
+
+    loop {
+        if usage_result.is_some() && rate_limits_done {
+            break;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        match receiver.recv_timeout(remaining) {
+            Ok(Ok(Some(line))) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let message: CodexAppServerResponse = match serde_json::from_str(trimmed) {
+                    Ok(message) => message,
+                    Err(_) => continue,
+                };
+                match message.id.as_ref().and_then(|id| id.as_u64()) {
+                    Some(2) => {
+                        if let Some(error) = message.error {
+                            return Err(codex_app_server_error_message(
+                                error.message.as_deref().unwrap_or("request failed"),
+                            ));
+                        }
+                        usage_result = message.result;
+                    }
+                    Some(3) => {
+                        rate_limits_done = true;
+                        if message.error.is_none() {
+                            rate_limits_result = message.result;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => {
+                if usage_result.is_some() {
+                    break;
+                }
+                return Err(format!("Failed to read codex app-server response: {error}"));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    Ok(CodexAccountAppServerResults {
+        usage_result,
+        rate_limits_result,
+    })
+}
+
+fn merge_rate_limits_into_usage(usage: &mut CodexAccountUsageResponse, result: Value) {
+    let Some(rate_limits) = result
+        .get("rateLimits")
+        .or_else(|| result.get("rate_limits"))
+    else {
+        return;
+    };
+    if rate_limits.is_null() {
+        return;
+    }
+    let limits = json_value_as_usage_limits(rate_limits.clone());
+    if !limits.is_empty() {
+        usage.usage_limits = Some(limits);
+    }
+}
+
+#[cfg(test)]
 fn read_codex_app_server_response(
     child: &mut Child,
     stdout: ChildStdout,
@@ -1202,6 +1338,232 @@ mod tests {
         assert_eq!(snapshot.limits[0].used, Some(26.0));
         assert_eq!(snapshot.limits[1].period, "week");
         assert_eq!(snapshot.limits[1].remaining, Some(96.0));
+    }
+
+    #[test]
+    fn local_rate_limit_enrichment_prefers_subscription_limits_over_model_limits() {
+        let root = temp_root("openai-usage-prefers-subscription-limits");
+        let cache_path = root.join("proxy").join("usage-cache.json");
+        let sessions_dir = root.join("sessions").join("2026").join("07").join("09");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-09T01:21:59.538Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26,"window_minutes":300,"resets_at":1783577639},"secondary":{"used_percent":56,"window_minutes":10080,"resets_at":1783993293},"plan_type":"pro"}}}"#,
+                r#"{"timestamp":"2026-07-09T01:22:12.340Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":0,"window_minutes":300,"resets_at":1783577657},"secondary":{"used_percent":0,"window_minutes":10080,"resets_at":1783901315},"plan_type":null}}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        write_test_cache(
+            &cache_path,
+            10_000,
+            r#"{
+              "summary": { "lifetimeTokens": 41 },
+              "dailyUsageBuckets": [
+                {"startDate": "2026-07-08", "tokens": 41}
+              ]
+            }"#,
+        );
+
+        let snapshot = openai_usage_completions_with_cache_and_rate_limit_dir(
+            1_783_468_800,
+            1_783_555_200,
+            false,
+            &cache_path,
+            Some(&root),
+            10_000,
+            || panic!("fresh cache should not refresh"),
+        )
+        .expect("fresh cached usage with local rate limits");
+
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].used, Some(26.0));
+        assert_eq!(snapshot.limits[0].remaining, Some(74.0));
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(snapshot.limits[1].used, Some(56.0));
+        assert_eq!(snapshot.limits[1].remaining, Some(44.0));
+    }
+
+    #[test]
+    fn merge_rate_limits_into_usage_parses_account_rate_limits_response() {
+        let mut usage = CodexAccountUsageResponse {
+            daily_usage_buckets: None,
+            usage_limits: None,
+            summary: CodexAccountUsageSummary::default(),
+        };
+        let result = json!({
+            "rateLimits": {
+                "limit_id": "codex",
+                "primary": {
+                    "used_percent": 100,
+                    "window_minutes": 300,
+                    "resets_at": 1783577639
+                },
+                "secondary": {
+                    "used_percent": 72,
+                    "window_minutes": 10080,
+                    "resets_at": 1783993293
+                },
+                "plan_type": "pro"
+            }
+        });
+        merge_rate_limits_into_usage(&mut usage, result);
+        let limits = usage.usage_limits.expect("rate limits merged");
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits[0].period.as_deref(), Some("five_hours"));
+        assert_eq!(limits[0].used, Some(100.0));
+        assert_eq!(limits[0].remaining, Some(0.0));
+        assert_eq!(limits[1].period.as_deref(), Some("week"));
+        assert_eq!(limits[1].used, Some(72.0));
+        assert_eq!(limits[1].remaining, Some(28.0));
+    }
+
+    #[test]
+    fn merge_rate_limits_into_usage_skips_null_rate_limits() {
+        let mut usage = CodexAccountUsageResponse {
+            daily_usage_buckets: None,
+            usage_limits: None,
+            summary: CodexAccountUsageSummary::default(),
+        };
+        merge_rate_limits_into_usage(&mut usage, json!({ "rateLimits": null }));
+        assert!(usage.usage_limits.is_none());
+    }
+
+    #[test]
+    fn merge_rate_limits_into_usage_skips_missing_rate_limits() {
+        let mut usage = CodexAccountUsageResponse {
+            daily_usage_buckets: None,
+            usage_limits: None,
+            summary: CodexAccountUsageSummary::default(),
+        };
+        merge_rate_limits_into_usage(&mut usage, json!({ "rateLimitResetCredits": null }));
+        assert!(usage.usage_limits.is_none());
+    }
+
+    #[test]
+    fn account_usage_reader_finishes_when_rate_limits_request_errors() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(Some(
+                json!({
+                    "id": 2,
+                    "result": {
+                        "summary": { "lifetimeTokens": 41 },
+                        "dailyUsageBuckets": []
+                    }
+                })
+                .to_string(),
+            )))
+            .unwrap();
+        sender
+            .send(Ok(Some(
+                json!({
+                    "id": 3,
+                    "error": { "message": "method not found" }
+                })
+                .to_string(),
+            )))
+            .unwrap();
+        drop(sender);
+
+        let started = Instant::now();
+        let collected =
+            collect_codex_usage_and_rate_limit_results(receiver, Duration::from_secs(30))
+                .expect("usage result survives best-effort rate limit errors");
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(collected.rate_limits_result.is_none());
+        assert_eq!(
+            collected.usage_result.and_then(|result| {
+                result
+                    .get("summary")
+                    .and_then(|summary| summary.get("lifetimeTokens"))
+                    .and_then(Value::as_u64)
+            }),
+            Some(41),
+        );
+    }
+
+    #[test]
+    fn rate_limits_from_api_override_stale_local_jsonl() {
+        // When account/rateLimits/read returns real-time limits (used 100/72),
+        // those must appear in the snapshot even if local JSONL has an older
+        // subscription-level entry with low used_percent (3/1).
+        let root = temp_root("openai-usage-rate-limits-api");
+        let cache_path = root.join("proxy").join("usage-cache.json");
+        let sessions_dir = root.join("sessions").join("2026").join("07").join("09");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        // Local JSONL has a stale subscription-level entry.
+        fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            r#"{"timestamp":"2026-07-09T01:21:59.538Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":3,"window_minutes":300,"resets_at":1783577639},"secondary":{"used_percent":1,"window_minutes":10080,"resets_at":1783993293},"plan_type":"pro"}}}"#,
+        )
+        .unwrap();
+        write_test_cache(
+            &cache_path,
+            10_000,
+            r#"{
+              "summary": { "lifetimeTokens": 41 },
+              "dailyUsageBuckets": [
+                {"startDate": "2026-07-08", "tokens": 41}
+              ]
+            }"#,
+        );
+
+        let snapshot = openai_usage_completions_with_cache_and_rate_limit_dir(
+            1_783_468_800,
+            1_783_555_200,
+            true, // force_refresh — trigger fetch so API rate limits are returned
+            &cache_path,
+            Some(&root),
+            10_000,
+            || {
+                // Simulate read_codex_account_usage after merging
+                // account/rateLimits/read response.
+                let mut usage: CodexAccountUsageResponse = serde_json::from_str(
+                    r#"{
+                      "summary": { "lifetimeTokens": 41 },
+                      "dailyUsageBuckets": [
+                        {"startDate": "2026-07-08", "tokens": 41}
+                      ]
+                    }"#,
+                )
+                .unwrap();
+                merge_rate_limits_into_usage(
+                    &mut usage,
+                    json!({
+                        "rateLimits": {
+                            "limit_id": "codex",
+                            "primary": {
+                                "used_percent": 100,
+                                "window_minutes": 300,
+                                "resets_at": 1783577639
+                            },
+                            "secondary": {
+                                "used_percent": 72,
+                                "window_minutes": 10080,
+                                "resets_at": 1783993293
+                            },
+                            "plan_type": "pro"
+                        }
+                    }),
+                );
+                Ok(usage)
+            },
+        )
+        .expect("snapshot with API rate limits");
+
+        // API rate limits (used 100/72 → 0%/28% remaining) must override
+        // the stale local JSONL entry (used 3/1 → 97%/99% remaining).
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
+        assert_eq!(snapshot.limits[0].used, Some(100.0));
+        assert_eq!(snapshot.limits[0].remaining, Some(0.0));
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(snapshot.limits[1].used, Some(72.0));
+        assert_eq!(snapshot.limits[1].remaining, Some(28.0));
     }
 
     #[test]
