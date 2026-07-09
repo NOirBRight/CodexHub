@@ -60,6 +60,14 @@ The desktop app and Gateway have independent lifecycles. Closing the window hide
 
 Release installers include the runtime required for normal use. Normal users do not need to install Python, Node.js, or Rust separately. Source development still requires local Node.js, Rust/Tauri tooling, and Python.
 
+## Release And Beta Channels
+
+CodexHub release uses frontend port `1420`, bridge port `1421`, Gateway port `9099`, and `%USERPROFILE%\.codex` by default.
+
+CodexHub Beta uses frontend port `1430`, bridge port `1431`, Gateway port `9109`, and `%USERPROFILE%\.codexhub-beta\codex-home` by default. Beta does not take over the release Codex config on first launch.
+
+Client routing state is target-based: `Official`, `Release`, or `Beta`. If a target is managed by the other channel, the current app displays `Managed by Release` or `Managed by Beta` and requires explicit takeover confirmation before rewriting it.
+
 ## Usage
 
 ### Connecting Codex

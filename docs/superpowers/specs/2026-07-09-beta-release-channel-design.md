@@ -258,6 +258,33 @@ Manual release validation:
 - Confirm beta update check reads `latest-beta.json`, not stable `latest.json`.
 - Confirm stable update check still reads stable latest.
 
+### Task 7 Verification Commands
+
+Run:
+
+```powershell
+pytest -q
+cd src-tauri
+cargo test
+cd ..\frontend
+npm run test:ui-contract
+npm run build
+```
+
+Build release artifacts with:
+
+```powershell
+scripts\build-windows-release.ps1 -Flavor stable -SkipFrontendBuild
+scripts\build-windows-release.ps1 -Flavor beta -SkipFrontendBuild
+```
+
+Expected stable/beta artifacts:
+
+- Stable installer: `src-tauri\target\release\bundle\nsis\CodexHub_0.1.1_x64-setup.exe`
+- Stable manifest: `src-tauri\target\release\bundle\nsis\latest.json`
+- Beta installer: `src-tauri\target\release\bundle\nsis\CodexHubBeta_0.1.1_x64-setup.exe`
+- Beta manifest: `src-tauri\target\release\bundle\nsis\latest-beta.json`
+
 ## Rollout Plan
 
 1. Add flavor manifest and script support for generated Tauri config.
