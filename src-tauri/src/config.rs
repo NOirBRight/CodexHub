@@ -1,4 +1,4 @@
-use crate::{runtime_paths, AppStatus, Provider, Settings};
+use crate::{runtime_paths, safe_file, AppStatus, Provider, Settings};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
@@ -327,7 +327,7 @@ fn save_providers_with_paths(
     };
     let text = toml::to_string_pretty(&document)
         .map_err(|error| format!("failed to serialize providers TOML: {error}"))?;
-    fs::write(&path, text)
+    safe_file::write_text_atomic(&path, &text)
         .map_err(|error| format!("failed to write providers TOML {}: {error}", path.display()))?;
 
     Ok(providers)
@@ -361,7 +361,7 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
 
     let text = serde_json::to_string_pretty(&settings)
         .map_err(|error| format!("failed to serialize settings JSON: {error}"))?;
-    fs::write(&path, format!("{text}\n"))
+    safe_file::write_text_atomic(&path, &format!("{text}\n"))
         .map_err(|error| format!("failed to write settings JSON {}: {error}", path.display()))?;
 
     Ok(settings)

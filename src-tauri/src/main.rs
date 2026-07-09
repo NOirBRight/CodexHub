@@ -11,6 +11,7 @@ mod models;
 mod openai_usage;
 mod proxy;
 mod runtime_paths;
+mod safe_file;
 mod web_bridge;
 
 use serde::{Deserialize, Serialize};

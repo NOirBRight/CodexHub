@@ -1,4 +1,4 @@
-use crate::{config, models, Provider, Settings, UpstreamFormat};
+use crate::{config, models, safe_file, Provider, Settings, UpstreamFormat};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -5730,32 +5730,7 @@ fn is_any_top_level_yaml_key(line: &str) -> bool {
 }
 
 fn write_text_replace(path: &Path, text: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create config directory {}: {error}",
-                parent.display()
-            )
-        })?;
-    }
-    let temp_path = path.with_extension("tmp-codexhub");
-    fs::write(&temp_path, text).map_err(|error| {
-        format!(
-            "failed to write temp config {}: {error}",
-            temp_path.display()
-        )
-    })?;
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|error| format!("failed to replace config {}: {error}", path.display()))?;
-    }
-    fs::rename(&temp_path, path).map_err(|error| {
-        format!(
-            "failed to move temp config {} to {}: {error}",
-            temp_path.display(),
-            path.display()
-        )
-    })
+    safe_file::write_text_atomic(path, text)
 }
 
 fn timestamp_millis() -> u128 {
@@ -5789,6 +5764,20 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn write_text_replace_does_not_clobber_existing_stale_temp_file() {
+        let root = version_probe_test_root("write-text-replace-stale-temp");
+        let target = root.join("config.toml");
+        let stale_temp = target.with_extension("tmp-codexhub");
+        fs::write(&target, "old").unwrap();
+        fs::write(&stale_temp, "stale-temp").unwrap();
+
+        super::write_text_replace(&target, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&stale_temp).unwrap(), "stale-temp");
+    }
 
     fn client_export_test_providers() -> Vec<Provider> {
         vec![Provider {

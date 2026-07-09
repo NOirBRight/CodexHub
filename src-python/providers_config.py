@@ -9,6 +9,7 @@ import tomllib
 from typing import Any, Iterable
 from urllib.request import Request, urlopen
 
+from atomic_io import atomic_write_text
 from catalog import canonical_model_id
 
 
@@ -470,7 +471,7 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                 ]
             )
 
-    path.write_text("\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(chunks).rstrip() + "\n", encoding="utf-8")
 
 
 def _sort_by_order[T](indexed_items: Iterable[tuple[int, T]]) -> list[T]:

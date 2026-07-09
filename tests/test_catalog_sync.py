@@ -574,6 +574,22 @@ class CatalogSyncTests(unittest.TestCase):
 
             self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
 
+    def test_write_json_uses_atomic_writer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "generated" / "catalog.json"
+            calls: list[tuple[Path, str, str]] = []
+
+            def capture_atomic_write(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+                calls.append((path, text, encoding))
+
+            with patch.object(catalog_sync, "atomic_write_text", capture_atomic_write, create=True):
+                catalog_sync.write_json(target, {"ok": True})
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], target)
+            self.assertEqual(calls[0][2], "utf-8")
+            self.assertEqual(json.loads(calls[0][1]), {"ok": True})
+
     def test_extracts_context_and_capabilities_from_ollama_show_payload(self):
         payload = {
             "capabilities": ["completion", "tools"],
