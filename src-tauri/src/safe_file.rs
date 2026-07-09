@@ -8,6 +8,7 @@ use std::{
 
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(60);
 
 pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -87,10 +88,19 @@ impl FileLock {
         loop {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
-                    let _ = writeln!(file, "pid={}", std::process::id());
+                    let _ = writeln!(
+                        file,
+                        "pid={}\nacquired_at_millis={}",
+                        std::process::id(),
+                        timestamp_millis()
+                    );
                     return Ok(Self { path });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(&path) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
                     if started.elapsed() >= LOCK_WAIT_TIMEOUT {
                         return Err(format!(
                             "timed out waiting for config lock {}",
@@ -105,6 +115,27 @@ impl FileLock {
             }
         }
     }
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(acquired_at) = parse_lock_acquired_at_millis(&text) else {
+        return true;
+    };
+    let now = timestamp_millis();
+    now.saturating_sub(acquired_at) >= LOCK_STALE_AFTER.as_millis()
+}
+
+fn parse_lock_acquired_at_millis(text: &str) -> Option<u128> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        if key.trim() != "acquired_at_millis" {
+            return None;
+        }
+        value.trim().parse::<u128>().ok()
+    })
 }
 
 impl Drop for FileLock {
@@ -141,5 +172,20 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
         assert_eq!(fs::read_to_string(&stale_temp).unwrap(), "stale-temp");
+    }
+
+    #[test]
+    fn write_text_atomic_recovers_stale_lock_file() {
+        let root = test_root("stale-lock");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("providers.toml");
+        let lock = root.join("providers.toml.lock");
+        fs::write(&target, "old").unwrap();
+        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").unwrap();
+
+        write_text_atomic(&target, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert!(!lock.exists());
     }
 }
