@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -130,6 +129,12 @@ def _size_bucket(value: Any) -> str:
     return ">=1MB"
 
 
+def _provider_scope(provider_id: str, upstream: str | None = None) -> str:
+    if provider_id == "official" or upstream == "official":
+        return "official"
+    return "third_party"
+
+
 def _infer_failure_phase(event: Mapping[str, Any]) -> str:
     explicit = _string(event.get("failure_phase"))
     if explicit:
@@ -245,6 +250,7 @@ def analyze_events(
             continue
         event = _enrich(raw_event, start_by_request)
         provider_id = _string(event.get("provider_id")) or _string(event.get("upstream")) or "unknown"
+        provider_scope = _provider_scope(provider_id, _string(event.get("upstream")))
         model_canonical = _string(event.get("model_canonical")) or _string(event.get("model")) or "unknown"
         client_id = _string(event.get("client_id")) or "unknown"
         event_name = _string(event.get("event")) or "unknown"
@@ -257,6 +263,7 @@ def analyze_events(
         size_bucket = _size_bucket(size_value)
         window_id = _string(event.get("window_id")) or "unknown"
         key = (
+            provider_scope,
             provider_id,
             model_canonical,
             client_id,
@@ -270,6 +277,7 @@ def analyze_events(
         group = groups.get(key)
         if group is None:
             group = {
+                "provider_scope": provider_scope,
                 "provider_id": provider_id,
                 "model_canonical": model_canonical,
                 "client_id": client_id,
@@ -309,6 +317,7 @@ def analyze_events(
         groups.values(),
         key=lambda item: (
             -int(item["count"]),
+            item["provider_scope"],
             item["provider_id"],
             item["model_canonical"],
             item["client_id"],

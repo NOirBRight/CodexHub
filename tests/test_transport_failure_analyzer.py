@@ -47,6 +47,7 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
     assert report["failure_count"] == 1
     assert report["groups"] == [
         {
+            "provider_scope": "official",
             "provider_id": "official",
             "model_canonical": "openai/gpt-5.5",
             "client_id": "codex-app",
@@ -104,6 +105,7 @@ def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
 
     group = report["groups"][0]
     assert group["provider_id"] == "official"
+    assert group["provider_scope"] == "official"
     assert group["client_id"] == "codex-app"
     assert group["model_canonical"] == "openai/gpt-5.5"
     assert group["window_id"] == "019f4519-70f4-7d81-861b-530b3849aa01:0"
@@ -147,6 +149,64 @@ def test_analyzer_infers_ssl_eof_phase_for_older_retry_events():
     phases = {(group["event"], group["failure_phase"], group["error"], group["count"]) for group in report["groups"]}
     assert ("upstream_retry", "tls_handshake", "URLError", 1) in phases
     assert ("request_error", "tls_handshake", "URLError", 1) in phases
+
+
+def test_analyzer_separates_official_and_third_party_transport_failures():
+    events = [
+        {
+            "ts": "2026-07-09T00:50:00Z",
+            "event": "request_start",
+            "request_id": "third-party-eof",
+            "client_id": "opencode",
+            "provider_id": "ollama_cloud",
+            "upstream": "ollama_cloud",
+            "model_canonical": "ollama-cloud/glm-5.2",
+            "window_id": "opencode:turn",
+            "content_length": 2048,
+        },
+        {
+            "ts": "2026-07-09T00:50:01Z",
+            "event": "request_error",
+            "request_id": "third-party-eof",
+            "status": 502,
+            "error": "URLError",
+            "detail": "SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol",
+        },
+        {
+            "ts": "2026-07-09T02:23:00Z",
+            "event": "request_start",
+            "request_id": "official-stream",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "window_id": "codex-app:turn",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:00Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "official-stream",
+            "status": 502,
+            "error": "ConnectionResetError",
+            "detail": "ConnectionResetError: [WinError 10054] remote host closed the connection",
+        },
+    ]
+
+    report = analyze_events(events)
+
+    grouped = {
+        (
+            group["provider_scope"],
+            group["provider_id"],
+            group["model_canonical"],
+            group["client_id"],
+            group["failure_phase"],
+        )
+        for group in report["groups"]
+    }
+    assert ("official", "official", "openai/gpt-5.5", "codex-app", "stream_body") in grouped
+    assert ("third_party", "ollama_cloud", "ollama-cloud/glm-5.2", "opencode", "tls_handshake") in grouped
 
 
 def test_analyzer_excludes_provider_capacity_upstream_retry_without_transport_phase():

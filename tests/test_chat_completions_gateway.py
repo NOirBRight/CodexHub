@@ -295,6 +295,106 @@ class RequestKindDetectionTests(unittest.TestCase):
         self.assertEqual(request_kind, "compact")
 
 
+class CodexHubErrorPayloadTests(unittest.TestCase):
+    def test_typed_error_payload_maps_core_categories(self):
+        cases = [
+            (
+                "provider.request",
+                {
+                    "source": "external-provider",
+                    "message": "model is required",
+                    "status": 400,
+                    "error": "ValidationError",
+                    "error_type": "invalid_request_error",
+                },
+            ),
+            (
+                "provider.auth",
+                {
+                    "source": "external-provider",
+                    "message": "invalid provider key",
+                    "status": 401,
+                    "error": "HTTPError",
+                },
+            ),
+            (
+                "provider.rate_limit",
+                {
+                    "source": "external-provider",
+                    "message": "rate limited",
+                    "status": 429,
+                    "error": "HTTPError",
+                },
+            ),
+            (
+                "upstream.http",
+                {
+                    "source": "external-provider",
+                    "message": "bad gateway",
+                    "status": 502,
+                    "exc": HTTPError("https://example.test", 502, "Bad Gateway", {}, io.BytesIO(b"")),
+                },
+            ),
+            (
+                "upstream.transport",
+                {
+                    "source": "external-provider",
+                    "message": "connection reset",
+                    "status": 502,
+                    "exc": URLError(ConnectionResetError("connection reset")),
+                },
+            ),
+            (
+                "upstream.protocol",
+                {
+                    "source": "external-provider",
+                    "message": "stream incomplete",
+                    "status": 502,
+                    "error": "upstream_stream_incomplete",
+                    "error_type": "upstream_stream_error",
+                },
+            ),
+            (
+                "backend.command",
+                {
+                    "source": "web_bridge",
+                    "message": "unknown command",
+                    "status": 500,
+                    "error": "UnknownCommand",
+                    "error_type": "backend_error",
+                },
+            ),
+            (
+                "config.origin",
+                {
+                    "source": "web_bridge",
+                    "message": "origin is not allowed",
+                    "status": 403,
+                    "error": "OriginNotAllowed",
+                    "error_type": "config_error",
+                },
+            ),
+            (
+                "gateway.auth",
+                {
+                    "source": "gateway",
+                    "message": "missing or invalid local Gateway client key",
+                    "status": 401,
+                    "error": "UnauthorizedLocalClient",
+                    "error_type": "gateway_auth_error",
+                },
+            ),
+        ]
+
+        for expected_code, kwargs in cases:
+            with self.subTest(expected_code=expected_code):
+                payload = codex_proxy._codexhub_error_payload(**kwargs)
+                self.assertEqual(payload["code"], expected_code)
+                self.assertEqual(set(payload), {"code", "message", "source", "retryable", "details"})
+                self.assertIsInstance(payload["retryable"], bool)
+                self.assertEqual(payload["details"]["status"], kwargs["status"])
+
+
 class ChatToolChoiceTests(unittest.TestCase):
     def test_string_tool_choice(self):
         self.assertEqual(_chat_tool_choice_to_responses_tool_choice("auto"), "auto")
@@ -2451,6 +2551,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         result = json.loads(written)
         self.assertIn("model is required", result["error"]["message"])
         self.assertEqual(result["error"]["type"], "invalid_request_error")
+        self.assertEqual(result["codexhub_error"]["code"], "provider.request")
+        self.assertEqual(result["codexhub_error"]["message"], "model is required for provider path: volc")
+        self.assertEqual(result["codexhub_error"]["source"], "volc")
+        self.assertFalse(result["codexhub_error"]["retryable"])
         self.assertEqual(handler._fake.status, 400)
 
     def test_provider_scoped_chat_completions_routes_slash_model_as_provider_relative(self):
@@ -3336,6 +3440,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "upstream_error")
         self.assertEqual(result["error"]["code"], "URLError")
         self.assertEqual(result["error"]["status"], 502)
+        self.assertEqual(result["codexhub_error"]["code"], "upstream.transport")
+        self.assertEqual(result["codexhub_error"]["source"], "official")
+        self.assertTrue(result["codexhub_error"]["retryable"])
+        self.assertEqual(result["codexhub_error"]["details"]["error"], "URLError")
         self.assertEqual(handler._fake.status, 502)
 
     def test_post_responses_streaming_keeps_responses_sse_error_shape(self):
@@ -3360,6 +3468,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"event: error\n", written)
         self.assertIn(b'"type":"upstream_stream_error"', written)
         self.assertIn(b'"error":"OSError"', written)
+        self.assertIn(b'"codexhub_error"', written)
+        self.assertIn(b'"code":"upstream.transport"', written)
 
     def test_auto_upstream_format_uses_responses_when_responses_succeeds(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)

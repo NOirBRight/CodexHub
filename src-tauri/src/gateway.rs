@@ -10,12 +10,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, Read, Seek};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(900);
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const EVENT_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 const TELEMETRY_INGEST_BATCH_LINES: usize = 1000;
 const TELEMETRY_INGEST_BATCH_BYTES: u64 = 1024 * 1024;
@@ -4624,25 +4625,16 @@ fn command_version(commands: &[&str]) -> Option<String> {
 }
 
 fn version_output_for_path(path: &Path) -> Option<std::process::Output> {
+    if !is_supported_version_probe_path(path) {
+        return None;
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "ps1" => {
-            let mut command = Command::new("powershell");
-            command.args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                path.to_string_lossy().as_ref(),
-                "--version",
-            ]);
-            command_output_no_window(command)
-        }
-        "cmd" | "bat" => {
+        "cmd" => {
             let mut command = Command::new("cmd");
             command.args(["/C", path.to_string_lossy().as_ref(), "--version"]);
             command_output_no_window(command)
@@ -4655,9 +4647,39 @@ fn version_output_for_path(path: &Path) -> Option<std::process::Output> {
     }
 }
 
+fn is_supported_version_probe_path(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "" | "exe" => true,
+        #[cfg(target_os = "windows")]
+        "cmd" | "com" => true,
+        _ => false,
+    }
+}
+
 fn command_output_no_window(mut command: Command) -> Option<std::process::Output> {
     configure_no_window(&mut command);
-    command.output().ok()
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            return child.wait_with_output().ok();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn configure_no_window(command: &mut Command) {
@@ -6286,7 +6308,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -6608,6 +6630,68 @@ mod tests {
             .expect("enabled fallback model");
 
         assert_eq!(model, "openai/gpt-5.4");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn command_version_reads_supported_cmd_shim_from_path() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous_path = std::env::var_os("PATH");
+        let root = unique_temp_dir("codexhub-version-probe-cmd");
+        fs::create_dir_all(&root).unwrap();
+        let shim = root.join("opencode.cmd");
+        fs::write(&shim, "@echo off\r\necho opencode 1.2.3\r\n").unwrap();
+        let mut path_entries = vec![root.clone()];
+        if let Some(path) = previous_path.as_ref() {
+            path_entries.extend(std::env::split_paths(path));
+        }
+        std::env::set_var("PATH", std::env::join_paths(path_entries).unwrap());
+
+        let version = super::command_version(&["opencode"]);
+
+        restore_env("PATH", previous_path);
+        assert_eq!(version.as_deref(), Some("1.2.3"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn version_probe_returns_none_when_supported_shim_times_out() {
+        let root = unique_temp_dir("codexhub-version-probe-timeout");
+        fs::create_dir_all(&root).unwrap();
+        let shim = root.join("slow-client.cmd");
+        fs::write(
+            &shim,
+            "@echo off\r\nping -n 6 127.0.0.1 >NUL\r\necho slow-client 9.9.9\r\n",
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let output = super::version_output_for_path(&shim);
+
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn version_probe_does_not_execute_powershell_scripts() {
+        let root = unique_temp_dir("codexhub-version-probe-ps1");
+        fs::create_dir_all(&root).unwrap();
+        let sentinel = root.join("executed.txt");
+        let script = root.join("opencode.ps1");
+        let sentinel_literal = sentinel.to_string_lossy().replace('\'', "''");
+        fs::write(
+            &script,
+            format!(
+                "Set-Content -LiteralPath '{sentinel_literal}' -Value 'ran'\r\nWrite-Output 'opencode 1.2.3'\r\n"
+            ),
+        )
+        .unwrap();
+
+        let output = super::version_output_for_path(&script);
+
+        assert!(output.is_none());
+        assert!(!sentinel.exists());
     }
 
     #[test]

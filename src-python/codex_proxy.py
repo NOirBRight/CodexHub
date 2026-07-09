@@ -8882,9 +8882,7 @@ def _local_request_authorized(
     if expected_key is None:
         return True
     token = _bearer_token(headers)
-    if token and hmac.compare_digest(token, expected_key):
-        return True
-    return bool(token and _is_codex_app_context(request_context))
+    return bool(token and hmac.compare_digest(token, expected_key))
 
 
 def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]) -> bool:
@@ -10339,6 +10337,12 @@ def _typed_error_code(
     exc: BaseException | None,
     status: int | None,
 ) -> str:
+    if error_type == "gateway_auth_error":
+        return "gateway.auth"
+    if error_type == "backend_error":
+        return "backend.command"
+    if error_type == "config_error":
+        return "config.origin"
     if error_type in {"invalid_request_error", "validation_error"}:
         return "provider.request"
     if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
@@ -10398,6 +10402,21 @@ def _codexhub_error_payload(
         "source": source,
         "retryable": resolved_failure_class != RETRY_FAILURE_PERMANENT,
         "details": details,
+    }
+
+
+def _local_gateway_auth_error_payload() -> dict[str, Any]:
+    message = "missing or invalid local Gateway client key"
+    return {
+        "error": "unauthorized",
+        "codexhub_error": _codexhub_error_payload(
+            source="gateway",
+            message=message,
+            status=401,
+            error="UnauthorizedLocalClient",
+            error_type="gateway_auth_error",
+            failure_class=RETRY_FAILURE_PERMANENT,
+        ),
     }
 
 
@@ -10774,7 +10793,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if parsed.path == "/shutdown":
             request_context = request_context_from_headers(self.headers)
             if not _local_request_authorized(self.headers, request_context):
-                self._send_json(401, {"error": "unauthorized"})
+                self._send_json(401, _local_gateway_auth_error_payload())
                 self.close_connection = True
                 return
             self._send_json(200, {"ok": True, "message": "shutdown scheduled"})
@@ -10826,7 +10845,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
-            self._send_json(401, {"error": "unauthorized"})
+            self._send_json(401, _local_gateway_auth_error_payload())
             self.close_connection = True
             return
         request_kind = RETRY_REQUEST_MAIN_GENERATION
@@ -11652,7 +11671,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._safe_send_downstream_json_error(
                 400,
                 inbound_format=inbound_format,
-                upstream_name=upstream_name or "upstream_error",
+                upstream_name=upstream_name or provider_hint or "gateway",
                 request_id=request_id,
                 exc=exc,
                 error=type(exc).__name__,
