@@ -1723,7 +1723,7 @@ time.sleep(10)
 "#,
         );
 
-        let error = start_with_paths_and_timeout(&paths, Duration::from_millis(500))
+        let error = start_with_paths_and_timeout(&paths, Duration::from_secs(5))
             .expect_err("startup should time out");
 
         assert!(error.contains("did not become healthy"));
