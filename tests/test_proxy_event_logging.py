@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import queue
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -24,6 +25,7 @@ class ProxyEventLoggingTests(TestCase):
                         codex_home / "proxy" / "codex-proxy-events.jsonl",
                     )
                     codex_proxy.write_proxy_event("request_complete", request_id="req-test", status=200)
+                    codex_proxy.flush_proxy_event_writer()
 
                     payload = json.loads(codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip())
                     self.assertEqual(payload["event"], "request_complete")
@@ -71,6 +73,7 @@ class ProxyEventLoggingTests(TestCase):
                             upstream="official",
                             model="openai/gpt-5.5",
                         )
+                        codex_proxy.flush_proxy_event_writer()
 
                     jsonl = codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
                     self.assertNotIn("should-not-persist", jsonl)
@@ -237,6 +240,7 @@ class ProxyEventLoggingTests(TestCase):
                         upstream="external",
                         **context,
                     )
+                    codex_proxy.flush_proxy_event_writer()
             finally:
                 importlib.reload(codex_proxy)
 
@@ -413,6 +417,7 @@ class ProxyEventLoggingTests(TestCase):
                             request_id="req-jsonl-survives",
                             status=200,
                         )
+                        codex_proxy.flush_proxy_event_writer()
                     sqlite_write.assert_not_called()
 
                     payloads = [
@@ -426,3 +431,22 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertFalse(any(payload.get("event") == "telemetry_sqlite_write_failed" for payload in payloads))
             finally:
                 importlib.reload(codex_proxy)
+
+    def test_proxy_event_writer_queue_is_bounded_and_drops_without_blocking(self):
+        payloads = [
+            {"event": "request_start", "request_id": "req-one"},
+            {"event": "request_complete", "request_id": "req-two"},
+        ]
+        original_queue = codex_proxy.PROXY_EVENT_QUEUE
+        original_dropped = codex_proxy.PROXY_EVENT_DROPPED_COUNT
+        try:
+            codex_proxy.PROXY_EVENT_QUEUE = queue.Queue(maxsize=1)
+            codex_proxy.PROXY_EVENT_DROPPED_COUNT = 0
+            with patch("codex_proxy._ensure_proxy_event_writer_started"):
+                self.assertTrue(codex_proxy._enqueue_proxy_event_payload(payloads[0]))
+                self.assertFalse(codex_proxy._enqueue_proxy_event_payload(payloads[1]))
+            self.assertEqual(codex_proxy.PROXY_EVENT_QUEUE.qsize(), 1)
+            self.assertEqual(codex_proxy.PROXY_EVENT_DROPPED_COUNT, 1)
+        finally:
+            codex_proxy.PROXY_EVENT_QUEUE = original_queue
+            codex_proxy.PROXY_EVENT_DROPPED_COUNT = original_dropped

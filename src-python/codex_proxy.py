@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import hmac
 import html
+import http.client
 import io
 import json
 import logging
@@ -16,7 +17,9 @@ import math
 import os
 import queue
 import re
+import socket
 import sqlite3
+import ssl
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,7 +32,16 @@ import uuid
 import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPSHandler, Request, build_opener, install_opener, urlopen
+
+from codex_semantic_adapter import (
+    coerce_number as _semantic_coerce_number,
+    coerce_target as _semantic_coerce_target,
+    coerce_targets as _semantic_coerce_targets,
+    multi_agent_discovery_arguments as _semantic_multi_agent_discovery_arguments,
+    normalize_multi_agent_arguments as _semantic_normalize_multi_agent_arguments,
+    normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
+)
 
 from catalog import (
     canonical_model_id,
@@ -67,6 +79,57 @@ except ImportError:  # pragma: no cover - optional dependency on older Python in
     zstandard = None
 
 DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is not None else ())
+
+OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
+OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
+OFFICIAL_KEEPALIVE_OPENER_INSTALLED = False
+OFFICIAL_KEEPALIVE_OPENER_LOCK = threading.Lock()
+
+
+def _configure_tcp_keepalive(sock: socket.socket) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    if sys.platform.startswith("win") and hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        sock.ioctl(
+            socket.SIO_KEEPALIVE_VALS,
+            (
+                1,
+                OFFICIAL_TCP_KEEPALIVE_IDLE_MS,
+                OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS,
+            ),
+        )
+        return
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, max(1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS // 1000))
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, max(1, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS // 1000))
+    if hasattr(socket, "TCP_KEEPCNT"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+
+class _OfficialKeepaliveHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        if self.sock is not None:
+            _configure_tcp_keepalive(self.sock)
+        server_hostname = self._tunnel_host if self._tunnel_host else self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _OfficialKeepaliveHTTPSHandler(HTTPSHandler):
+    def https_open(self, req: Request) -> Any:
+        return self.do_open(_OfficialKeepaliveHTTPSConnection, req, context=self._context)
+
+
+def _ensure_official_keepalive_opener_installed() -> None:
+    global OFFICIAL_KEEPALIVE_OPENER_INSTALLED
+    if OFFICIAL_KEEPALIVE_OPENER_INSTALLED:
+        return
+    with OFFICIAL_KEEPALIVE_OPENER_LOCK:
+        if OFFICIAL_KEEPALIVE_OPENER_INSTALLED:
+            return
+        install_opener(build_opener(_OfficialKeepaliveHTTPSHandler()))
+        OFFICIAL_KEEPALIVE_OPENER_INSTALLED = True
+
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
@@ -114,6 +177,7 @@ PROXY_FEATURES = [
     "third-party-multi-agent-deterministic-repair",
     "third-party-required-subagent-action-repair",
     "third-party-chat-output-repair-parity",
+    "official-upstream-tcp-keepalive",
     "raw-provider-probe-opt-out",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
@@ -313,6 +377,13 @@ HOP_BY_HOP_RESPONSE_HEADERS = {
 }
 
 PROXY_DIR = Path(__file__).resolve().parent
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default)) or str(default)))
+    except ValueError:
+        return default
+
+
 def _runtime_codex_dir() -> Path:
     codex_home_env = os.environ.get("CODEX_HOME")
     if codex_home_env:
@@ -325,6 +396,12 @@ RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 PROXY_EVENT_LOG_LOCK = threading.Lock()
+PROXY_EVENT_QUEUE_MAXSIZE = _env_positive_int("CODEX_PROXY_EVENT_QUEUE_MAXSIZE", 4096)
+PROXY_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=PROXY_EVENT_QUEUE_MAXSIZE)
+PROXY_EVENT_WRITER_LOCK = threading.Lock()
+PROXY_EVENT_WRITER_THREAD: threading.Thread | None = None
+PROXY_EVENT_DROPPED_COUNT = 0
+PROXY_EVENT_DROPPED_LOCK = threading.Lock()
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
@@ -1013,6 +1090,44 @@ def gateway_transparent_vision_proxy_enabled() -> bool:
 
 def write_proxy_event(event: str, **fields: Any) -> None:
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
+    _enqueue_proxy_event_payload(payload)
+
+
+def _enqueue_proxy_event_payload(payload: dict[str, Any]) -> bool:
+    global PROXY_EVENT_DROPPED_COUNT
+    _ensure_proxy_event_writer_started()
+    try:
+        PROXY_EVENT_QUEUE.put_nowait(payload)
+        return True
+    except queue.Full:
+        with PROXY_EVENT_DROPPED_LOCK:
+            PROXY_EVENT_DROPPED_COUNT += 1
+        return False
+
+
+def _ensure_proxy_event_writer_started() -> None:
+    global PROXY_EVENT_WRITER_THREAD
+    with PROXY_EVENT_WRITER_LOCK:
+        if PROXY_EVENT_WRITER_THREAD is not None and PROXY_EVENT_WRITER_THREAD.is_alive():
+            return
+        PROXY_EVENT_WRITER_THREAD = threading.Thread(
+            target=_proxy_event_writer_loop,
+            name="codex-proxy-event-writer",
+            daemon=True,
+        )
+        PROXY_EVENT_WRITER_THREAD.start()
+
+
+def _proxy_event_writer_loop() -> None:
+    while True:
+        payload = PROXY_EVENT_QUEUE.get()
+        try:
+            _write_proxy_event_payload_to_log(payload)
+        finally:
+            PROXY_EVENT_QUEUE.task_done()
+
+
+def _write_proxy_event_payload_to_log(payload: Mapping[str, Any]) -> None:
     line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     try:
         with PROXY_EVENT_LOG_LOCK:
@@ -1022,6 +1137,15 @@ def write_proxy_event(event: str, **fields: Any) -> None:
                 handle.flush()
     except OSError as exc:
         logger.warning("failed to write proxy event log: %s", type(exc).__name__)
+
+
+def flush_proxy_event_writer(timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while PROXY_EVENT_QUEUE.unfinished_tasks:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
 
 
 def _usage_int(value: Any) -> int | None:
@@ -1889,6 +2013,141 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+SSE_EVENT_TYPE_TELEMETRY_LIMIT = 64
+
+
+def _sse_field_value(line_without_ending: bytes, prefix: bytes) -> bytes:
+    value = line_without_ending[len(prefix) :]
+    if value.startswith(b" "):
+        value = value[1:]
+    return value
+
+
+def _decode_sse_metadata_value(value: bytes) -> str | None:
+    try:
+        text = value.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return None
+    return text or None
+
+
+class PassthroughSseSemanticStats:
+    def __init__(self) -> None:
+        self.events_streamed = 0
+        self.json_events_streamed = 0
+        self.terminal_event_seen = False
+        self.completed_event_seen = False
+        self.done_sentinel_seen = False
+        self.response_event_seen = False
+        self.downstream_output_seen = False
+        self.last_event_type: str | None = None
+        self.response_id: str | None = None
+        self.event_type_counts: dict[str, int] = {}
+        self.event_types_truncated = False
+        self._event_name: str | None = None
+        self._data_lines: list[bytes] = []
+
+    def observe_line(self, line: bytes) -> None:
+        for physical_line in line.splitlines(keepends=True):
+            self._observe_physical_line(physical_line)
+
+    def finalize_pending(self) -> None:
+        if self._event_name is not None or self._data_lines:
+            self._finish_event()
+
+    def has_pending_event(self) -> bool:
+        return self._event_name is not None or bool(self._data_lines)
+
+    def fields(self) -> dict[str, Any]:
+        event_types = sorted(self.event_type_counts)
+        fields: dict[str, Any] = {
+            "sse_events_streamed": self.events_streamed,
+            "sse_json_events_streamed": self.json_events_streamed,
+            "sse_terminal_event_seen": self.terminal_event_seen,
+            "sse_completed_event_seen": self.completed_event_seen,
+            "sse_done_sentinel_seen": self.done_sentinel_seen,
+            "sse_response_event_seen": self.response_event_seen,
+            "sse_downstream_output_seen": self.downstream_output_seen,
+            "sse_event_types": event_types,
+            "sse_event_type_counts": {key: self.event_type_counts[key] for key in event_types},
+        }
+        if self.last_event_type is not None:
+            fields["sse_last_event_type"] = self.last_event_type
+        if self.event_types_truncated:
+            fields["sse_event_types_truncated"] = True
+        return fields
+
+    def _observe_physical_line(self, physical_line: bytes) -> None:
+        line = physical_line
+        for candidate in (b"\r\n", b"\n", b"\r"):
+            if line.endswith(candidate):
+                line = line[: -len(candidate)]
+                break
+        if line == b"":
+            self._finish_event()
+            return
+        if line.startswith(b":"):
+            return
+        if line.startswith(b"event:"):
+            self._event_name = _decode_sse_metadata_value(_sse_field_value(line, b"event:"))
+            return
+        if line.startswith(b"data:"):
+            self._data_lines.append(_sse_field_value(line, b"data:"))
+
+    def _finish_event(self) -> None:
+        if self._event_name is None and not self._data_lines:
+            return
+        event_name = self._event_name
+        data = b"\n".join(self._data_lines)
+        self._event_name = None
+        self._data_lines = []
+
+        self.events_streamed += 1
+        event_type = event_name
+        payload: Any = None
+        if data == b"[DONE]":
+            self.done_sentinel_seen = True
+            self.terminal_event_seen = True
+            event_type = event_type or "[DONE]"
+        elif data:
+            try:
+                payload = json.loads(data.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, Mapping):
+                self.json_events_streamed += 1
+                payload_type = payload.get("type")
+                if isinstance(payload_type, str) and payload_type:
+                    event_type = payload_type
+                if _responses_event_commits_downstream_output(payload, "official"):
+                    self.downstream_output_seen = True
+                response = payload.get("response")
+                if isinstance(response, Mapping):
+                    response_id = response.get("id")
+                    if isinstance(response_id, str) and response_id:
+                        self.response_id = response_id
+
+        if event_type is None:
+            return
+        self.last_event_type = event_type
+        self._record_event_type(event_type)
+        if event_type.startswith("response."):
+            self.response_event_seen = True
+        if event_type == "response.completed":
+            self.completed_event_seen = True
+        if event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+            self.terminal_event_seen = True
+
+    def _record_event_type(self, event_type: str) -> None:
+        if event_type in self.event_type_counts:
+            self.event_type_counts[event_type] += 1
+            return
+        if len(self.event_type_counts) >= SSE_EVENT_TYPE_TELEMETRY_LIMIT:
+            self.event_types_truncated = True
+            return
+        self.event_type_counts[event_type] = 1
 
 
 RESPONSES_TERMINAL_EVENT_TYPES = {
@@ -5243,60 +5502,16 @@ def _function_tool_names(value: Any) -> set[str]:
     }
 
 
-def _json_string_value(value: str) -> Any:
-    text = value.strip()
-    if not text:
-        return value
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return value
-
-
 def _coerce_targets(value: Any) -> tuple[Any, bool]:
-    if isinstance(value, str):
-        parsed = _json_string_value(value)
-        if isinstance(parsed, list):
-            return parsed, True
-        if isinstance(parsed, str):
-            return [parsed], True
-        return [value], True
-    return value, False
+    return _semantic_coerce_targets(value)
 
 
 def _coerce_target(value: Any) -> tuple[Any, bool]:
-    if isinstance(value, str):
-        parsed = _json_string_value(value)
-        if isinstance(parsed, list) and parsed:
-            return parsed[0], True
-        if isinstance(parsed, str) and parsed != value:
-            return parsed, True
-        return value, False
-    if isinstance(value, list) and value:
-        return value[0], True
-    return value, False
+    return _semantic_coerce_target(value)
 
 
 def _coerce_number(value: Any) -> tuple[Any, bool]:
-    if isinstance(value, str):
-        text = value.strip()
-        if re.fullmatch(r"[+-]?\d+", text):
-            return int(text), True
-        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\d*\.\d+)", text):
-            return float(text), True
-    return value, False
-
-
-def _infer_multi_agent_tool_name(arguments: Mapping[str, Any]) -> str | None:
-    if "targets" in arguments:
-        return "wait_agent"
-    if "target" in arguments:
-        return "send_input" if "message" in arguments else "close_agent"
-    if "id" in arguments:
-        return "resume_agent"
-    if any(key in arguments for key in ("agent_type", "fork_context", "message", "prompt", "input")):
-        return "spawn_agent"
-    return None
+    return _semantic_coerce_number(value)
 
 
 def _codex_apps_flat_alias_parts(name: Any) -> tuple[str, str] | None:
@@ -5359,21 +5574,7 @@ def _codex_apps_namespace_flat_alias(namespace: Any, name: Any) -> str | None:
 
 
 def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
-    arguments = _json_object_from_arguments(value)
-    if arguments is None:
-        return None
-
-    query = arguments.get("query")
-    if not isinstance(query, str) or not query.strip():
-        return None
-
-    normalized: dict[str, Any] = {"query": query}
-    limit = arguments.get("limit")
-    if isinstance(limit, str) and limit.strip().isdigit():
-        limit = int(limit.strip())
-    if isinstance(limit, int) and limit > 0:
-        normalized["limit"] = limit
-    return normalized
+    return _semantic_normalize_tool_search_arguments(value)
 
 
 def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
@@ -5387,102 +5588,14 @@ def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> 
 
 
 def _multi_agent_discovery_arguments(value: Any) -> dict[str, Any] | None:
-    arguments = _json_object_from_arguments(value)
-    if arguments is None:
-        return None
-
-    if arguments:
-        return None
-
-    return {"query": MULTI_AGENT_DISCOVERY_QUERY, "limit": 8}
+    return _semantic_multi_agent_discovery_arguments(value)
 
 
 def _normalize_multi_agent_arguments(
     value: Any,
     tool_name: str | None,
 ) -> tuple[Any, str | None, bool]:
-    arguments = _json_object_from_arguments(value)
-    if arguments is None:
-        return value, tool_name, False
-
-    changed = False
-    resolved_tool_name = tool_name
-    if resolved_tool_name is None:
-        for key in ("", "tool", "function", "name", "action", "ns_tool", "operation", "method", "tool_name"):
-            candidate = arguments.get(key)
-            if isinstance(candidate, str) and candidate in MULTI_AGENT_TOOL_NAMES:
-                resolved_tool_name = candidate
-                arguments.pop(key, None)
-                changed = True
-                break
-    if resolved_tool_name is None:
-        resolved_tool_name = _infer_multi_agent_tool_name(arguments)
-
-    changed = changed or _json_argument_string_needs_repair(value)
-
-    if resolved_tool_name == "spawn_agent":
-        if "message" not in arguments:
-            for alias in ("prompt", "input"):
-                alias_value = arguments.get(alias)
-                if isinstance(alias_value, str) and alias_value.strip():
-                    arguments["message"] = alias_value
-                    changed = True
-                    break
-        if "message" in arguments:
-            for alias in ("prompt", "input"):
-                if alias in arguments:
-                    arguments.pop(alias, None)
-                    changed = True
-        if "name" in arguments:
-            name_value = arguments.get("name")
-            if "nickname" not in arguments and isinstance(name_value, str) and name_value.strip() and name_value not in MULTI_AGENT_TOOL_NAMES:
-                arguments["nickname"] = name_value
-                changed = True
-            arguments.pop("name", None)
-            changed = True
-        if "agent_type" in arguments:
-            arguments.pop("agent_type", None)
-            changed = True
-        if "fork_context" not in arguments:
-            arguments["fork_context"] = False
-            changed = True
-
-    for key in ("fork_context", "interrupt"):
-        item = arguments.get(key)
-        if isinstance(item, str) and item.lower() in {"true", "false"}:
-            arguments[key] = item.lower() == "true"
-            changed = True
-
-    if "targets" in arguments:
-        coerced, item_changed = _coerce_targets(arguments["targets"])
-        if item_changed:
-            arguments["targets"] = coerced
-            changed = True
-    if "target" in arguments:
-        coerced, item_changed = _coerce_target(arguments["target"])
-        if item_changed:
-            arguments["target"] = coerced
-            changed = True
-    if resolved_tool_name == "close_agent" and "target" not in arguments and "targets" in arguments:
-        target_value = arguments.get("targets")
-        if isinstance(target_value, list) and target_value:
-            arguments["target"] = target_value[0]
-            arguments.pop("targets", None)
-            changed = True
-    if resolved_tool_name == "wait_agent" and "targets" not in arguments and "target" in arguments:
-        target_value = arguments.get("target")
-        arguments["targets"] = target_value if isinstance(target_value, list) else [target_value]
-        arguments.pop("target", None)
-        changed = True
-    if "timeout_ms" in arguments:
-        coerced, item_changed = _coerce_number(arguments["timeout_ms"])
-        if item_changed:
-            arguments["timeout_ms"] = coerced
-            changed = True
-
-    if not changed:
-        return value, resolved_tool_name, False
-    return _dump_arguments_like(value, arguments), resolved_tool_name, True
+    return _semantic_normalize_multi_agent_arguments(value, tool_name)
 
 
 def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
@@ -8442,6 +8555,37 @@ def safe_upstream_error_detail(exc: BaseException) -> str:
     return detail[:300]
 
 
+def transport_failure_phase(exc: BaseException | None) -> str | None:
+    """Best-effort phase label for failures before an upstream response is relayed."""
+    if exc is None:
+        return None
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, URLError) and isinstance(reason, BaseException):
+        nested = transport_failure_phase(reason)
+        if nested:
+            return nested
+    if isinstance(exc, HTTPError):
+        return "response_headers"
+    if isinstance(exc, ssl.SSLEOFError):
+        return "tls_handshake"
+    if isinstance(exc, ssl.SSLError):
+        return "tls_handshake"
+    if isinstance(exc, TimeoutError):
+        return "tcp_connect"
+    if isinstance(exc, IncompleteRead):
+        return "response_headers"
+    detail = safe_upstream_error_detail(exc).lower()
+    if "unexpected_eof" in detail or "ssleoferror" in detail or "eof occurred in violation" in detail:
+        return "tls_handshake"
+    if "timed out" in detail or "timeout" in detail or "winerror 10060" in detail:
+        return "tcp_connect"
+    if "connection reset" in detail or "connectionreseterror" in detail or "winerror 10054" in detail:
+        return "request_write"
+    if isinstance(exc, (OSError, URLError)):
+        return "tcp_connect"
+    return None
+
+
 def _header_items(headers: Mapping[str, str] | Any) -> list[tuple[str, str]]:
     return [(str(key), str(value)) for key, value in headers.items()]
 
@@ -10015,6 +10159,7 @@ def _emit_upstream_retry_event(
         delay_ms=delay_seconds * 1000,
         error=type(exc).__name__,
         detail=safe_upstream_error_detail(exc),
+        failure_phase=transport_failure_phase(exc),
     )
 
 
@@ -10041,6 +10186,87 @@ def _downstream_retry_payload(
         "delay_ms": delay_seconds * 1000,
         "error": type(exc).__name__,
         "detail": safe_upstream_error_detail(exc),
+        "failure_phase": transport_failure_phase(exc),
+    }
+
+
+@dataclass(frozen=True)
+class DownstreamErrorSpec:
+    inbound_format: str
+    upstream_name: str
+    status: int = 502
+    exc: BaseException | None = None
+    error: str | None = None
+    detail: str | None = None
+    error_type: str = "upstream_error"
+
+
+def _typed_error_code(
+    *,
+    error_type: str,
+    error_code: str,
+    exc: BaseException | None,
+    status: int | None,
+) -> str:
+    if error_type in {"invalid_request_error", "validation_error"}:
+        return "provider.request"
+    if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
+        return "upstream.protocol"
+    if status in {401, 403}:
+        return "provider.auth"
+    if status == 429:
+        return "provider.rate_limit"
+    if isinstance(exc, HTTPError):
+        return "upstream.http"
+    if isinstance(exc, (IncompleteRead, OSError, TimeoutError, URLError)):
+        return "upstream.transport"
+    if status is not None and status >= 500:
+        return "upstream.http"
+    return "upstream.error"
+
+
+def _codexhub_error_payload(
+    *,
+    source: str,
+    message: str,
+    status: int | None = None,
+    exc: BaseException | None = None,
+    error: str | None = None,
+    error_type: str = "upstream_error",
+    failure_class: str | None = None,
+) -> dict[str, Any]:
+    error_code = error or (type(exc).__name__ if exc is not None else "UpstreamError")
+    resolved_failure_class = failure_class
+    if resolved_failure_class is None and exc is not None:
+        resolved_failure_class = _upstream_failure_class(exc)
+    if resolved_failure_class is None and (
+        error_type in {"invalid_request_error", "validation_error"}
+        or (status is not None and 400 <= status < 500 and status != 429)
+    ):
+        resolved_failure_class = RETRY_FAILURE_PERMANENT
+    if resolved_failure_class is None and (status == 429 or (status is not None and status >= 500)):
+        resolved_failure_class = RETRY_FAILURE_QUICK_TRANSIENT
+    if resolved_failure_class is None:
+        resolved_failure_class = RETRY_FAILURE_PERMANENT
+    details: dict[str, Any] = {
+        "error": error_code,
+        "type": error_type,
+    }
+    if status is not None:
+        details["status"] = status
+    if resolved_failure_class is not None:
+        details["failure_class"] = resolved_failure_class
+    return {
+        "code": _typed_error_code(
+            error_type=error_type,
+            error_code=error_code,
+            exc=exc,
+            status=status,
+        ),
+        "message": message,
+        "source": source,
+        "retryable": resolved_failure_class != RETRY_FAILURE_PERMANENT,
+        "details": details,
     }
 
 
@@ -10073,7 +10299,77 @@ def _downstream_stream_error_payload(
     if failure_class is not None:
         payload["failure_class"] = failure_class
         payload["retryable"] = failure_class != RETRY_FAILURE_PERMANENT
+    payload["codexhub_error"] = _codexhub_error_payload(
+        source=upstream_name,
+        message=error_detail or error_type,
+        status=status,
+        exc=exc,
+        error=error_type,
+        error_type="upstream_stream_error",
+        failure_class=failure_class,
+    )
     return payload
+
+
+def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec) -> dict[str, Any]:
+    if error.inbound_format == "chat_completions":
+        return _chat_completion_error_payload(
+            upstream_name=error.upstream_name,
+            status=error.status,
+            exc=error.exc,
+            error=error.error,
+            detail=error.detail,
+            error_type="upstream_stream_error",
+        )
+    if error.exc is not None:
+        return _downstream_stream_error_payload(upstream_name=error.upstream_name, exc=error.exc)
+    return _downstream_stream_error_payload(
+        upstream_name=error.upstream_name,
+        status=error.status,
+        error=error.error or "UpstreamProtocolError",
+        detail=error.detail or error.error or "upstream stream failed",
+    )
+
+
+def _responses_failed_event_for_stream_error(
+    *,
+    upstream_name: str,
+    model: str | None,
+    status: int,
+    exc: BaseException | None = None,
+    error: str | None = None,
+    detail: str | None = None,
+    response_id: str | None = None,
+) -> dict[str, Any]:
+    stream_error = _downstream_stream_error_payload(
+        upstream_name=upstream_name,
+        status=status,
+        exc=exc,
+        error=error,
+        detail=detail,
+    )
+    error_payload: dict[str, Any] = {
+        "code": stream_error.get("error") or "UpstreamStreamError",
+        "message": stream_error.get("detail") or stream_error.get("error") or "Upstream stream error",
+        "type": stream_error.get("type") or "upstream_stream_error",
+        "status": status,
+        "upstream": upstream_name,
+    }
+    if "failure_class" in stream_error:
+        error_payload["failure_class"] = stream_error["failure_class"]
+    if "retryable" in stream_error:
+        error_payload["retryable"] = stream_error["retryable"]
+    return {
+        "type": "response.failed",
+        "response": {
+            "id": response_id if isinstance(response_id, str) and response_id else f"resp_{uuid.uuid4().hex[:12]}",
+            "object": "response",
+            "status": "failed",
+            "model": model,
+            "output": [],
+            "error": error_payload,
+        },
+    }
 
 
 def _chat_completion_error_payload(
@@ -10095,8 +10391,28 @@ def _chat_completion_error_payload(
             "code": error_code,
             "status": status,
             "upstream": upstream_name,
-        }
+        },
+        "codexhub_error": _codexhub_error_payload(
+            source=upstream_name,
+            message=message,
+            status=status,
+            exc=exc,
+            error=error_code,
+            error_type=error_type,
+        ),
     }
+
+
+def _downstream_json_error_payload(error: DownstreamErrorSpec) -> dict[str, Any]:
+    return _json_error_payload_for_inbound_format(
+        inbound_format=error.inbound_format,
+        upstream_name=error.upstream_name,
+        status=error.status,
+        exc=error.exc,
+        error=error.error,
+        detail=error.detail,
+        error_type=error.error_type,
+    )
 
 
 def _json_error_payload_for_inbound_format(
@@ -10123,6 +10439,14 @@ def _json_error_payload_for_inbound_format(
     payload: dict[str, Any] = {"error": error_detail or error_code}
     if error_detail:
         payload["detail"] = error_detail
+    payload["codexhub_error"] = _codexhub_error_payload(
+        source=upstream_name,
+        message=error_detail or error_code,
+        status=status,
+        exc=exc,
+        error=error_code,
+        error_type=error_type,
+    )
     return payload
 
 
@@ -10140,6 +10464,80 @@ def _auto_protocol_fallback_allowed(exc: HTTPError) -> bool:
     return _upstream_retry_status(exc) in AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES
 
 
+@dataclass(frozen=True)
+class GatewayRequestInput:
+    request_id: str
+    started_at: float
+    request_context: dict[str, Any]
+    proxy_request_context: dict[str, Any]
+    raw_provider_probe: bool
+    content_length: int
+    content_type: str | None
+    content_encoding: str | None
+    content_decoded: bool
+    body: bytes
+    inbound_payload: Any
+    request_kind: str
+    model_requested: str | None
+    model: str | None
+    route_reason: str
+
+
+def _parse_gateway_request_input(
+    handler: Any,
+    *,
+    inbound_format: str,
+    provider_hint: str | None,
+    request_id: str,
+    started_at: float,
+    request_context: Mapping[str, Any],
+    proxy_request_context: Mapping[str, Any],
+    raw_provider_probe: bool,
+    content_length: int,
+) -> GatewayRequestInput:
+    body = handler.rfile.read(content_length)
+    content_type = _get_header(handler.headers, "Content-Type")
+    content_encoding = _get_header(handler.headers, "Content-Encoding")
+    body, content_decoded, decode_error = decoded_request_body(body, content_encoding)
+    if decode_error:
+        raise ValueError(f"request body content-encoding decode failed: {decode_error}")
+    try:
+        inbound_payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        inbound_payload = None
+    request_kind = _request_kind_from_headers_and_payload(handler.headers, inbound_payload, inbound_format)
+    parsed_proxy_request_context = dict(proxy_request_context)
+    if request_kind == RETRY_REQUEST_COMPACT:
+        parsed_proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+        if raw_provider_probe:
+            parsed_proxy_request_context["raw_provider_probe"] = True
+    if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("model"), str):
+        model_requested = inbound_payload["model"]
+    else:
+        model_requested = try_extract_model(body)
+    model = provider_scoped_route_model(model_requested, provider_hint)
+    if provider_hint is not None and not model:
+        raise ValueError(f"model is required for provider path: {provider_hint}")
+    route_reason = "provider_path" if provider_hint and model else "model" if model else "official_control_fallback"
+    return GatewayRequestInput(
+        request_id=request_id,
+        started_at=started_at,
+        request_context=dict(request_context),
+        proxy_request_context=parsed_proxy_request_context,
+        raw_provider_probe=raw_provider_probe,
+        content_length=content_length,
+        content_type=content_type,
+        content_encoding=content_encoding,
+        content_decoded=content_decoded,
+        body=body,
+        inbound_payload=inbound_payload,
+        request_kind=request_kind,
+        model_requested=model_requested,
+        model=model,
+        route_reason=route_reason,
+    )
+
+
 def _open_upstream_response(
     request: Request,
     *,
@@ -10151,6 +10549,7 @@ def _open_upstream_response(
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
     max_attempts: int | None = None,
     retry_policy: str = RETRY_GATEWAY_FULL,
+    retry_http_errors: bool = True,
 ) -> Any:
     explicit_max_attempts = max_attempts is not None
     base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
@@ -10158,8 +10557,12 @@ def _open_upstream_response(
     attempt = 1
     while True:
         try:
+            if upstream_name == "official":
+                _ensure_official_keepalive_opener_installed()
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
+            if isinstance(exc, HTTPError) and not retry_http_errors:
+                raise
             failure_class = _upstream_failure_class(exc)
             retry_attempts = _retry_attempts_for_failure_class(
                 request_kind=request_kind,
@@ -10347,30 +10750,29 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 self.close_connection = True
                 return
-            body = self.rfile.read(content_length)
-            content_type = _get_header(self.headers, "Content-Type")
-            content_encoding = _get_header(self.headers, "Content-Encoding")
-            body, content_decoded, decode_error = decoded_request_body(body, content_encoding)
-            if decode_error:
-                raise ValueError(f"request body content-encoding decode failed: {decode_error}")
-            caller_body = body
-            try:
-                inbound_payload = json.loads(body.decode("utf-8-sig"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                inbound_payload = None
-            request_kind = _request_kind_from_headers_and_payload(self.headers, inbound_payload, inbound_format)
-            if request_kind == RETRY_REQUEST_COMPACT:
-                proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
-                if raw_provider_probe:
-                    proxy_request_context["raw_provider_probe"] = True
-            if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("model"), str):
-                model_requested = inbound_payload["model"]
-            else:
-                model_requested = try_extract_model(body)
-            model = provider_scoped_route_model(model_requested, provider_hint)
-            if provider_hint is not None and not model:
-                raise ValueError(f"model is required for provider path: {provider_hint}")
-            route_reason = "provider_path" if provider_hint and model else "model" if model else "official_control_fallback"
+            request_input = _parse_gateway_request_input(
+                self,
+                inbound_format=inbound_format,
+                provider_hint=provider_hint,
+                request_id=request_id,
+                started_at=started_at,
+                request_context=request_context,
+                proxy_request_context=proxy_request_context,
+                raw_provider_probe=raw_provider_probe,
+                content_length=content_length,
+            )
+            content_type = request_input.content_type
+            content_encoding = request_input.content_encoding
+            content_decoded = request_input.content_decoded
+            decode_error = None
+            body = request_input.body
+            caller_body = request_input.body
+            inbound_payload = request_input.inbound_payload
+            request_kind = request_input.request_kind
+            proxy_request_context = request_input.proxy_request_context
+            model_requested = request_input.model_requested
+            model = request_input.model
+            route_reason = request_input.route_reason
             upstream = choose_upstream(model) if model else official_upstream()
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
@@ -10804,10 +11206,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 event_context=adapter_event_context,
                                 downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
                                 request_kind=request_kind,
-                                max_attempts=1 if is_official_http_passthrough else None,
+                                max_attempts=official_upstream_open_attempts() if is_official_http_passthrough else None,
                                 retry_policy=route_decision.retry_policy
                                 if enable_transparent_metered
                                 else RETRY_GATEWAY_FULL,
+                                retry_http_errors=not is_official_http_passthrough,
                             ) as response:
                                 status = self._relay_upstream_response(
                                     response,
@@ -11190,6 +11593,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 status=status,
                 error="HTTPError",
                 detail=safe_upstream_error_detail(exc),
+                failure_phase=transport_failure_phase(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **proxy_request_context,
             )
@@ -11205,6 +11609,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 status=502,
                 error=type(exc).__name__,
                 detail=detail,
+                failure_phase=transport_failure_phase(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **proxy_request_context,
             )
@@ -11235,6 +11640,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 status=502,
                 error=type(exc).__name__,
                 detail=detail,
+                failure_phase=transport_failure_phase(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **proxy_request_context,
             )
@@ -11708,18 +12114,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         error: str | None = None,
         detail: str | None = None,
     ) -> None:
+        error_spec = DownstreamErrorSpec(
+            inbound_format=inbound_format,
+            upstream_name=upstream_name,
+            status=status,
+            exc=exc,
+            error=error,
+            detail=detail,
+        )
         if inbound_format == "chat_completions":
             self.wfile.write(
                 b"data: "
                 + json.dumps(
-                    _chat_completion_error_payload(
-                        upstream_name=upstream_name,
-                        status=status,
-                        exc=exc,
-                        error=error,
-                        detail=detail,
-                        error_type="upstream_stream_error",
-                    ),
+                    _downstream_sse_error_payload_for_inbound_format(error_spec),
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
@@ -11729,15 +12136,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         if exc is not None:
-            self._write_sse_error_event(upstream_name, exc)
+            self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
             self.close_connection = True
             return
-        self._write_sse_protocol_error_event(
-            upstream_name,
-            status,
-            detail or error or "upstream stream failed",
-            error=error or "UpstreamProtocolError",
-        )
+        self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
         self.close_connection = True
 
     def _write_sse_protocol_error_event(
@@ -11770,17 +12172,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         detail: str | None = None,
         error_type: str = "upstream_error",
     ) -> None:
+        error_spec = DownstreamErrorSpec(
+            inbound_format=inbound_format,
+            upstream_name=upstream_name,
+            status=status,
+            exc=exc,
+            error=error,
+            detail=detail,
+            error_type=error_type,
+        )
         self._safe_send_json(
             status,
-            _json_error_payload_for_inbound_format(
-                inbound_format=inbound_format,
-                upstream_name=upstream_name,
-                status=status,
-                exc=exc,
-                error=error,
-                detail=detail,
-                error_type=error_type,
-            ),
+            _downstream_json_error_payload(error_spec),
             request_id,
         )
 
@@ -11812,6 +12215,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         event_context: Mapping[str, Any] | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
+        headers_sent_downstream = bool(headers_already_sent)
         if not headers_already_sent:
             self.send_response(status)
             for key, value in _filtered_response_headers(response.headers, True):
@@ -11819,6 +12223,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
             self.send_header("Connection", "close")
             self.end_headers()
+            headers_sent_downstream = True
             if mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
 
@@ -11830,30 +12235,98 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             "inbound_format": inbound_format,
         }
         _capture_usage(usage_capture, None, missing_reason="async_official_passthrough")
+        lines_streamed = 0
+        bytes_streamed = 0
+        last_upstream_byte_at: float | None = None
+        failure_side = "upstream_read"
+        sse_stats = PassthroughSseSemanticStats()
         try:
             while True:
+                failure_side = "upstream_read"
                 line = response.readline()
                 if not line:
                     break
+                last_upstream_byte_at = time.monotonic()
+                failure_side = "downstream_write"
                 self.wfile.write(line)
                 self.wfile.flush()
+                lines_streamed += 1
+                bytes_streamed += len(line)
+                sse_stats.observe_line(line)
                 _offer_official_passthrough_usage_line(usage_context, line)
         except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
             self.close_connection = True
+            now = time.monotonic()
+            last_upstream_byte_age_ms = (
+                None
+                if last_upstream_byte_at is None
+                else int(max(0.0, now - last_upstream_byte_at) * 1000)
+            )
+            failure_phase = "downstream_write" if failure_side == "downstream_write" else "stream_body"
+            client_disconnected = failure_side == "downstream_write"
+            telemetry_status = 499 if client_disconnected else 502
+            synthetic_terminal_event_sent = False
+            synthetic_terminal_write_error: str | None = None
+            synthetic_terminal_write_detail: str | None = None
+            if not client_disconnected:
+                try:
+                    if sse_stats.has_pending_event():
+                        self.wfile.write(b"\n")
+                        self.wfile.flush()
+                        sse_stats.finalize_pending()
+                    self._write_sse_event(
+                        "response.failed",
+                        _responses_failed_event_for_stream_error(
+                            upstream_name=upstream_name,
+                            model=model,
+                            status=502,
+                            exc=exc,
+                            response_id=sse_stats.response_id,
+                        ),
+                    )
+                    synthetic_terminal_event_sent = True
+                except OSError as write_exc:
+                    synthetic_terminal_write_error = type(write_exc).__name__
+                    synthetic_terminal_write_detail = safe_upstream_error_detail(write_exc)
+            sse_fields = sse_stats.fields()
+            if usage_capture is not None:
+                usage_capture.update(sse_fields)
+                usage_capture["synthetic_terminal_event_sent"] = synthetic_terminal_event_sent
+                if synthetic_terminal_event_sent:
+                    usage_capture["synthetic_terminal_event_type"] = "response.failed"
+                if synthetic_terminal_write_error is not None:
+                    usage_capture["synthetic_terminal_write_error"] = synthetic_terminal_write_error
             write_proxy_event(
                 "official_passthrough_stream_closed",
                 request_id=request_id,
                 model=model,
                 upstream=upstream_name,
-                status=502,
+                status=telemetry_status,
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 error=type(exc).__name__,
                 detail=safe_upstream_error_detail(exc),
+                failure_phase=failure_phase,
+                failure_side=failure_side,
+                failure_class="downstream_client_closed" if client_disconnected else "upstream_stream_interrupted",
+                client_disconnected=client_disconnected,
+                synthetic_terminal_event_sent=synthetic_terminal_event_sent,
+                synthetic_terminal_event_type="response.failed" if synthetic_terminal_event_sent else None,
+                synthetic_terminal_write_error=synthetic_terminal_write_error,
+                synthetic_terminal_write_detail=synthetic_terminal_write_detail,
+                lines_streamed=lines_streamed,
+                bytes_streamed=bytes_streamed,
+                last_upstream_byte_age_ms=last_upstream_byte_age_ms,
+                headers_sent_downstream=headers_sent_downstream,
+                downstream_sse_started=True,
+                **sse_fields,
             )
-            return 502
+            return telemetry_status
 
         self.close_connection = True
+        sse_stats.finalize_pending()
+        if usage_capture is not None:
+            usage_capture.update(sse_stats.fields())
         return status
 
     def _relay_transparent_upstream_response(
