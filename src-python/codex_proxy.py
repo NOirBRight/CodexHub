@@ -6537,6 +6537,36 @@ def _rewrite_internal_input_items(
     return changed
 
 
+def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    changed = False
+    rewritten_items: list[Any] = []
+    for item in input_items:
+        if not isinstance(item, dict):
+            rewritten_items.append(item)
+            continue
+
+        item_type = item.get("type")
+        if item_type == "compaction":
+            replacement = _compatible_compaction_message(item)
+            if replacement is not None:
+                rewritten_items.append(replacement)
+            changed = True
+            continue
+        if item_type == "compaction_trigger":
+            changed = True
+            continue
+
+        rewritten_items.append(item)
+
+    if changed:
+        payload["input"] = rewritten_items
+    return changed
+
+
 def _sanitize_official_system_messages(payload: dict[str, Any]) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -7857,6 +7887,8 @@ def official_passthrough_request_body(
     if isinstance(service_tier, str) and service_tier and next_payload.get("service_tier") != service_tier:
         next_payload["service_tier"] = service_tier
         changed = True
+    if _sanitize_unsupported_compaction_input_items(next_payload):
+        changed = True
     if next_payload.get("store") is not False:
         next_payload["store"] = False
         changed = True
@@ -7888,6 +7920,8 @@ def transparent_request_body(
             next_payload = dict(payload)
             changed = False
             if _normalize_responses_message_input_items(next_payload):
+                changed = True
+            if official_responses_backend and _sanitize_unsupported_compaction_input_items(next_payload):
                 changed = True
             if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
                 changed = True
@@ -7925,6 +7959,8 @@ def transparent_request_body(
         next_payload["stream"] = True
         changed = True
     if official_responses_backend and _normalize_responses_string_input(next_payload):
+        changed = True
+    if official_responses_backend and _sanitize_unsupported_compaction_input_items(next_payload):
         changed = True
     if _normalize_responses_message_input_items(next_payload):
         changed = True
@@ -7968,6 +8004,8 @@ def compatible_request_body(
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
         if _sanitize_official_reasoning_items(payload):
+            changed = True
+        if _sanitize_unsupported_compaction_input_items(payload):
             changed = True
         if _normalize_responses_string_input(payload):
             changed = True
