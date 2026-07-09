@@ -10,9 +10,7 @@ pub(crate) fn set_resource_root(path: impl AsRef<Path>) {
 pub(crate) fn codex_home_dir() -> Result<PathBuf, String> {
     match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
         Some(value) => Ok(PathBuf::from(value)),
-        None => dirs::home_dir()
-            .ok_or_else(|| "failed to resolve user home directory".to_string())
-            .map(|home| home.join(".codex")),
+        None => crate::app_flavor::default_codex_home_dir(),
     }
 }
 

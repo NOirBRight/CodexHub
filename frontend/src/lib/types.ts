@@ -91,6 +91,18 @@ export interface AppVersionInfo {
   current_version: string;
 }
 
+export type RuntimeFlavor = "stable" | "beta";
+export type RoutingOwner = "official" | "release" | "beta" | "unknown_external";
+
+export interface AppFlavorInfo {
+  flavor: RuntimeFlavor;
+  routing_owner: RoutingOwner;
+  product_name: string;
+  bridge_port: number;
+  gateway_port: number;
+  default_codex_home_suffix: string;
+}
+
 export interface AppUpdateStatus {
   available: boolean;
   current_version: string;
@@ -309,6 +321,9 @@ export interface GatewayClientInfo {
   auto_apply_supported: boolean;
   config_path?: string | null;
   route_mode: string;
+  route_owner: RoutingOwner;
+  route_endpoint?: string | null;
+  managed_by_current_app: boolean;
   status: string;
   versions_checked?: boolean | null;
   current_version?: string | null;

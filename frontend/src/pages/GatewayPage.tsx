@@ -10,6 +10,7 @@ import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { cx } from "../lib/format";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
+  AppFlavorInfo,
   GatewayClientContract,
   GatewayClientInfo,
   GatewayEvent,
@@ -17,12 +18,16 @@ import type {
   GatewayUsageEvent,
   GatewayUsageSummary,
   Provider,
+  RoutingOwner,
   Settings,
   TelemetryStatus,
   UsageQueryWindow,
 } from "../lib/types";
 
+type RouteAction = "official" | "current_owner" | "takeover";
+
 interface GatewayPageProps {
+  appFlavor?: AppFlavorInfo | null;
   busy?: string | null;
   clients: GatewayClientContract[];
   pending?: {
@@ -53,6 +58,7 @@ function isActionableDiagnostic(item: GatewayStatus["diagnostics"][number]) {
 }
 
 function GatewayPageImpl({
+  appFlavor,
   busy,
   clients,
   onApplySettings,
@@ -135,10 +141,12 @@ function GatewayPageImpl({
     [status, t],
   );
   const defaultModel = status?.official_models[0]?.id ?? null;
+  const runtimeOwner = appFlavor?.routing_owner ?? null;
   const clientInfoById = useMemo(
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
+  const currentAppGatewayUrl = currentAppGatewayEndpoint(appFlavor, settings, status);
 
   function markCopied(target: string) {
     setCopiedTarget(target);
@@ -289,14 +297,36 @@ function GatewayPageImpl({
     setError(null);
   }
 
-  async function switchClientMode(clientId: string, mode: "official" | "hub") {
-    setClientBusy(`${clientId}:switch:${mode}`);
+  async function switchClientMode(clientId: string, owner: RoutingOwner, forceTakeover = false) {
+    setClientBusy(`${clientId}:switch:${owner}`);
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
-    const routeName = mode === "hub" ? "CodexHub" : "Official";
+    const client = clientInfoById.get(clientId);
+    if (!forceTakeover && client && client.managed_by_current_app === false) {
+      if (!runtimeOwner) {
+        setClientBusy(null);
+        showToast(t("gateway.ownerUnavailable"), "error");
+        return;
+      }
+      const confirmText = t("gateway.takeoverConfirm", {
+        name: client.name,
+        path: client.config_path ?? t("common.unknown"),
+        current: ownerDisplayName(client.route_owner, t),
+        next: ownerDisplayName(runtimeOwner, t),
+        oldEndpoint: client.route_endpoint ?? t("common.unknown"),
+        newEndpoint: currentAppGatewayUrl ?? t("common.unknown"),
+      });
+      if (!window.confirm(confirmText)) {
+        setClientBusy(null);
+        return;
+      }
+      forceTakeover = true;
+      owner = runtimeOwner;
+    }
+    const routeName = ownerDisplayName(owner, t);
     const toastId = showToast(t("gateway.switchClient", { clientName, routeName }), "loading");
     try {
-      await api.switchGatewayClientRoute(clientId, mode, defaultModel);
+      await api.switchGatewayClientRoute(clientId, owner, defaultModel, forceTakeover);
       await onRefreshClients();
       updateToast(toastId, {
         action: null,
@@ -360,6 +390,17 @@ function GatewayPageImpl({
   const actionableDiagnostics = status?.diagnostics.filter(isActionableDiagnostic) ?? [];
   const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
   const apiKeyCopied = copiedTarget === "gateway-api-key";
+
+  function handleRouteAction(clientId: string, action: RouteAction) {
+    if (!runtimeOwner) {
+      showToast(t("gateway.ownerUnavailable"), "error");
+      return;
+    }
+    if (action === "official") {
+      return void switchClientMode(clientId, "official");
+    }
+    return void switchClientMode(clientId, runtimeOwner);
+  }
 
   async function toggleRuntime() {
     const toastId = showToast(
@@ -595,20 +636,28 @@ function GatewayPageImpl({
             )}
           >
             {clients.map((client) => (
-              <GatewayClientCard
-                key={client.id}
-                client={client}
-                info={clientInfoById.get(client.id)}
-                busy={Boolean(clientBusy?.startsWith(client.id))}
-                busyMode={
-                  clientBusy === `${client.id}:switch:official`
-                    ? "official"
-                    : clientBusy === `${client.id}:switch:hub`
-                      ? "hub"
-                      : null
-                }
-                onSwitchMode={(mode) => void switchClientMode(client.id, mode)}
-              />
+              (() => {
+                const info = clientInfoById.get(client.id);
+                return (
+                  <GatewayClientCard
+                    key={client.id}
+                    client={client}
+                    info={info}
+                    busy={Boolean(clientBusy?.startsWith(client.id))}
+                    busyMode={
+                      clientBusy === `${client.id}:switch:official`
+                        ? "official"
+                        : clientBusy === `${client.id}:switch:${runtimeOwner}`
+                          ? info?.managed_by_current_app === false
+                            ? "takeover"
+                            : "current_owner"
+                          : null
+                    }
+                    runtimeOwner={runtimeOwner}
+                    onSwitchMode={(mode) => handleRouteAction(client.id, mode)}
+                  />
+                );
+              })()
             ))}
           </div>
         </div>
@@ -1050,6 +1099,31 @@ function isRecoveryRetryStillActive(event: GatewayEvent) {
 function recoveryEventTime(event: GatewayEvent) {
   const timestamp = event.ts ? Date.parse(event.ts) : NaN;
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function currentAppGatewayEndpoint(
+  appFlavor?: AppFlavorInfo | null,
+  settings?: Settings | null,
+  status?: GatewayStatus | null,
+) {
+  const port = settings?.proxy_port ?? status?.port ?? appFlavor?.gateway_port;
+  if (!port) {
+    return null;
+  }
+  return `http://127.0.0.1:${port}/v1`;
+}
+
+function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {
+  if (owner === "release") {
+    return t("gateway.ownerRelease");
+  }
+  if (owner === "beta") {
+    return t("gateway.ownerBeta");
+  }
+  if (owner === "unknown_external") {
+    return t("gateway.ownerExternal");
+  }
+  return t("common.official");
 }
 
 function formatAttemptCell(event: GatewayEvent) {

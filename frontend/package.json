@@ -5,10 +5,10 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 1420",
+    "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "test:ui-contract": "node --test scripts/ui-contract.test.mjs",
-    "preview": "vite preview --host 127.0.0.1 --port 1420"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

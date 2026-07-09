@@ -8,6 +8,7 @@ import { cx } from "./lib/format";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
 import type {
+  AppFlavorInfo,
   AppStatus,
   AppUpdateInstallStatus,
   AppUpdateStatus,
@@ -36,6 +37,7 @@ type RuntimeSnapshot = {
   gatewayClients: RuntimeCache<GatewayClientInfo[]>;
   catalogModels: RuntimeCache<Model[]>;
   modelMetadata: RuntimeCache<Model[]>;
+  appFlavor: RuntimeCache<AppFlavorInfo>;
   appVersion: RuntimeCache<AppVersionInfo>;
   updateStatus: RuntimeCache<AppUpdateStatus>;
 };
@@ -307,6 +309,7 @@ export default function App() {
     gatewayClients: runtimeCache<GatewayClientInfo[]>([]),
     catalogModels: runtimeCache<Model[]>([]),
     modelMetadata: runtimeCache<Model[]>([]),
+    appFlavor: runtimeCache<AppFlavorInfo>(),
     appVersion: runtimeCache<AppVersionInfo>(),
     updateStatus: runtimeCache<AppUpdateStatus>(),
   });
@@ -428,6 +431,17 @@ export default function App() {
     [runCachedRequest],
   );
 
+  const loadAppFlavor = useCallback(async (options?: LoadRuntimeOptions) => {
+    await runCachedRequest<AppFlavorInfo>(
+      "appFlavor",
+      () => api.getAppFlavor(),
+      {
+        force: options?.force,
+        staleMs: options?.staleMs,
+      },
+    );
+  }, [runCachedRequest]);
+
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
     const includeClientVersions = Boolean(options?.includeClientVersions);
     await runCachedRequest<GatewayClientInfo[]>(
@@ -480,6 +494,7 @@ export default function App() {
         refreshGatewayStatus({ force: options?.force }),
         refreshCatalogModels({ force: options?.force }),
         refreshModelMetadata({ force: options?.force, quiet: true }),
+        loadAppFlavor({ force: options?.force }),
       ]);
     } finally {
       setBusy((current) => (current === "load" ? null : current));
@@ -491,6 +506,7 @@ export default function App() {
     refreshProviders,
     refreshSettings,
     refreshStatus,
+    loadAppFlavor,
   ]);
 
   const refreshRuntimeStatus = useCallback(async (options?: { force?: boolean }) => {
@@ -807,6 +823,7 @@ export default function App() {
   const gatewayClients = runtime.gatewayClients.data ?? [];
   const catalogModels = runtime.catalogModels.data ?? [];
   const modelMetadata = runtime.modelMetadata.data ?? [];
+  const appFlavor = runtime.appFlavor.data;
   const visionModels = useMemo(() => visionModelOptions(catalogModels), [catalogModels]);
 
   useEffect(() => {
@@ -953,6 +970,7 @@ export default function App() {
   return (
     <div className="grid h-screen min-h-[720px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
       <RuntimeBar
+        appFlavor={appFlavor}
         busy={busy}
         message={banner}
         settings={settings}
@@ -1016,6 +1034,7 @@ export default function App() {
           >
             <div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
               <GatewayPage
+                appFlavor={appFlavor}
                 settings={settings}
                 providers={providers}
                 status={gatewayStatus}

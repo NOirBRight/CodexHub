@@ -12,6 +12,7 @@ __pycache__/
 test-results/
 diagnostics/
 docs/superpowers/
+.superpowers/
 
 # Local secrets
 config/local.toml

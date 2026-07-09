@@ -1,0 +1,38 @@
+{
+  "stable": {
+    "productName": "CodexHub",
+    "executableBaseName": "codexhub",
+    "identifier": "com.codexhub.app",
+    "windowTitle": "CodexHub",
+    "frontendPort": 1420,
+    "bridgePort": 1421,
+    "gatewayPort": 9099,
+    "routingOwner": "release",
+    "defaultCodexHome": ".codex",
+    "updaterEndpoint": "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
+    "updaterManifestName": "latest.json",
+    "releaseAssetPrefix": "CodexHub",
+    "autostartTaskName": "CodexHubProxy",
+    "macosLabel": "com.codexhub.proxy",
+    "macosPlistFile": "com.codexhub.proxy.plist",
+    "linuxServiceFile": "codexhub-proxy.service"
+  },
+  "beta": {
+    "productName": "CodexHub Beta",
+    "executableBaseName": "codexhub-beta",
+    "identifier": "com.codexhub.beta",
+    "windowTitle": "CodexHub Beta",
+    "frontendPort": 1430,
+    "bridgePort": 1431,
+    "gatewayPort": 9109,
+    "routingOwner": "beta",
+    "defaultCodexHome": ".codexhub-beta/codex-home",
+    "updaterEndpoint": "https://github.com/NOirBRight/CodexHub/releases/download/beta/latest-beta.json",
+    "updaterManifestName": "latest-beta.json",
+    "releaseAssetPrefix": "CodexHubBeta",
+    "autostartTaskName": "CodexHubBetaProxy",
+    "macosLabel": "com.codexhub.beta.proxy",
+    "macosPlistFile": "com.codexhub.beta.proxy.plist",
+    "linuxServiceFile": "codexhub-beta-proxy.service"
+  }
+}

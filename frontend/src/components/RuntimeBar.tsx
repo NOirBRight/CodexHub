@@ -5,9 +5,10 @@ import { useTranslation } from "react-i18next";
 import codexLogo from "../assets/codex-logo.svg";
 import { cx } from "../lib/format";
 import { api } from "../lib/tauri";
-import type { AppStatus, Settings } from "../lib/types";
+import type { AppFlavorInfo, AppStatus, Settings } from "../lib/types";
 
 interface RuntimeBarProps {
+  appFlavor?: AppFlavorInfo | null;
   busy?: string | null;
   message?: string | null;
   settings: Settings | null;
@@ -18,6 +19,7 @@ interface RuntimeBarProps {
 }
 
 export function RuntimeBar({
+  appFlavor,
   busy,
   message,
   onOpenSettings,
@@ -45,7 +47,14 @@ export function RuntimeBar({
         <span className="grid h-8 w-8 place-items-center rounded-full bg-surface shadow-control">
           <img src={codexLogo} alt="" className="h-5 w-5" aria-hidden="true" />
         </span>
-        <span className="truncate text-base font-semibold text-ink">CodexHub</span>
+        <span className="truncate text-base font-semibold text-ink">
+          {appFlavor?.product_name ?? "CodexHub"}
+        </span>
+        {appFlavor?.flavor === "beta" ? (
+          <span className="rounded-control border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+            Beta
+          </span>
+        ) : null}
       </div>
 
       <div className="min-w-0 flex-1 self-stretch" data-tauri-drag-region />

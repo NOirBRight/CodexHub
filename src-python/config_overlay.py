@@ -218,10 +218,11 @@ def catalog_config_value(config_path: Path, catalog_path: Path) -> str:
         return str(catalog_path)
 
 
-def build_overlay(catalog_value: str) -> str:
+def build_overlay(catalog_value: str, owner: str) -> str:
     return "\n".join(
         [
             MARKER_BEGIN,
+            f"# owner = {owner}",
             'model = "openai/gpt-5.5"',
             f'model_provider = "{PROXY_PROVIDER_ID}"',
             f"model_catalog_json = {toml_literal(catalog_value)}",
@@ -254,7 +255,15 @@ def insert_provider_section(text: str, provider_section: str) -> str:
     return provider_section
 
 
-def apply_overlay(config_path: Path, backup_path: Path, catalog_path: Path, base_url: str) -> None:
+def apply_overlay(
+    config_path: Path,
+    backup_path: Path,
+    catalog_path: Path,
+    base_url: str,
+    owner: str = "release",
+) -> None:
+    if owner not in {"release", "beta"}:
+        raise ValueError(f"unsupported CodexHub owner: {owner}")
     original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     cleaned = strip_marked_overlay(original)
     atomic_write_text(backup_path, cleaned if cleaned != original else original, encoding="utf-8")
@@ -263,7 +272,7 @@ def apply_overlay(config_path: Path, backup_path: Path, catalog_path: Path, base
         cleaned = strip_section(cleaned, section)
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
-    updated = build_overlay(catalog_config_value(config_path, catalog_path)) + cleaned.lstrip()
+    updated = build_overlay(catalog_config_value(config_path, catalog_path), owner) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url))
     atomic_write_text(config_path, updated, encoding="utf-8")
 
@@ -273,7 +282,7 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
         restored = backup_path.read_text(encoding="utf-8")
         restore_from_backup = True
     elif config_path.exists():
-        restored = config_path.read_text(encoding="utf-8")
+        restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
         restore_from_backup = False
     else:
         restored = ""
@@ -301,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--backup", required=True, type=Path)
     apply_parser.add_argument("--catalog", required=True, type=Path)
     apply_parser.add_argument("--base-url", required=True)
+    apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
 
     restore_parser = subparsers.add_parser("restore")
     restore_parser.add_argument("--config", required=True, type=Path)
@@ -309,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "apply":
-        apply_overlay(args.config, args.backup, args.catalog, args.base_url)
+        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner)
     elif args.command == "restore":
         status = restore_overlay(args.config, args.backup, args.unified_history)
         if args.unified_history:
