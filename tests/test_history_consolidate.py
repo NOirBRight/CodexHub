@@ -124,7 +124,11 @@ class HistoryConsolidateTests(unittest.TestCase):
             root = Path(tmpdir)
             active = root / ".codex"
             official = root / "official"
+            active.mkdir(parents=True)
             official.mkdir(parents=True)
+            active_state_path = active / ".codex-global-state.json"
+            lock_path = active_state_path.with_name(".codex-global-state.json.lock")
+            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
             (official / ".codex-global-state.json").write_text(
                 json.dumps(
                     {
@@ -147,6 +151,7 @@ class HistoryConsolidateTests(unittest.TestCase):
             self.assertEqual(state["remote-connection-auto-connect-by-host-id"], {})
             self.assertNotIn("selected-remote-host-id", state["electron-persisted-atom-state"])
             self.assertEqual(state["electron-persisted-atom-state"]["remote-connection-auto-connect-by-host-id"], {})
+            self.assertFalse(lock_path.exists())
 
 
 if __name__ == "__main__":

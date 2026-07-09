@@ -14,7 +14,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
-                "failed to create config directory {}: {error}",
+                "failed to create file directory {}: {error}",
                 parent.display()
             )
         })?;
@@ -22,28 +22,21 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
 
     let _lock = FileLock::acquire(path)?;
     let temp_path = unique_temp_path(path);
-    let mut temp_file = File::create(&temp_path).map_err(|error| {
-        format!(
-            "failed to write temp config {}: {error}",
-            temp_path.display()
-        )
-    })?;
+    let mut temp_file = File::create(&temp_path)
+        .map_err(|error| format!("failed to write temp file {}: {error}", temp_path.display()))?;
     temp_file
         .write_all(text.as_bytes())
         .and_then(|_| temp_file.sync_all())
         .map_err(|error| {
             let _ = fs::remove_file(&temp_path);
-            format!(
-                "failed to write temp config {}: {error}",
-                temp_path.display()
-            )
+            format!("failed to write temp file {}: {error}", temp_path.display())
         })?;
     drop(temp_file);
 
     fs::rename(&temp_path, path).map_err(|error| {
         let _ = fs::remove_file(&temp_path);
         format!(
-            "failed to move temp config {} to {}: {error}",
+            "failed to move temp file {} to {}: {error}",
             temp_path.display(),
             path.display()
         )
@@ -55,7 +48,7 @@ fn unique_temp_path(path: &Path) -> PathBuf {
         ".{}.{}.{}.tmp-codexhub",
         path.file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("config"),
+            .unwrap_or("file"),
         std::process::id(),
         timestamp_millis()
     ))
@@ -66,7 +59,7 @@ fn lock_path(path: &Path) -> PathBuf {
         "{}.lock",
         path.file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("config")
+            .unwrap_or("file")
     ))
 }
 
@@ -103,14 +96,17 @@ impl FileLock {
                     }
                     if started.elapsed() >= LOCK_WAIT_TIMEOUT {
                         return Err(format!(
-                            "timed out waiting for config lock {}",
+                            "timed out waiting for file lock {}",
                             path.display()
                         ));
                     }
                     thread::sleep(LOCK_RETRY_DELAY);
                 }
                 Err(error) => {
-                    return Err(format!("failed to create config lock {}: {error}", path.display()))
+                    return Err(format!(
+                        "failed to create file lock {}: {error}",
+                        path.display()
+                    ))
                 }
             }
         }
@@ -172,6 +168,18 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
         assert_eq!(fs::read_to_string(&stale_temp).unwrap(), "stale-temp");
+    }
+
+    #[test]
+    fn write_text_atomic_overwrites_existing_target() {
+        let root = test_root("overwrite-existing");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("usage-cache.json");
+        fs::write(&target, "old").unwrap();
+
+        write_text_atomic(&target, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
     }
 
     #[test]
