@@ -1946,7 +1946,9 @@ test("background history repair can reuse the connection toast", async () => {
   assert.match(repair, /toastId\?: string/);
   assert.match(repair, /prefix\?: string/);
   assert.match(repair, /const activeToastId = toastId \?\? showToast\(t\("settings\.repairingHistoryBucket"\), "loading"\)/);
-  assert.match(repair, /await api\.syncHistory\(targetProvider\)/);
+  assert.match(repair, /await api\.reconcileAfterRouteSwitch\(targetProvider\)/);
+  assert.match(repair, /result\.status === "restart_required"/);
+  assert.match(repair, /result\.codex_restarted/);
   assert.match(repair, /updateToast\(activeToastId,[\s\S]*text: prefix \? `\$\{prefix\}; \$\{message\}` : message,[\s\S]*tone: "success"/);
   assert.match(repair, /t\("providers\.historyRepairFailed", \{ message: messageFromError\(err\) \}\)/);
   assert.match(repair, /updateToast\(activeToastId,[\s\S]*t\("providers\.historyRepairFailed", \{ message: messageFromError\(err\) \}\)[\s\S]*tone: "error"/);
@@ -2094,6 +2096,19 @@ test("settings drawer reports the backend sync result", async () => {
   assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);
   assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) => call<string>\("restore_official_history_from_unified"\)/);
   assert.doesNotMatch(drawerSource, /History sync requested/);
+});
+
+test("CodexHub route switches restart Codex so the new model catalog is loaded", async () => {
+  const [providersSource, tauriSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+  ]);
+
+  assert.match(tauriSource, /reconcileAfterRouteSwitch/);
+  assert.match(tauriSource, /"reconcile_after_route_switch"/);
+  assert.match(providersSource, /api\.reconcileAfterRouteSwitch\(targetProvider\)/);
+  assert.match(providersSource, /result\.codex_restarted/);
+  assert.match(providersSource, /codexRestartedForRoute/);
 });
 
 test("settings drawer keeps language immediate and protects unsaved drafts", async () => {

@@ -273,6 +273,10 @@ export const api = {
     call<Model>("save_model_metadata_override", { model }),
   syncHistory: (targetProvider?: string) =>
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
+  reconcileAfterRouteSwitch: (targetProvider?: string) =>
+    call<UnifiedHistoryResult>("reconcile_after_route_switch", {
+      targetProvider: targetProvider ?? null,
+    }),
   migrateOfficialHistoryToUnified: () => call<string>("migrate_official_history_to_unified"),
   restoreOfficialHistoryFromUnified: () => call<string>("restore_official_history_from_unified"),
   preflightUnifiedHistory: (requestRestart = false, targetUnified?: boolean) =>

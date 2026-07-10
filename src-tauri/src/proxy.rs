@@ -1743,7 +1743,7 @@ time.sleep(10)
         let started_at = Instant::now();
         let error = start_with_paths_and_timing(
             &paths,
-            Duration::from_millis(75),
+            Duration::from_millis(750),
             Duration::from_millis(5),
             &|_| Ok(None),
         )

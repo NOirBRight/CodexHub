@@ -520,6 +520,16 @@ async fn sync_history(target_provider: Option<String>) -> Result<String, String>
 }
 
 #[tauri::command]
+async fn reconcile_after_route_switch(
+    target_provider: Option<String>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    run_blocking("reconcile_after_route_switch", move || {
+        history::reconcile_after_route_switch(target_provider.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn migrate_official_history_to_unified() -> Result<String, String> {
     run_blocking("migrate_official_history_to_unified", || {
         history::migrate_official_history_to_unified()
@@ -608,10 +618,19 @@ fn run_tray_action(app: &AppHandle, id: &str) {
     match id {
         TRAY_SHOW => show_main_window(app),
         TRAY_CONNECT_OFFICIAL => {
-            let _ = config::switch_mode("official", false);
+            if config::switch_mode("official", false).is_ok() {
+                let target = config::get_settings()
+                    .ok()
+                    .filter(|settings| !settings.unified_codex_history)
+                    .map(|_| "openai")
+                    .unwrap_or("custom");
+                let _ = history::reconcile_after_route_switch(Some(target));
+            }
         }
         TRAY_CONNECT_HUB => {
-            let _ = config::switch_mode("custom", false);
+            if config::switch_mode("custom", false).is_ok() {
+                let _ = history::reconcile_after_route_switch(Some("custom"));
+            }
         }
         TRAY_START_GATEWAY => {
             let _ = proxy::start();
@@ -824,6 +843,7 @@ fn run_gui() {
             list_model_metadata,
             save_model_metadata_override,
             sync_history,
+            reconcile_after_route_switch,
             migrate_official_history_to_unified,
             restore_official_history_from_unified,
             preflight_unified_history,

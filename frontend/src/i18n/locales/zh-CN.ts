@@ -324,6 +324,8 @@ const zhCN = {
     gatewayFacingMetadata: "面向 Gateway 的模型元数据",
     gatewayFacingModelName: "面向 Gateway 的模型名称和限制",
     historyRepairFailed: "历史修复失败：{{message}}",
+    codexRestartedForRoute: "已重启 Codex App，以加载新的路由和模型目录",
+    historyAlreadyClean: "历史桶已经是干净状态",
     hoursShort: "小时",
     includeOfficialModels: "包含官方模型",
     includingOfficialModels: "正在包含官方模型...",

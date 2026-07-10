@@ -1019,7 +1019,21 @@ function ProvidersPageImpl({
       tone: "loading",
     });
     try {
-      const message = await api.syncHistory(targetProvider);
+      const result = await api.reconcileAfterRouteSwitch(targetProvider);
+      if (result.status === "restart_required") {
+        throw new Error(t("settings.historyManualExitRequired"));
+      }
+      if (result.status === "conflict") {
+        throw new Error(result.error ?? result.reason ?? t("settings.historyProviderConflict"));
+      }
+      const message = result.status === "repaired"
+        ? t("settings.historyStartupRepaired", {
+            rows: result.changed_rows,
+            files: result.changed_files,
+          })
+        : result.codex_restarted
+          ? t("providers.codexRestartedForRoute")
+          : t("providers.historyAlreadyClean");
       updateToast(activeToastId, {
         action: null,
         text: prefix ? `${prefix}; ${message}` : message,

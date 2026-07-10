@@ -487,6 +487,16 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .map(ToOwned::to_owned);
             to_value(history::sync_history(target_provider.as_deref()))
         }
+        "reconcile_after_route_switch" => {
+            let target_provider = request
+                .args
+                .get("targetProvider")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            to_value(history::reconcile_after_route_switch(
+                target_provider.as_deref(),
+            ))
+        }
         "migrate_official_history_to_unified" => {
             to_value(history::migrate_official_history_to_unified())
         }

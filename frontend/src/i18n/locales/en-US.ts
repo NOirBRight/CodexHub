@@ -324,6 +324,8 @@ const enUS = {
     gatewayFacingMetadata: "Gateway-facing model metadata",
     gatewayFacingModelName: "Gateway-facing model name and limits",
     historyRepairFailed: "History repair failed: {{message}}",
+    codexRestartedForRoute: "Codex App restarted to load the new route and model catalog",
+    historyAlreadyClean: "History bucket is already clean",
     hoursShort: "h",
     includeOfficialModels: "Include official models",
     includingOfficialModels: "Including official models...",

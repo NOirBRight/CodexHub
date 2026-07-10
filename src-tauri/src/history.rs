@@ -620,19 +620,69 @@ impl CodexAppController for SystemCodexAppController {
 }
 
 pub fn sync_history(target_provider: Option<&str>) -> Result<String, String> {
-    let target_unified = match target_provider {
-        None | Some("custom") => true,
-        Some("openai") => false,
-        Some(value) => {
-            return Err(format!(
-                "unsupported history repair target: {value}; expected custom or openai"
-            ))
-        }
-    };
+    let target_unified = target_unified_from_provider(target_provider)?;
     legacy_reconcile_message(
         preflight_unified_history(true, Some(target_unified))?,
         if target_unified { "custom" } else { "openai" },
     )
+}
+
+pub fn reconcile_after_route_switch(
+    target_provider: Option<&str>,
+) -> Result<UnifiedHistoryResult, String> {
+    let target_unified = target_unified_from_provider(target_provider)?;
+    let paths = ConfigPaths::runtime()?;
+    let python = config::find_python();
+    let runner = ProcessCommandRunner;
+    let controller = SystemCodexAppController;
+    reconcile_after_route_switch_with_paths(
+        HistoryBucketTarget::from_unified(target_unified),
+        &paths,
+        &python,
+        &runner,
+        &controller,
+    )
+}
+
+fn target_unified_from_provider(target_provider: Option<&str>) -> Result<bool, String> {
+    match target_provider {
+        None | Some("custom") => Ok(true),
+        Some("openai") => Ok(false),
+        Some(value) => Err(format!(
+            "unsupported history repair target: {value}; expected custom or openai"
+        )),
+    }
+}
+
+fn reconcile_after_route_switch_with_paths(
+    target: HistoryBucketTarget,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+    controller: &dyn CodexAppController,
+) -> Result<UnifiedHistoryResult, String> {
+    let mut result = preflight_unified_history_with_paths(
+        PreflightRequest {
+            target: PreflightTarget::Explicit(target),
+            request_restart: true,
+        },
+        paths,
+        python,
+        runner,
+        controller,
+    )?;
+    if result.status != UnifiedHistoryStatus::Clean || !controller.is_running()? {
+        return Ok(result);
+    }
+    if !controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)? {
+        return Ok(UnifiedHistoryResult::pending(
+            UnifiedHistoryStatus::RestartRequired,
+            "graceful_close_failed",
+        ));
+    }
+    controller.launch()?;
+    result.codex_restarted = true;
+    Ok(result)
 }
 
 fn legacy_reconcile_message(
@@ -640,9 +690,11 @@ fn legacy_reconcile_message(
     target_provider: &str,
 ) -> Result<String, String> {
     match result.status {
-        UnifiedHistoryStatus::Clean => Ok(format!(
-            "History bucket is already clean for {target_provider}"
-        )),
+        UnifiedHistoryStatus::Clean => Ok(if result.codex_restarted {
+            format!("History bucket is already clean for {target_provider}; Codex App restarted to load the new route")
+        } else {
+            format!("History bucket is already clean for {target_provider}")
+        }),
         UnifiedHistoryStatus::Repaired => Ok(format!(
             "History bucket repair completed for {target_provider}; changed rows: {}; changed files: {}; backup root: {}",
             result.changed_rows,
@@ -815,9 +867,9 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 mod tests {
     use super::{
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
-        restore_official_history_from_unified_with_paths, sync_history_with_paths,
-        CodexAppController, HistoryBucketTarget, PreflightRequest, PreflightTarget,
-        UnifiedHistoryStatus, GRACEFUL_CLOSE_TIMEOUT_SECONDS,
+        reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
+        sync_history_with_paths, CodexAppController, HistoryBucketTarget, PreflightRequest,
+        PreflightTarget, UnifiedHistoryStatus, GRACEFUL_CLOSE_TIMEOUT_SECONDS,
     };
     use crate::config::{CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::{Cell, RefCell};
@@ -853,6 +905,32 @@ mod tests {
         assert_eq!(runner.commands.borrow().len(), 2);
         assert_eq!(controller.close_calls.get(), 0);
         assert!(!paths.proxy_dir().join("migrations").exists());
+    }
+
+    #[test]
+    fn route_switch_restarts_running_codex_even_when_history_is_clean() {
+        let root = temp_root("route-switch-clean");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"clean"}"#,
+            r#"{"status":"clean","dirty_state_rows":0,"dirty_jsonl_files":0}"#,
+        ]);
+        let controller = RecordingCodexController::running();
+
+        let result = reconcile_after_route_switch_with_paths(
+            HistoryBucketTarget::Unified,
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("route switch reconciliation");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Clean);
+        assert!(result.codex_restarted);
+        assert_eq!(controller.close_calls.get(), 1);
+        assert_eq!(controller.launch_calls.get(), 1);
+        assert_eq!(runner.commands.borrow().len(), 2);
     }
 
     #[test]
