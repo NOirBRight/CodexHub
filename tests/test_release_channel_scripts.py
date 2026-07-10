@@ -24,6 +24,14 @@ def test_beta_portable_asset_prefix_is_distinct():
     assert flavors["beta"]["releaseAssetPrefix"] == "CodexHubBeta"
 
 
+def test_flavor_manifest_separates_beta_runtime_from_codex_target():
+    flavors = json.loads((ROOT / "config" / "build-flavors.json").read_text(encoding="utf-8"))
+    assert flavors["stable"]["defaultCodexHome"] == ".codex"
+    assert flavors["stable"]["codexTargetHome"] == ".codex"
+    assert flavors["beta"]["defaultCodexHome"] == ".codexhub-beta"
+    assert flavors["beta"]["codexTargetHome"] == ".codex"
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
