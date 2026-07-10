@@ -1956,6 +1956,35 @@ test("official refresh action is placed in the Models toolbar", async () => {
   assert.match(modelSection, /t\("common\.refresh"\)/);
 });
 
+test("official refresh preserves the unsaved draft order and appends new models deterministically", async () => {
+  const [providersSource, settingsSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(settingsLibPath, "utf8"),
+  ]);
+  const refresh = providersSource.match(/async function refreshOfficialModels[\s\S]*?async function deleteProvider/)?.[0] ?? "";
+  const orderHelper = providersSource.match(/function refreshedOfficialModelOrder[\s\S]*?^}/m)?.[0] ?? "";
+  const sortKeys = providersSource.match(/function officialModelSortKeys[\s\S]*?^}/m)?.[0] ?? "";
+  const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    `${normalizeSource}\n${sortKeys}\n${orderHelper}\nexport { refreshedOfficialModelOrder };`,
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { refreshedOfficialModelOrder } = await import(moduleUrl);
+
+  assert.match(refresh, /refreshedOfficialModelOrder\(officialModelOrderDraft, refreshed\)/);
+  assert.match(refresh, /setOfficialModelOrderDraft\(nextOrder\)/);
+  assert.match(refresh, /sortOfficialModels\(refreshed, nextOrder\)/);
+  assert.doesNotMatch(refresh, /settingsDraft\?\.official_model_sort_order/);
+  assert.deepEqual(
+    refreshedOfficialModelOrder(
+      ["gpt-b", "gpt-removed", "gpt-a"],
+      [{ id: "gpt-a" }, { id: "gpt-new-y" }, { id: "gpt-b" }, { id: "gpt-new-x" }],
+    ),
+    ["gpt-b", "gpt-a", "gpt-new-y", "gpt-new-x"],
+  );
+});
+
 test("official model list exposes the same drag sorting as provider model lists", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";

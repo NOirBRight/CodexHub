@@ -919,13 +919,12 @@ def official_model_disable_key(model_id: str) -> str | None:
 
 def known_official_model_ids() -> set[str]:
     known = set(load_policy(POLICY_PATH).official_models)
-    for path in official_seed_catalog_paths():
-        for model in load_catalog_models(path):
-            slug = canonical_model_id(str(model.get("slug", "")))
-            if slug.startswith("openai/gpt-"):
-                slug = slug.removeprefix("openai/")
-            if slug.startswith("gpt-"):
-                known.add(slug)
+    for model in load_catalog_models(RUNTIME_OFFICIAL_SEED_PATH):
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if slug.startswith("openai/gpt-"):
+            slug = slug.removeprefix("openai/")
+        if slug.startswith("gpt-"):
+            known.add(slug)
     return known
 
 

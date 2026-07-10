@@ -226,3 +226,23 @@ After the fixes:
 - Frontend production build: passed.
 
 The fixes preserve unsaved official-model drafts across unrelated settings snapshots, use exact enabled-state OR semantics, trust only static policy and the current App CLI official cache for legacy aliases, preserve existing raw App fields without injecting absent modality/tier/default fields, and prefer bare App records independently of duplicate order while retaining the earliest list position.
+
+## Re-review fix verification
+
+Four focused regression tests reproduced the re-review findings before implementation:
+
+- Rust seed output retained a legacy-prefixed raw `slug`.
+- Python alias trust accepted a forged model found only in the bundled seed.
+- Gateway exported an alias group when every source record was disabled.
+- Official refresh replaced the unsaved draft order with persisted settings order; the strengthened contract also proved missing/new IDs were not reconciled into the draft.
+
+GREEN verification:
+
+- Python catalog identity/trust coverage: `3 passed, 5 subtests passed`.
+- Rust subscription seed coverage: `3 passed`.
+- Rust official Gateway coverage: `4 passed`.
+- Focused UI draft/merge/refresh contracts: `3 passed`.
+- Frontend production build: passed.
+- `git diff --check`: passed.
+
+The runtime seed now always emits the canonical bare `slug`; Python dynamic alias authority comes only from the current App CLI cache; Gateway alias groups export only when enabled OR is true; and refresh retains still-present draft IDs, drops disappeared IDs, then appends newly discovered IDs in refresh order before updating both the draft and visual list.

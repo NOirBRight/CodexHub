@@ -1133,7 +1133,9 @@ function ProvidersPageImpl({
     const toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
-      setOfficialModels(sortOfficialModels(refreshed, settingsDraft?.official_model_sort_order ?? []));
+      const nextOrder = refreshedOfficialModelOrder(officialModelOrderDraft, refreshed);
+      setOfficialModelOrderDraft(nextOrder);
+      setOfficialModels(sortOfficialModels(refreshed, nextOrder));
       const syncResult = await updateGatewayAfterCatalog(undefined, toastId);
       const toastMessage = catalogSyncToastMessage(t("providers.officialModelsRefreshed"), syncResult);
       if (syncResult?.failed) {
@@ -4005,6 +4007,24 @@ function sortOfficialModels(models: Model[], sortOrder: string[]) {
     }
     return (left.sort_order ?? Number.MAX_SAFE_INTEGER) - (right.sort_order ?? Number.MAX_SAFE_INTEGER);
   });
+}
+
+function refreshedOfficialModelOrder(currentOrder: string[], refreshedModels: Model[]) {
+  const refreshedKeySets = refreshedModels.map((model) => new Set(officialModelSortKeys(model.id)));
+  const nextOrder = currentOrder.filter((id) => {
+    const keys = officialModelSortKeys(id);
+    return refreshedKeySets.some((refreshedKeys) => keys.some((key) => refreshedKeys.has(key)));
+  });
+  const seen = new Set(nextOrder.flatMap(officialModelSortKeys));
+  for (const model of refreshedModels) {
+    const keys = officialModelSortKeys(model.id);
+    if (keys.some((key) => seen.has(key))) {
+      continue;
+    }
+    nextOrder.push(model.id);
+    keys.forEach((key) => seen.add(key));
+  }
+  return nextOrder;
 }
 
 function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {

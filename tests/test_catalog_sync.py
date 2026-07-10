@@ -232,6 +232,32 @@ class CatalogSyncTests(unittest.TestCase):
                     vector["expected"],
                 )
 
+    def test_bundled_seed_does_not_authorize_stale_official_aliases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_seed = root / "runtime.json"
+            bundled_seed = root / "bundled.json"
+            runtime_seed.write_text(
+                json.dumps({"models": [{"slug": "gpt-5.6-current"}]}),
+                encoding="utf-8",
+            )
+            bundled_seed.write_text(
+                json.dumps({"models": [{"slug": "gpt-5.6-stale"}]}),
+                encoding="utf-8",
+            )
+            with (
+                patch("catalog_sync.load_policy", return_value=self.policy),
+                patch("catalog_sync.RUNTIME_OFFICIAL_SEED_PATH", runtime_seed),
+                patch(
+                    "catalog_sync.official_seed_catalog_paths",
+                    return_value=[runtime_seed, bundled_seed],
+                ),
+            ):
+                known = catalog_sync.known_official_model_ids()
+
+        self.assertIn("gpt-5.6-current", known)
+        self.assertNotIn("gpt-5.6-stale", known)
+
     def test_official_catalog_preserves_app_cli_metadata_without_generic_defaults(self):
         official = [
             {

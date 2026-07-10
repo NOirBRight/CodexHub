@@ -750,9 +750,7 @@ fn write_official_subscription_seed(
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
-    payload
-        .entry("slug".to_string())
-        .or_insert_with(|| json!(model.slug));
+    payload.insert("slug".to_string(), json!(model.slug));
     payload
         .entry("display_name".to_string())
         .or_insert_with(|| json!(official_short_display_name(&model.display_name)));
@@ -2293,6 +2291,23 @@ mod tests {
         assert!(!seed.contains_key("additional_speed_tiers"));
         assert!(!seed.contains_key("service_tiers"));
         assert!(!seed.contains_key("is_default"));
+    }
+
+    #[test]
+    fn subscription_seed_always_canonicalizes_legacy_only_slug() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "slug": "openai/gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol"
+                }
+            ]
+        }))
+        .expect("legacy-only subscription model");
+
+        let seed = super::official_subscription_seed_model(&subscription_models[0]);
+
+        assert_eq!(seed["slug"], "gpt-5.6-sol");
     }
 
     #[test]

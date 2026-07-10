@@ -1561,13 +1561,18 @@ fn official_models_from_metadata(
                 let mut models = Vec::<GatewayModel>::new();
                 let mut positions = HashMap::<String, usize>::new();
                 let mut bare_sources = HashMap::<String, bool>::new();
+                let mut enabled_by_id = HashMap::<String, bool>::new();
                 for model in source_models {
                     let source_is_bare = !model.id.trim().starts_with("openai/");
+                    let source_enabled = model.enabled;
                     let Some(gateway_model) = official_gateway_model_from_metadata(settings, model)
                     else {
                         continue;
                     };
                     if let Some(position) = positions.get(&gateway_model.id).copied() {
+                        enabled_by_id
+                            .entry(gateway_model.id.clone())
+                            .and_modify(|enabled| *enabled = *enabled || source_enabled);
                         let existing_is_bare = bare_sources
                             .get(&gateway_model.id)
                             .copied()
@@ -1582,8 +1587,10 @@ fn official_models_from_metadata(
                     let id = gateway_model.id.clone();
                     positions.insert(id.clone(), models.len());
                     bare_sources.insert(id, source_is_bare);
+                    enabled_by_id.insert(gateway_model.id.clone(), source_enabled);
                     models.push(gateway_model);
                 }
+                models.retain(|model| enabled_by_id.get(&model.id).copied().unwrap_or(true));
                 models
             }
             None => fallback_official_gateway_models(settings),
@@ -6896,6 +6903,31 @@ mod tests {
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
         assert_eq!(models[0].context_window, 400_000);
+    }
+
+    #[test]
+    fn official_gateway_alias_merge_exports_only_when_any_record_is_enabled() {
+        let merged = |legacy_enabled, bare_enabled| {
+            official_models_from_metadata(
+                &Settings::default(),
+                Some(vec![
+                    Model {
+                        id: "openai/gpt-5.6-sol".to_string(),
+                        enabled: legacy_enabled,
+                        ..Model::default()
+                    },
+                    Model {
+                        id: "gpt-5.6-sol".to_string(),
+                        enabled: bare_enabled,
+                        ..Model::default()
+                    },
+                ]),
+            )
+        };
+
+        assert!(merged(false, false).is_empty());
+        assert_eq!(merged(false, true)[0].id, "gpt-5.6-sol");
+        assert_eq!(merged(true, false)[0].id, "gpt-5.6-sol");
     }
 
     #[test]
