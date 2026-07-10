@@ -2,7 +2,7 @@ param(
     [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
     [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot '..') 'output\cli-tool-exposure-smoke'),
     [string]$OfficialDirectModel = 'gpt-5.5',
-    [string]$OfficialProxyModel = 'openai/gpt-5.5',
+    [string]$OfficialProxyModel = 'gpt-5.5',
     [string]$ThirdPartyModel = 'ollama-cloud/glm-5.2',
     [string]$ProxyBaseUrl = '',
     [string[]]$CaseName = @(),
