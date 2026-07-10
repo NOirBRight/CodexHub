@@ -107,6 +107,7 @@ enum CloseOutcome {
     Released,
     CloseTimedOut,
     BackgroundProcessesRemain,
+    LockedFilesRemain,
 }
 
 impl CloseOutcome {
@@ -115,16 +116,25 @@ impl CloseOutcome {
             Self::Released => None,
             Self::CloseTimedOut => Some("graceful_close_failed"),
             Self::BackgroundProcessesRemain => Some("background_processes_remain"),
+            Self::LockedFilesRemain => Some("codex_files_locked"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct CodexProcessSnapshot {
     process_id: u32,
     process_name: String,
     executable_path: PathBuf,
     main_window_handle: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+struct WindowsCodexDiscovery {
+    package_install_path: Option<PathBuf>,
+    #[serde(default)]
+    processes: Vec<CodexProcessSnapshot>,
 }
 
 impl CodexProcessSnapshot {
@@ -348,20 +358,18 @@ fn preflight_unified_history_with_paths(
     }
 
     let was_running = controller.is_running()?;
-    if was_running && !request.request_restart {
+    if !request.request_restart {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
-            "codex_running",
+            if was_running { "codex_running" } else { "repair_required" },
         ));
     }
-    if was_running {
-        let close_outcome = controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)?;
-        if let Some(reason) = close_outcome.restart_reason() {
+    let close_outcome = controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)?;
+    if let Some(reason) = close_outcome.restart_reason() {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
-                reason,
+            reason,
         ));
-        }
     }
 
     fs::create_dir_all(paths.proxy_dir()).map_err(|error| {
@@ -371,6 +379,7 @@ fn preflight_unified_history_with_paths(
         )
     })?;
     let backup_root = history_backup_root(paths, "history-startup-repair");
+    let config_existed_before_repair = paths.codex_config_path().exists();
     let repair_result = repair_unified_history(
         HistoryRepairPlan {
             target,
@@ -404,7 +413,37 @@ fn preflight_unified_history_with_paths(
     };
 
     if was_running {
-        controller.launch()?;
+        if let Err(launch_error) = controller.launch() {
+            let receipt_path = result.receipt_path.as_ref().map(PathBuf::from);
+            let rollback_error = rollback_applied_repair(
+                AppliedRepairRollback {
+                    repair_config,
+                    repair_bucket,
+                    backup_root: &backup_root,
+                    config_snapshot: &backup_root.join("config.toml.before-repair"),
+                    config_existed: config_existed_before_repair,
+                },
+                paths,
+                python,
+                runner,
+            )
+            .err();
+            if let Some(receipt_path) = receipt_path {
+                if receipt_path.exists() {
+                    let _ = fs::remove_file(receipt_path);
+                }
+            }
+            result.status = UnifiedHistoryStatus::Conflict;
+            result.reason = Some("relaunch_failed".to_string());
+            result.receipt_path = None;
+            result.error = Some(match rollback_error {
+                Some(rollback_error) => format!(
+                    "failed to relaunch Codex App: {launch_error}; repair rollback also failed: {rollback_error}"
+                ),
+                None => format!("failed to relaunch Codex App: {launch_error}"),
+            });
+            return Ok(result);
+        }
         result.codex_restarted = true;
     }
     Ok(result)
@@ -644,7 +683,20 @@ fn parse_key_value_output(output: &str) -> std::collections::HashMap<String, usi
 impl CodexAppController for SystemCodexAppController {
     fn is_running(&self) -> Result<bool, String> {
         let output = run_powershell(&windows_codex_discovery_script())?;
-        Ok(output.code == Some(0) && output.stdout.trim() == "running")
+        if output.code != Some(0) {
+            return Err(format!(
+                "failed to discover Codex App processes: {}",
+                output.stderr.trim()
+            ));
+        }
+        let discovery: WindowsCodexDiscovery = serde_json::from_str(output.stdout.trim())
+            .map_err(|error| format!("Codex App process discovery returned invalid JSON: {error}"))?;
+        let Some(package_install_path) = discovery.package_install_path else {
+            return Ok(false);
+        };
+        Ok(!classify_codex_processes(&package_install_path, &discovery.processes)
+            .relevant_process_ids
+            .is_empty())
     }
 
     fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String> {
@@ -654,6 +706,7 @@ impl CodexAppController for SystemCodexAppController {
             Some(0) => Ok(CloseOutcome::Released),
             Some(2) => Ok(CloseOutcome::CloseTimedOut),
             Some(3) => Ok(CloseOutcome::BackgroundProcessesRemain),
+            Some(4) => Ok(CloseOutcome::LockedFilesRemain),
             _ => Err(format!("failed to close Codex App gracefully: {}", output.stderr.trim())),
         }
     }
@@ -674,13 +727,13 @@ impl CodexAppController for SystemCodexAppController {
 
 #[cfg(target_os = "windows")]
 fn windows_codex_discovery_script() -> String {
-    "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) { Write-Output 'stopped'; exit 0 }; $root=$package.InstallLocation.TrimEnd('\\'); $relevant=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }); if ($relevant) { Write-Output 'running' } else { Write-Output 'stopped' }".to_string()
+    "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) { @{ package_install_path=$null; processes=@() } | ConvertTo-Json -Compress -Depth 3; exit 0 }; $root=$package.InstallLocation.TrimEnd('\\'); $processes=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { $process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; @{ process_id=[uint32]$_.ProcessId; process_name=[string]$_.Name; executable_path=[string]$_.ExecutablePath; main_window_handle=if ($process) { [uint64]$process.MainWindowHandle } else { [uint64]0 } } }); @{ package_install_path=$root; processes=$processes } | ConvertTo-Json -Compress -Depth 3".to_string()
 }
 
 #[cfg(target_os = "windows")]
 fn windows_codex_close_script(timeout_seconds: u64) -> String {
     format!(
-        "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) {{ exit 0 }}; $root=$package.InstallLocation.TrimEnd('\\'); function Relevant {{ @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; $relevant=@(Relevant); if (-not $relevant) {{ exit 0 }}; $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }}; $deadline=(Get-Date).AddSeconds({timeout_seconds}); do {{ Start-Sleep -Milliseconds 200; $relevant=@(Relevant); if (-not $relevant) {{ exit 0 }} }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} else {{ exit 3 }}"
+        "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; $root=if ($package) {{ $package.InstallLocation.TrimEnd('\\') }} else {{ $null }}; $codex=Join-Path $env:USERPROFILE '.codex'; function Relevant {{ if (-not $root) {{ return @() }}; @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; function Locked {{ if (-not (Test-Path -LiteralPath $codex)) {{ return $false }}; $files=@(Get-ChildItem -LiteralPath $codex -File -Recurse -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq 'config.toml' -or $_.Name -like 'state*.sqlite*' -or $_.Extension -eq '.jsonl' }}); foreach ($file in $files) {{ try {{ $stream=[System.IO.File]::Open($file.FullName,'Open','Read','None'); $stream.Dispose() }} catch {{ return $true }} }}; return $false }}; $relevant=@(Relevant); if ($relevant) {{ $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }} }}; $deadline=(Get-Date).AddSeconds({timeout_seconds}); do {{ $relevant=@(Relevant); $locked=Locked; if (-not $relevant -and -not $locked) {{ exit 0 }}; Start-Sleep -Milliseconds 200 }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} elseif ($relevant) {{ exit 3 }} else {{ exit 4 }}"
     )
 }
 
@@ -1047,6 +1100,34 @@ mod tests {
     }
 
     #[test]
+    fn startup_preflight_is_read_only_while_codex_is_stopped() {
+        let root = temp_root("preflight-stopped");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"needs_repair"}"#,
+            r#"{"status":"needs_repair","dirty_state_rows":2,"dirty_state_files":1,"dirty_jsonl_files":1}"#,
+        ]);
+        let controller = RecordingCodexController::stopped();
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Startup(HistoryBucketTarget::Unified),
+                request_restart: false,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("preflight result");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::RestartRequired);
+        assert_eq!(result.reason.as_deref(), Some("repair_required"));
+        assert_eq!(runner.commands.borrow().len(), 2);
+        assert!(!paths.proxy_dir().exists());
+    }
+
+    #[test]
     fn route_switch_restarts_running_codex_even_when_history_is_clean() {
         let root = temp_root("route-switch-clean");
         let paths = test_paths(&root);
@@ -1132,7 +1213,37 @@ mod tests {
     }
 
     #[test]
-    fn preflight_repairs_config_and_history_then_writes_receipt() {
+    fn requested_repair_returns_locked_files_reason_without_writing() {
+        let root = temp_root("preflight-locked-files");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"clean"}"#,
+            r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_jsonl_files":0}"#,
+        ]);
+        let controller = RecordingCodexController::running_with_close_outcome(
+            CloseOutcome::LockedFilesRemain,
+        );
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("preflight result");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::RestartRequired);
+        assert_eq!(result.reason.as_deref(), Some("codex_files_locked"));
+        assert_eq!(runner.commands.borrow().len(), 2);
+        assert!(!paths.proxy_dir().exists());
+    }
+
+    #[test]
+    fn requested_preflight_repairs_config_and_history_then_writes_receipt() {
         let root = temp_root("preflight-repair");
         let paths = test_paths(&root);
         let runner = SequenceRunner::successful([
@@ -1145,8 +1256,8 @@ mod tests {
 
         let result = preflight_unified_history_with_paths(
             PreflightRequest {
-                target: PreflightTarget::Startup(HistoryBucketTarget::Unified),
-                request_restart: false,
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
             },
             &paths,
             Path::new("python-test"),
@@ -1380,6 +1491,44 @@ mod tests {
     }
 
     #[test]
+    fn relaunch_failure_returns_typed_error_and_rolls_repair_back() {
+        let root = temp_root("preflight-relaunch-failure");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.codex_dir()).unwrap();
+        fs::write(paths.codex_config_path(), "model_provider = \"openai\"\n").unwrap();
+        let runner = SequenceRunner::successful([
+            r#"{"status":"needs_repair"}"#,
+            r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_state_files":1,"dirty_jsonl_files":1}"#,
+            "unified_history=injected\n",
+            "status=completed\nstate_rows=1\njsonl_applied=1\n",
+            "restored_state_backups=1\nrestored_jsonl_backups=1\n",
+        ]);
+        let controller = RecordingCodexController::running_with_launch_error("launch failed");
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("typed relaunch failure");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Conflict);
+        assert_eq!(result.reason.as_deref(), Some("relaunch_failed"));
+        assert!(result.error.as_deref().is_some_and(|error| error.contains("launch failed")));
+        assert_eq!(
+            fs::read_to_string(paths.codex_config_path()).unwrap(),
+            "model_provider = \"openai\"\n"
+        );
+        assert!(!paths.proxy_dir().join("migrations").join("unified-history-last.json").exists());
+        assert_contains_sequence(&runner.commands.borrow()[4].args, &["rollback-repair"]);
+    }
+
+    #[test]
     fn sync_history_runs_unified_repair_and_returns_stdout_context() {
         let root = temp_root("history-default-custom");
         let codex_home = root.join("codex-home");
@@ -1593,6 +1742,7 @@ mod tests {
         close_outcome: CloseOutcome,
         close_calls: Cell<usize>,
         launch_calls: Cell<usize>,
+        launch_error: Option<String>,
     }
 
     impl RecordingCodexController {
@@ -1614,6 +1764,7 @@ mod tests {
                 close_outcome,
                 close_calls: Cell::new(0),
                 launch_calls: Cell::new(0),
+                launch_error: None,
             }
         }
 
@@ -1623,7 +1774,14 @@ mod tests {
                 close_outcome: CloseOutcome::Released,
                 close_calls: Cell::new(0),
                 launch_calls: Cell::new(0),
+                launch_error: None,
             }
+        }
+
+        fn running_with_launch_error(error: &str) -> Self {
+            let mut controller = Self::running();
+            controller.launch_error = Some(error.to_string());
+            controller
         }
     }
 
@@ -1640,7 +1798,10 @@ mod tests {
 
         fn launch(&self) -> Result<(), String> {
             self.launch_calls.set(self.launch_calls.get() + 1);
-            Ok(())
+            match &self.launch_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
         }
     }
 
