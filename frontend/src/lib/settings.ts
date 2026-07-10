@@ -57,7 +57,7 @@ export function normalizeSettings(settings: LegacySettings | null | undefined): 
   };
 }
 
-function normalizeOfficialModelId(value: string) {
+export function normalizeOfficialModelId(value: string): string {
   value = value.trim();
   return value.startsWith("openai/gpt-") ? value.slice("openai/".length) : value;
 }
@@ -75,5 +75,6 @@ function normalizeModelIds(values: string[] | null | undefined) {
 
 function normalizeFastModelVariants(values: string[] | null | undefined) {
   const source = values?.length ? values : DEFAULT_FAST_MODEL_VARIANTS;
-  return normalizeModelIds(source).filter((value) => ALLOWED_FAST_MODEL_VARIANTS.has(value));
+  const normalized = normalizeModelIds(source).filter((value) => ALLOWED_FAST_MODEL_VARIANTS.has(value));
+  return normalized.length ? normalized : [...DEFAULT_FAST_MODEL_VARIANTS];
 }

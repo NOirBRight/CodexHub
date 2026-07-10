@@ -874,7 +874,14 @@ def load_official_model_sort_order() -> list[str]:
     value = data.get("official_model_sort_order")
     if not isinstance(value, list):
         return []
-    return [model_id for model_id in value if isinstance(model_id, str) and model_id.strip()]
+    output: list[str] = []
+    for model_id in value:
+        if not isinstance(model_id, str):
+            continue
+        normalized = normalize_official_model_id(model_id)
+        if normalized and normalized not in output:
+            output.append(normalized)
+    return output
 
 
 def load_official_disabled_models() -> list[str]:
@@ -886,8 +893,12 @@ def load_official_disabled_models() -> list[str]:
 
 
 def official_model_disable_key(model_id: str) -> str:
+    return normalize_official_model_id(model_id)
+
+
+def normalize_official_model_id(model_id: str) -> str:
     value = canonical_model_id(model_id)
-    return value.removeprefix("openai/")
+    return value.removeprefix("openai/") if value.startswith("openai/gpt-") else value
 
 
 def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:

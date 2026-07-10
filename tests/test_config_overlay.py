@@ -120,7 +120,7 @@ class ConfigOverlayTests(unittest.TestCase):
             updated = config_path.read_text(encoding="utf-8")
 
             self.assertIn(MARKER_BEGIN, updated)
-            self.assertIn('model = "openai/gpt-5.5"', updated)
+            self.assertIn('model = "gpt-5.5"', updated)
             self.assertIn('model_provider = "custom"', updated)
             self.assertIn(f"model_catalog_json = '{catalog_path.resolve()}'", updated)
             self.assertIn("[model_providers.custom]", updated)

@@ -23,7 +23,7 @@ import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToa
 import { SortableList } from "../components/SortableList";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
-import { normalizeSettings } from "../lib/settings";
+import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   AppStatus,
@@ -3341,8 +3341,7 @@ function isOfficialModelDisabled(disabledModels: string[], modelId: string) {
 }
 
 function modelIdMatches(left: string, right: string) {
-  const normalize = (value: string) => value.trim().replace(/^openai\//, "");
-  return normalize(left) === normalize(right);
+  return normalizeOfficialModelId(left) === normalizeOfficialModelId(right);
 }
 
 function withDefaultFastVariants(settings: Settings): Settings {
@@ -4009,8 +4008,8 @@ function isOfficialGatewayFastVariant(model: Model) {
 }
 
 function officialModelSortKeys(id: string) {
-  const prefix = "openai/";
-  return id.startsWith(prefix) ? [id, id.slice(prefix.length)] : [`${prefix}${id}`, id];
+  const normalized = normalizeOfficialModelId(id);
+  return [normalized, `openai/${normalized}`];
 }
 
 function uniqueModelId(models: Model[]) {

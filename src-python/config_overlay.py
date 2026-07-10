@@ -284,7 +284,7 @@ def build_overlay(catalog_value: str, owner: str) -> str:
         [
             MARKER_BEGIN,
             f"# owner = {owner}",
-            'model = "openai/gpt-5.5"',
+            'model = "gpt-5.5"',
             f'model_provider = "{PROXY_PROVIDER_ID}"',
             f"model_catalog_json = {toml_literal(catalog_value)}",
             MARKER_END,

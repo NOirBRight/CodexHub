@@ -1239,7 +1239,11 @@ test("official model settings normalize legacy OpenAI prefixes to bare ids", asy
   assert.match(settingsSource, /gateway_fast_model_variants:\s*normalizeFastModelVariants\(/);
   assert.match(settingsSource, /official_disabled_models:\s*normalizeModelIds\(/);
   assert.match(settingsSource, /official_model_sort_order:\s*normalizeModelIds\(/);
-  assert.match(providersSource, /import \{ normalizeSettings \} from "\.\.\/lib\/settings"/);
+  assert.match(
+    providersSource,
+    /import \{ normalizeOfficialModelId, normalizeSettings \} from "\.\.\/lib\/settings"/,
+  );
+  assert.match(providersSource, /return normalizeOfficialModelId\(left\) === normalizeOfficialModelId\(right\)/);
   assert.match(providersSource, /function withDefaultFastVariants\(settings: Settings\): Settings \{\s*return normalizeSettings\(settings\);\s*\}/);
   assert.doesNotMatch(providersSource, /const DEFAULT_FAST_MODEL_VARIANTS = \["openai\//);
   assert.doesNotMatch(providersSource, /const DEFAULT_OFFICIAL_MODEL_ORDER = \[\s*"openai\//);

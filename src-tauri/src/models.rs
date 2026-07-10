@@ -1530,7 +1530,11 @@ fn write_models_json(path: &Path, models: &[Model]) -> Result<(), String> {
 }
 
 fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) -> Vec<Model> {
+    for model in &mut base {
+        model.id = normalize_official_model_metadata_id(&model.id);
+    }
     for mut override_model in overrides {
+        override_model.id = normalize_official_model_metadata_id(&override_model.id);
         override_model.metadata_provenance = Some(MetadataProvenance {
             source: "user_override".to_string(),
             source_url: None,
@@ -1545,6 +1549,14 @@ fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) ->
     }
     base.sort_by(|left, right| left.id.cmp(&right.id));
     base
+}
+
+fn normalize_official_model_metadata_id(id: &str) -> String {
+    let id = id.trim();
+    id.strip_prefix("openai/")
+        .filter(|bare| bare.starts_with("gpt-"))
+        .unwrap_or(id)
+        .to_string()
 }
 
 fn merge_model_override(base: &mut Model, override_model: Model) {
@@ -1592,7 +1604,7 @@ fn merge_model_aliases(mut base: Vec<String>, overrides: Vec<String>) -> Vec<Str
 fn builtin_model_metadata() -> Vec<Model> {
     vec![
         official_priced_metadata(
-            "openai/gpt-5.5",
+            "gpt-5.5",
             "GPT-5.5",
             272_000,
             "https://developers.openai.com/api/docs/pricing",
@@ -1601,7 +1613,7 @@ fn builtin_model_metadata() -> Vec<Model> {
             22.50,
         ),
         official_priced_metadata(
-            "openai/gpt-5.4",
+            "gpt-5.4",
             "GPT-5.4",
             272_000,
             "https://developers.openai.com/api/docs/pricing",
@@ -1610,7 +1622,7 @@ fn builtin_model_metadata() -> Vec<Model> {
             11.25,
         ),
         official_priced_metadata(
-            "openai/gpt-5.4-mini",
+            "gpt-5.4-mini",
             "GPT-5.4 mini",
             272_000,
             "https://developers.openai.com/api/docs/pricing",
@@ -1618,7 +1630,7 @@ fn builtin_model_metadata() -> Vec<Model> {
             Some(0.0375),
             2.25,
         ),
-        official_metadata("openai/gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
+        official_metadata("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
         priced_metadata(
             "zai/glm-5.2",
             "GLM 5.2",
@@ -2695,8 +2707,17 @@ mod tests {
         restore_env("CODEX_HOME", previous);
         let gpt55 = models
             .iter()
-            .find(|model| model.id == "openai/gpt-5.5")
+            .find(|model| model.id == "gpt-5.5")
             .expect("gpt-5.5 metadata");
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| {
+                    model.id == "gpt-5.5" || model.id == "openai/gpt-5.5"
+                })
+                .count(),
+            1
+        );
         assert_eq!(gpt55.display_name.as_deref(), Some("Cached GPT-5.5"));
         assert_eq!(gpt55.context_window, Some(120_000));
         assert_eq!(

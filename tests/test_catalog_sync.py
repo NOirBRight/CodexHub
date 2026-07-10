@@ -807,6 +807,7 @@ class CatalogSyncTests(unittest.TestCase):
                     {
                         "official_model_sort_order": [
                             "openai/gpt-5.4",
+                            " gpt-5.4 ",
                             "gpt-5.5",
                             "",
                             123,
@@ -821,7 +822,7 @@ class CatalogSyncTests(unittest.TestCase):
                 importlib.reload(catalog_sync)
                 self.assertEqual(
                     catalog_sync.load_official_model_sort_order(),
-                    ["openai/gpt-5.4", "gpt-5.5"],
+                    ["gpt-5.4", "gpt-5.5"],
                 )
                 importlib.reload(catalog_sync)
 
