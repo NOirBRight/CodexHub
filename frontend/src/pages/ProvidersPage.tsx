@@ -982,10 +982,11 @@ function ProvidersPageImpl({
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
     let forceTakeover = false;
     if (nextMode === "custom" && appFlavor?.codex_takeover_required) {
-      const currentOwner = appFlavor.codex_target_owner ?? "unknown_external";
-      forceTakeover = window.confirm(
-        `Codex is managed by ${currentOwner}. ${appFlavor.product_name} must explicitly take over; disconnect will restore the previous owner. Continue?`,
-      );
+      const currentOwner = codexTakeoverOwnerLabel(appFlavor.codex_target_owner, tr);
+      forceTakeover = window.confirm(t("providers.betaTakeoverConfirm", {
+        current: currentOwner,
+        product: appFlavor.product_name,
+      }));
       if (!forceTakeover) {
         return;
       }
@@ -4549,7 +4550,22 @@ function shortProviderDiscoveryError(err: unknown, t: Translate) {
 function codexHubConnectionErrorMessage(err: unknown, t: Translate) {
   const message = messageFromError(err);
 
+  if (message.includes("route.takeover_required")) {
+    return t("providers.betaTakeoverRequired");
+  }
+  if (message.includes("route.owner_mismatch")) {
+    return t("providers.betaOwnerConflict");
+  }
+
   return t("providers.codexHubConnectionFailed", { message });
+}
+
+function codexTakeoverOwnerLabel(owner: AppFlavorInfo["codex_target_owner"], t: Translate) {
+  if (owner === null) return t("providers.betaTakeoverUnowned");
+  if (owner === "official") return t("common.official");
+  if (owner === "release") return t("gateway.ownerRelease");
+  if (owner === "beta") return t("gateway.ownerBeta");
+  return t("gateway.ownerExternal");
 }
 
 function codexHubConnectionSuccessMessage(mode: string, t: Translate) {
