@@ -56,6 +56,115 @@ def test_portable_uses_flavor_executable_base_name():
     assert 'Join-Path $tauriDir "target\\release\\codexhub.exe"' in script
 
 
+def _portable_fixture(tmp_path: Path, version: str) -> Path:
+    repo = tmp_path / "portable-repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / "src-tauri").mkdir()
+    (repo / "config" / "build-flavors.json").write_bytes(
+        (ROOT / "config" / "build-flavors.json").read_bytes()
+    )
+    base = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    base["version"] = version
+    (repo / "src-tauri" / "tauri.conf.json").write_text(json.dumps(base), encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "portable-tests@example.test")
+    _git(repo, "config", "user.name", "Portable Tests")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "fixture")
+    return repo
+
+
+def _portable(repo: Path, flavor: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-File",
+            str(ROOT / "scripts" / "build-windows-portable.ps1"),
+            "-Flavor",
+            flavor,
+            "-RepoRoot",
+            str(repo),
+            "-DryRun",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_portable_dry_run_validates_generated_beta_config_and_output_name(tmp_path):
+    repo = _portable_fixture(tmp_path, "0.1.5-beta.1")
+
+    result = _portable(repo, "beta")
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["flavor"] == "beta"
+    assert plan["version"] == "0.1.5-beta.1"
+    assert plan["executable"] == "CodexHubBeta.exe"
+    assert plan["portable_name"].startswith("CodexHubBeta_0.1.5-beta.1_portable_")
+    assert plan["generated_config"] == {
+        "productName": "CodexHub Beta",
+        "identifier": "com.codexhub.beta",
+        "title": "CodexHub Beta",
+        "updaterEndpoint": "https://github.com/NOirBRight/CodexHub/releases/download/beta/latest-beta.json",
+    }
+
+
+def test_portable_dry_run_rejects_beta_version_for_stable(tmp_path):
+    repo = _portable_fixture(tmp_path, "0.1.5-beta.1")
+
+    result = _portable(repo, "stable")
+
+    assert result.returncode != 0
+    assert "Stable" in result.stderr
+    assert "prerelease" in result.stderr
+
+
+def test_portable_dry_run_validates_stable_executable_name(tmp_path):
+    repo = _portable_fixture(tmp_path, "0.1.5")
+
+    result = _portable(repo, "stable")
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["executable"] == "CodexHub.exe"
+    assert plan["portable_name"].startswith("CodexHub_0.1.5_portable_")
+    assert plan["generated_config"]["productName"] == "CodexHub"
+
+
+def test_portable_dry_run_rejects_stable_version_for_beta(tmp_path):
+    repo = _portable_fixture(tmp_path, "0.1.5")
+
+    result = _portable(repo, "beta")
+
+    assert result.returncode != 0
+    assert "Beta" in result.stderr
+    assert "prerelease" in result.stderr
+
+
+def test_portable_requires_explicit_flavor(tmp_path):
+    repo = _portable_fixture(tmp_path, "0.1.5")
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NonInteractive",
+            "-NoProfile",
+            "-File",
+            str(ROOT / "scripts" / "build-windows-portable.ps1"),
+            "-RepoRoot",
+            str(repo),
+            "-DryRun",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "Flavor" in result.stderr
+
+
 def test_beta_portable_asset_prefix_is_distinct():
     flavors = json.loads((ROOT / "config" / "build-flavors.json").read_text(encoding="utf-8"))
 
