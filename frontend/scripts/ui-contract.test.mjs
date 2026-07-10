@@ -981,6 +981,17 @@ test("Codex app-server probes time out and avoid visible Windows consoles", asyn
   assert.match(modelsSource, /CODEX_APP_SERVER_MODEL_LIST_TIMEOUT/);
 });
 
+test("OpenAI primary and secondary quota names render as 5 hours and weekly", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const fiveHour = providersSource.match(/function isFiveHourUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
+  const weekly = providersSource.match(/function isWeeklyUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
+
+  assert.match(fiveHour, /\\bprimary\\b/);
+  assert.match(weekly, /\\bsecondary\\b/);
+  assert.match(providersSource, /fiveHourLimit:|"providers\.fiveHourLimit"/);
+  assert.match(providersSource, /weeklyLimit:|"providers\.weeklyLimit"/);
+});
+
 test("manual OpenAI usage refresh uses a persistent toast", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
@@ -2022,26 +2033,43 @@ test("official refresh action is placed in the Models toolbar", async () => {
   assert.match(modelSection, /t\("common\.refresh"\)/);
 });
 
-test("official refresh preserves the unsaved draft order and appends new models deterministically", async () => {
+test("startup refresh follows Codex catalog order until the user customizes it", async () => {
   const [providersSource, settingsSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
     readFile(settingsLibPath, "utf8"),
   ]);
   const refresh = providersSource.match(/async function refreshOfficialModels[\s\S]*?async function deleteProvider/)?.[0] ?? "";
+  const automaticOrder = providersSource.match(/function shouldFollowOfficialCatalogOrder[\s\S]*?^}/m)?.[0] ?? "";
   const orderHelper = providersSource.match(/function refreshedOfficialModelOrder[\s\S]*?^}/m)?.[0] ?? "";
   const sortKeys = providersSource.match(/function officialModelSortKeys[\s\S]*?^}/m)?.[0] ?? "";
   const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const legacyOrder = providersSource.match(/const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = \[[\s\S]*?\];/)?.[0] ?? "";
   const javascript = ts.transpileModule(
-    `${normalizeSource}\n${sortKeys}\n${orderHelper}\nexport { refreshedOfficialModelOrder };`,
+    `${normalizeSource}\n${legacyOrder}\n${automaticOrder}\n${sortKeys}\n${orderHelper}\nexport { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder };`,
     { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
-  const { refreshedOfficialModelOrder } = await import(moduleUrl);
+  const { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder } = await import(moduleUrl);
 
+  assert.match(providersSource, /void primeOfficialModels\(\);[\s\S]*void primeOfficialOpenAIUsage\(\);/);
+  assert.match(refresh, /shouldFollowOfficialCatalogOrder\(officialModelOrderDraft\)[\s\S]*refreshed\.map\(\(model\) => model\.id\)/);
   assert.match(refresh, /refreshedOfficialModelOrder\(officialModelOrderDraft, refreshed\)/);
   assert.match(refresh, /setOfficialModelOrderDraft\(nextOrder\)/);
   assert.match(refresh, /sortOfficialModels\(refreshed, nextOrder\)/);
-  assert.doesNotMatch(refresh, /settingsDraft\?\.official_model_sort_order/);
+  assert.equal(
+    shouldFollowOfficialCatalogOrder([
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+      "gpt-5.6-sol",
+    ]),
+    true,
+  );
+  assert.equal(
+    shouldFollowOfficialCatalogOrder(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]),
+    false,
+  );
   assert.deepEqual(
     refreshedOfficialModelOrder(
       ["gpt-b", "gpt-removed", "gpt-a"],
