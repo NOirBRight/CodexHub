@@ -2,10 +2,146 @@ use crate::config::{self, CommandRunner, ConfigPaths, ProcessCommandRunner};
 use crate::safe_file;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GRACEFUL_CLOSE_TIMEOUT_SECONDS: u64 = 10;
+const HISTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(29);
+const HISTORY_ROLLBACK_RESERVE: Duration = Duration::from_secs(5);
+static HISTORY_REPAIR_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug)]
+struct HistoryRepairGuard<'a> {
+    gate: &'a AtomicBool,
+}
+
+impl HistoryRepairGuard<'_> {
+    fn try_acquire(gate: &AtomicBool) -> Option<HistoryRepairGuard<'_>> {
+        gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| HistoryRepairGuard { gate })
+    }
+}
+
+impl Drop for HistoryRepairGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.store(false, Ordering::Release);
+    }
+}
+
+fn acquire_history_repair(
+    mutating: bool,
+    gate: &AtomicBool,
+) -> Result<Option<HistoryRepairGuard<'_>>, UnifiedHistoryResult> {
+    if !mutating {
+        return Ok(None);
+    }
+    HistoryRepairGuard::try_acquire(gate).map(Some).ok_or_else(|| {
+        UnifiedHistoryResult::pending(UnifiedHistoryStatus::Conflict, "repair_in_progress")
+    })
+}
+
+struct DeadlineCommandRunner;
+
+impl DeadlineCommandRunner {
+    fn run_until(
+        &self,
+        program: &Path,
+        args: &[String],
+        deadline: Instant,
+    ) -> Result<config::CommandOutcome, String> {
+        let mut command = Command::new(program);
+        command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        configure_history_helper_no_window(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to start {}: {error}", program.display()))?;
+        let mut stdout = child.stdout.take().expect("piped helper stdout");
+        let mut stderr = child.stderr.take().expect("piped helper stderr");
+        let stdout_reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            bytes
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        });
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("failed to wait for {}: {error}", program.display()))?
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err("history_operation_timeout: helper command exceeded deadline".to_string());
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default();
+        Ok(config::CommandOutcome {
+            code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
+    }
+}
+
+struct HistoryDeadlineRunner {
+    operation_deadline: Instant,
+}
+
+impl HistoryDeadlineRunner {
+    fn new() -> Self {
+        Self {
+            operation_deadline: Instant::now() + HISTORY_OPERATION_TIMEOUT,
+        }
+    }
+
+    fn command_deadline(&self, args: &[String]) -> Instant {
+        let rollback = args.iter().any(|arg| arg == "rollback-repair");
+        let mutating = args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "restore" | "migrate-official-to-unified" | "restore-official-from-unified"
+            )
+        });
+        if mutating && !rollback {
+            self.operation_deadline
+                .checked_sub(HISTORY_ROLLBACK_RESERVE)
+                .unwrap_or(self.operation_deadline)
+        } else {
+            self.operation_deadline
+        }
+    }
+}
+
+impl CommandRunner for HistoryDeadlineRunner {
+    fn run(&self, program: &Path, args: &[String]) -> Result<config::CommandOutcome, String> {
+        DeadlineCommandRunner.run_until(program, args, self.command_deadline(args))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn configure_history_helper_no_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_history_helper_no_window(_command: &mut Command) {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -56,16 +192,27 @@ impl UnifiedHistoryResult {
     }
 
     fn failed(error: String, backup_path: &Path) -> Self {
+        let reason = if error.contains("history_operation_timeout") {
+            "helper_timeout"
+        } else {
+            "repair_failed"
+        };
         Self {
             status: UnifiedHistoryStatus::Conflict,
             changed_rows: 0,
             changed_files: 0,
             backup_path: Some(backup_path.to_string_lossy().into_owned()),
             receipt_path: None,
-            reason: Some("repair_failed".to_string()),
+            reason: Some(reason.to_string()),
             error: Some(error),
             codex_restarted: false,
         }
+    }
+
+    fn helper_timeout(error: String) -> Self {
+        let mut result = Self::pending(UnifiedHistoryStatus::Conflict, "helper_timeout");
+        result.error = Some(error);
+        result
     }
 }
 
@@ -263,10 +410,14 @@ pub fn preflight_unified_history(
     request_restart: bool,
     target_unified: Option<bool>,
 ) -> Result<UnifiedHistoryResult, String> {
+    let _repair_guard = match acquire_history_repair(request_restart, &HISTORY_REPAIR_IN_PROGRESS) {
+        Ok(guard) => guard,
+        Err(result) => return Ok(result),
+    };
     let settings = config::get_settings()?;
     let paths = ConfigPaths::runtime()?;
     let python = config::find_python();
-    let runner = ProcessCommandRunner;
+    let runner = HistoryDeadlineRunner::new();
     let controller = SystemCodexAppController;
     preflight_unified_history_with_paths(
         PreflightRequest {
@@ -300,7 +451,7 @@ fn preflight_unified_history_with_paths(
         PreflightTarget::Startup(HistoryBucketTarget::Separated)
     );
 
-    let config_inspection: ConfigInspection = inspect_json(
+    let config_inspection: ConfigInspection = match inspect_json(
         "unified history config inspection",
         python,
         paths.config_overlay_script(),
@@ -312,8 +463,14 @@ fn preflight_unified_history_with_paths(
             target.config_name().to_string(),
         ],
         runner,
-    )?;
-    let bucket_inspection: BucketInspection = inspect_json(
+    ) {
+        Ok(inspection) => inspection,
+        Err(error) if error.contains("history_operation_timeout") => {
+            return Ok(UnifiedHistoryResult::helper_timeout(error));
+        }
+        Err(error) => return Err(error),
+    };
+    let bucket_inspection: BucketInspection = match inspect_json(
         "unified history bucket inspection",
         python,
         paths.history_overlay_script(),
@@ -334,7 +491,13 @@ fn preflight_unified_history_with_paths(
             args
         },
         runner,
-    )?;
+    ) {
+        Ok(inspection) => inspection,
+        Err(error) if error.contains("history_operation_timeout") => {
+            return Ok(UnifiedHistoryResult::helper_timeout(error));
+        }
+        Err(error) => return Err(error),
+    };
 
     if config_inspection.status == InspectionStatus::Conflict {
         return Ok(UnifiedHistoryResult::pending(
@@ -412,7 +575,7 @@ fn preflight_unified_history_with_paths(
         }
     };
 
-    if was_running {
+    if was_running || result.status == UnifiedHistoryStatus::Repaired {
         if let Err(launch_error) = controller.launch() {
             let receipt_path = result.receipt_path.as_ref().map(PathBuf::from);
             let rollback_error = rollback_applied_repair(
@@ -428,25 +591,46 @@ fn preflight_unified_history_with_paths(
                 runner,
             )
             .err();
-            if let Some(receipt_path) = receipt_path {
-                if receipt_path.exists() {
-                    let _ = fs::remove_file(receipt_path);
+            let receipt_delete_error = receipt_path.as_ref().and_then(|receipt_path| {
+                match fs::remove_file(receipt_path) {
+                    Ok(()) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(format!(
+                        "failed to delete rolled-back repair receipt: {error}"
+                    )),
                 }
-            }
-            result.status = UnifiedHistoryStatus::Conflict;
-            result.reason = Some("relaunch_failed".to_string());
-            result.receipt_path = None;
-            result.error = Some(match rollback_error {
-                Some(rollback_error) => format!(
-                    "failed to relaunch Codex App: {launch_error}; repair rollback also failed: {rollback_error}"
-                ),
-                None => format!("failed to relaunch Codex App: {launch_error}"),
             });
+            finalize_relaunch_failure(
+                &mut result,
+                &launch_error,
+                rollback_error,
+                receipt_delete_error,
+            );
             return Ok(result);
         }
         result.codex_restarted = true;
     }
     Ok(result)
+}
+
+fn finalize_relaunch_failure(
+    result: &mut UnifiedHistoryResult,
+    launch_error: &str,
+    rollback_error: Option<String>,
+    receipt_delete_error: Option<String>,
+) {
+    result.status = UnifiedHistoryStatus::Conflict;
+    result.reason = Some("relaunch_failed".to_string());
+    let mut errors = vec![format!("failed to relaunch Codex App: {launch_error}")];
+    if let Some(rollback_error) = rollback_error {
+        errors.push(format!("repair rollback also failed: {rollback_error}"));
+    }
+    if let Some(receipt_delete_error) = receipt_delete_error {
+        errors.push(receipt_delete_error);
+    } else {
+        result.receipt_path = None;
+    }
+    result.error = Some(errors.join("; "));
 }
 
 fn repair_unified_history(
@@ -529,10 +713,25 @@ fn repair_unified_history(
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                if repair_config {
-                    rollback_config_repair(paths, &config_snapshot, config_existed)?;
-                }
-                return Err(error);
+                let rollback_error = rollback_applied_repair(
+                    AppliedRepairRollback {
+                        repair_config,
+                        repair_bucket: true,
+                        backup_root,
+                        config_snapshot: &config_snapshot,
+                        config_existed,
+                    },
+                    paths,
+                    python,
+                    runner,
+                )
+                .err();
+                return Err(match rollback_error {
+                    Some(rollback_error) => {
+                        format!("{error}; repair rollback also failed: {rollback_error}")
+                    }
+                    None => error,
+                });
             }
         };
         let values = parse_key_value_output(&outcome.stdout);
@@ -776,10 +975,14 @@ pub fn sync_history(target_provider: Option<&str>) -> Result<String, String> {
 pub fn reconcile_after_route_switch(
     target_provider: Option<&str>,
 ) -> Result<UnifiedHistoryResult, String> {
+    let _repair_guard = match acquire_history_repair(true, &HISTORY_REPAIR_IN_PROGRESS) {
+        Ok(guard) => guard,
+        Err(result) => return Ok(result),
+    };
     let target_unified = target_unified_from_provider(target_provider)?;
     let paths = ConfigPaths::runtime()?;
     let python = config::find_python();
-    let runner = ProcessCommandRunner;
+    let runner = HistoryDeadlineRunner::new();
     let controller = SystemCodexAppController;
     reconcile_after_route_switch_with_paths(
         HistoryBucketTarget::from_unified(target_unified),
@@ -1016,6 +1219,7 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 mod tests {
     use super::{
         classify_codex_processes, CloseOutcome, CodexProcessSnapshot,
+        acquire_history_repair, finalize_relaunch_failure, DeadlineCommandRunner,
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
         reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
         sync_history_with_paths, CodexAppController, HistoryBucketTarget, PreflightRequest,
@@ -1027,6 +1231,50 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn history_repair_gate_allows_only_one_mutation_at_a_time() {
+        let gate = AtomicBool::new(false);
+        let first = acquire_history_repair(true, &gate)
+            .expect("first repair accepted")
+            .expect("first repair owns gate");
+        let mut mutations = 0;
+
+        let concurrent = acquire_history_repair(true, &gate);
+        if concurrent.is_ok() {
+            mutations += 1;
+        }
+
+        let result = concurrent.expect_err("concurrent repair rejected");
+        assert_eq!(result.status, UnifiedHistoryStatus::Conflict);
+        assert_eq!(result.reason.as_deref(), Some("repair_in_progress"));
+        assert_eq!(mutations, 0);
+        drop(first);
+        assert!(acquire_history_repair(true, &gate).is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn history_deadline_runner_terminates_a_hung_helper() {
+        let runner = DeadlineCommandRunner;
+        let started = Instant::now();
+        let error = runner
+            .run_until(
+                Path::new("powershell"),
+                &[
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "Start-Sleep -Seconds 5".to_string(),
+                ],
+                Instant::now() + Duration::from_millis(100),
+            )
+            .expect_err("helper must time out");
+
+        assert!(error.contains("history_operation_timeout"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn windows_process_discovery_identifies_visible_chatgpt_from_codex_package() {
@@ -1267,6 +1515,8 @@ mod tests {
         .expect("preflight result");
 
         assert_eq!(result.status, UnifiedHistoryStatus::Repaired);
+        assert!(result.codex_restarted);
+        assert_eq!(controller.launch_calls.get(), 1);
         assert_eq!(result.changed_rows, 2);
         assert_eq!(result.changed_files, 3);
         assert!(result
@@ -1445,6 +1695,82 @@ mod tests {
     }
 
     #[test]
+    fn helper_timeout_returns_typed_error_and_rolls_config_back() {
+        let root = temp_root("preflight-helper-timeout");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.codex_dir()).unwrap();
+        fs::write(paths.codex_config_path(), "model_provider = \"openai\"\n").unwrap();
+        let runner = SequenceRunner {
+            commands: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(VecDeque::from([
+                successful_outcome(r#"{"status":"needs_repair"}"#),
+                successful_outcome(
+                    r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_state_files":1,"dirty_jsonl_files":0}"#,
+                ),
+                successful_outcome("unified_history=injected\n"),
+                CommandOutcome {
+                    code: None,
+                    stdout: String::new(),
+                    stderr: "history_operation_timeout".to_string(),
+                },
+            ])),
+        };
+        let controller = RecordingCodexController::stopped();
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("typed timeout result");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Conflict);
+        assert_eq!(result.reason.as_deref(), Some("helper_timeout"));
+        assert!(result.error.as_deref().is_some_and(|error| error.contains("history_operation_timeout")));
+        assert_eq!(
+            fs::read_to_string(paths.codex_config_path()).unwrap(),
+            "model_provider = \"openai\"\n"
+        );
+    }
+
+    #[test]
+    fn inspection_helper_timeout_returns_typed_result_without_mutation() {
+        let root = temp_root("preflight-inspection-timeout");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner {
+            commands: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(VecDeque::from([CommandOutcome {
+                code: None,
+                stdout: String::new(),
+                stderr: "history_operation_timeout".to_string(),
+            }])),
+        };
+        let controller = RecordingCodexController::stopped();
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("typed inspection timeout");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Conflict);
+        assert_eq!(result.reason.as_deref(), Some("helper_timeout"));
+        assert!(!paths.proxy_dir().exists());
+        assert_eq!(runner.commands.borrow().len(), 1);
+    }
+
+    #[test]
     fn receipt_failure_rolls_back_completed_config_and_bucket_repair() {
         let root = temp_root("preflight-receipt-failure");
         let paths = test_paths(&root);
@@ -1526,6 +1852,31 @@ mod tests {
         );
         assert!(!paths.proxy_dir().join("migrations").join("unified-history-last.json").exists());
         assert_contains_sequence(&runner.commands.borrow()[4].args, &["rollback-repair"]);
+    }
+
+    #[test]
+    fn receipt_delete_failure_preserves_actual_path_and_reports_error() {
+        let mut result = super::UnifiedHistoryResult {
+            status: UnifiedHistoryStatus::Repaired,
+            changed_rows: 1,
+            changed_files: 2,
+            backup_path: Some("backup".to_string()),
+            receipt_path: Some("receipt.json".to_string()),
+            reason: None,
+            error: None,
+            codex_restarted: false,
+        };
+
+        finalize_relaunch_failure(
+            &mut result,
+            "launch failed",
+            None,
+            Some("receipt delete denied".to_string()),
+        );
+
+        assert_eq!(result.reason.as_deref(), Some("relaunch_failed"));
+        assert_eq!(result.receipt_path.as_deref(), Some("receipt.json"));
+        assert!(result.error.as_deref().is_some_and(|error| error.contains("receipt delete denied")));
     }
 
     #[test]
