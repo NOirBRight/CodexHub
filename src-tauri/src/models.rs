@@ -1,4 +1,7 @@
-use crate::{runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, UpstreamFormat};
+use crate::{
+    config, runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, Settings,
+    UpstreamFormat,
+};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
@@ -40,7 +43,7 @@ pub fn probe_upstream_format(
     api_key: &str,
     model: Option<&str>,
 ) -> Result<Value, String> {
-    let api_key = resolve_api_key(api_key)?.unwrap_or_default();
+    let api_key = resolve_gateway_api_key(base_url, api_key)?.unwrap_or_default();
     let paths = ModelPaths::runtime()?;
     let python = find_python();
     let script = paths.upstream_format_probe_script();
@@ -106,7 +109,7 @@ fn test_model_endpoint_with_timeout(
         return Err("model is required for endpoint connectivity test".to_string());
     }
 
-    let api_key = resolve_api_key(api_key)?;
+    let api_key = resolve_gateway_api_key(base_url, api_key)?;
     let (format_id, label, path, payload) = model_test_payload(model, upstream_format);
     let endpoint = provider_api_endpoint(base_url, path)?;
     let client = Client::builder()
@@ -1071,6 +1074,54 @@ fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
     Ok(Some(value))
 }
 
+fn resolve_gateway_api_key(base_url: &str, api_key: &str) -> Result<Option<String>, String> {
+    resolve_gateway_api_key_for_settings(base_url, api_key, None)
+}
+
+fn resolve_gateway_api_key_for_settings(
+    base_url: &str,
+    api_key: &str,
+    gateway_settings: Option<&Settings>,
+) -> Result<Option<String>, String> {
+    if let Some(api_key) = resolve_api_key(api_key)? {
+        return Ok(Some(api_key));
+    }
+    if let Some(settings) = gateway_settings {
+        return Ok(local_gateway_api_key_for_settings(base_url, settings));
+    }
+    Ok(config::get_settings()
+        .ok()
+        .and_then(|settings| local_gateway_api_key_for_settings(base_url, &settings)))
+}
+
+fn local_gateway_api_key_for_settings(base_url: &str, settings: &Settings) -> Option<String> {
+    if !is_current_local_gateway_base_url(base_url, settings.proxy_port) {
+        return None;
+    }
+    let key = settings.gateway_client_key.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+fn is_current_local_gateway_base_url(base_url: &str, proxy_port: u16) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        return false;
+    }
+    if url.port_or_known_default() != Some(proxy_port) {
+        return false;
+    }
+    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
+    path.is_empty() || path == "/v1" || path.starts_with("/v1/")
+}
+
 fn env_placeholder_name(value: &str) -> Result<Option<String>, String> {
     if !value.starts_with("{env:") && !value.ends_with('}') {
         return Ok(None);
@@ -2021,11 +2072,12 @@ mod tests {
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
         list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
-        refresh_official_models_with_runner, subscription_models_from_payload,
-        subscription_models_to_metadata_models, test_model_endpoint_with_timeout,
-        AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
+        refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
+        subscription_models_from_payload, subscription_models_to_metadata_models,
+        test_model_endpoint_with_timeout, AppServerModelListRunner, CatalogCommandOutcome,
+        CatalogSyncRunner, ModelPaths,
     };
-    use crate::{MetadataProvenance, Model, UpstreamFormat};
+    use crate::{MetadataProvenance, Model, Settings, UpstreamFormat};
     use reqwest::blocking::Client;
     use serde_json::{json, Value};
     use std::cell::RefCell;
@@ -2549,6 +2601,86 @@ mod tests {
             .contains("authorization: bearer provider-secret"));
         assert!(request.contains(r#""model":"model-a""#));
         server.join();
+    }
+
+    #[test]
+    fn model_endpoint_test_injects_current_loopback_gateway_key_when_key_is_blank() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_codex_home = std::env::var_os("CODEX_HOME");
+        let root = temp_root("local-gateway-model-test-key");
+        let codex_home = root.join("codex-home");
+        let settings_path = codex_home.join("proxy").join("settings.json");
+        let server = MockServer::json(r#"{"id":"resp-test"}"#, Duration::ZERO);
+        let base_url = format!("{}/v1", server.base_url());
+        let port = reqwest::Url::parse(&base_url).unwrap().port().unwrap();
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            settings_path,
+            serde_json::to_vec(&json!({
+                "proxy_port": port,
+                "gateway_client_key": "local-test-key"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let result = test_model_endpoint_with_timeout(
+            &base_url,
+            "  ",
+            "openai/gpt-5.5",
+            &UpstreamFormat::Responses,
+            Duration::from_secs(2),
+        );
+        restore_env("CODEX_HOME", original_codex_home);
+
+        assert_eq!(result.expect("model endpoint test")["ok"], true);
+        let request = server.request();
+        assert!(request.starts_with("POST /v1/responses "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer local-test-key"));
+        server.join();
+    }
+
+    #[test]
+    fn local_gateway_key_resolution_preserves_explicit_key() {
+        let settings = Settings {
+            proxy_port: 4555,
+            gateway_client_key: "local-test-key".to_string(),
+            ..Settings::default()
+        };
+
+        let resolved = resolve_gateway_api_key_for_settings(
+            "http://127.0.0.1:4555/v1",
+            " explicit-key ",
+            Some(&settings),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.as_deref(), Some("explicit-key"));
+    }
+
+    #[test]
+    fn local_gateway_key_resolution_rejects_nonmatching_or_remote_endpoints() {
+        let settings = Settings {
+            proxy_port: 4555,
+            gateway_client_key: "local-test-key".to_string(),
+            ..Settings::default()
+        };
+
+        for base_url in [
+            "http://127.0.0.1:4556/v1",
+            "http://example.com:4555/v1",
+            "https://127.0.0.1:4555/v1",
+            "http://127.0.0.1:4555/custom",
+        ] {
+            assert_eq!(
+                resolve_gateway_api_key_for_settings(base_url, "", Some(&settings)).unwrap(),
+                None,
+                "unexpected local Gateway key for {base_url}"
+            );
+        }
     }
 
     #[test]
