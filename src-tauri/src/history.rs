@@ -96,11 +96,88 @@ enum InspectionStatus {
 
 trait CodexAppController {
     fn is_running(&self) -> Result<bool, String>;
-    fn close_gracefully(&self, timeout_seconds: u64) -> Result<bool, String>;
+    fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String>;
     fn launch(&self) -> Result<(), String>;
 }
 
 struct SystemCodexAppController;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseOutcome {
+    Released,
+    CloseTimedOut,
+    BackgroundProcessesRemain,
+}
+
+impl CloseOutcome {
+    fn restart_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Released => None,
+            Self::CloseTimedOut => Some("graceful_close_failed"),
+            Self::BackgroundProcessesRemain => Some("background_processes_remain"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexProcessSnapshot {
+    process_id: u32,
+    process_name: String,
+    executable_path: PathBuf,
+    main_window_handle: u64,
+}
+
+impl CodexProcessSnapshot {
+    fn new(
+        process_id: u32,
+        process_name: impl Into<String>,
+        executable_path: PathBuf,
+        main_window_handle: u64,
+    ) -> Self {
+        Self {
+            process_id,
+            process_name: process_name.into(),
+            executable_path,
+            main_window_handle,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexProcessState {
+    visible_ui_process_ids: Vec<u32>,
+    relevant_process_ids: Vec<u32>,
+}
+
+fn classify_codex_processes(
+    package_install_path: &Path,
+    snapshots: &[CodexProcessSnapshot],
+) -> CodexProcessState {
+    let package_prefix = package_install_path
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase();
+    let belongs_to_package = |snapshot: &&CodexProcessSnapshot| {
+        let executable = snapshot.executable_path.to_string_lossy().to_lowercase();
+        executable == package_prefix
+            || executable
+                .strip_prefix(&package_prefix)
+                .is_some_and(|suffix| suffix.starts_with('\\') || suffix.starts_with('/'))
+    };
+    let relevant: Vec<&CodexProcessSnapshot> =
+        snapshots.iter().filter(belongs_to_package).collect();
+    CodexProcessState {
+        visible_ui_process_ids: relevant
+            .iter()
+            .filter(|snapshot| snapshot.main_window_handle != 0)
+            .map(|snapshot| snapshot.process_id)
+            .collect(),
+        relevant_process_ids: relevant
+            .iter()
+            .map(|snapshot| snapshot.process_id)
+            .collect(),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum HistoryBucketTarget {
@@ -277,11 +354,14 @@ fn preflight_unified_history_with_paths(
             "codex_running",
         ));
     }
-    if was_running && !controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)? {
+    if was_running {
+        let close_outcome = controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)?;
+        if let Some(reason) = close_outcome.restart_reason() {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
-            "graceful_close_failed",
+                reason,
         ));
+        }
     }
 
     fs::create_dir_all(paths.proxy_dir()).map_err(|error| {
@@ -563,18 +643,19 @@ fn parse_key_value_output(output: &str) -> std::collections::HashMap<String, usi
 #[cfg(target_os = "windows")]
 impl CodexAppController for SystemCodexAppController {
     fn is_running(&self) -> Result<bool, String> {
-        let output = run_powershell(
-            "if (Get-Process -Name Codex -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
-        )?;
-        Ok(output.code == Some(0))
+        let output = run_powershell(&windows_codex_discovery_script())?;
+        Ok(output.code == Some(0) && output.stdout.trim() == "running")
     }
 
-    fn close_gracefully(&self, timeout_seconds: u64) -> Result<bool, String> {
-        let script = format!(
-            "$ErrorActionPreference='Stop'; $p=@(Get-Process -Name Codex -ErrorAction SilentlyContinue); if (-not $p) {{ exit 0 }}; $p | ForEach-Object {{ [void]$_.CloseMainWindow() }}; $deadline=(Get-Date).AddSeconds({timeout_seconds}); do {{ Start-Sleep -Milliseconds 200; $p=@(Get-Process -Name Codex -ErrorAction SilentlyContinue) }} while ($p -and (Get-Date) -lt $deadline); if ($p) {{ exit 2 }}"
-        );
+    fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String> {
+        let script = windows_codex_close_script(timeout_seconds);
         let output = run_powershell(&script)?;
-        Ok(output.code == Some(0))
+        match output.code {
+            Some(0) => Ok(CloseOutcome::Released),
+            Some(2) => Ok(CloseOutcome::CloseTimedOut),
+            Some(3) => Ok(CloseOutcome::BackgroundProcessesRemain),
+            _ => Err(format!("failed to close Codex App gracefully: {}", output.stderr.trim())),
+        }
     }
 
     fn launch(&self) -> Result<(), String> {
@@ -589,6 +670,18 @@ impl CodexAppController for SystemCodexAppController {
             ))
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_discovery_script() -> String {
+    "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) { Write-Output 'stopped'; exit 0 }; $root=$package.InstallLocation.TrimEnd('\\'); $relevant=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }); if ($relevant) { Write-Output 'running' } else { Write-Output 'stopped' }".to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_close_script(timeout_seconds: u64) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) {{ exit 0 }}; $root=$package.InstallLocation.TrimEnd('\\'); function Relevant {{ @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; $relevant=@(Relevant); if (-not $relevant) {{ exit 0 }}; $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }}; $deadline=(Get-Date).AddSeconds({timeout_seconds}); do {{ Start-Sleep -Milliseconds 200; $relevant=@(Relevant); if (-not $relevant) {{ exit 0 }} }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} else {{ exit 3 }}"
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -611,8 +704,8 @@ impl CodexAppController for SystemCodexAppController {
     fn is_running(&self) -> Result<bool, String> {
         Ok(false)
     }
-    fn close_gracefully(&self, _timeout_seconds: u64) -> Result<bool, String> {
-        Ok(true)
+    fn close_gracefully(&self, _timeout_seconds: u64) -> Result<CloseOutcome, String> {
+        Ok(CloseOutcome::Released)
     }
     fn launch(&self) -> Result<(), String> {
         Err("Codex App restart is supported on Windows only".to_string())
@@ -674,10 +767,13 @@ fn reconcile_after_route_switch_with_paths(
     if result.status != UnifiedHistoryStatus::Clean || !controller.is_running()? {
         return Ok(result);
     }
-    if !controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)? {
+    if let Some(reason) = controller
+        .close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)?
+        .restart_reason()
+    {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
-            "graceful_close_failed",
+            reason,
         ));
     }
     controller.launch()?;
@@ -866,6 +962,7 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
+        classify_codex_processes, CloseOutcome, CodexProcessSnapshot,
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
         reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
         sync_history_with_paths, CodexAppController, HistoryBucketTarget, PreflightRequest,
@@ -877,6 +974,48 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn windows_process_discovery_identifies_visible_chatgpt_from_codex_package() {
+        let package = Path::new(r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__abc");
+        let state = classify_codex_processes(
+            package,
+            &[
+                CodexProcessSnapshot::new(
+                    41,
+                    "ChatGPT.exe",
+                    package.join("ChatGPT.exe"),
+                    9001,
+                ),
+                CodexProcessSnapshot::new(
+                    42,
+                    "codex.exe",
+                    package.join(r"app\resources\codex.exe"),
+                    0,
+                ),
+            ],
+        );
+
+        assert_eq!(state.visible_ui_process_ids, vec![41]);
+        assert_eq!(state.relevant_process_ids, vec![41, 42]);
+    }
+
+    #[test]
+    fn windows_process_discovery_does_not_treat_headless_codex_as_desktop_ui() {
+        let package = Path::new(r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__abc");
+        let state = classify_codex_processes(
+            package,
+            &[CodexProcessSnapshot::new(
+                42,
+                "codex.exe",
+                package.join(r"app\resources\codex.exe"),
+                0,
+            )],
+        );
+
+        assert!(state.visible_ui_process_ids.is_empty());
+        assert_eq!(state.relevant_process_ids, vec![42]);
+    }
 
     #[test]
     fn startup_preflight_is_read_only_while_codex_is_running() {
@@ -960,6 +1099,36 @@ mod tests {
         assert_eq!(runner.commands.borrow().len(), 2);
         assert_eq!(controller.close_calls.get(), 1);
         assert_eq!(controller.launch_calls.get(), 0);
+    }
+
+    #[test]
+    fn requested_repair_returns_background_process_reason_without_writing() {
+        let root = temp_root("preflight-background-process");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"clean"}"#,
+            r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_jsonl_files":0}"#,
+        ]);
+        let controller = RecordingCodexController::running_with_close_outcome(
+            CloseOutcome::BackgroundProcessesRemain,
+        );
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("preflight result");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::RestartRequired);
+        assert_eq!(result.reason.as_deref(), Some("background_processes_remain"));
+        assert_eq!(runner.commands.borrow().len(), 2);
+        assert!(!paths.proxy_dir().exists());
     }
 
     #[test]
@@ -1421,7 +1590,7 @@ mod tests {
 
     struct RecordingCodexController {
         running: bool,
-        close_result: bool,
+        close_outcome: CloseOutcome,
         close_calls: Cell<usize>,
         launch_calls: Cell<usize>,
     }
@@ -1432,9 +1601,17 @@ mod tests {
         }
 
         fn running_with_close_result(close_result: bool) -> Self {
+            Self::running_with_close_outcome(if close_result {
+                CloseOutcome::Released
+            } else {
+                CloseOutcome::CloseTimedOut
+            })
+        }
+
+        fn running_with_close_outcome(close_outcome: CloseOutcome) -> Self {
             Self {
                 running: true,
-                close_result,
+                close_outcome,
                 close_calls: Cell::new(0),
                 launch_calls: Cell::new(0),
             }
@@ -1443,7 +1620,7 @@ mod tests {
         fn stopped() -> Self {
             Self {
                 running: false,
-                close_result: true,
+                close_outcome: CloseOutcome::Released,
                 close_calls: Cell::new(0),
                 launch_calls: Cell::new(0),
             }
@@ -1455,10 +1632,10 @@ mod tests {
             Ok(self.running)
         }
 
-        fn close_gracefully(&self, timeout_seconds: u64) -> Result<bool, String> {
+        fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String> {
             assert_eq!(timeout_seconds, GRACEFUL_CLOSE_TIMEOUT_SECONDS);
             self.close_calls.set(self.close_calls.get() + 1);
-            Ok(self.close_result)
+            Ok(self.close_outcome)
         }
 
         fn launch(&self) -> Result<(), String> {
