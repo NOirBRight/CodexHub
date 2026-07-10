@@ -582,7 +582,12 @@ function GatewayPageImpl({
         <StackedUsageChartShell
           events={usageEvents}
           onWindowChange={onUsageWindowChange}
-          pendingMessage={pending?.usage ?? t("gateway.pendingUsage")}
+          pendingMessage={
+            pending?.usage ??
+            (appFlavor?.flavor === "beta"
+              ? t("gateway.betaUsageIsolated")
+              : t("gateway.pendingUsage"))
+          }
           providers={providers}
           summary={usageSummary}
           telemetryStatus={usageStatus}
