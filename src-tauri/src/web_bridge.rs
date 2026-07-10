@@ -190,9 +190,10 @@ fn handle_request(
     app: Option<AppHandle>,
 ) -> Result<BridgeResponse, String> {
     if !origin_allowed(request.origin.as_deref()) {
-        return Ok(BridgeResponse::error(
+        return Ok(BridgeResponse::typed_error(
             403,
             "origin is not allowed for CodexHub web bridge".to_string(),
+            BridgeErrorKind::OriginNotAllowed,
         ));
     }
     if request.method == "OPTIONS" {
@@ -492,6 +493,17 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "restore_official_history_from_unified" => {
             to_value(history::restore_official_history_from_unified())
         }
+        "preflight_unified_history" => {
+            let request_restart =
+                optional_bool_arg(&request.args, &["requestRestart", "request_restart"])
+                    .unwrap_or(false);
+            let target_unified =
+                optional_bool_arg(&request.args, &["targetUnified", "target_unified"]);
+            to_value(history::preflight_unified_history(
+                request_restart,
+                target_unified,
+            ))
+        }
         "sync_catalog" => to_value(catalog::sync_catalog()),
         "set_autostart" => to_value(autostart::set_autostart(bool_arg(
             &request.args,
@@ -514,17 +526,24 @@ fn to_value<T: serde::Serialize>(result: Result<T, String>) -> Result<Value, Str
     })
 }
 
-fn bridge_error_code(status: u16, error: &str) -> &'static str {
-    let lowered = error.to_ascii_lowercase();
-    if status == 403 && lowered.contains("origin") {
-        return "config.origin";
-    }
-    "backend.command"
+#[derive(Debug, Clone, Copy)]
+enum BridgeErrorKind {
+    BackendCommand,
+    OriginNotAllowed,
 }
 
-fn bridge_error_payload(status: u16, error: &str) -> Value {
+impl BridgeErrorKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::BackendCommand => "backend.command",
+            Self::OriginNotAllowed => "config.origin",
+        }
+    }
+}
+
+fn bridge_error_payload(status: u16, error: &str, kind: BridgeErrorKind) -> Value {
     json!({
-        "code": bridge_error_code(status, error),
+        "code": kind.code(),
         "message": error,
         "source": "web_bridge",
         "retryable": false,
@@ -599,7 +618,11 @@ impl BridgeResponse {
     }
 
     fn error(status: u16, error: String) -> Self {
-        let codexhub_error = bridge_error_payload(status, &error);
+        Self::typed_error(status, error, BridgeErrorKind::BackendCommand)
+    }
+
+    fn typed_error(status: u16, error: String, kind: BridgeErrorKind) -> Self {
+        let codexhub_error = bridge_error_payload(status, &error, kind);
         Self::json(
             status,
             json!({
@@ -632,7 +655,7 @@ impl BridgeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_request, origin_allowed, BridgeRequest};
+    use super::{handle_request, origin_allowed, BridgeRequest, BridgeResponse};
     use serde_json::json;
 
     #[test]
@@ -711,6 +734,14 @@ mod tests {
         assert_eq!(body["codexhub_error"]["code"], "config.origin");
         assert_eq!(body["codexhub_error"]["source"], "web_bridge");
         assert_eq!(body["codexhub_error"]["retryable"], false);
+    }
+
+    #[test]
+    fn backend_error_text_cannot_impersonate_origin_policy_error() {
+        let response = BridgeResponse::error(403, "backend origin lookup failed".to_string());
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+
+        assert_eq!(body["codexhub_error"]["code"], "backend.command");
     }
 
     #[test]

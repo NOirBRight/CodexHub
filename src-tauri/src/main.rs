@@ -512,18 +512,38 @@ fn save_model_metadata_override(model: Model) -> Result<Model, String> {
 }
 
 #[tauri::command]
-fn sync_history(target_provider: Option<String>) -> Result<String, String> {
-    history::sync_history(target_provider.as_deref())
+async fn sync_history(target_provider: Option<String>) -> Result<String, String> {
+    run_blocking("sync_history", move || {
+        history::sync_history(target_provider.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
-fn migrate_official_history_to_unified() -> Result<String, String> {
-    history::migrate_official_history_to_unified()
+async fn migrate_official_history_to_unified() -> Result<String, String> {
+    run_blocking("migrate_official_history_to_unified", || {
+        history::migrate_official_history_to_unified()
+    })
+    .await
 }
 
 #[tauri::command]
-fn restore_official_history_from_unified() -> Result<String, String> {
-    history::restore_official_history_from_unified()
+async fn restore_official_history_from_unified() -> Result<String, String> {
+    run_blocking("restore_official_history_from_unified", || {
+        history::restore_official_history_from_unified()
+    })
+    .await
+}
+
+#[tauri::command]
+async fn preflight_unified_history(
+    request_restart: bool,
+    target_unified: Option<bool>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    run_blocking("preflight_unified_history", move || {
+        history::preflight_unified_history(request_restart, target_unified)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -806,6 +826,7 @@ fn run_gui() {
             sync_history,
             migrate_official_history_to_unified,
             restore_official_history_from_unified,
+            preflight_unified_history,
             sync_catalog,
             set_autostart,
             remove_autostart,

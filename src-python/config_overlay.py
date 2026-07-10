@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from atomic_io import atomic_write_text
 import re
 import sys
+from urllib.parse import urlsplit
 
 
 MARKER_BEGIN = "# BEGIN CODEX PROXY SESSION CONFIG"
@@ -27,6 +30,10 @@ STALE_PROXY_PROVIDER_SECTIONS = (
 
 def toml_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def toml_basic_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
 def strip_marked_overlay(text: str) -> str:
@@ -122,8 +129,45 @@ def unified_official_provider_values() -> dict[str, str]:
     }
 
 
-def has_exact_unified_official_provider(text: str) -> bool:
-    return section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}") == unified_official_provider_values()
+@dataclass(frozen=True)
+class UnifiedConfigState:
+    provider_id: str | None
+    custom_section: dict[str, str] | None
+    exact_unified: bool
+    managed_gateway: bool
+    stale_catalog: bool
+
+
+def is_managed_gateway_provider(values: dict[str, str] | None) -> bool:
+    if not values or values.get("name") != PROXY_PROVIDER_NAME:
+        return False
+    if values.get("wire_api") != "responses":
+        return False
+    if values.get("supports_websockets") != "false":
+        return False
+    legacy_auth = values.get("requires_openai_auth") == "true" and "experimental_bearer_token" not in values
+    keyed_auth = values.get("requires_openai_auth") == "false" and "experimental_bearer_token" in values
+    if not (legacy_auth or keyed_auth):
+        return False
+    parsed = urlsplit(values.get("base_url", ""))
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        and parsed.port is not None
+        and parsed.path.rstrip("/") == "/v1"
+    )
+
+
+def unified_config_state(text: str) -> UnifiedConfigState:
+    provider_id = top_level_value(text, "model_provider")
+    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    return UnifiedConfigState(
+        provider_id=provider_id,
+        custom_section=custom_section,
+        exact_unified=custom_section == unified_official_provider_values(),
+        managed_gateway=is_managed_gateway_provider(custom_section),
+        stale_catalog=top_level_value(text, "model_catalog_json") is not None,
+    )
 
 
 def build_unified_official_provider_section() -> str:
@@ -139,38 +183,58 @@ def build_unified_official_provider_section() -> str:
     )
 
 
-def inject_unified_history_config(text: str) -> tuple[str, str]:
-    provider_id = top_level_value(text, "model_provider")
-    if provider_id is not None:
-        if provider_id == PROXY_PROVIDER_ID and has_exact_unified_official_provider(text):
-            return text, "already_unified"
-        if provider_id != "openai":
-            return text, "explicit_model_provider"
-        text = strip_top_level_keys(text, {"model_provider"})
+def inspect_unified_history_config(text: str, unified_history: bool = True) -> str:
+    state = unified_config_state(text)
+    if state.provider_id == PROXY_PROVIDER_ID and state.managed_gateway:
+        return "gateway_active"
+    if state.provider_id not in {None, "openai", PROXY_PROVIDER_ID}:
+        return "conflict"
+    if state.custom_section is not None and not (state.exact_unified or state.managed_gateway):
+        return "conflict"
+    if unified_history:
+        if state.provider_id == PROXY_PROVIDER_ID and state.exact_unified and not state.stale_catalog:
+            return "clean"
+    elif state.provider_id in {None, "openai"} and state.custom_section is None and not state.stale_catalog:
+        return "clean"
+    return "needs_repair"
 
-    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
-    if custom_section is not None and custom_section != unified_official_provider_values():
+
+def inject_unified_history_config(text: str) -> tuple[str, str]:
+    state = unified_config_state(text)
+    if state.provider_id is not None:
+        if state.provider_id == PROXY_PROVIDER_ID and state.exact_unified and not state.stale_catalog:
+            return text, "already_unified"
+        if state.provider_id not in {"openai", PROXY_PROVIDER_ID}:
+            return text, "explicit_model_provider"
+        if state.provider_id == PROXY_PROVIDER_ID and not (state.exact_unified or state.managed_gateway):
+            return text, "explicit_model_provider"
+
+    if state.custom_section is not None and not (state.exact_unified or state.managed_gateway):
         return text, "conflicting_custom_provider"
 
-    updated = text
-    if custom_section is None:
-        updated = insert_provider_section(updated, build_unified_official_provider_section())
+    updated = strip_top_level_keys(text, {"model_provider", "model_catalog_json", "openai_base_url"})
+    if state.custom_section is not None:
+        updated = strip_section(updated, f"model_providers.{PROXY_PROVIDER_ID}")
+    updated = insert_provider_section(updated, build_unified_official_provider_section())
 
     prefix = f'model_provider = "{PROXY_PROVIDER_ID}"\n'
     if updated.strip():
         updated = prefix + "\n" + updated.lstrip()
     else:
         updated = prefix
+    if state.managed_gateway:
+        return updated, "replaced_managed_gateway"
+    if state.exact_unified:
+        return updated, "repaired_unified"
     return updated, "injected"
 
 
 def strip_unified_history_config(text: str) -> str:
-    if top_level_value(text, "model_provider") != PROXY_PROVIDER_ID:
-        return text
-    if not has_exact_unified_official_provider(text):
+    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    if custom_section != unified_official_provider_values() and not is_managed_gateway_provider(custom_section):
         return text
     stripped = strip_section(text, f"model_providers.{PROXY_PROVIDER_ID}")
-    stripped = strip_top_level_keys(stripped, {"model_provider"})
+    stripped = strip_top_level_keys(stripped, {"model_provider", "model_catalog_json", "openai_base_url"})
     return stripped.lstrip() if text.startswith("model_provider") else stripped
 
 
@@ -211,11 +275,8 @@ def set_feature_flags(text: str, flags: dict[str, str]) -> str:
     return "\n".join(result + suffix).rstrip() + "\n"
 
 
-def catalog_config_value(config_path: Path, catalog_path: Path) -> str:
-    try:
-        return catalog_path.resolve().relative_to(config_path.parent.resolve()).as_posix()
-    except ValueError:
-        return str(catalog_path)
+def catalog_config_value(_config_path: Path, catalog_path: Path) -> str:
+    return str(catalog_path.resolve())
 
 
 def build_overlay(catalog_value: str, owner: str) -> str:
@@ -232,14 +293,15 @@ def build_overlay(catalog_value: str, owner: str) -> str:
     )
 
 
-def build_provider_section(base_url: str) -> str:
+def build_provider_section(base_url: str, gateway_key: str) -> str:
     return "\n".join(
         [
             f"[model_providers.{PROXY_PROVIDER_ID}]",
             f'name = "{PROXY_PROVIDER_NAME}"',
             f"base_url = {toml_literal(base_url.rstrip('/') + '/v1')}",
             'wire_api = "responses"',
-            "requires_openai_auth = true",
+            "requires_openai_auth = false",
+            f"experimental_bearer_token = {toml_basic_string(gateway_key)}",
             "supports_websockets = false",
             "",
         ]
@@ -261,10 +323,16 @@ def apply_overlay(
     catalog_path: Path,
     base_url: str,
     owner: str = "release",
+    gateway_key: str = "codexhub-proxy",
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
     original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    custom_section = section_key_values(original, f"model_providers.{PROXY_PROVIDER_ID}")
+    if custom_section is not None and not (
+        custom_section == unified_official_provider_values() or is_managed_gateway_provider(custom_section)
+    ):
+        raise ValueError("refusing to overwrite unknown custom provider")
     cleaned = strip_marked_overlay(original)
     atomic_write_text(backup_path, cleaned if cleaned != original else original, encoding="utf-8")
 
@@ -273,7 +341,7 @@ def apply_overlay(
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
     updated = build_overlay(catalog_config_value(config_path, catalog_path), owner) + cleaned.lstrip()
-    updated = insert_provider_section(updated, build_provider_section(base_url))
+    updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
 
 
@@ -311,19 +379,32 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--catalog", required=True, type=Path)
     apply_parser.add_argument("--base-url", required=True)
     apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
+    apply_parser.add_argument("--gateway-key", default="codexhub-proxy")
 
     restore_parser = subparsers.add_parser("restore")
     restore_parser.add_argument("--config", required=True, type=Path)
     restore_parser.add_argument("--backup", required=True, type=Path)
     restore_parser.add_argument("--unified-history", action="store_true")
 
+    inspect_parser = subparsers.add_parser("inspect-unified")
+    inspect_parser.add_argument("--config", required=True, type=Path)
+    inspect_parser.add_argument("--target", choices=["unified", "separated"], default="unified")
+
     args = parser.parse_args(argv)
     if args.command == "apply":
-        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner)
+        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner, args.gateway_key)
     elif args.command == "restore":
         status = restore_overlay(args.config, args.backup, args.unified_history)
         if args.unified_history:
             print(f"unified_history={status}")
+    elif args.command == "inspect-unified":
+        text = args.config.read_text(encoding="utf-8") if args.config.exists() else ""
+        print(
+            json.dumps(
+                {"status": inspect_unified_history_config(text, args.target == "unified")},
+                ensure_ascii=True,
+            )
+        )
     return 0
 
 

@@ -306,9 +306,18 @@ fn start_with_paths_and_timeout(
     paths: &ProxyPaths,
     timeout: Duration,
 ) -> Result<AppStatus, String> {
+    start_with_paths_and_timing(paths, timeout, Duration::from_millis(200), &health)
+}
+
+fn start_with_paths_and_timing(
+    paths: &ProxyPaths,
+    timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+) -> Result<AppStatus, String> {
     let settings = read_settings(paths)?;
     let mode = read_mode(paths)?;
-    if let Some(response) = health(settings.proxy_port)? {
+    if let Some(response) = health_probe(settings.proxy_port)? {
         if response.is_running() {
             return Ok(AppStatus {
                 mode,
@@ -352,7 +361,13 @@ fn start_with_paths_and_timeout(
         return Err(error);
     }
 
-    match wait_for_startup_health(&mut child, settings.proxy_port, timeout)? {
+    match wait_for_startup_health(
+        &mut child,
+        settings.proxy_port,
+        timeout,
+        poll_interval,
+        health_probe,
+    )? {
         StartupOutcome::Healthy(response) => Ok(AppStatus {
             mode,
             proxy_running: true,
@@ -1156,10 +1171,12 @@ fn wait_for_startup_health(
     child: &mut Child,
     port: u16,
     timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
 ) -> Result<StartupOutcome, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(response) = health(port)? {
+        if let Some(response) = health_probe(port)? {
             if response.is_running() {
                 return Ok(StartupOutcome::Healthy(response));
             }
@@ -1173,7 +1190,7 @@ fn wait_for_startup_health(
         if Instant::now() >= deadline {
             return Ok(StartupOutcome::TimedOut);
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(poll_interval);
     }
 }
 
@@ -1444,7 +1461,7 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 mod tests {
     use super::{
         build_start_command, comparable_path, configure_start_stdio, detect_mode, find_python,
-        read_pid, read_pid_record, start_with_paths, start_with_paths_and_timeout,
+        read_pid, read_pid_record, start_with_paths, start_with_paths_and_timing,
         status_with_paths, stop_with_paths, stop_with_paths_and_controls, write_pid,
         InspectedProcess, ProcessInfo, ProcessInspector, ProcessKiller, ProxyPaths,
         ProxyPidMetadata, ProxyPidRecord,
@@ -1456,7 +1473,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn status_returns_not_running_when_health_endpoint_is_unavailable() {
@@ -1723,14 +1740,21 @@ time.sleep(10)
 "#,
         );
 
-        let error = start_with_paths_and_timeout(&paths, Duration::from_secs(5))
-            .expect_err("startup should time out");
+        let started_at = Instant::now();
+        let error = start_with_paths_and_timing(
+            &paths,
+            Duration::from_millis(75),
+            Duration::from_millis(5),
+            &|_| Ok(None),
+        )
+        .expect_err("startup should time out");
 
         assert!(error.contains("did not become healthy"));
         assert!(error.contains("startup stdout"));
         assert!(error.contains("fake proxy stdout during startup"));
         assert!(error.contains("startup stderr"));
         assert!(error.contains("fake proxy stderr during startup"));
+        assert!(started_at.elapsed() < Duration::from_secs(1));
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
     }
 

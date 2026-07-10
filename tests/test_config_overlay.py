@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
+import json
 import tempfile
 from pathlib import Path
 import unittest
@@ -9,6 +12,8 @@ from config_overlay import (
     MARKER_BEGIN,
     apply_overlay,
     inject_unified_history_config,
+    inspect_unified_history_config,
+    main as config_overlay_main,
     restore_overlay,
     catalog_config_value,
     set_feature_flags,
@@ -52,7 +57,7 @@ class ConfigOverlayTests(unittest.TestCase):
         self.assertNotIn("Old Proxy", cleaned)
         self.assertIn("[model_providers.openai]", cleaned)
 
-    def test_catalog_value_is_relative_to_config_dir_when_possible(self):
+    def test_catalog_value_is_absolute_even_when_catalog_is_below_config_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             config_path = tmp / "config.toml"
@@ -60,7 +65,7 @@ class ConfigOverlayTests(unittest.TestCase):
 
             self.assertEqual(
                 catalog_config_value(config_path, catalog_path),
-                "model-catalogs/catalog.json",
+                str(catalog_path.resolve()),
             )
 
     def test_set_feature_flags_updates_existing_features_section(self):
@@ -117,11 +122,12 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn(MARKER_BEGIN, updated)
             self.assertIn('model = "openai/gpt-5.5"', updated)
             self.assertIn('model_provider = "custom"', updated)
-            self.assertIn("model_catalog_json = 'model-catalogs/catalog.json'", updated)
+            self.assertIn(f"model_catalog_json = '{catalog_path.resolve()}'", updated)
             self.assertIn("[model_providers.custom]", updated)
             self.assertIn("base_url = 'http://127.0.0.1:9099/v1'", updated)
             self.assertIn('wire_api = "responses"', updated)
-            self.assertIn("requires_openai_auth = true", updated)
+            self.assertIn("requires_openai_auth = false", updated)
+            self.assertIn('experimental_bearer_token = "codexhub-proxy"', updated)
             self.assertIn("supports_websockets = false", updated)
             self.assertNotIn("responses_websockets = true", updated)
             self.assertIn("responses_websockets = false", updated)
@@ -170,6 +176,32 @@ class ConfigOverlayTests(unittest.TestCase):
             text = config.read_text(encoding="utf-8")
             self.assertIn("# owner = beta", text)
             self.assertIn("http://127.0.0.1:9109/v1", text)
+
+    def test_apply_overlay_rejects_unknown_custom_provider_without_mutation(self):
+        original = "\n".join(
+            [
+                'model_provider = "custom"',
+                "",
+                "[model_providers.custom]",
+                'name = "Third Party"',
+                'base_url = "https://example.test/v1"',
+                'wire_api = "responses"',
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "backup.toml"
+            catalog = tmp / "catalog.json"
+            config.write_text(original, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unknown custom provider"):
+                apply_overlay(config, backup, catalog, "http://127.0.0.1:9099")
+
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+            self.assertFalse(backup.exists())
 
     def test_restore_overlay_removes_owner_marker(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -316,6 +348,124 @@ class ConfigOverlayTests(unittest.TestCase):
         self.assertEqual(status, "conflicting_custom_provider")
         self.assertEqual(updated, original)
 
+    def test_unified_history_injection_replaces_managed_gateway_residue(self):
+        original = "\n".join(
+            [
+                'model = "gpt-5.6-sol"',
+                "model_catalog_json = 'model-catalogs/codexhub-model-catalog.json'",
+                "",
+                "[model_providers.custom]",
+                'name = "Codex Proxy"',
+                "base_url = 'http://127.0.0.1:9099/v1'",
+                'wire_api = "responses"',
+                "requires_openai_auth = true",
+                "supports_websockets = false",
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "replaced_managed_gateway")
+        self.assertIn('model_provider = "custom"', updated)
+        self.assertIn('model = "gpt-5.6-sol"', updated)
+        self.assertIn('[model_providers.custom]', updated)
+        self.assertIn('name = "OpenAI"', updated)
+        self.assertNotIn("base_url", updated)
+        self.assertNotIn("model_catalog_json", updated)
+        self.assertIn("[features]", updated)
+
+    def test_unified_history_inspection_distinguishes_active_gateway_from_drift(self):
+        managed_provider = "\n".join(
+            [
+                "[model_providers.custom]",
+                'name = "Codex Proxy"',
+                "base_url = 'http://127.0.0.1:9099/v1'",
+                'wire_api = "responses"',
+                "requires_openai_auth = true",
+                "supports_websockets = false",
+                "",
+            ]
+        )
+
+        active = 'model_provider = "custom"\n\n' + managed_provider
+        drifted = managed_provider
+        keyed_active = active.replace(
+            "requires_openai_auth = true",
+            'requires_openai_auth = false\nexperimental_bearer_token = "codexhub-proxy"',
+        )
+
+        self.assertEqual(inspect_unified_history_config(active), "gateway_active")
+        self.assertEqual(inspect_unified_history_config(keyed_active), "gateway_active")
+        self.assertEqual(inspect_unified_history_config(drifted), "needs_repair")
+
+    def test_unified_history_inspection_reports_clean_and_conflicting_states(self):
+        unified = "\n".join(
+            [
+                'model_provider = "custom"',
+                "",
+                "[model_providers.custom]",
+                'name = "OpenAI"',
+                "requires_openai_auth = true",
+                "supports_websockets = true",
+                'wire_api = "responses"',
+                "",
+            ]
+        )
+        conflicting = "\n".join(
+            [
+                "[model_providers.custom]",
+                'name = "Third Party"',
+                "base_url = 'https://example.test/v1'",
+                "",
+            ]
+        )
+
+        self.assertEqual(inspect_unified_history_config(unified), "clean")
+        self.assertEqual(inspect_unified_history_config(conflicting), "conflict")
+        self.assertEqual(inspect_unified_history_config(""), "needs_repair")
+        self.assertEqual(inspect_unified_history_config(unified, unified_history=False), "needs_repair")
+        self.assertEqual(inspect_unified_history_config("", unified_history=False), "clean")
+        self.assertEqual(inspect_unified_history_config(conflicting, unified_history=False), "conflict")
+
+    def test_inspect_unified_cli_emits_machine_readable_json_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            original = 'model_provider = "openai"\n'
+            config_path.write_text(original, encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = config_overlay_main(["inspect-unified", "--config", str(config_path)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "needs_repair")
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_unified_history_injection_cleans_stale_catalog_from_official_custom_provider(self):
+        original = "\n".join(
+            [
+                'model_provider = "custom"',
+                "model_catalog_json = 'model-catalogs/codexhub-model-catalog.json'",
+                "",
+                "[model_providers.custom]",
+                'name = "OpenAI"',
+                "requires_openai_auth = true",
+                "supports_websockets = true",
+                'wire_api = "responses"',
+                "",
+            ]
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "repaired_unified")
+        self.assertIn('model_provider = "custom"', updated)
+        self.assertNotIn("model_catalog_json", updated)
+
     def test_restore_overlay_strips_exact_unified_history_bucket_when_disabled(self):
         unified = "\n".join(
             [
@@ -347,6 +497,40 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("[model_providers.custom]", updated)
             self.assertIn("[features]", updated)
             self.assertIn("hooks = true", updated)
+
+    def test_restore_overlay_disabled_strips_managed_gateway_residue(self):
+        managed = "\n".join(
+            [
+                'model_provider = "custom"',
+                "model_catalog_json = 'model-catalogs/codexhub-model-catalog.json'",
+                "",
+                "[model_providers.custom]",
+                'name = "Codex Proxy"',
+                "base_url = 'http://127.0.0.1:9099/v1'",
+                'wire_api = "responses"',
+                "requires_openai_auth = true",
+                "supports_websockets = false",
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(managed, encoding="utf-8")
+
+            status = restore_overlay(config_path, backup_path, unified_history=False)
+            updated = config_path.read_text(encoding="utf-8")
+
+            self.assertEqual(status, "disabled")
+            self.assertNotIn('model_provider = "custom"', updated)
+            self.assertNotIn("model_catalog_json", updated)
+            self.assertNotIn("[model_providers.custom]", updated)
+            self.assertIn("[features]", updated)
 
 
 if __name__ == "__main__":

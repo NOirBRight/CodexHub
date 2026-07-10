@@ -1519,6 +1519,32 @@ def policy_denies_any_model(model_ids: tuple[Any, ...], policy: Any) -> bool:
     return any(model_id is not None and policy_denies_model(model_id, policy) for model_id in model_ids)
 
 
+def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | None:
+    upstream_model = slug[len(OFFICIAL_ALIAS_PREFIX) :] if slug.startswith(OFFICIAL_ALIAS_PREFIX) else slug
+    if not upstream_model.startswith(official_prefixes()):
+        return None
+
+    alias = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
+    model = generated_catalog_by_slug().get(alias)
+    if not model or model.get("supported_in_api") is False:
+        return None
+
+    metadata = model.get("codex_proxy_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    catalog_upstream = canonical_model_id(str(metadata.get("upstream_model", "")))
+    if (
+        metadata.get("provider") != "openai"
+        or metadata.get("upstream_name") != "official"
+        or catalog_upstream != upstream_model
+        or not catalog_upstream.startswith(official_prefixes())
+    ):
+        return None
+    if policy_denies_any_model((slug, alias, catalog_upstream), policy):
+        raise ValueError(f"model is not allowed: {slug}")
+    return catalog_upstream
+
+
 def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
     if not slug.startswith(OFFICIAL_ALIAS_PREFIX):
         return None
@@ -1653,6 +1679,16 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "base_url": official_base_url(),
             "auth": "codex_auth",
             "upstream_model": official_alias,
+            "reports_cached_input_tokens": True,
+        }
+
+    discovered_official = generated_official_catalog_upstream_model(slug, policy)
+    if discovered_official is not None:
+        return {
+            "name": "official",
+            "base_url": official_base_url(),
+            "auth": "codex_auth",
+            "upstream_model": discovered_official,
             "reports_cached_input_tokens": True,
         }
 
@@ -10339,10 +10375,6 @@ def _typed_error_code(
 ) -> str:
     if error_type == "gateway_auth_error":
         return "gateway.auth"
-    if error_type == "backend_error":
-        return "backend.command"
-    if error_type == "config_error":
-        return "config.origin"
     if error_type in {"invalid_request_error", "validation_error"}:
         return "provider.request"
     if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
@@ -10551,6 +10583,37 @@ def _chat_completion_error_payload(
             error_type=error_type,
         ),
     }
+
+
+def _with_codexhub_http_error(
+    body: bytes,
+    *,
+    upstream_name: str,
+    status: int,
+    exc: BaseException | None = None,
+) -> bytes:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(payload, dict) or "codexhub_error" in payload:
+        return body
+    upstream_error = payload.get("error")
+    if isinstance(upstream_error, Mapping):
+        message = str(upstream_error.get("message") or upstream_error.get("detail") or "HTTPError")
+        error_type = str(upstream_error.get("type") or "upstream_error")
+    else:
+        message = str(upstream_error or payload.get("detail") or "HTTPError")
+        error_type = "upstream_error"
+    payload["codexhub_error"] = _codexhub_error_payload(
+        source=upstream_name,
+        message=message,
+        status=status,
+        exc=exc,
+        error="HTTPError",
+        error_type=error_type,
+    )
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
 def _downstream_json_error_payload(error: DownstreamErrorSpec) -> dict[str, Any]:
@@ -12852,6 +12915,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
             else:
                 body = compatible_response_body(body, upstream_name, event_context=event_context)
+            if status >= 400:
+                body = _with_codexhub_http_error(
+                    body,
+                    upstream_name=upstream_name,
+                    status=status,
+                    exc=response if isinstance(response, BaseException) else None,
+                )
             if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
                 _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
                 _offer_usage_observed_body(usage_context, upstream_body_for_usage)

@@ -3671,6 +3671,71 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body)["model"], "gpt-5.5")
 
+    def test_runtime_discovered_official_models_route_for_bare_and_openai_aliases(self):
+        catalog = {
+            f"openai/{model}": {
+                "slug": f"openai/{model}",
+                "supported_in_api": True,
+                "codex_proxy_metadata": {
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": model,
+                },
+            }
+            for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+        }
+
+        with patch("codex_proxy.generated_catalog_by_slug", return_value=catalog):
+            for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+                with self.subTest(model=model, form="bare"):
+                    upstream = choose_upstream(model)
+                    self.assertEqual(upstream["name"], "official")
+                    self.assertEqual(upstream["auth"], "codex_auth")
+                    self.assertEqual(upstream["upstream_model"], model)
+                with self.subTest(model=model, form="alias"):
+                    upstream = choose_upstream(f"openai/{model}")
+                    self.assertEqual(upstream["name"], "official")
+                    self.assertEqual(upstream["upstream_model"], model)
+
+    def test_runtime_official_route_rejects_untrusted_catalog_metadata(self):
+        catalog = {
+            "openai/gpt-untrusted": {
+                "slug": "openai/gpt-untrusted",
+                "supported_in_api": True,
+                "codex_proxy_metadata": {
+                    "provider": "external",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-untrusted",
+                },
+            }
+        }
+
+        with patch("codex_proxy.generated_catalog_by_slug", return_value=catalog):
+            with self.assertRaisesRegex(ValueError, "model is not allowed"):
+                choose_upstream("gpt-untrusted")
+
+    def test_runtime_official_route_respects_policy_denylist(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(policy, denied_models=set(policy.denied_models) | {"gpt-5.6-sol"})
+        catalog = {
+            "openai/gpt-5.6-sol": {
+                "slug": "openai/gpt-5.6-sol",
+                "supported_in_api": True,
+                "codex_proxy_metadata": {
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-5.6-sol",
+                },
+            }
+        }
+
+        with (
+            patch("codex_proxy.load_policy", return_value=policy),
+            patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+        ):
+            with self.assertRaisesRegex(ValueError, "model is not allowed"):
+                choose_upstream("gpt-5.6-sol")
+
     def test_openai_fast_alias_routes_to_priority_service_tier(self):
         upstream = choose_upstream("openai/gpt-5.5-fast")
 

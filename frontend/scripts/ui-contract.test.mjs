@@ -76,6 +76,29 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
+test("startup unified history preflight exposes a safe graceful-restart action", async () => {
+  const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(new URL("../../src-tauri/src/history.rs", import.meta.url), "utf8"),
+    readFile(tauriWebBridgePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface UnifiedHistoryResult/);
+  assert.match(tauriSource, /preflightUnifiedHistory: \(requestRestart = false, targetUnified\?: boolean\)/);
+  assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
+  assert.match(mainSource, /fn preflight_unified_history\([\s\S]*request_restart: bool/);
+  assert.match(webBridgeSource, /"preflight_unified_history"/);
+  assert.match(appSource, /api\.preflightUnifiedHistory\(false\)/);
+  assert.match(appSource, /api\.preflightUnifiedHistory\(true\)/);
+  assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
+  assert.match(appSource, /result\.status === "restart_required"/);
+  assert.match(historySource, /CloseMainWindow\(\)/);
+  assert.doesNotMatch(historySource, /Stop-Process\s+-Force/);
+});
+
 test("default locale resolution treats Chinese system variants as Chinese and otherwise falls back to English", async () => {
   const indexSource = await readFile(i18nIndexPath, "utf8");
 
@@ -2057,8 +2080,10 @@ test("settings drawer reports the backend sync result", async () => {
   ]);
 
   assert.match(appSource, /const message = await api\.syncHistory\(targetProvider\)/);
-  assert.match(appSource, /api\.migrateOfficialHistoryToUnified\(\)/);
-  assert.match(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
+  assert.doesNotMatch(appSource, /api\.migrateOfficialHistoryToUnified\(\)/);
+  assert.doesNotMatch(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
+  assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
+  assert.match(appSource, /const restoredSettings = await api\.saveSettings\(settings\)/);
   assert.match(appSource, /return message/);
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
   assert.match(drawerSource, /showToast\(t\("settings\.repairingHistoryBucket"\), "loading"\)/);

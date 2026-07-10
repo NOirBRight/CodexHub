@@ -1869,6 +1869,9 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     {
         return Ok(path);
     }
+    if let Some(path) = desktop_codex_exe() {
+        return Ok(path);
+    }
     if let Some(path) = npm_codex_vendor_exe() {
         return Ok(path);
     }
@@ -1881,6 +1884,27 @@ fn find_codex_executable() -> Result<PathBuf, String> {
         "Codex subscription model refresh requires the Codex CLI to be installed and on PATH."
             .to_string(),
     )
+}
+
+fn desktop_codex_exe() -> Option<PathBuf> {
+    let local_appdata = std::env::var_os("LOCALAPPDATA")?;
+    desktop_codex_exe_from_local_appdata(Path::new(&local_appdata))
+}
+
+fn desktop_codex_exe_from_local_appdata(local_appdata: &Path) -> Option<PathBuf> {
+    let bin_dir = local_appdata.join("OpenAI").join("Codex").join("bin");
+    let mut candidates = fs::read_dir(bin_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("codex.exe"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    candidates.pop()
 }
 
 fn npm_codex_vendor_exe() -> Option<PathBuf> {
@@ -1907,9 +1931,9 @@ fn codex_executable_candidates() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout, enrich_models_with_ollama_show,
-        generate_catalog_with_runner, list_model_metadata, list_models,
-        merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
+        enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
+        list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, test_model_endpoint_with_timeout,
         AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
@@ -1928,6 +1952,25 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn desktop_codex_exe_finds_the_app_managed_runtime() {
+        let root = temp_root("desktop-codex-runtime");
+        let executable = root
+            .join("OpenAI")
+            .join("Codex")
+            .join("bin")
+            .join("runtime-hash")
+            .join("codex.exe");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"desktop codex").unwrap();
+
+        assert_eq!(
+            desktop_codex_exe_from_local_appdata(&root),
+            Some(executable)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     struct StaticAppServerModelListRunner {
         result: Result<Value, String>,

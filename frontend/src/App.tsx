@@ -22,6 +22,7 @@ import type {
   Provider,
   Settings,
   TabId,
+  UnifiedHistoryResult,
   UsageQueryWindow,
 } from "./lib/types";
 import { GatewayPage } from "./pages/GatewayPage";
@@ -323,6 +324,7 @@ export default function App() {
   const runtimeInflight = useRef<Partial<Record<RuntimeCacheKey, Promise<unknown>>>>({});
   const runtimeRef = useRef<RuntimeSnapshot | null>(null);
   const startupUpdateCheckStarted = useRef(false);
+  const historyPreflightStarted = useRef(false);
   const updateAvailableToastId = useRef<string | null>(null);
   const updateInstallToastId = useRef<string | null>(null);
   runtimeRef.current = runtime;
@@ -649,6 +651,53 @@ export default function App() {
     }
   }, [loadAppUpdateStatus, showToast, t]);
 
+  const repairUnifiedHistoryAfterClose = useCallback(async () => {
+    const toastId = showToast({
+      dedupeKey: "unified-history-preflight",
+      text: t("settings.repairingHistoryBucket"),
+      timeoutMs: null,
+      tone: "loading",
+    });
+    try {
+      const result = await api.preflightUnifiedHistory(true);
+      if (result.status === "repaired") {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.historyStartupRepaired", {
+            rows: result.changed_rows,
+            files: result.changed_files,
+          }),
+          tone: "success",
+        });
+      } else if (result.status === "restart_required") {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.historyManualExitRequired"),
+          timeoutMs: null,
+          tone: "error",
+        });
+      } else if (result.status === "conflict") {
+        updateToast(toastId, {
+          action: null,
+          text: result.error
+            ? t("settings.historyStartupRepairFailed", { message: result.error })
+            : t("settings.historyProviderConflict"),
+          timeoutMs: null,
+          tone: "error",
+        });
+      } else {
+        dismissToast(toastId);
+      }
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("settings.historyStartupRepairFailed", { message: messageFromError(err) }),
+        timeoutMs: null,
+        tone: "error",
+      });
+    }
+  }, [dismissToast, showToast, t, updateToast]);
+
   const runAutomaticUpdateCheck = useCallback(async () => {
     try {
       const status = await loadAppUpdateStatus();
@@ -703,6 +752,57 @@ export default function App() {
       window.clearInterval(clientTimer);
     };
   }, [loadGatewayClients, refreshCoreRuntime, refreshRuntimeStatus]);
+
+  useEffect(() => {
+    if (historyPreflightStarted.current || !settingsLoaded) {
+      return;
+    }
+    historyPreflightStarted.current = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const result: UnifiedHistoryResult = await api.preflightUnifiedHistory(false);
+        if (result.status === "repaired") {
+          showToast(
+            t("settings.historyStartupRepaired", {
+              rows: result.changed_rows,
+              files: result.changed_files,
+            }),
+            "success",
+          );
+        } else if (result.status === "restart_required") {
+          showToast({
+            action: {
+              label: t("settings.closeCodexAndRepair"),
+              onClick: () => void repairUnifiedHistoryAfterClose(),
+            },
+            dedupeKey: "unified-history-preflight",
+            text: t("settings.historyRestartRequired"),
+            timeoutMs: null,
+            tone: "info",
+          });
+        } else if (result.status === "conflict") {
+          showToast({
+            dedupeKey: "unified-history-preflight",
+            text: result.reason === "separated_history_drift"
+              ? t("settings.historySeparatedDrift")
+              : result.error
+                ? t("settings.historyStartupRepairFailed", { message: result.error })
+                : t("settings.historyProviderConflict"),
+            timeoutMs: null,
+            tone: "error",
+          });
+        }
+      } catch (err) {
+        showToast({
+          dedupeKey: "unified-history-preflight",
+          text: t("settings.historyStartupRepairFailed", { message: messageFromError(err) }),
+          timeoutMs: null,
+          tone: "error",
+        });
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [repairUnifiedHistoryAfterClose, settingsLoaded, showToast, t]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -874,10 +974,11 @@ export default function App() {
 
   const saveSettings = useCallback(async (next: Settings) => {
     setBusy("settings");
+    const previousUnified = settings?.unified_codex_history ?? true;
+    const nextUnified = next.unified_codex_history ?? true;
+    let savedSettingsApplied = false;
+    let historyReconciled = previousUnified === nextUnified;
     try {
-      const previousUnified = settings?.unified_codex_history ?? true;
-      const nextUnified = next.unified_codex_history ?? true;
-      const currentMode = appStatus?.mode;
       const shouldRestartGateway = Boolean(
         appStatus?.proxy_running && gatewayRuntimeSettingsChanged(settings, next),
       );
@@ -889,18 +990,28 @@ export default function App() {
         }
       }
       const savedSettings = await api.saveSettings(next);
+      savedSettingsApplied = true;
       setRuntimeCacheData("settings", savedSettings);
       let historyMessage: string | null = null;
       if (previousUnified !== nextUnified) {
-        if (currentMode === "official") {
-          const status = await api.switchMode("official", false);
-          setRuntimeCacheData("status", status);
+        const result = await api.preflightUnifiedHistory(true, nextUnified);
+        if (result.status === "restart_required") {
+          throw new Error(t("settings.historyManualExitRequired"));
         }
-        if (nextUnified) {
-          historyMessage = await api.migrateOfficialHistoryToUnified();
-        } else if (currentMode === "official") {
-          historyMessage = await api.restoreOfficialHistoryFromUnified();
+        if (result.status === "conflict") {
+          throw new Error(
+            result.error ?? t("settings.historyProviderConflict"),
+          );
         }
+        historyReconciled = true;
+        historyMessage = result.status === "repaired"
+          ? t("settings.historyStartupRepaired", {
+              rows: result.changed_rows,
+              files: result.changed_files,
+            })
+          : nextUnified
+            ? t("settings.unifiedHistoryEnabled")
+            : t("settings.officialHistoryRestored");
       }
       let saveMessage = historyMessage ?? t("settings.settingsSaved");
       if (shouldRestartGateway) {
@@ -912,6 +1023,14 @@ export default function App() {
       await refreshRuntimeStatus({ force: true });
       return saveMessage;
     } catch (err) {
+      if (savedSettingsApplied && !historyReconciled && settings) {
+        try {
+          const restoredSettings = await api.saveSettings(settings);
+          setRuntimeCacheData("settings", restoredSettings);
+        } catch {
+          // Preserve the original reconciliation error; startup preflight will report settings drift.
+        }
+      }
       const message = messageFromError(err);
       setBanner(message);
       throw err;

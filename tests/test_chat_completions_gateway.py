@@ -355,26 +355,6 @@ class CodexHubErrorPayloadTests(unittest.TestCase):
                 },
             ),
             (
-                "backend.command",
-                {
-                    "source": "web_bridge",
-                    "message": "unknown command",
-                    "status": 500,
-                    "error": "UnknownCommand",
-                    "error_type": "backend_error",
-                },
-            ),
-            (
-                "config.origin",
-                {
-                    "source": "web_bridge",
-                    "message": "origin is not allowed",
-                    "status": 403,
-                    "error": "OriginNotAllowed",
-                    "error_type": "config_error",
-                },
-            ),
-            (
                 "gateway.auth",
                 {
                     "source": "gateway",
@@ -3445,6 +3425,35 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertTrue(result["codexhub_error"]["retryable"])
         self.assertEqual(result["codexhub_error"]["details"]["error"], "URLError")
         self.assertEqual(handler._fake.status, 502)
+
+    def test_post_chat_completions_http_error_keeps_openai_error_and_adds_typed_error(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_error = {
+            "error": {
+                "message": "rate limit exceeded",
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded",
+            }
+        }
+
+        with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch("codex_proxy.urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["error"], upstream_error["error"])
+        self.assertEqual(result["codexhub_error"]["code"], "provider.rate_limit")
+        self.assertEqual(result["codexhub_error"]["source"], "official")
+        self.assertTrue(result["codexhub_error"]["retryable"])
+        self.assertEqual(result["codexhub_error"]["details"]["status"], 429)
+        self.assertEqual(handler._fake.status, 429)
 
     def test_post_responses_streaming_keeps_responses_sse_error_shape(self):
         body = json.dumps({

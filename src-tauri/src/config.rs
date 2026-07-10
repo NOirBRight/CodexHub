@@ -70,11 +70,11 @@ impl ConfigPaths {
         self.proxy_dir().join("settings.json")
     }
 
-    fn codex_config_path(&self) -> PathBuf {
+    pub(crate) fn codex_config_path(&self) -> PathBuf {
         self.codex_dir.join("config.toml")
     }
 
-    fn config_backup_path(&self) -> PathBuf {
+    pub(crate) fn config_backup_path(&self) -> PathBuf {
         let name = match crate::app_flavor::current().routing_owner() {
             crate::app_flavor::RoutingOwner::Beta => "config.toml.beta.backup",
             _ => "config.toml.release.backup",
@@ -88,7 +88,7 @@ impl ConfigPaths {
             .join("codexhub-model-catalog.json")
     }
 
-    fn config_overlay_script(&self) -> PathBuf {
+    pub(crate) fn config_overlay_script(&self) -> PathBuf {
         self.repo_root.join("src-python").join("config_overlay.py")
     }
 
@@ -430,6 +430,8 @@ pub(crate) fn switch_mode_with_paths(
                     .into_owned(),
                 "--base-url".to_string(),
                 format!("http://127.0.0.1:{}", settings.proxy_port),
+                "--gateway-key".to_string(),
+                settings.gateway_client_key.clone(),
                 "--owner".to_string(),
                 match crate::app_flavor::current().routing_owner() {
                     crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
@@ -968,9 +970,13 @@ sort_order = 7
             &paths.generated_catalog_path(),
         );
         assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:4555");
+        assert_arg_literal(&commands[0].args, "--gateway-key", "codexhub-proxy");
         assert_arg_literal(&commands[0].args, "--owner", "release");
         assert_eq!(
-            paths.config_backup_path().file_name().and_then(|name| name.to_str()),
+            paths
+                .config_backup_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
             Some("config.toml.release.backup")
         );
         assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
@@ -1001,7 +1007,10 @@ sort_order = 7
         assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
         assert_eq!(
-            paths.config_backup_path().file_name().and_then(|name| name.to_str()),
+            paths
+                .config_backup_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
             Some("config.toml.release.backup")
         );
         assert!(commands[0]

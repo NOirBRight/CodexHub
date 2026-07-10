@@ -927,51 +927,71 @@ def repair_history_bucket(
 
     backup_root.mkdir(parents=True, exist_ok=True)
     ledger_path = backup_root / "ledger.json"
-    state_entries = [
-        repair_state_db_provider_only(
-            path,
-            codex_dir,
-            backup_root,
-            source_provider,
-            target_provider,
-            allowed_thread_ids,
-        )
-        for path in db_paths
-    ]
-    state_done_at = time.perf_counter()
-
-    jsonl_candidates: list[dict[str, str]] = []
-    missing_rollout_paths = 0
-    for state_entry in state_entries:
-        missing_rollout_paths += int(state_entry.get("missing_rollout_paths", 0))
-        jsonl_candidates.extend(state_entry.get("jsonl_candidates", []))
-    jsonl_candidates.extend(ledger_jsonl_candidates)
-    jsonl_candidates.extend(
-        collect_state_provider_mismatch_jsonl_candidates(
-            codex_dir,
-            db_paths,
-            target_provider,
-            source_provider,
-            target_provider,
-            allowed_thread_ids,
-        )
-    )
-    if missing_rollout_paths or (dirty_state_rows > 0 and not jsonl_candidates):
-        jsonl_candidates.extend(
-            collect_filesystem_jsonl_candidates(
+    written_entries: list[dict[str, str]] = []
+    try:
+        state_entries = [
+            repair_state_db_provider_only(
+                path,
                 codex_dir,
+                backup_root,
+                source_provider,
+                target_provider,
+                allowed_thread_ids,
+            )
+            for path in db_paths
+        ]
+        state_done_at = time.perf_counter()
+
+        jsonl_candidates: list[dict[str, str]] = []
+        missing_rollout_paths = 0
+        for state_entry in state_entries:
+            missing_rollout_paths += int(state_entry.get("missing_rollout_paths", 0))
+            jsonl_candidates.extend(state_entry.get("jsonl_candidates", []))
+        jsonl_candidates.extend(ledger_jsonl_candidates)
+        jsonl_candidates.extend(
+            collect_state_provider_mismatch_jsonl_candidates(
+                codex_dir,
+                db_paths,
+                target_provider,
                 source_provider,
                 target_provider,
                 allowed_thread_ids,
             )
         )
-    jsonl_candidates = dedupe_jsonl_candidates(jsonl_candidates)
+        if missing_rollout_paths or (dirty_state_rows > 0 and not jsonl_candidates):
+            jsonl_candidates.extend(
+                collect_filesystem_jsonl_candidates(
+                    codex_dir,
+                    source_provider,
+                    target_provider,
+                    allowed_thread_ids,
+                )
+            )
+        jsonl_candidates = dedupe_jsonl_candidates(jsonl_candidates)
 
-    jsonl_results = [
-        apply_session_file_provider_fast(candidate, codex_dir, backup_root)
-        for candidate in jsonl_candidates
-    ]
-    jsonl_done_at = time.perf_counter()
+        jsonl_results: list[dict[str, str]] = []
+        for candidate in jsonl_candidates:
+            result = apply_session_file_provider_fast(candidate, codex_dir, backup_root)
+            jsonl_results.append(result)
+            if result.get("status") == "applied":
+                written_entries.append(result)
+        jsonl_done_at = time.perf_counter()
+    except Exception:
+        rollback = rollback_provider_changes(codex_dir, backup_root, written_entries)
+        write_json_atomic(
+            ledger_path,
+            {
+                "version": 1,
+                "mode": "repair-history",
+                "status": "rolled-back-after-error",
+                "created_at": utc_now_iso(),
+                "codex_dir": str(codex_dir),
+                "source_provider": source_provider,
+                "target_provider": target_provider,
+                **rollback,
+            },
+        )
+        raise
     jsonl_applied = sum(1 for entry in jsonl_results if entry.get("status") == "applied")
     jsonl_skipped = sum(1 for entry in jsonl_results if entry.get("status") == "skipped")
     state_rows = sum(int(entry.get("rows", 0)) for entry in state_entries)
@@ -1050,6 +1070,47 @@ def ensure_unified_history_bucket(codex_dir: Path, backup_root: Path) -> dict[st
         ledger_path = backup_root / "ledger.json"
         write_json_atomic(ledger_path, result)
     return result
+
+
+def inspect_unified_history_bucket(
+    codex_dir: Path,
+    target_provider: str = TARGET_PROVIDER,
+    ledger_root: Path | None = None,
+) -> dict[str, Any]:
+    if target_provider not in (SOURCE_PROVIDER, TARGET_PROVIDER):
+        raise ValueError(f"unsupported target provider: {target_provider}")
+    started_at = time.perf_counter()
+    source_provider = TARGET_PROVIDER if target_provider == SOURCE_PROVIDER else SOURCE_PROVIDER
+    allowed_session_ids: set[str] | None = None
+    if target_provider == SOURCE_PROVIDER:
+        ledgers = load_unified_history_ledgers(ledger_root)
+        allowed_session_ids = unified_ledger_session_ids(ledgers)
+    state_counts = [
+        state_provider_dirty_count(path, source_provider, allowed_session_ids)
+        for path in sqlite_db_paths(codex_dir)
+    ]
+    dirty_state_rows = sum(state_counts)
+    dirty_state_files = sum(1 for count in state_counts if count > 0)
+    dirty_jsonl_files = len(
+        collect_filesystem_jsonl_candidates(
+            codex_dir,
+            source_provider,
+            target_provider,
+            allowed_session_ids,
+        )
+    )
+    return {
+        "version": 1,
+        "mode": "inspect-unified",
+        "target_provider": target_provider,
+        "status": "needs_repair" if dirty_state_rows or dirty_jsonl_files else "clean",
+        "created_at": utc_now_iso(),
+        "codex_dir": str(codex_dir),
+        "dirty_state_rows": dirty_state_rows,
+        "dirty_state_files": dirty_state_files,
+        "dirty_jsonl_files": dirty_jsonl_files,
+        "timings": {"total_seconds": round(time.perf_counter() - started_at, 3)},
+    }
 
 
 def migrate_official_history_to_unified(codex_dir: Path, backup_root: Path) -> dict[str, Any]:
@@ -1206,6 +1267,64 @@ def restore_fast_state_backups(codex_dir: Path, backup_root: Path) -> int:
     return restored
 
 
+def rollback_provider_changes(
+    codex_dir: Path,
+    backup_root: Path,
+    written_entries: Iterable[dict[str, str]],
+) -> dict[str, Any]:
+    rolled_back_jsonl = 0
+    failures: list[dict[str, str]] = []
+    for entry in reversed(list(written_entries)):
+        try:
+            rollback_session_file_provider_fast(entry, codex_dir)
+            rolled_back_jsonl += 1
+            continue
+        except Exception as error:
+            backup = backup_root / "jsonl" / entry.get("path", "")
+            target = codex_dir / entry.get("path", "")
+            try:
+                if not backup.is_file():
+                    raise FileNotFoundError(backup)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, target)
+                rolled_back_jsonl += 1
+                continue
+            except Exception as backup_error:
+                failures.append(
+                    {
+                        "path": str(entry.get("path", "")),
+                        "error": str(error),
+                        "backup_error": str(backup_error),
+                    }
+                )
+    return {
+        "rolled_back_jsonl": rolled_back_jsonl,
+        "jsonl_rollback_failures": failures,
+        "restored_state_backups": restore_fast_state_backups(codex_dir, backup_root),
+    }
+
+
+def restore_repair_backups(codex_dir: Path, backup_root: Path) -> dict[str, Any]:
+    restored_jsonl = 0
+    failures: list[dict[str, str]] = []
+    jsonl_root = backup_root / "jsonl"
+    if jsonl_root.exists():
+        for backup in sorted(path for path in jsonl_root.rglob("*") if path.is_file()):
+            relative = backup.relative_to(jsonl_root)
+            target = codex_dir / relative
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, target)
+                restored_jsonl += 1
+            except OSError as error:
+                failures.append({"path": str(relative), "error": str(error)})
+    return {
+        "restored_state_backups": restore_fast_state_backups(codex_dir, backup_root),
+        "restored_jsonl_backups": restored_jsonl,
+        "restore_failures": failures,
+    }
+
+
 def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_provider: str) -> dict[str, Any]:
     if target_provider not in (SOURCE_PROVIDER, TARGET_PROVIDER):
         raise ValueError(f"unsupported target provider: {target_provider}")
@@ -1255,15 +1374,9 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
                 written_entries.append(result)
         jsonl_done_at = time.perf_counter()
     except Exception:
-        for entry in reversed(written_entries):
-            try:
-                rollback_session_file_provider_fast(entry, codex_dir)
-            except Exception:
-                pass
-        restored_states = restore_fast_state_backups(codex_dir, backup_root)
+        rollback = rollback_provider_changes(codex_dir, backup_root, written_entries)
         ledger["status"] = "rolled-back-after-error"
-        ledger["rolled_back_jsonl"] = len(written_entries)
-        ledger["restored_state_backups"] = restored_states
+        ledger.update(rollback)
         ledger["failed_at"] = utc_now_iso()
         write_json_atomic(ledger_path, ledger)
         raise
@@ -1311,6 +1424,11 @@ def main(argv: list[str] | None = None) -> int:
     ensure_unified_parser.add_argument("--codex-dir", type=Path, default=default_codex_dir())
     ensure_unified_parser.add_argument("--backup-root", required=True, type=Path)
 
+    inspect_unified_parser = subparsers.add_parser("inspect-unified")
+    inspect_unified_parser.add_argument("--codex-dir", type=Path, default=default_codex_dir())
+    inspect_unified_parser.add_argument("--target", choices=[SOURCE_PROVIDER, TARGET_PROVIDER], default=TARGET_PROVIDER)
+    inspect_unified_parser.add_argument("--ledger-root", type=Path)
+
     repair_parser = subparsers.add_parser("repair-history")
     repair_parser.add_argument("--codex-dir", type=Path, default=default_codex_dir())
     repair_parser.add_argument("--backup-root", required=True, type=Path)
@@ -1325,6 +1443,10 @@ def main(argv: list[str] | None = None) -> int:
     restore_official_parser.add_argument("--codex-dir", type=Path, default=default_codex_dir())
     restore_official_parser.add_argument("--backup-root", required=True, type=Path)
     restore_official_parser.add_argument("--ledger-root", type=Path)
+
+    rollback_repair_parser = subparsers.add_parser("rollback-repair")
+    rollback_repair_parser.add_argument("--codex-dir", type=Path, default=default_codex_dir())
+    rollback_repair_parser.add_argument("--backup-root", required=True, type=Path)
 
     fast_parser = subparsers.add_parser("normalize-fast")
     fast_parser.add_argument("--codex-dir", type=Path, default=default_codex_dir())
@@ -1366,6 +1488,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"jsonl_skipped={result.get('jsonl_skipped', 0)}")
         for key, value in result.get("timings", {}).items():
             print(f"{key}={value}")
+    elif args.command == "inspect-unified":
+        print(
+            json.dumps(
+                inspect_unified_history_bucket(args.codex_dir, args.target, args.ledger_root),
+                ensure_ascii=True,
+            )
+        )
     elif args.command == "repair-history":
         result = repair_history_bucket(args.codex_dir, args.backup_root, args.target, args.ledger_root)
         print(f"status={result.get('status', 'completed')}")
@@ -1395,6 +1524,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_restored={result.get('jsonl_restored', 0)}")
         print(f"jsonl_skipped={result.get('jsonl_skipped', 0)}")
+    elif args.command == "rollback-repair":
+        result = restore_repair_backups(args.codex_dir, args.backup_root)
+        print(f"restored_state_backups={result['restored_state_backups']}")
+        print(f"restored_jsonl_backups={result['restored_jsonl_backups']}")
+        if result["restore_failures"]:
+            raise RuntimeError(f"history repair rollback failed: {result['restore_failures']}")
     elif args.command == "normalize-fast":
         result = normalize_history_provider_fast(args.codex_dir, args.backup_root, args.target)
         print(f"status={result.get('status', 'completed')}")

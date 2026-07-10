@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
 import sqlite3
 import tempfile
@@ -11,6 +13,8 @@ from history_overlay import (
     apply_history_overlay,
     apply_session_file_provider_fast,
     ensure_unified_history_bucket,
+    inspect_unified_history_bucket,
+    main as history_overlay_main,
     migrate_official_history_to_unified,
     normalize_history_provider_fast,
     plan_session_file_provider_fast,
@@ -18,6 +22,7 @@ from history_overlay import (
     repair_history_bucket,
     restore_history_overlay,
     restore_official_history_from_unified,
+    restore_repair_backups,
 )
 
 
@@ -379,6 +384,77 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(result["jsonl_planned"], 0)
             self.assertFalse((codex_dir / "backup").exists())
 
+    def test_inspect_unified_history_bucket_is_read_only_and_reports_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-openai.jsonl"
+            session_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-openai", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-openai', 'openai', 'gpt-5.6-sol', ?)",
+                    (str(session_file),),
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-custom', 'custom', 'glm-5.2', '')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            before_db = state_path.read_bytes()
+            before_jsonl = session_file.read_bytes()
+            result = inspect_unified_history_bucket(codex_dir)
+
+            self.assertEqual(result["status"], "needs_repair")
+            self.assertEqual(result["dirty_state_rows"], 1)
+            self.assertEqual(result["dirty_state_files"], 1)
+            self.assertEqual(result["dirty_jsonl_files"], 1)
+            self.assertEqual(state_path.read_bytes(), before_db)
+            self.assertEqual(session_file.read_bytes(), before_jsonl)
+            self.assertFalse((codex_dir / "backup").exists())
+
+    def test_inspect_unified_history_bucket_reports_clean_custom_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+                connection.execute("INSERT INTO threads VALUES ('thread-custom', 'custom')")
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = inspect_unified_history_bucket(codex_dir)
+
+            self.assertEqual(result["status"], "clean")
+            self.assertEqual(result["dirty_state_rows"], 0)
+            self.assertEqual(result["dirty_state_files"], 0)
+            self.assertEqual(result["dirty_jsonl_files"], 0)
+
+    def test_inspect_unified_history_cli_emits_json_without_creating_backups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = history_overlay_main(["inspect-unified", "--codex-dir", str(codex_dir)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "clean")
+            self.assertEqual(list(codex_dir.iterdir()), [])
+
     def test_normalize_history_provider_fast_scans_filesystem_beside_state_rollout_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
@@ -523,6 +599,89 @@ class HistoryOverlayTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(row, ("custom", "kimi-k2.7-code"))
+
+    def test_ledger_scoped_repair_rolls_back_state_when_jsonl_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-openai.jsonl"
+            session_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-openai", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-openai', 'openai', ?)",
+                    (str(session_file),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            backup_root = codex_dir / "backup"
+            with patch("history_overlay.apply_session_file_provider_fast", side_effect=RuntimeError("jsonl failed")):
+                with self.assertRaisesRegex(RuntimeError, "jsonl failed"):
+                    repair_history_bucket(codex_dir, backup_root, "custom")
+
+            connection = sqlite3.connect(state_path)
+            try:
+                provider = connection.execute(
+                    "SELECT model_provider FROM threads WHERE id = 'thread-openai'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(provider, "openai")
+            self.assertEqual(json.loads((backup_root / "ledger.json").read_text())["status"], "rolled-back-after-error")
+
+    def test_restore_repair_backups_restores_sqlite_and_jsonl_after_completed_migration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            session_file = sessions_dir / "rollout-openai.jsonl"
+            session_file.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-openai", "model_provider": "openai"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-openai', 'openai', ?)",
+                    (str(session_file),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            backup_root = codex_dir / "backup"
+
+            result = repair_history_bucket(codex_dir, backup_root, "custom")
+            self.assertEqual(result["status"], "completed")
+            rollback = restore_repair_backups(codex_dir, backup_root)
+
+            self.assertEqual(rollback["restored_state_backups"], 1)
+            self.assertEqual(rollback["restored_jsonl_backups"], 1)
+            connection = sqlite3.connect(state_path)
+            try:
+                provider = connection.execute(
+                    "SELECT model_provider FROM threads WHERE id = 'thread-openai'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(provider, "openai")
+            first_line = json.loads(session_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first_line["payload"]["model_provider"], "openai")
 
     def test_normalize_history_provider_fast_replans_changed_session_meta(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -735,6 +894,11 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(providers["thread-official"], "custom")
             self.assertEqual(providers["thread-existing-custom"], "custom")
 
+            separated_inspection = inspect_unified_history_bucket(codex_dir, "openai", backup_root)
+            self.assertEqual(separated_inspection["status"], "needs_repair")
+            self.assertEqual(separated_inspection["dirty_state_rows"], 1)
+            self.assertEqual(separated_inspection["dirty_jsonl_files"], 1)
+
             new_custom_file = sessions_dir / "rollout-new-custom.jsonl"
             new_custom_file.write_text(
                 json.dumps({"type": "session_meta", "payload": {"id": "thread-new-custom", "model_provider": "custom"}})
@@ -767,6 +931,7 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(providers["thread-official"], "openai")
             self.assertEqual(providers["thread-existing-custom"], "custom")
             self.assertEqual(providers["thread-new-custom"], "custom")
+            self.assertEqual(inspect_unified_history_bucket(codex_dir, "openai", backup_root)["status"], "clean")
 
     def test_repair_history_bucket_can_restore_ledger_confirmed_custom_rows_to_openai(self):
         with tempfile.TemporaryDirectory() as tmpdir:

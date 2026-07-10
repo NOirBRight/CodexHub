@@ -30,6 +30,7 @@ import type {
   SubagentMatrixStatus,
   UpstreamFormat,
   UpstreamFormatProbeResult,
+  UnifiedHistoryResult,
   UsageQueryWindow,
 } from "./types";
 import { normalizeSettings } from "./settings";
@@ -274,6 +275,8 @@ export const api = {
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
   migrateOfficialHistoryToUnified: () => call<string>("migrate_official_history_to_unified"),
   restoreOfficialHistoryFromUnified: () => call<string>("restore_official_history_from_unified"),
+  preflightUnifiedHistory: (requestRestart = false, targetUnified?: boolean) =>
+    call<UnifiedHistoryResult>("preflight_unified_history", { requestRestart, targetUnified }),
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),

@@ -87,6 +87,17 @@ export interface AppStatus {
   history_sync_message?: string | null;
 }
 
+export interface UnifiedHistoryResult {
+  status: "clean" | "repaired" | "restart_required" | "conflict";
+  changed_rows: number;
+  changed_files: number;
+  backup_path?: string | null;
+  receipt_path?: string | null;
+  reason?: string | null;
+  error?: string | null;
+  codex_restarted: boolean;
+}
+
 export interface AppVersionInfo {
   current_version: string;
 }
