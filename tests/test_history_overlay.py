@@ -443,6 +443,57 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(result["dirty_state_files"], 0)
             self.assertEqual(result["dirty_jsonl_files"], 0)
 
+    def test_inspect_unified_history_bucket_ignores_unindexed_openai_rollouts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            sessions_dir = codex_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+
+            indexed_file = sessions_dir / "rollout-custom.jsonl"
+            indexed_file.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "thread-custom", "model_provider": "custom"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            orphan_file = sessions_dir / "rollout-orphan-openai.jsonl"
+            orphan_file.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "thread-orphan", "model_provider": "openai"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-custom', 'custom', ?)",
+                    (str(indexed_file),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = inspect_unified_history_bucket(codex_dir)
+
+            self.assertEqual(result["status"], "clean")
+            self.assertEqual(result["dirty_state_rows"], 0)
+            self.assertEqual(result["dirty_state_files"], 0)
+            self.assertEqual(result["dirty_jsonl_files"], 0)
+            self.assertTrue(orphan_file.exists())
+
     def test_inspect_unified_history_cli_emits_json_without_creating_backups(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)

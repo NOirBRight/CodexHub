@@ -605,8 +605,11 @@ fn subscription_models_to_metadata_models(
     let builtin = builtin_model_metadata();
     let mut output = Vec::new();
     for subscription_model in subscription_models {
-        let id = format!("openai/{}", subscription_model.slug);
-        let defaults = builtin.iter().find(|model| model.id == id);
+        let id = subscription_model.slug.clone();
+        let legacy_prefixed_id = format!("openai/{}", subscription_model.slug);
+        let defaults = builtin
+            .iter()
+            .find(|model| model.id == id || model.id == legacy_prefixed_id);
         output.push(Model {
             id,
             display_name: Some(subscription_model_display_name(
@@ -1935,7 +1938,8 @@ mod tests {
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
         list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
-        refresh_official_models_with_runner, test_model_endpoint_with_timeout,
+        refresh_official_models_with_runner, subscription_models_from_payload,
+        subscription_models_to_metadata_models, test_model_endpoint_with_timeout,
         AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
     use crate::{MetadataProvenance, Model, UpstreamFormat};
@@ -1995,6 +1999,27 @@ mod tests {
     }
 
     #[test]
+    fn subscription_models_use_bare_official_ids_and_keep_builtin_defaults() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "openai/gpt-5.4",
+                    "displayName": "gpt-5.4",
+                    "hidden": false
+                }
+            ]
+        }))
+        .expect("subscription models");
+
+        let models = subscription_models_to_metadata_models(&subscription_models);
+
+        assert_eq!(model_ids(&models), ["gpt-5.4"]);
+        assert_eq!(models[0].display_name.as_deref(), Some("OpenAI GPT-5.4"));
+        assert_eq!(models[0].upstream_model.as_deref(), Some("gpt-5.4"));
+        assert!(models[0].pricing.is_some());
+    }
+
+    #[test]
     fn subscription_refresh_converts_visible_codex_models_and_writes_caches() {
         let root = temp_root("subscription-refresh");
         let paths = test_paths(&root);
@@ -2040,10 +2065,7 @@ mod tests {
         let models =
             refresh_official_models_with_runner(&paths, &runner).expect("subscription refresh");
 
-        assert_eq!(
-            model_ids(&models),
-            ["openai/gpt-subscription-live", "openai/gpt-5.4"]
-        );
+        assert_eq!(model_ids(&models), ["gpt-subscription-live", "gpt-5.4"]);
         assert_eq!(
             models[0].display_name.as_deref(),
             Some("OpenAI GPT Subscription Live")
@@ -2063,7 +2085,7 @@ mod tests {
         );
         let known_model = models
             .iter()
-            .find(|model| model.id == "openai/gpt-5.4")
+            .find(|model| model.id == "gpt-5.4")
             .expect("known subscription model");
         assert_eq!(known_model.display_name.as_deref(), Some("OpenAI GPT-5.4"));
 
@@ -2071,7 +2093,7 @@ mod tests {
             read_models_json(&paths.metadata_cache_path()).expect("metadata cache");
         assert_eq!(
             model_ids(&cached_metadata),
-            ["openai/gpt-subscription-live", "openai/gpt-5.4"]
+            ["gpt-subscription-live", "gpt-5.4"]
         );
 
         let seed: Value = serde_json::from_str(
@@ -2114,7 +2136,7 @@ mod tests {
         let models = refresh_official_models_with_runner(&paths, &runner)
             .expect("cached subscription refresh");
 
-        assert_eq!(model_ids(&models), ["openai/gpt-cached-subscription"]);
+        assert_eq!(model_ids(&models), ["gpt-cached-subscription"]);
         assert_eq!(
             models[0].display_name.as_deref(),
             Some("OpenAI GPT Cached Subscription")

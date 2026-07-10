@@ -1525,7 +1525,8 @@ def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | N
         return None
 
     alias = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
-    model = generated_catalog_by_slug().get(alias)
+    catalog = generated_catalog_by_slug()
+    model = catalog.get(upstream_model) or catalog.get(alias)
     if not model or model.get("supported_in_api") is False:
         return None
 

@@ -560,8 +560,7 @@ def official_proxy_display_name(slug: str, model: dict[str, Any], policy: Catalo
 
 def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
     model = deepcopy(official_by_slug.get(slug) or build_minimal_official_model(slug, policy))
-    alias = official_proxy_alias(slug)
-    model["slug"] = alias
+    model["slug"] = slug
     model["display_name"] = official_proxy_display_name(slug, model, policy)
     model.setdefault("description", MINIMAL_OFFICIAL_MODEL["description"])
     model.setdefault("visibility", "list")
@@ -764,12 +763,11 @@ def build_codex_catalog(
     )
 
     for slug in official_slugs:
-        alias = official_proxy_alias(slug)
-        if not slug or alias in seen_slugs:
+        if not slug or slug in seen_slugs:
             continue
         model = build_official_proxy_model(slug, official_by_slug, policy)
         models.append(model)
-        seen_slugs.add(alias)
+        seen_slugs.add(slug)
 
     fallback_list = list(fallback_models or [])
     fallback_by_slug = fallback_model_index(fallback_list)

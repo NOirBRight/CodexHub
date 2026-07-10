@@ -765,6 +765,74 @@ def collect_state_provider_mismatch_jsonl_candidates(
     return candidates
 
 
+def collect_state_indexed_jsonl_candidates(
+    codex_dir: Path,
+    db_paths: list[Path],
+    source_provider: str,
+    target_provider: str,
+    allowed_thread_ids: set[str] | None = None,
+) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    indexed_thread_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    for db_path in db_paths:
+        if not db_path.exists():
+            continue
+        connection = sqlite3.connect(db_path)
+        try:
+            columns = table_columns(connection, "threads")
+            if "id" not in columns:
+                continue
+            select_columns = ["id"]
+            if "rollout_path" in columns:
+                select_columns.append("rollout_path")
+            rows = connection.execute(f"SELECT {', '.join(select_columns)} FROM threads").fetchall()
+        finally:
+            connection.close()
+
+        for row in rows:
+            thread_id = str(row[0]) if row[0] is not None else ""
+            if not thread_id or (allowed_thread_ids is not None and thread_id not in allowed_thread_ids):
+                continue
+            indexed_thread_ids.add(thread_id)
+            if len(row) < 2:
+                continue
+            path = resolve_rollout_path(codex_dir, row[1])
+            if path is None or not path.exists():
+                continue
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key in seen_paths:
+                continue
+            session_id, provider, record = parse_session_meta(read_first_line(path))
+            if record is None or provider != source_provider:
+                continue
+            if session_id and session_id != thread_id:
+                continue
+            seen_paths.add(key)
+            candidates.append(
+                {
+                    "path": relative_to_codex_dir(path, codex_dir),
+                    "session_id": thread_id,
+                    "source_provider": source_provider,
+                    "target_provider": target_provider,
+                }
+            )
+
+    if indexed_thread_ids:
+        candidates.extend(
+            collect_filesystem_jsonl_candidates(
+                codex_dir,
+                source_provider,
+                target_provider,
+                indexed_thread_ids,
+            )
+        )
+    return dedupe_jsonl_candidates(candidates)
+
+
 def collect_filesystem_jsonl_candidates(
     codex_dir: Path,
     source_provider: str,
@@ -1085,15 +1153,17 @@ def inspect_unified_history_bucket(
     if target_provider == SOURCE_PROVIDER:
         ledgers = load_unified_history_ledgers(ledger_root)
         allowed_session_ids = unified_ledger_session_ids(ledgers)
+    db_paths = sqlite_db_paths(codex_dir)
     state_counts = [
         state_provider_dirty_count(path, source_provider, allowed_session_ids)
-        for path in sqlite_db_paths(codex_dir)
+        for path in db_paths
     ]
     dirty_state_rows = sum(state_counts)
     dirty_state_files = sum(1 for count in state_counts if count > 0)
     dirty_jsonl_files = len(
-        collect_filesystem_jsonl_candidates(
+        collect_state_indexed_jsonl_candidates(
             codex_dir,
+            db_paths,
             source_provider,
             target_provider,
             allowed_session_ids,

@@ -3673,8 +3673,8 @@ class RoutingTests(unittest.TestCase):
 
     def test_runtime_discovered_official_models_route_for_bare_and_openai_aliases(self):
         catalog = {
-            f"openai/{model}": {
-                "slug": f"openai/{model}",
+            model: {
+                "slug": model,
                 "supported_in_api": True,
                 "codex_proxy_metadata": {
                     "provider": "openai",
@@ -3718,8 +3718,8 @@ class RoutingTests(unittest.TestCase):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         policy = replace(policy, denied_models=set(policy.denied_models) | {"gpt-5.6-sol"})
         catalog = {
-            "openai/gpt-5.6-sol": {
-                "slug": "openai/gpt-5.6-sol",
+            "gpt-5.6-sol": {
+                "slug": "gpt-5.6-sol",
                 "supported_in_api": True,
                 "codex_proxy_metadata": {
                     "provider": "openai",
