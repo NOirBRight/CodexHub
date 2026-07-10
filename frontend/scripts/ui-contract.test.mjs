@@ -331,13 +331,26 @@ test("runtime header treats SVG icon clicks inside controls as interactive", asy
   assert.match(settingsButton, /aria-label=\{t\("common\.settings"\)\}/);
 });
 
-test("main desktop window opens tall enough for the primary dashboard", async () => {
+test("runtime title area double-click toggles maximize without activating controls or drag", async () => {
+  const runtimeSource = await readFile(runtimeBarPath, "utf8");
+  const dragHandler = runtimeSource.match(/function startWindowDrag[\s\S]*?^}/m)?.[0] ?? "";
+  const maximizeHandler = runtimeSource.match(/function toggleWindowMaximizeFromTitlebar[\s\S]*?^}/m)?.[0] ?? "";
+
+  assert.match(runtimeSource, /onDoubleClickCapture=\{toggleWindowMaximizeFromTitlebar\}/);
+  assert.match(dragHandler, /event\.detail > 1/);
+  assert.match(maximizeHandler, /isInteractiveWindowControl\(event\.target\)/);
+  assert.match(maximizeHandler, /event\.preventDefault\(\)/);
+  assert.match(maximizeHandler, /event\.stopPropagation\(\)/);
+  assert.match(maximizeHandler, /api\.windowToggleMaximize\(\)/);
+});
+
+test("main desktop window opens at the release candidate height", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
   const mainWindow = tauriConfig.app.windows[0];
 
   assert.equal(mainWindow.width, 1280);
-  assert.ok(mainWindow.height >= 900);
-  assert.ok(mainWindow.minHeight >= 800);
+  assert.equal(mainWindow.height, 930);
+  assert.equal(mainWindow.minHeight, 800);
 });
 
 test("tauri config enables Windows updater packaging", async () => {
