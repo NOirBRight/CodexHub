@@ -21,37 +21,23 @@ const EVENT_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 const TELEMETRY_INGEST_BATCH_LINES: usize = 1000;
 const TELEMETRY_INGEST_BATCH_BYTES: u64 = 1024 * 1024;
 const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
-const DEFAULT_MODEL: &str = "openai/gpt-5.5";
+const DEFAULT_MODEL: &str = "gpt-5.5";
 
 const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
-    ("openai/gpt-5.5", "OpenAI GPT-5.5", 258400),
-    ("openai/gpt-5.4", "OpenAI GPT-5.4", 272000),
-    ("openai/gpt-5.4-mini", "OpenAI GPT-5.4-Mini", 272000),
-    (
-        "openai/gpt-5.3-codex-spark",
-        "OpenAI GPT-5.3-Codex-Spark",
-        128000,
-    ),
+    ("gpt-5.5", "OpenAI GPT-5.5", 258400),
+    ("gpt-5.4", "OpenAI GPT-5.4", 272000),
+    ("gpt-5.4-mini", "OpenAI GPT-5.4-Mini", 272000),
+    ("gpt-5.3-codex-spark", "OpenAI GPT-5.3-Codex-Spark", 128000),
 ];
 
 const OFFICIAL_FAST_VARIANTS: &[(&str, &str, &str, u32)] = &[
-    (
-        "openai/gpt-5.5",
-        "openai/gpt-5.5-fast",
-        "OpenAI GPT-5.5 Fast",
-        258400,
-    ),
-    (
-        "openai/gpt-5.4",
-        "openai/gpt-5.4-fast",
-        "OpenAI GPT-5.4 Fast",
-        272000,
-    ),
+    ("gpt-5.5", "gpt-5.5-fast", "OpenAI GPT-5.5 Fast", 258400),
+    ("gpt-5.4", "gpt-5.4-fast", "OpenAI GPT-5.4 Fast", 272000),
 ];
 
 const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
-    ("openai/gpt-5.5-fast", 12.50, 1.25, 75.00),
-    ("openai/gpt-5.4-fast", 5.00, 0.50, 30.00),
+    ("gpt-5.5-fast", 12.50, 1.25, 75.00),
+    ("gpt-5.4-fast", 5.00, 0.50, 30.00),
 ];
 
 static GATEWAY_CLIENT_CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1645,13 +1631,8 @@ fn fallback_official_gateway_models(settings: &Settings) -> Vec<GatewayModel> {
 
 fn official_gateway_model_id(id: &str) -> Option<String> {
     let id = id.trim();
-    if id.starts_with("openai/gpt-") {
-        Some(id.to_string())
-    } else if id.starts_with("gpt-") {
-        Some(format!("openai/{id}"))
-    } else {
-        None
-    }
+    let bare_id = id.strip_prefix("openai/").unwrap_or(id);
+    bare_id.starts_with("gpt-").then(|| bare_id.to_string())
 }
 
 fn is_gateway_fast_variant_id(id: &str) -> bool {
@@ -1775,6 +1756,11 @@ fn resolve_gateway_client_model_id(
     if exported.contains(requested) {
         return Ok(requested.to_string());
     }
+    if let Some(canonical) = official_gateway_model_id(requested) {
+        if exported.contains(&canonical) {
+            return Ok(canonical);
+        }
+    }
     if let Some(canonical) = gateway_model_alias_map(providers).get(requested) {
         return Ok(canonical.clone());
     }
@@ -1814,6 +1800,9 @@ fn gateway_client_models(
 
 fn split_gateway_model_id(model_id: &str) -> (String, String) {
     let model_id = model_id.trim();
+    if let Some(official_id) = official_gateway_model_id(model_id) {
+        return ("openai".to_string(), official_id);
+    }
     if let Some((provider_id, short_id)) = model_id.split_once('/') {
         let provider_id = provider_id.trim();
         let short_id = short_id.trim();
@@ -6629,7 +6618,7 @@ mod tests {
         let model = super::default_gateway_client_sync_model(&settings, &[])
             .expect("enabled fallback model");
 
-        assert_eq!(model, "openai/gpt-5.4");
+        assert_eq!(model, "gpt-5.4");
     }
 
     #[cfg(target_os = "windows")]
@@ -6729,7 +6718,8 @@ mod tests {
 
         let models = gateway_models_from_config(&settings, &providers);
 
-        assert!(models.iter().any(|model| model.id == "openai/gpt-5.5"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
+        assert!(!models.iter().any(|model| model.id == "openai/gpt-5.5"));
         assert!(models.iter().any(|model| model.id == "minimax/minimax-m3"));
         assert!(!models
             .iter()
@@ -6828,10 +6818,10 @@ mod tests {
 
         let models = gateway_models_from_config(&settings, &[]);
 
-        assert!(models.iter().any(|model| model.id == "openai/gpt-5.5"));
-        assert!(models.iter().any(|model| model.id == "openai/gpt-5.5-fast"));
-        assert!(!models.iter().any(|model| model.id == "openai/gpt-5.4"));
-        assert!(!models.iter().any(|model| model.id == "openai/gpt-5.4-fast"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5-fast"));
+        assert!(!models.iter().any(|model| model.id == "gpt-5.4"));
+        assert!(!models.iter().any(|model| model.id == "gpt-5.4-fast"));
     }
 
     #[test]
@@ -6848,9 +6838,39 @@ mod tests {
         );
 
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "openai/gpt-5.6");
+        assert_eq!(models[0].id, "gpt-5.6");
         assert_eq!(models[0].display_name, "OpenAI GPT-5.6");
         assert_eq!(models[0].context_window, 300_000);
+    }
+
+    #[test]
+    fn official_gateway_model_ids_are_bare_and_accept_legacy_aliases() {
+        assert_eq!(
+            super::official_gateway_model_id("openai/gpt-5.6").as_deref(),
+            Some("gpt-5.6")
+        );
+        assert_eq!(
+            super::official_gateway_model_id("gpt-5.6").as_deref(),
+            Some("gpt-5.6")
+        );
+        assert_eq!(
+            super::official_gateway_model_id("ollama-cloud/glm-5.2"),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_official_client_selection_resolves_to_exported_bare_id() {
+        let settings = Settings::default();
+
+        let resolved =
+            super::resolve_gateway_client_model_id(&settings, &[], "openai/gpt-5.5").unwrap();
+
+        assert_eq!(resolved, "gpt-5.5");
+        assert_eq!(
+            super::split_gateway_model_id(&resolved),
+            ("openai".to_string(), "gpt-5.5".to_string())
+        );
     }
 
     #[test]

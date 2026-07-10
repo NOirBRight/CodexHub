@@ -23,6 +23,7 @@ import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToa
 import { SortableList } from "../components/SortableList";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
+import { normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   AppStatus,
@@ -40,12 +41,11 @@ import type {
 
 const OFFICIAL_ID = "__official__";
 const ADD_ID = "__add__";
-const DEFAULT_FAST_MODEL_VARIANTS = ["openai/gpt-5.5", "openai/gpt-5.4"];
 const DEFAULT_OFFICIAL_MODEL_ORDER = [
-  "openai/gpt-5.5",
-  "openai/gpt-5.4",
-  "openai/gpt-5.4-mini",
-  "openai/gpt-5.3-codex-spark",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
 ];
 const OPENAI_USAGE_DAY_SECONDS = 86_400;
 const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
@@ -3346,17 +3346,7 @@ function modelIdMatches(left: string, right: string) {
 }
 
 function withDefaultFastVariants(settings: Settings): Settings {
-  const base = {
-    ...settings,
-    auto_sync_history: settings.auto_sync_history ?? false,
-    unified_codex_history: settings.unified_codex_history ?? true,
-    auto_sync_clients: settings.auto_sync_clients ?? settings.auto_sync_catalog ?? true,
-    official_disabled_models: settings.official_disabled_models ?? [],
-  };
-  if (settings.gateway_fast_model_variants?.length) {
-    return base;
-  }
-  return { ...base, gateway_fast_model_variants: DEFAULT_FAST_MODEL_VARIANTS };
+  return normalizeSettings(settings);
 }
 
 function formatContextWindow(value?: number | null) {

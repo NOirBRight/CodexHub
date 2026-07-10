@@ -1227,6 +1227,24 @@ test("settings normalization restores default-on fields when persisted settings 
   assert.match(tauriSource, /settings: normalizeSettings\(settings\)/);
 });
 
+test("official model settings normalize legacy OpenAI prefixes to bare ids", async () => {
+  const [settingsSource, providersSource] = await Promise.all([
+    readFile(settingsLibPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+  ]);
+
+  assert.match(settingsSource, /DEFAULT_FAST_MODEL_VARIANTS\s*=\s*\["gpt-5\.5",\s*"gpt-5\.4"\]/);
+  assert.match(settingsSource, /function normalizeOfficialModelId\(/);
+  assert.match(settingsSource, /value\.startsWith\("openai\/gpt-"\)/);
+  assert.match(settingsSource, /gateway_fast_model_variants:\s*normalizeFastModelVariants\(/);
+  assert.match(settingsSource, /official_disabled_models:\s*normalizeModelIds\(/);
+  assert.match(settingsSource, /official_model_sort_order:\s*normalizeModelIds\(/);
+  assert.match(providersSource, /import \{ normalizeSettings \} from "\.\.\/lib\/settings"/);
+  assert.match(providersSource, /function withDefaultFastVariants\(settings: Settings\): Settings \{\s*return normalizeSettings\(settings\);\s*\}/);
+  assert.doesNotMatch(providersSource, /const DEFAULT_FAST_MODEL_VARIANTS = \["openai\//);
+  assert.doesNotMatch(providersSource, /const DEFAULT_OFFICIAL_MODEL_ORDER = \[\s*"openai\//);
+});
+
 test("settings drawer omits duplicated local endpoint controls", async () => {
   const drawerSource = await readFile(settingsDrawerPath, "utf8");
 

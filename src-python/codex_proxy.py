@@ -9223,9 +9223,9 @@ def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, An
         if isinstance(model, Mapping)
     }
     for fast_model, upstream_model in OFFICIAL_FAST_VARIANT_BASE_MODELS.items():
-        base_slug = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
-        fast_slug = f"{OFFICIAL_ALIAS_PREFIX}{fast_model}"
-        base_model = by_slug.get(base_slug)
+        legacy_base_slug = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
+        fast_slug = fast_model
+        base_model = by_slug.get(upstream_model) or by_slug.get(legacy_base_slug)
         if not isinstance(base_model, Mapping) or fast_slug in by_slug:
             continue
         fast_entry = deepcopy(dict(base_model))

@@ -249,6 +249,7 @@ impl SettingsDocument {
                 .unwrap_or(defaults.official_disabled_models),
             official_model_sort_order: self
                 .official_model_sort_order
+                .map(sanitize_model_ids)
                 .unwrap_or(defaults.official_model_sort_order),
             official_provider_sort_order: self
                 .official_provider_sort_order
@@ -263,25 +264,31 @@ fn sanitize_gateway_auto_retry_max_attempts(value: u32) -> u8 {
 }
 
 fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
-    const ALLOWED: &[&str] = &["openai/gpt-5.5", "openai/gpt-5.4"];
+    const ALLOWED: &[&str] = &["gpt-5.5", "gpt-5.4"];
+    sanitize_model_ids(values)
+        .into_iter()
+        .filter(|value| ALLOWED.contains(&value.as_str()))
+        .collect()
+}
+
+fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
     let mut output = Vec::new();
     for value in values {
-        if ALLOWED.contains(&value.as_str()) && !output.contains(&value) {
+        let value = normalize_official_model_id(&value);
+        if !value.is_empty() && !output.contains(&value) {
             output.push(value);
         }
     }
     output
 }
 
-fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
-    let mut output = Vec::new();
-    for value in values {
-        let value = value.trim().to_string();
-        if !value.is_empty() && !output.contains(&value) {
-            output.push(value);
-        }
-    }
-    output
+fn normalize_official_model_id(value: &str) -> String {
+    let value = value.trim();
+    value
+        .strip_prefix("openai/")
+        .filter(|bare| bare.starts_with("gpt-"))
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn sanitize_locale(value: String) -> String {
@@ -294,6 +301,10 @@ fn sanitize_locale(value: String) -> String {
 
 fn sanitize_settings_for_save(mut settings: Settings) -> Settings {
     settings.locale = sanitize_locale(settings.locale);
+    settings.gateway_fast_model_variants =
+        sanitize_fast_model_variants(settings.gateway_fast_model_variants);
+    settings.official_disabled_models = sanitize_model_ids(settings.official_disabled_models);
+    settings.official_model_sort_order = sanitize_model_ids(settings.official_model_sort_order);
     settings
 }
 
@@ -738,12 +749,9 @@ sort_order = 7
             gateway_auto_retry_max_attempts: 7,
             gateway_image_proxy_enabled: true,
             gateway_image_proxy_model: "minimax-cn/MiniMax-M3".to_string(),
-            gateway_fast_model_variants: vec!["openai/gpt-5.5".to_string()],
-            official_disabled_models: vec!["openai/gpt-5.4-mini".to_string()],
-            official_model_sort_order: vec![
-                "openai/gpt-5.4".to_string(),
-                "openai/gpt-5.5".to_string(),
-            ],
+            gateway_fast_model_variants: vec!["gpt-5.5".to_string()],
+            official_disabled_models: vec!["gpt-5.4-mini".to_string()],
+            official_model_sort_order: vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
             official_provider_sort_order: 3,
             proxy_port: 4555,
         };
@@ -768,6 +776,82 @@ sort_order = 7
         assert!(written.contains("\"auto_start_gateway\": false"));
         assert!(written.contains("\"unified_codex_history\": false"));
         assert!(written.contains("\"locale\": \"zh-CN\""));
+    }
+
+    #[test]
+    fn legacy_official_model_ids_are_normalized_on_load_and_save() {
+        let root = temp_root("legacy-official-model-ids");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "gateway_fast_model_variants": [
+                " openai/gpt-5.5 ",
+                "gpt-5.5",
+                "openai/gpt-5.4",
+                "ollama-cloud/glm-5.2"
+              ],
+              "official_disabled_models": [
+                " openai/gpt-5.4-mini ",
+                "gpt-5.4-mini",
+                "ollama-cloud/glm-5.2"
+              ],
+              "official_model_sort_order": [
+                "openai/gpt-5.5",
+                " gpt-5.5 ",
+                "ollama-cloud/glm-5.2"
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("legacy settings load");
+
+        assert_eq!(
+            loaded.gateway_fast_model_variants,
+            vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+        );
+        assert_eq!(
+            loaded.official_disabled_models,
+            vec![
+                "gpt-5.4-mini".to_string(),
+                "ollama-cloud/glm-5.2".to_string()
+            ]
+        );
+        assert_eq!(
+            loaded.official_model_sort_order,
+            vec!["gpt-5.5".to_string(), "ollama-cloud/glm-5.2".to_string()]
+        );
+
+        let saved = save_settings_with_paths(
+            Settings {
+                gateway_fast_model_variants: vec![
+                    "openai/gpt-5.5".to_string(),
+                    " gpt-5.4 ".to_string(),
+                ],
+                official_disabled_models: vec![
+                    "openai/gpt-5.4".to_string(),
+                    " gpt-5.4 ".to_string(),
+                ],
+                official_model_sort_order: vec![
+                    "openai/gpt-5.5".to_string(),
+                    " gpt-5.5 ".to_string(),
+                ],
+                ..Settings::default()
+            },
+            &paths,
+        )
+        .expect("legacy settings save");
+
+        assert_eq!(
+            saved.gateway_fast_model_variants,
+            vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+        );
+        assert_eq!(saved.official_disabled_models, vec!["gpt-5.4".to_string()]);
+        assert_eq!(saved.official_model_sort_order, vec!["gpt-5.5".to_string()]);
+        let written = fs::read_to_string(paths.settings_path()).expect("normalized settings text");
+        assert!(!written.contains("openai/gpt-"));
     }
 
     #[test]

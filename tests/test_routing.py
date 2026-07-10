@@ -3789,12 +3789,12 @@ class RoutingTests(unittest.TestCase):
                     {
                         "models": [
                             {
-                                "slug": "openai/gpt-5.5",
+                                "slug": "gpt-5.5",
                                 "display_name": "OpenAI GPT-5.5",
                                 "context_window": 258400,
                             },
                             {
-                                "slug": "openai/gpt-5.4",
+                                "slug": "gpt-5.4",
                                 "display_name": "OpenAI GPT-5.4",
                                 "context_window": 272000,
                             },
@@ -3808,11 +3808,12 @@ class RoutingTests(unittest.TestCase):
                 catalog = codex_proxy.current_catalog_data()
 
         by_slug = {model["slug"]: model for model in catalog["models"]}
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["display_name"], "OpenAI GPT-5.5 Fast")
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["context_window"], 258400)
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["codex_proxy_metadata"]["service_tier"], "priority")
-        self.assertEqual(by_slug["openai/gpt-5.4-fast"]["display_name"], "OpenAI GPT-5.4 Fast")
+        self.assertNotIn("openai/gpt-5.5-fast", by_slug)
+        self.assertEqual(by_slug["gpt-5.5-fast"]["display_name"], "OpenAI GPT-5.5 Fast")
+        self.assertEqual(by_slug["gpt-5.5-fast"]["context_window"], 258400)
+        self.assertEqual(by_slug["gpt-5.5-fast"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
+        self.assertEqual(by_slug["gpt-5.5-fast"]["codex_proxy_metadata"]["service_tier"], "priority")
+        self.assertEqual(by_slug["gpt-5.4-fast"]["display_name"], "OpenAI GPT-5.4 Fast")
 
     def test_responses_to_chat_completion_body_preserves_input_images(self):
         body = json.dumps(
