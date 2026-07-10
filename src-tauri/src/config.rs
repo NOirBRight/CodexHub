@@ -1581,6 +1581,53 @@ sort_order = 7
     }
 
     #[test]
+    fn stable_normal_connect_then_official_reconciles_unified_history() {
+        let root = temp_root("stable-normal-unified-restore");
+        let runtime = root.join(".codexhub");
+        let target = root.join(".codex");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            paths.codex_config_path(),
+            b"model_reasoning_effort = \"high\"\r\n",
+        )
+        .unwrap();
+        save_settings_with_paths(Settings::default(), &paths).unwrap();
+        let python = super::find_python();
+        let runner = ProcessCommandRunner;
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "official",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+        assert!(restored.contains("model_provider = \"custom\""));
+        assert!(restored.contains("[model_providers.custom]"));
+        assert!(restored.contains("name = \"OpenAI\""));
+        assert!(restored.contains("requires_openai_auth = true"));
+        assert!(!paths.config_backup_path().exists());
+    }
+
+    #[test]
     fn codex_disconnect_restores_only_changes_owned_by_current_channel() {
         assert!(ensure_codex_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Beta,

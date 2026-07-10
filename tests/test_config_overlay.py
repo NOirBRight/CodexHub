@@ -333,7 +333,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("# owner = release", text)
             self.assertNotIn("# BEGIN CODEX PROXY SESSION CONFIG", text)
 
-    def test_restore_overlay_preserves_backup_exactly_before_history_reconciliation(self):
+    def test_same_channel_restore_reconciles_unified_official_history(self):
         original = "\n".join(
             [
                 'model = "gpt-5.5"',
@@ -354,9 +354,13 @@ class ConfigOverlayTests(unittest.TestCase):
             status = restore_overlay(config_path, backup_path, unified_history=True)
             updated = config_path.read_text(encoding="utf-8")
 
-            self.assertEqual(status, "restored_backup")
+            self.assertEqual(status, "injected")
             self.assertFalse(backup_path.exists())
-            self.assertEqual(updated, original)
+            self.assertIn('model_provider = "custom"', updated)
+            self.assertIn("[model_providers.custom]", updated)
+            self.assertIn('name = "OpenAI"', updated)
+            self.assertIn("requires_openai_auth = true", updated)
+            self.assertIn('model_reasoning_effort = "high"', updated)
 
     def test_restore_overlay_keeps_backup_when_config_write_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:

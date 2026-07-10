@@ -303,6 +303,40 @@ def read_text_preserving_newlines(path: Path) -> str:
         return handle.read()
 
 
+def takeover_metadata_path(backup_path: Path) -> Path:
+    return backup_path.with_name(f"{backup_path.name}.takeover.json")
+
+
+def write_takeover_metadata(backup_path: Path, takeover_owner: str, original_owner: str | None) -> None:
+    metadata = {
+        "version": 1,
+        "takeover_owner": takeover_owner,
+        "original_owner": original_owner,
+    }
+    atomic_write_text(
+        takeover_metadata_path(backup_path),
+        json.dumps(metadata, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def is_active_takeover_backup(config_text: str, backup_text: str, backup_path: Path) -> bool:
+    metadata_path = takeover_metadata_path(backup_path)
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if metadata.get("version") != 1:
+        return False
+    takeover_owner = metadata.get("takeover_owner")
+    original_owner = metadata.get("original_owner")
+    if takeover_owner not in {"release", "beta"}:
+        return False
+    if original_owner not in {None, "release", "beta"}:
+        return False
+    return overlay_owner(config_text) == takeover_owner and overlay_owner(backup_text) == original_owner
+
+
 def build_provider_section(base_url: str, gateway_key: str) -> str:
     return "\n".join(
         [
@@ -349,6 +383,11 @@ def apply_overlay(
     if active_owner != owner or not backup_path.exists():
         backup = original if takeover else (cleaned if cleaned != original else original)
         atomic_write_text(backup_path, backup, encoding="utf-8")
+        metadata_path = takeover_metadata_path(backup_path)
+        if takeover:
+            write_takeover_metadata(backup_path, owner, active_owner)
+        elif metadata_path.exists():
+            metadata_path.unlink()
 
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
@@ -362,13 +401,19 @@ def apply_overlay(
 def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
     if backup_path.exists():
         restored = read_text_preserving_newlines(backup_path)
-        atomic_write_text(config_path, restored, encoding="utf-8")
-        backup_path.unlink()
-        return "restored_backup"
+        current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
+        restore_from_backup = True
+        if is_active_takeover_backup(current, restored, backup_path):
+            atomic_write_text(config_path, restored, encoding="utf-8")
+            backup_path.unlink()
+            takeover_metadata_path(backup_path).unlink()
+            return "restored_takeover_backup"
     elif config_path.exists():
         restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
+        restore_from_backup = False
     else:
         restored = ""
+        restore_from_backup = False
 
     if unified_history:
         restored, status = inject_unified_history_config(restored)
@@ -378,6 +423,11 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
 
     if restored or config_path.exists() or unified_history:
         atomic_write_text(config_path, restored, encoding="utf-8")
+    if restore_from_backup:
+        backup_path.unlink()
+        metadata_path = takeover_metadata_path(backup_path)
+        if metadata_path.exists():
+            metadata_path.unlink()
     return status
 
 
