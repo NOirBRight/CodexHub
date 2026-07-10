@@ -93,7 +93,7 @@ const enUS = {
     discardUnsavedChanges: "Discard changes",
     enablingUnifiedHistory: "Enabling conversation history sync...",
     syncConversationHistory: "Sync conversation history",
-    historySyncDeferred: "To protect history data, this Beta does not perform online history sync yet. Route switching is unaffected.",
+    historySyncDeferred: "History files were busy or changed, so sync was safely deferred. Completed progress is preserved and startup will retry.",
     conversationHistoryAlreadySynced: "Conversation history is already synced.",
     historyProviderConflict: "Conversation history was not changed because an unknown third-party Codex configuration is active.",
     historySeparatedDrift: "Conversation history sync is off, but previously synced data remains. You can run conversation history sync once from Settings.",

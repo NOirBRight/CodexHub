@@ -97,9 +97,10 @@ cargo test --locked route_switch_restarts_running_codex_even_when_history_is_cle
 ### 0.1.4-beta.2 的安全恢复边界
 
 - 连接、断开和托盘切换只修改路由配置，不再检查或迁移历史，也不关闭、启动 Codex。
-- 启动时只读检查历史漂移；显式同步返回结构化 `deferred`，不会启动迁移 helper。
-- 生产构建中的在线历史写入固定关闭；测试构建仍保留迁移引擎回归，便于继续完成并发安全实现。
-- 在 JSONL 全文件修改时间/长度复核、原子替换、脚本延期状态传播，以及真实运行中 Codex 的 Windows E2E 完成前，不把在线历史迁移声明为可用功能。
+- 启动时检查历史漂移；确认存在漂移后才运行一次可延期的在线迁移，不控制 Codex 进程。
+- JSONL 在计划和替换前后核对长度、修改时间、文件标识和完整 SHA-256；先从已验证快照备份，再执行同目录原子替换。文件变化或占用时返回 `deferred`，不写完成标记。
+- SQLite 使用 5 秒 `busy_timeout`、在线备份和 `BEGIN IMMEDIATE` 短事务；数据库忙碌时返回 `deferred`，下次启动继续。
+- `scripts/e2e_history_online_sync.py` 使用 App 管理版 CLI 和隔离 `CODEX_HOME` 验证了运行中的 app-server 不被关闭：第一次在持锁时延期，释放锁后完成，JSONL 追加尾部保持不变。
 
 ## 对 0.1.4 任务的修订
 

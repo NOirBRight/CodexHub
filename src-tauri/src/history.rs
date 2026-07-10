@@ -358,7 +358,7 @@ pub fn preflight_unified_history(
         &python,
         &runner,
         &budget,
-        false,
+        true,
     )
 }
 
@@ -576,18 +576,51 @@ fn repair_unified_history(
             runner,
         );
         let outcome = outcome?;
+        let fields = parse_key_value_text_output(&outcome.stdout);
         let values = parse_key_value_output(&outcome.stdout);
         changed_rows = values
             .get("state_rows")
             .copied()
             .unwrap_or(inspection.dirty_state_rows)
             + values.get("state_model_rows").copied().unwrap_or(0);
-        changed_files += inspection.dirty_state_files;
-        changed_files += values
+        let helper_status = fields
+            .get("status")
+            .map(String::as_str)
+            .unwrap_or("completed");
+        let helper_deferred = matches!(
+            helper_status,
+            "deferred" | "deferred-after-error" | "completed-with-skips" | "skipped"
+        );
+        let jsonl_changed = values
             .get("jsonl_applied")
             .or_else(|| values.get("jsonl_restored"))
             .copied()
-            .unwrap_or(inspection.dirty_jsonl_files);
+            .unwrap_or(if helper_deferred {
+                0
+            } else {
+                inspection.dirty_jsonl_files
+            });
+        if helper_deferred {
+            changed_files += values.get("state_files_applied").copied().unwrap_or(0);
+            changed_files += jsonl_changed;
+            return Ok(UnifiedHistoryResult {
+                status: UnifiedHistoryStatus::Deferred,
+                changed_rows,
+                changed_files,
+                backup_path: Some(backup_root.to_string_lossy().into_owned()),
+                receipt_path: None,
+                reason: Some(
+                    fields
+                        .get("reason")
+                        .cloned()
+                        .unwrap_or_else(|| "history_concurrent_change".to_string()),
+                ),
+                error: None,
+                codex_restarted: false,
+            });
+        }
+        changed_files += inspection.dirty_state_files;
+        changed_files += jsonl_changed;
     }
 
     let receipt_dir = paths.proxy_dir().join("migrations");
@@ -635,16 +668,17 @@ fn inspect_json<T: for<'de> Deserialize<'de>>(
 }
 
 fn parse_key_value_output(output: &str) -> std::collections::HashMap<String, usize> {
+    parse_key_value_text_output(output)
+        .into_iter()
+        .filter_map(|(key, value)| value.parse().ok().map(|value| (key, value)))
+        .collect()
+}
+
+fn parse_key_value_text_output(output: &str) -> std::collections::HashMap<String, String> {
     output
         .lines()
         .filter_map(|line| line.split_once('='))
-        .filter_map(|(key, value)| {
-            value
-                .trim()
-                .parse()
-                .ok()
-                .map(|value| (key.to_string(), value))
-        })
+        .map(|(key, value)| (key.to_string(), value.trim().to_string()))
         .collect()
 }
 
@@ -1043,6 +1077,38 @@ mod tests {
         assert_eq!(result.status, UnifiedHistoryStatus::Repaired);
         assert_eq!(result.changed_rows, 1);
         assert_eq!(runner.commands.borrow().len(), 3);
+    }
+
+    #[test]
+    fn concurrent_history_change_is_deferred_without_writing_receipt() {
+        let root = temp_root("preflight-concurrent-change");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"clean"}"#,
+            r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_state_files":1,"dirty_jsonl_files":1}"#,
+            "status=deferred\nreason=file_changed\nstate_rows=0\njsonl_deferred=1\n",
+        ]);
+
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                apply_repairs: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("typed deferred result");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Deferred);
+        assert_eq!(result.reason.as_deref(), Some("file_changed"));
+        assert_eq!(result.changed_rows, 0);
+        assert_eq!(result.changed_files, 0);
+        assert!(!paths
+            .proxy_dir()
+            .join("migrations")
+            .join("unified-history-last.json")
+            .exists());
     }
 
     #[test]

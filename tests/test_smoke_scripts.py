@@ -61,3 +61,15 @@ def test_active_gateway_diagnostics_default_to_bare_official_model_ids():
 
     assert '{"model":"gpt-5.5","input":"proxy upstream preflight"}' in launcher
     assert 'DEFAULT_MODEL = "gpt-5.5-fast"' in replay
+
+
+def test_online_history_e2e_uses_app_cli_and_isolated_codex_home():
+    source = (ROOT / "scripts" / "e2e_history_online_sync.py").read_text(encoding="utf-8")
+
+    assert "OpenAI" in source and "Codex" in source and "bin" in source
+    assert '"app-server"' in source
+    assert '"CODEX_HOME"' in source
+    assert '"migrate-official-to-unified"' in source
+    assert 'expected deferred while SQLite writer lock is held' in source
+    assert 'expected completed after releasing SQLite writer lock' in source
+    assert "app-server exited during online history migration" in source

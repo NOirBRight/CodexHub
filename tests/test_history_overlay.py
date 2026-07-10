@@ -9,6 +9,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import history_overlay
 from history_overlay import (
     apply_history_overlay,
     apply_session_file_provider_fast,
@@ -791,13 +792,108 @@ class HistoryOverlayTests(unittest.TestCase):
                 result = normalize_history_provider_fast(codex_dir, codex_dir / "backup", "custom")
 
             first_line = json.loads(session_file.read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(first_line["payload"]["model_provider"], "custom")
+            self.assertEqual(first_line["payload"]["model_provider"], "openai")
             self.assertEqual(first_line["payload"]["timestamp"], "new")
-            self.assertEqual(result["status"], "completed")
-            self.assertEqual(result["jsonl_applied"], 1)
+            self.assertEqual(result["status"], "deferred")
+            self.assertEqual(result["reason"], "file_changed")
+            self.assertEqual(result["jsonl_applied"], 0)
             self.assertEqual(result["jsonl_skipped"], 0)
-            self.assertEqual(result["jsonl"][0]["status"], "applied")
-            self.assertEqual(json.loads(result["jsonl"][0]["old_first_line"])["payload"]["timestamp"], "new")
+            self.assertEqual(result["jsonl_deferred"], 1)
+            self.assertEqual(result["jsonl"][0]["status"], "deferred")
+
+    def test_session_file_apply_defers_when_file_changes_after_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            session_file = codex_dir / "sessions" / "rollout-openai.jsonl"
+            session_file.parent.mkdir(parents=True)
+            original = (
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "thread-openai", "model_provider": "openai"},
+                    }
+                )
+                + "\n"
+            )
+            session_file.write_text(original, encoding="utf-8")
+            plan = plan_session_file_provider_fast(session_file, codex_dir, "custom")
+            self.assertIsNotNone(plan)
+
+            appended = json.dumps({"type": "event_msg", "payload": {"message": "still-writing"}}) + "\n"
+            with session_file.open("a", encoding="utf-8") as handle:
+                handle.write(appended)
+
+            result = apply_session_file_provider_fast(plan, codex_dir, codex_dir / "backup")
+
+            self.assertEqual(result["status"], "deferred")
+            self.assertEqual(result["reason"], "file_changed")
+            self.assertEqual(session_file.read_text(encoding="utf-8"), original + appended)
+            self.assertFalse((codex_dir / "backup" / "jsonl" / "sessions" / session_file.name).exists())
+
+    def test_history_repair_defers_while_sqlite_is_busy_then_retries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            session_file = codex_dir / "sessions" / "rollout-openai.jsonl"
+            session_file.parent.mkdir(parents=True)
+            session_file.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "thread-openai", "model_provider": "openai"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path = codex_dir / "state_5.sqlite"
+            connection = sqlite3.connect(state_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, rollout_path TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES ('thread-openai', 'openai', ?)",
+                    (str(session_file),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            lock = sqlite3.connect(state_path)
+            lock.execute("BEGIN IMMEDIATE")
+            try:
+                with patch.object(history_overlay, "SQLITE_BUSY_TIMEOUT_MILLIS", 25):
+                    deferred = repair_history_bucket(codex_dir, codex_dir / "backup", "custom")
+            finally:
+                lock.rollback()
+                lock.close()
+
+            self.assertEqual(deferred["status"], "deferred")
+            self.assertEqual(deferred["reason"], "sqlite_busy")
+            self.assertNotIn("completed_at", deferred)
+            verify = sqlite3.connect(state_path)
+            try:
+                self.assertEqual(
+                    verify.execute(
+                        "SELECT model_provider FROM threads WHERE id = 'thread-openai'"
+                    ).fetchone()[0],
+                    "openai",
+                )
+            finally:
+                verify.close()
+
+            completed = repair_history_bucket(codex_dir, codex_dir / "backup", "custom")
+            self.assertEqual(completed["status"], "completed")
+            verify = sqlite3.connect(state_path)
+            try:
+                self.assertEqual(
+                    verify.execute(
+                        "SELECT model_provider FROM threads WHERE id = 'thread-openai'"
+                    ).fetchone()[0],
+                    "custom",
+                )
+            finally:
+                verify.close()
 
     def test_normalize_history_provider_fast_skips_missing_or_already_target_session_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -830,9 +926,10 @@ class HistoryOverlayTests(unittest.TestCase):
             with patch("history_overlay.apply_session_file_provider_fast", side_effect=mutate_before_apply):
                 result = normalize_history_provider_fast(codex_dir, codex_dir / "backup", "custom")
 
-            self.assertEqual(result["status"], "completed-with-skips")
+            self.assertEqual(result["status"], "deferred")
             self.assertEqual(result["jsonl_applied"], 0)
-            self.assertEqual(result["jsonl_skipped"], 2)
+            self.assertEqual(result["jsonl_skipped"], 1)
+            self.assertEqual(result["jsonl_deferred"], 1)
             reasons = {entry["reason"] for entry in result["jsonl"]}
             self.assertEqual(reasons, {"missing", "already_target"})
 

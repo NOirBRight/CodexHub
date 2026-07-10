@@ -78,7 +78,7 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
-test("startup history sync preflight is read-only and repair never controls Codex", async () => {
+test("startup history sync safely retries online and never controls Codex", async () => {
   const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
@@ -93,12 +93,12 @@ test("startup history sync preflight is read-only and repair never controls Code
   assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
   assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
   assert.match(webBridgeSource, /"preflight_unified_history"/);
-  assert.match(appSource, /api\.preflightUnifiedHistory\(false\)/);
+  assert.doesNotMatch(appSource, /api\.preflightUnifiedHistory\(false\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
   assert.match(appSource, /result\.status === "restart_required"/);
   assert.match(appSource, /result\.status === "deferred"/);
-  assert.match(historySource, /preflight_unified_history_with_budget\([\s\S]*&budget,\s*false,\s*\)/);
+  assert.match(historySource, /preflight_unified_history_with_budget\([\s\S]*&budget,\s*true,\s*\)/);
   assert.doesNotMatch(historySource, /CloseMainWindow\(\)/);
   assert.doesNotMatch(historySource, /Start-Process/);
   assert.doesNotMatch(historySource, /Stop-Process\s+-Force/);
@@ -115,6 +115,14 @@ test("history repair action waits for the bounded backend and always unlocks", a
   assert.doesNotMatch(action, /result\.error|result\.reason/);
   assert.match(action, /setBusy\("history"\)/);
   assert.match(action, /finally \{[\s\S]*setBusy\(null\)/);
+});
+
+test("a deferred history migration keeps the requested setting for startup retry", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.match(saveAction, /result\.status === "deferred"[\s\S]*historyReconciled = true[\s\S]*historyMessage = t\("settings\.historySyncDeferred"\)/);
+  assert.doesNotMatch(saveAction, /result\.status === "deferred"[\s\S]{0,120}throw new Error/);
 });
 
 test("history sync uses user-facing terminology and hides internal timeout details", async () => {

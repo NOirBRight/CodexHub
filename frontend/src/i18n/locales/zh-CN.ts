@@ -93,7 +93,7 @@ const zhCN = {
     discardUnsavedChanges: "放弃更改",
     enablingUnifiedHistory: "正在启用历史对话同步...",
     syncConversationHistory: "同步历史对话",
-    historySyncDeferred: "为保护历史数据，当前 Beta 暂不执行在线同步；路由切换不受影响。",
+    historySyncDeferred: "历史文件正在使用或发生变化，本次同步已安全延期；已完成的进度会保留，并在下次启动时重试。",
     conversationHistoryAlreadySynced: "历史对话已同步。",
     historyProviderConflict: "检测到未知的第三方 Codex 配置，未修改历史对话设置。",
     historySeparatedDrift: "历史对话同步已关闭，但检测到以前同步的数据。可在设置中执行一次历史对话同步。",

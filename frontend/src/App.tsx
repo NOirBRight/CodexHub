@@ -771,7 +771,7 @@ export default function App() {
     historyPreflightStarted.current = true;
     const timer = window.setTimeout(async () => {
       try {
-        const result: UnifiedHistoryResult = await api.preflightUnifiedHistory(false);
+        const result: UnifiedHistoryResult = await api.preflightUnifiedHistory(true);
         if (result.status === "repaired") {
           showToast(
             t("settings.historyStartupRepaired", {
@@ -780,6 +780,17 @@ export default function App() {
             }),
             "success",
           );
+        } else if (result.status === "deferred") {
+          showToast({
+            action: {
+              label: t("settings.syncConversationHistory"),
+              onClick: () => void repairConversationHistory(),
+            },
+            dedupeKey: "unified-history-preflight",
+            text: t("settings.historySyncDeferred"),
+            timeoutMs: null,
+            tone: "info",
+          });
         } else if (result.status === "restart_required") {
           showToast({
             action: {
@@ -1001,20 +1012,22 @@ export default function App() {
       if (previousUnified !== nextUnified) {
         const result = await api.preflightUnifiedHistory(true, nextUnified);
         if (result.status === "deferred") {
-          throw new Error(t("settings.historySyncDeferred"));
+          historyReconciled = true;
+          historyMessage = t("settings.historySyncDeferred");
+        } else {
+          if (result.status === "restart_required" || result.status === "conflict") {
+            throw new Error(t(historyIssueKey(result)));
+          }
+          historyReconciled = true;
+          historyMessage = result.status === "repaired"
+            ? t("settings.historyStartupRepaired", {
+                rows: result.changed_rows,
+                files: result.changed_files,
+              })
+            : nextUnified
+              ? t("settings.unifiedHistoryEnabled")
+              : t("settings.officialHistoryRestored");
         }
-        if (result.status === "restart_required" || result.status === "conflict") {
-          throw new Error(t(historyIssueKey(result)));
-        }
-        historyReconciled = true;
-        historyMessage = result.status === "repaired"
-          ? t("settings.historyStartupRepaired", {
-              rows: result.changed_rows,
-              files: result.changed_files,
-            })
-          : nextUnified
-            ? t("settings.unifiedHistoryEnabled")
-            : t("settings.officialHistoryRestored");
       }
       let saveMessage = historyMessage ?? t("settings.settingsSaved");
       if (restartGateway) {

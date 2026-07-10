@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -24,6 +25,10 @@ SESSION_DIR_NAMES = ("sessions", "archived_sessions")
 SQLITE_ID_CHUNK = 500
 SQLITE_BUSY_TIMEOUT_MILLIS = 5_000
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
+
+
+class ConcurrentHistoryChange(RuntimeError):
+    pass
 
 
 def utc_now_iso() -> str:
@@ -133,6 +138,11 @@ def connect_state_db(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MILLIS / 1_000)
     connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MILLIS}")
     return connection
+
+
+def sqlite_is_busy(error: sqlite3.OperationalError) -> bool:
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
 
 
 def migrate_state_db(db_path: Path, codex_dir: Path, backup_root: Path) -> dict[str, Any]:
@@ -390,9 +400,22 @@ def write_first_line_in_place(path: Path, old_line: str, new_line: str) -> None:
         handle.write(new_bytes)
 
 
-def skipped_session_file_provider_fast(entry: dict[str, str], reason: str, current_line: str = "") -> dict[str, str]:
+def skipped_session_file_provider_fast(entry: dict[str, Any], reason: str, current_line: str = "") -> dict[str, Any]:
     result = dict(entry)
     result["status"] = "skipped"
+    result["reason"] = reason
+    if current_line:
+        result["current_first_line"] = current_line
+    return result
+
+
+def deferred_session_file_provider_fast(
+    entry: dict[str, Any],
+    reason: str,
+    current_line: str = "",
+) -> dict[str, Any]:
+    result = dict(entry)
+    result["status"] = "deferred"
     result["reason"] = reason
     if current_line:
         result["current_first_line"] = current_line
@@ -409,6 +432,76 @@ def write_rewritten_lines(path: Path, lines: list[str]) -> None:
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
+
+
+def stable_file_snapshot(path: Path) -> tuple[bytes, os.stat_result]:
+    before = path.stat()
+    data = path.read_bytes()
+    after = path.stat()
+    before_identity = (before.st_size, before.st_mtime_ns, before.st_ino)
+    after_identity = (after.st_size, after.st_mtime_ns, after.st_ino)
+    if before_identity != after_identity or len(data) != after.st_size:
+        raise ConcurrentHistoryChange(f"history file changed while reading: {path}")
+    return data, after
+
+
+def first_line_from_bytes(data: bytes) -> tuple[bytes, str]:
+    newline = data.find(b"\n")
+    first_line_bytes = data if newline < 0 else data[: newline + 1]
+    return first_line_bytes, first_line_bytes.decode("utf-8", errors="replace")
+
+
+def snapshot_fields(data: bytes, metadata: os.stat_result) -> dict[str, str]:
+    return {
+        "planned_size": str(len(data)),
+        "planned_mtime_ns": str(metadata.st_mtime_ns),
+        "planned_inode": str(metadata.st_ino),
+        "planned_sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def snapshot_matches_entry(data: bytes, metadata: os.stat_result, entry: dict[str, Any]) -> bool:
+    expected_hash = entry.get("planned_sha256")
+    if expected_hash is None:
+        return True
+    return (
+        str(len(data)) == str(entry.get("planned_size"))
+        and str(metadata.st_mtime_ns) == str(entry.get("planned_mtime_ns"))
+        and str(metadata.st_ino) == str(entry.get("planned_inode"))
+        and hashlib.sha256(data).hexdigest() == str(expected_hash)
+    )
+
+
+def atomic_replace_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def backup_session_snapshot(
+    source: Path,
+    codex_dir: Path,
+    backup_root: Path,
+    data: bytes,
+) -> Path:
+    try:
+        relative = source.resolve().relative_to(codex_dir.resolve())
+    except ValueError:
+        relative = Path(source.name)
+    target = backup_root / "jsonl" / relative
+    atomic_replace_bytes(target, data)
+    return target
 
 
 def rewrite_session_file(
@@ -645,6 +738,7 @@ def repair_state_db_provider_only(
             rows = [row for row in rows if str(row[0]) in allowed_thread_ids]
         entry["dirty_rows"] = len(rows)
         if not rows:
+            entry["status"] = "clean"
             return entry
 
         thread_ids = [str(row[0]) for row in rows if row[0] is not None]
@@ -676,6 +770,7 @@ def repair_state_db_provider_only(
         entry["missing_rollout_paths"] = missing_rollout_paths
 
         backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir, backup_root))
+        connection.execute("BEGIN IMMEDIATE")
         if has_id and thread_ids:
             updated = 0
             for chunk in chunks(thread_ids):
@@ -693,6 +788,18 @@ def repair_state_db_provider_only(
             updated = cursor.rowcount if cursor.rowcount is not None else 0
         connection.commit()
         entry["rows"] = updated
+        entry["status"] = "applied"
+        return entry
+    except sqlite3.OperationalError as error:
+        if not sqlite_is_busy(error):
+            raise
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        entry["status"] = "deferred"
+        entry["reason"] = "sqlite_busy"
+        entry["rows"] = 0
         return entry
     finally:
         connection.close()
@@ -1016,6 +1123,9 @@ def repair_history_bucket(
             for path in db_paths
         ]
         state_done_at = time.perf_counter()
+        state_deferred_entries = [
+            entry for entry in state_entries if entry.get("status") == "deferred"
+        ]
 
         jsonl_candidates: list[dict[str, str]] = []
         missing_rollout_paths = 0
@@ -1044,9 +1154,33 @@ def repair_history_bucket(
             )
         jsonl_candidates = dedupe_jsonl_candidates(jsonl_candidates)
 
-        for candidate in jsonl_candidates:
-            result = apply_session_file_provider_fast(candidate, codex_dir, backup_root)
-            jsonl_results.append(result)
+        if state_deferred_entries:
+            jsonl_results.extend(
+                deferred_session_file_provider_fast(candidate, "sqlite_busy")
+                for candidate in jsonl_candidates
+            )
+        else:
+            planned_candidates: list[dict[str, Any]] = []
+            for candidate in jsonl_candidates:
+                path = codex_dir / candidate["path"]
+                try:
+                    planned = plan_session_file_provider_fast(path, codex_dir, target_provider)
+                except ConcurrentHistoryChange:
+                    jsonl_results.append(
+                        deferred_session_file_provider_fast(candidate, "file_changed")
+                    )
+                    continue
+                if planned is None:
+                    jsonl_results.append(
+                        deferred_session_file_provider_fast(candidate, "missing_or_changed")
+                    )
+                    continue
+                if candidate.get("session_id"):
+                    planned["session_id"] = candidate["session_id"]
+                planned_candidates.append(planned)
+            for candidate in planned_candidates:
+                result = apply_session_file_provider_fast(candidate, codex_dir, backup_root)
+                jsonl_results.append(result)
         jsonl_done_at = time.perf_counter()
     except Exception as error:
         write_json_atomic(
@@ -1067,24 +1201,41 @@ def repair_history_bucket(
         raise
     jsonl_applied = sum(1 for entry in jsonl_results if entry.get("status") == "applied")
     jsonl_skipped = sum(1 for entry in jsonl_results if entry.get("status") == "skipped")
+    jsonl_deferred = sum(1 for entry in jsonl_results if entry.get("status") == "deferred")
+    state_deferred = sum(1 for entry in state_entries if entry.get("status") == "deferred")
     state_rows = sum(int(entry.get("rows", 0)) for entry in state_entries)
+    state_files_applied = sum(
+        1
+        for entry in state_entries
+        if entry.get("status") == "applied" and int(entry.get("rows", 0)) > 0
+    )
 
-    if dirty_state_rows == 0 and not jsonl_applied and not jsonl_skipped:
+    if state_deferred or jsonl_deferred:
+        status = "deferred"
+    elif dirty_state_rows == 0 and not jsonl_applied and not jsonl_skipped:
         status = "already-unified" if target_provider == TARGET_PROVIDER else "already-openai"
     else:
-        status = "completed-with-skips" if jsonl_skipped else "completed"
+        status = "completed"
+
+    deferred_reasons = [
+        str(entry.get("reason"))
+        for entry in [*state_entries, *jsonl_results]
+        if entry.get("status") == "deferred" and entry.get("reason")
+    ]
+    reason = deferred_reasons[0] if deferred_reasons else None
 
     ledger = {
         "version": 1,
         "mode": "repair-history",
         "status": status,
         "created_at": utc_now_iso(),
-        "completed_at": utc_now_iso(),
         "codex_dir": str(codex_dir),
         "source_provider": source_provider,
         "target_provider": target_provider,
         "dirty_state_rows": dirty_state_rows,
         "state_rows": state_rows,
+        "state_files_applied": state_files_applied,
+        "state_deferred": state_deferred,
         "state_model_rows": 0,
         "state": state_entries,
         "jsonl": jsonl_results,
@@ -1092,6 +1243,7 @@ def repair_history_bucket(
         "jsonl_applied": jsonl_applied,
         "jsonl_restored": jsonl_applied if target_provider == SOURCE_PROVIDER else 0,
         "jsonl_skipped": jsonl_skipped,
+        "jsonl_deferred": jsonl_deferred,
         "missing_rollout_paths": missing_rollout_paths,
         "ledger_count": len(ledgers),
         "plan_source": "dirty_rollout_path",
@@ -1102,6 +1254,12 @@ def repair_history_bucket(
             "total_seconds": round(jsonl_done_at - started_at, 3),
         },
     }
+    if reason:
+        ledger["reason"] = reason
+    if status == "deferred":
+        ledger["deferred_at"] = utc_now_iso()
+    else:
+        ledger["completed_at"] = utc_now_iso()
     if status not in {"already-unified", "already-openai"}:
         write_json_atomic(ledger_path, ledger)
     return ledger
@@ -1251,9 +1409,13 @@ def normalize_state_provider_fast(db_path: Path, codex_dir: Path, backup_root: P
         connection.close()
 
 
-def plan_session_file_provider_fast(path: Path, codex_dir: Path, target_provider: str) -> dict[str, str] | None:
-    first_line = read_first_line(path)
-    if not first_line:
+def plan_session_file_provider_fast(path: Path, codex_dir: Path, target_provider: str) -> dict[str, Any] | None:
+    try:
+        data, metadata = stable_file_snapshot(path)
+    except FileNotFoundError:
+        return None
+    first_line_bytes, first_line = first_line_from_bytes(data)
+    if not first_line_bytes:
         return None
 
     session_id, provider, record = parse_session_meta(first_line)
@@ -1270,57 +1432,74 @@ def plan_session_file_provider_fast(path: Path, codex_dir: Path, target_provider
         "target_provider": target_provider,
         "old_first_line": first_line,
         "new_first_line": new_first_line,
+        **snapshot_fields(data, metadata),
     }
 
 
 def apply_session_file_provider_fast(
-    entry: dict[str, str],
+    entry: dict[str, Any],
     codex_dir: Path,
     backup_root: Path | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     path = codex_dir / entry["path"]
     target_provider = entry["target_provider"]
     source_provider = entry["source_provider"]
 
-    for _attempt in range(3):
-        first_line = read_first_line(path)
-        if not first_line:
-            return skipped_session_file_provider_fast(entry, "missing")
+    try:
+        data, metadata = stable_file_snapshot(path)
+    except FileNotFoundError:
+        return deferred_session_file_provider_fast(entry, "missing")
+    except ConcurrentHistoryChange:
+        return deferred_session_file_provider_fast(entry, "file_changed")
 
-        session_id, provider, record = parse_session_meta(first_line)
-        if record is None:
-            return skipped_session_file_provider_fast(entry, "invalid_session_meta", first_line)
-        if provider == target_provider:
-            return skipped_session_file_provider_fast(entry, "already_target", first_line)
-        if provider != source_provider:
-            return skipped_session_file_provider_fast(entry, "provider_changed", first_line)
+    first_line_bytes, first_line = first_line_from_bytes(data)
+    if not first_line_bytes:
+        return deferred_session_file_provider_fast(entry, "missing")
+    session_id, provider, record = parse_session_meta(first_line)
+    if record is None:
+        return deferred_session_file_provider_fast(entry, "invalid_session_meta", first_line)
+    if provider == target_provider:
+        return skipped_session_file_provider_fast(entry, "already_target", first_line)
+    if provider != source_provider:
+        return deferred_session_file_provider_fast(entry, "provider_changed", first_line)
+    if not snapshot_matches_entry(data, metadata, entry):
+        return deferred_session_file_provider_fast(entry, "file_changed", first_line)
 
-        new_first_line = rewritten_provider_line(first_line, record, provider, target_provider)
-        if len(first_line.encode("utf-8")) != len(new_first_line.encode("utf-8")):
-            return skipped_session_file_provider_fast(entry, "byte_length_changed", first_line)
+    new_first_line = rewritten_provider_line(first_line, record, provider, target_provider)
+    new_first_line_bytes = new_first_line.encode("utf-8")
+    if len(first_line_bytes) != len(new_first_line_bytes):
+        return deferred_session_file_provider_fast(entry, "byte_length_changed", first_line)
+    replacement = new_first_line_bytes + data[len(first_line_bytes) :]
+    applied = dict(entry)
+    applied.update(
+        {
+            "status": "applied",
+            "session_id": session_id or entry.get("session_id", ""),
+            "old_first_line": first_line,
+            "new_first_line": new_first_line,
+        }
+    )
 
-        applied = dict(entry)
-        applied.update(
-            {
-                "status": "applied",
-                "session_id": session_id or entry.get("session_id", ""),
-                "old_first_line": first_line,
-                "new_first_line": new_first_line,
-            }
-        )
-        try:
-            if backup_root is not None:
-                backup_file(path, codex_dir, backup_root, "jsonl")
-            write_first_line_in_place(path, first_line, new_first_line)
-            return applied
-        except FileNotFoundError:
-            return skipped_session_file_provider_fast(entry, "missing")
-        except ValueError as error:
-            if "session_meta line changed while rewriting" not in str(error):
-                raise
-            time.sleep(0.01)
-
-    return skipped_session_file_provider_fast(entry, "changed_while_rewriting")
+    try:
+        if backup_root is not None:
+            backup_session_snapshot(path, codex_dir, backup_root, data)
+        current_data, current_metadata = stable_file_snapshot(path)
+        if (
+            current_data != data
+            or current_metadata.st_mtime_ns != metadata.st_mtime_ns
+            or current_metadata.st_ino != metadata.st_ino
+        ):
+            return deferred_session_file_provider_fast(entry, "file_changed_before_replace")
+        atomic_replace_bytes(path, replacement, metadata.st_mode & 0o7777)
+        return applied
+    except FileNotFoundError:
+        return deferred_session_file_provider_fast(entry, "missing")
+    except ConcurrentHistoryChange:
+        return deferred_session_file_provider_fast(entry, "file_changed_before_replace")
+    except OSError as error:
+        if error.errno in {errno.EACCES, errno.EBUSY, errno.EPERM} or getattr(error, "winerror", None) in {5, 32, 33}:
+            return deferred_session_file_provider_fast(entry, "file_busy")
+        raise
 
 
 def rollback_session_file_provider_fast(entry: dict[str, str], codex_dir: Path) -> None:
@@ -1431,8 +1610,8 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
     }
     write_json_atomic(ledger_path, ledger)
 
-    written_entries: list[dict[str, str]] = []
-    jsonl_results: list[dict[str, str]] = []
+    written_entries: list[dict[str, Any]] = []
+    jsonl_results: list[dict[str, Any]] = []
     try:
         state_start_at = time.perf_counter()
         state_results = [
@@ -1458,13 +1637,26 @@ def normalize_history_provider_fast(codex_dir: Path, backup_root: Path, target_p
 
     jsonl_applied = sum(1 for entry in jsonl_results if entry.get("status") == "applied")
     jsonl_skipped = sum(1 for entry in jsonl_results if entry.get("status") == "skipped")
-    ledger["status"] = "completed-with-skips" if jsonl_skipped else "completed"
-    ledger["completed_at"] = utc_now_iso()
+    jsonl_deferred = sum(1 for entry in jsonl_results if entry.get("status") == "deferred")
+    ledger["status"] = "deferred" if jsonl_deferred else ("completed-with-skips" if jsonl_skipped else "completed")
+    if jsonl_deferred:
+        ledger["deferred_at"] = utc_now_iso()
+        ledger["reason"] = next(
+            (
+                str(entry.get("reason"))
+                for entry in jsonl_results
+                if entry.get("status") == "deferred" and entry.get("reason")
+            ),
+            "history_concurrent_change",
+        )
+    else:
+        ledger["completed_at"] = utc_now_iso()
     ledger["state_rows"] = state_rows
     ledger["state_model_rows"] = state_model_rows
     ledger["jsonl"] = jsonl_results
     ledger["jsonl_applied"] = jsonl_applied
     ledger["jsonl_skipped"] = jsonl_skipped
+    ledger["jsonl_deferred"] = jsonl_deferred
     ledger["timings"] = {
         **ledger["timings"],
         "state_seconds": round(state_done_at - state_start_at, 3),
@@ -1557,6 +1749,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"status={result.get('status', 'completed')}")
         print(f"dirty_state_rows={result.get('dirty_state_rows', 0)}")
         print(f"state_rows={result.get('state_rows', 0)}")
+        print(f"state_files_applied={result.get('state_files_applied', 0)}")
         print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_planned={result.get('jsonl_planned', 0)}")
         print(f"jsonl_applied={result.get('jsonl_applied', 0)}")
@@ -1573,14 +1766,19 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "repair-history":
         result = repair_history_bucket(args.codex_dir, args.backup_root, args.target, args.ledger_root)
         print(f"status={result.get('status', 'completed')}")
+        if result.get("reason"):
+            print(f"reason={result.get('reason')}")
         print(f"target_provider={result.get('target_provider', args.target)}")
         print(f"dirty_state_rows={result.get('dirty_state_rows', 0)}")
         print(f"state_rows={result.get('state_rows', 0)}")
+        print(f"state_files_applied={result.get('state_files_applied', 0)}")
         print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_planned={result.get('jsonl_planned', 0)}")
         print(f"jsonl_applied={result.get('jsonl_applied', 0)}")
         print(f"jsonl_restored={result.get('jsonl_restored', 0)}")
         print(f"jsonl_skipped={result.get('jsonl_skipped', 0)}")
+        print(f"jsonl_deferred={result.get('jsonl_deferred', 0)}")
+        print(f"state_deferred={result.get('state_deferred', 0)}")
         for key, value in result.get("timings", {}).items():
             print(f"{key}={value}")
     elif args.command == "migrate-official-to-unified":
@@ -1589,16 +1787,24 @@ def main(argv: list[str] | None = None) -> int:
         if result.get("reason"):
             print(f"reason={result.get('reason')}")
         print(f"state_rows={result.get('state_rows', 0)}")
+        print(f"state_files_applied={result.get('state_files_applied', 0)}")
         print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_applied={result.get('jsonl_applied', 0)}")
         print(f"jsonl_skipped={result.get('jsonl_skipped', 0)}")
+        print(f"jsonl_deferred={result.get('jsonl_deferred', 0)}")
+        print(f"state_deferred={result.get('state_deferred', 0)}")
     elif args.command == "restore-official-from-unified":
         result = restore_official_history_from_unified(args.codex_dir, args.backup_root, args.ledger_root)
         print(f"status={result.get('status', 'completed')}")
+        if result.get("reason"):
+            print(f"reason={result.get('reason')}")
         print(f"state_rows={result.get('state_rows', 0)}")
+        print(f"state_files_applied={result.get('state_files_applied', 0)}")
         print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_restored={result.get('jsonl_restored', 0)}")
         print(f"jsonl_skipped={result.get('jsonl_skipped', 0)}")
+        print(f"jsonl_deferred={result.get('jsonl_deferred', 0)}")
+        print(f"state_deferred={result.get('state_deferred', 0)}")
     elif args.command == "rollback-repair":
         result = restore_repair_backups(args.codex_dir, args.backup_root)
         print(f"restored_state_backups={result['restored_state_backups']}")
@@ -1608,11 +1814,14 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "normalize-fast":
         result = normalize_history_provider_fast(args.codex_dir, args.backup_root, args.target)
         print(f"status={result.get('status', 'completed')}")
+        if result.get("reason"):
+            print(f"reason={result.get('reason')}")
         print(f"state_rows={result['state_rows']}")
         print(f"state_model_rows={result.get('state_model_rows', 0)}")
         print(f"jsonl_files={len(result.get('jsonl', []))}")
         print(f"jsonl_applied={result.get('jsonl_applied', len(result.get('jsonl', [])))}")
         print(f"jsonl_skipped={result.get('jsonl_skipped', 0)}")
+        print(f"jsonl_deferred={result.get('jsonl_deferred', 0)}")
         for key, value in result.get("timings", {}).items():
             print(f"{key}={value}")
     return 0
