@@ -87,3 +87,16 @@ The Important review findings and receipt Minor were fixed with additional TDD c
 - `npm run build --prefix frontend` — passed.
 - `python scripts/report_quality_gates.py` — report-only run completed with `parse_errors: 0`.
 - `git diff --check` — passed.
+
+## Final absolute-deadline follow-up
+
+The final review found that Python helpers were bounded, but process discovery, graceful close, and relaunch still used unbounded PowerShell execution. This was corrected in `e5572c82 fix: bound full history operation lifecycle`.
+
+- RED: injected clock/controller tests failed to compile because there was no shared `HistoryOperationBudget` and `CodexAppController` had no deadline-aware methods. A route-switch timeout test then failed because the second process probe returned a raw error.
+- GREEN: one 29-second absolute budget is created immediately after acquiring the single-flight guard, before settings/path resolution, inspections, or process discovery. The same work deadline and rollback deadline flow through inspections, discovery, close, repair, launch, and rollback.
+- `is_running`, `close_gracefully`, and `launch` now execute PowerShell through the history timed child runner; this path no longer uses unbounded `Command::output()`.
+- The normal-window close wait receives `min(10 seconds, remaining work budget)` and still only calls `CloseMainWindow()`; no Codex process is force-killed.
+- Mutation work and launch use the deadline with a five-second rollback reserve. A launch timeout returns a typed result and rollback uses the reserved absolute deadline while the single-flight guard remains held.
+- Injected-clock evidence: 20 seconds consumed by inspections leaves exactly four seconds for close; a launch at second 23 receives the second-24 work deadline and its rollback completes within the second-29 absolute cap.
+- Process timeouts from both normal preflight and clean route reconciliation return typed `conflict/process_timeout` results.
+- Final verification: history 30/30, Rust 254/254, UI contract 118/118, frontend build passed, and `git diff --check` passed.
