@@ -57,9 +57,21 @@ export function normalizeSettings(settings: LegacySettings | null | undefined): 
   };
 }
 
-export function normalizeOfficialModelId(value: string): string {
+export function normalizeOfficialModelId(
+  value: string,
+  knownOfficialIds: ReadonlySet<string> = new Set([
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+  ]),
+): string | null {
   value = value.trim();
-  return value.startsWith("openai/gpt-") ? value.slice("openai/".length) : value;
+  if (value.startsWith("openai/gpt-")) {
+    const bare = value.slice("openai/".length);
+    return knownOfficialIds.has(bare) ? bare : null;
+  }
+  return value;
 }
 
 function normalizeModelIds(values: string[] | null | undefined) {

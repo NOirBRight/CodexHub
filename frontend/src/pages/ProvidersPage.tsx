@@ -312,6 +312,12 @@ function ProvidersPageImpl({
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(() => (
     settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
   ));
+  const [officialDisabledModelsDraft, setOfficialDisabledModelsDraft] = useState<string[]>(() => (
+    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_disabled_models : []
+  ));
+  const [officialModelOrderDraft, setOfficialModelOrderDraft] = useState<string[]>(() => (
+    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order : []
+  ));
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
@@ -351,6 +357,8 @@ function ProvidersPageImpl({
     const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
     setSettings(normalizedSettings);
     setSettingsDraft(normalizedSettings);
+    setOfficialDisabledModelsDraft(normalizedSettings?.official_disabled_models ?? []);
+    setOfficialModelOrderDraft(normalizedSettings?.official_model_sort_order ?? []);
   }, [settingsSnapshot]);
 
   useEffect(() => {
@@ -430,7 +438,14 @@ function ProvidersPageImpl({
       ),
     [providers],
   );
-  const officialDisabledModels = settings?.official_disabled_models ?? [];
+  const officialDisabledModels = officialDisabledModelsDraft;
+  const officialModelDraftDirty = Boolean(
+    settings &&
+    (
+      JSON.stringify(officialDisabledModelsDraft) !== JSON.stringify(settings.official_disabled_models ?? []) ||
+      JSON.stringify(officialModelOrderDraft) !== JSON.stringify(settings.official_model_sort_order ?? [])
+    ),
+  );
   const officialEnabledCount = officialModels.filter(
     (model) => !isOfficialModelDisabled(officialDisabledModels, model.id),
   ).length;
@@ -933,28 +948,13 @@ function ProvidersPageImpl({
   }
 
   function toggleOfficialModel(modelId: string, enabled: boolean) {
-    if (!settingsDraft) {
-      return;
-    }
-    const current = settingsDraft.official_disabled_models ?? [];
+    const current = officialDisabledModelsDraft;
     const nextDisabled = enabled
       ? current.filter((item) => !modelIdMatches(item, modelId))
       : [...new Set([...current, modelId])];
-    const nextSettings = { ...settingsDraft, official_disabled_models: nextDisabled };
-    setSettings(nextSettings);
-    setSettingsDraft(nextSettings);
+    setOfficialDisabledModelsDraft(nextDisabled);
     setOfficialModels((currentModels) =>
       currentModels.map((model) => (modelIdMatches(model.id, modelId) ? { ...model, enabled } : model)),
-    );
-    const toastId = showToast(
-      enabled ? t("providers.enablingModel", { modelId }) : t("providers.disablingModel", { modelId }),
-      "loading",
-    );
-    void saveSettings(
-      nextSettings,
-      true,
-      enabled ? t("providers.modelEnabledNamed", { modelId }) : t("providers.modelDisabledNamed", { modelId }),
-      toastId,
     );
   }
 
@@ -1053,16 +1053,21 @@ function ProvidersPageImpl({
   async function reorderOfficialModels(models: Model[]) {
     const nextModels = renumberModels(models);
     setOfficialModels(nextModels);
+    setOfficialModelOrderDraft(nextModels.map((model) => model.id));
+  }
+
+  async function saveOfficialModels() {
     if (!settingsDraft) {
       return;
     }
     await saveSettings(
       {
         ...settingsDraft,
-        official_model_sort_order: nextModels.map((model) => model.id),
+        official_disabled_models: officialDisabledModelsDraft,
+        official_model_sort_order: officialModelOrderDraft,
       },
       true,
-      t("providers.officialModelOrderSaved"),
+      t("providers.officialModelsSaved"),
     );
   }
 
@@ -1356,7 +1361,10 @@ function ProvidersPageImpl({
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
                 onReorder={(models) => void reorderOfficialModels(models)}
+                onSave={() => void saveOfficialModels()}
                 onToggleModel={toggleOfficialModel}
+                dirty={officialModelDraftDirty}
+                saveBusy={busy === "settings"}
                 usageBusy={officialUsageBusy}
                 usageError={officialUsageError}
                 usageHidden={officialUsageHidden}
@@ -2265,6 +2273,7 @@ function OfficialDetail({
   authIssue,
   authState,
   busy,
+  dirty,
   gatewayContextById,
   models,
   officialDisabledModels,
@@ -2275,7 +2284,9 @@ function OfficialDetail({
   onRefreshAuth,
   onRefreshUsage,
   onReorder,
+  onSave,
   onToggleModel,
+  saveBusy,
   usageBusy,
   usageError,
   usageHidden,
@@ -2284,6 +2295,7 @@ function OfficialDetail({
   authIssue: string | null;
   authState: CodexAuthState;
   busy: string | null;
+  dirty: boolean;
   gatewayContextById: Map<string, number>;
   models: Model[];
   officialDisabledModels: string[];
@@ -2294,7 +2306,9 @@ function OfficialDetail({
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
+  onSave: () => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
+  saveBusy: boolean;
   usageBusy: boolean;
   usageError: string | null;
   usageHidden: boolean;
@@ -2331,7 +2345,7 @@ function OfficialDetail({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-3 border-b border-line p-4">
         <HeaderRow
           title={t("common.codex")}
@@ -2389,11 +2403,21 @@ function OfficialDetail({
         onRefresh={onRefresh}
         onReorder={onReorder}
         onTestModel={testOfficialModel}
-        reorderable={false}
         refreshBusy={busy === "official-refresh"}
         onToggleOfficialModel={onToggleModel}
         modelTestDisabled={authState !== "authorized"}
       />
+      <div className="flex items-center justify-end border-t border-line px-5 py-3">
+        <button
+          type="button"
+          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+          disabled={!dirty || saveBusy}
+          onClick={onSave}
+        >
+          <Save size={16} />
+          {t("common.save")}
+        </button>
+      </div>
     </div>
   );
 }
@@ -2775,13 +2799,9 @@ function ModelSection({
     const modelEnabled = disabled
       ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
       : model.enabled;
-    const rowInteractable = !interactionDisabled && (!disabled || Boolean(onToggleOfficialModel));
+    const rowInteractable = !interactionDisabled && !disabled;
     function activateModelRow() {
       if (interactionDisabled) {
-        return;
-      }
-      if (disabled && onToggleOfficialModel) {
-        onToggleOfficialModel(model.id, !modelEnabled);
         return;
       }
       setEditingModelId(model.id);
@@ -3971,27 +3991,47 @@ function sortOfficialModels(models: Model[], sortOrder: string[]) {
 }
 
 function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
+  const knownOfficialIds = officialModelIdSet(catalog, metadata);
   const merged = new Map<string, Model>();
-  for (const model of metadata.filter(isOfficialModel)) {
-    merged.set(model.id, {
-      ...model,
-      enabled: true,
-    });
-  }
   for (const model of catalog.filter(isOfficialModel)) {
-    const existing = merged.get(model.id);
-    merged.set(model.id, {
+    const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
+    if (!canonicalId) {
+      continue;
+    }
+    const existing = merged.get(canonicalId);
+    merged.set(canonicalId, {
       ...existing,
       ...model,
-      context_window: existing?.context_window ?? model.context_window,
-      max_output_tokens: existing?.max_output_tokens ?? model.max_output_tokens,
-      input_modalities: existing?.input_modalities ?? model.input_modalities,
-      supported_reasoning_levels: existing?.supported_reasoning_levels ?? model.supported_reasoning_levels,
-      default_reasoning_level: existing?.default_reasoning_level ?? model.default_reasoning_level,
-      enabled: true,
+      id: canonicalId,
+      enabled: (existing?.enabled ?? true) || (model.enabled ?? true),
+    });
+  }
+  for (const model of metadata.filter(isOfficialModel)) {
+    const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
+    if (!canonicalId) {
+      continue;
+    }
+    const existing = merged.get(canonicalId);
+    merged.set(canonicalId, {
+      ...existing,
+      ...model,
+      id: canonicalId,
+      enabled: (existing?.enabled ?? true) || (model.enabled ?? true),
     });
   }
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
+}
+
+function officialModelIdSet(...groups: Model[][]) {
+  const known = new Set<string>();
+  for (const model of groups.flatMap((group) => group).filter(isOfficialModel)) {
+    const value = model.id.trim();
+    const bare = value.startsWith("openai/gpt-") ? value.slice("openai/".length) : value;
+    if (bare.startsWith("gpt-")) {
+      known.add(bare);
+    }
+  }
+  return known;
 }
 
 function isOfficialModel(model: Model) {
@@ -4009,7 +4049,7 @@ function isOfficialGatewayFastVariant(model: Model) {
 
 function officialModelSortKeys(id: string) {
   const normalized = normalizeOfficialModelId(id);
-  return [normalized, `openai/${normalized}`];
+  return normalized ? [normalized, `openai/${normalized}`] : [id.trim()];
 }
 
 function uniqueModelId(models: Model[]) {

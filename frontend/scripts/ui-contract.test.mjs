@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, stat } from "node:fs/promises";
 import { test } from "node:test";
+import ts from "typescript";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
@@ -1651,17 +1652,77 @@ test("canceling a newly added model removes the temporary draft before navigatio
   assert.match(addProviderPanel, /onCancelNewModel=\{\(modelId\) =>[\s\S]*models: renumberModels\(form\.models\.filter\(\(model\) => model\.id !== modelId\)\)/);
 });
 
-test("official model rows remain pointer-interactive while editing is disabled", async () => {
+test("official model rows only toggle from the switch while provider rows can still open editing", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
-  assert.match(modelSection, /const rowInteractable = !interactionDisabled && \(!disabled \|\| Boolean\(onToggleOfficialModel\)\);/);
+  assert.match(modelSection, /const rowInteractable = !interactionDisabled && !disabled;/);
   assert.match(modelSection, /if \(interactionDisabled\) \{[\s\S]*return;[\s\S]*\}/);
-  assert.match(modelSection, /function activateModelRow\(\)[\s\S]*onToggleOfficialModel\(model\.id, !modelEnabled\)/);
+  assert.match(modelSection, /function activateModelRow\(\)[\s\S]*setEditingModelId\(model\.id\)/);
+  assert.doesNotMatch(modelSection, /onToggleOfficialModel\(model\.id, !modelEnabled\)/);
+  assert.match(modelSection, /onChange=\{\(checked\) => onToggleOfficialModel\(model\.id, checked\)\}/);
   assert.match(modelSection, /rowInteractable && "cursor-pointer"/);
   assert.match(modelSection, /role=\{rowInteractable \? "button" : undefined\}/);
   assert.match(modelSection, /tabIndex=\{rowInteractable \? 0 : undefined\}/);
   assert.match(modelSection, /onClick=\{rowInteractable \? activateModelRow : undefined\}/);
+});
+
+test("official OpenAI model edits are draft-only until the footer Save action", async () => {
+  const [providersSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
+  const toggleOfficialModel = providersSource.match(/function toggleOfficialModel[\s\S]*?async function toggleCodexHubConnection/)?.[0] ?? "";
+  const reorderOfficialModels = providersSource.match(/function reorderOfficialModels[\s\S]*?async function saveOfficialModels/)?.[0] ?? "";
+  const saveOfficialModels = providersSource.match(/async function saveOfficialModels[\s\S]*?async function refreshProviderModels/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
+
+  assert.match(pageSource, /const \[officialDisabledModelsDraft, setOfficialDisabledModelsDraft\]/);
+  assert.match(pageSource, /const \[officialModelOrderDraft, setOfficialModelOrderDraft\]/);
+  assert.match(pageSource, /const officialModelDraftDirty = Boolean/);
+  assert.match(toggleOfficialModel, /setOfficialDisabledModelsDraft\(nextDisabled\)/);
+  assert.doesNotMatch(toggleOfficialModel, /saveSettings|generateCatalog|syncGatewayClients|showToast/);
+  assert.match(reorderOfficialModels, /setOfficialModelOrderDraft\(nextModels\.map\(\(model\) => model\.id\)\)/);
+  assert.doesNotMatch(reorderOfficialModels, /saveSettings|generateCatalog|syncGatewayClients|showToast/);
+  assert.match(saveOfficialModels, /await saveSettings\([\s\S]*official_disabled_models: officialDisabledModelsDraft[\s\S]*official_model_sort_order: officialModelOrderDraft[\s\S]*true[\s\S]*t\("providers\.officialModelsSaved"\)/);
+  assert.match(officialDetail, /dirty: boolean;/);
+  assert.match(officialDetail, /onSave: \(\) => void;/);
+  assert.match(officialDetail, /<Save size=\{16\} \/>/);
+  assert.match(officialDetail, /disabled=\{!dirty \|\| saveBusy\}/);
+  assert.match(enSource, /officialModelsSaved: "Official model settings saved"/);
+  assert.match(zhSource, /officialModelsSaved: "官方模型设置已保存"/);
+});
+
+test("shared identity vectors drive TypeScript canonicalization", async () => {
+  const fixture = JSON.parse(
+    await readFile(new URL("../../tests/fixtures/model_identity_vectors.json", import.meta.url), "utf8"),
+  );
+  const settingsSource = await readFile(settingsLibPath, "utf8");
+  const functionSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(functionSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { normalizeOfficialModelId } = await import(moduleUrl);
+  const knownOfficialIds = new Set(fixture.known_official_ids);
+
+  for (const vector of fixture.vectors) {
+    assert.equal(normalizeOfficialModelId(vector.input, knownOfficialIds), vector.expected, vector.name);
+  }
+});
+
+test("frontend official merge canonicalizes aliases with fresh metadata winning", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const merge = providersSource.match(/function mergeOfficialModelSources[\s\S]*?function isOfficialModel/)?.[0] ?? "";
+
+  assert.match(merge, /const knownOfficialIds = officialModelIdSet\(catalog, metadata\);/);
+  assert.match(merge, /for \(const model of catalog\.filter\(isOfficialModel\)\)/);
+  assert.match(merge, /for \(const model of metadata\.filter\(isOfficialModel\)\)/);
+  assert.match(merge, /const canonicalId = normalizeOfficialModelId\(model\.id, knownOfficialIds\);/);
+  assert.match(merge, /\.\.\.existing,[\s\S]*\.\.\.model,[\s\S]*id: canonicalId/);
+  assert.match(merge, /enabled: \(existing\?\.enabled \?\? true\) \|\| \(model\.enabled \?\? true\)/);
 });
 
 test("official OpenAI controls are locked while Codex auth is missing", async () => {
@@ -1838,16 +1899,16 @@ test("official refresh action is placed in the Models toolbar", async () => {
   assert.match(modelSection, /t\("common\.refresh"\)/);
 });
 
-test("official model list does not expose unsupported drag sorting", async () => {
+test("official model list exposes the same drag sorting as provider model lists", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
-  assert.match(officialDetail, /reorderable=\{false\}/);
+  assert.match(officialDetail, /onReorder=\{onReorder\}/);
+  assert.doesNotMatch(officialDetail, /reorderable=\{false\}/);
   assert.match(modelSection, /reorderable = true/);
   assert.match(modelSection, /reorderable \? \(/);
   assert.match(modelSection, /<SortableList/);
-  assert.match(modelSection, /models\.map\(\(model\)[\s\S]*renderModelRow\(model\)/);
 });
 
 test("Codex Hub connection CTA is prominent and has a connecting state", async () => {

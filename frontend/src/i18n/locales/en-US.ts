@@ -353,6 +353,7 @@ const enUS = {
     officialModelsExcluded: "Official models excluded",
     officialModelsIncluded: "Official models included",
     officialModelOrderSaved: "Official model order saved",
+    officialModelsSaved: "Official model settings saved",
     officialModelsRefreshed: "Official models refreshed",
     officialModelsRefreshedSyncFailed: "Official models refreshed; bound client sync failed",
     openCodexApp: "Open Codex App to sign in",

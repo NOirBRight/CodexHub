@@ -353,6 +353,7 @@ const zhCN = {
     officialModelsExcluded: "官方模型已排除",
     officialModelsIncluded: "官方模型已包含",
     officialModelOrderSaved: "官方模型顺序已保存",
+    officialModelsSaved: "官方模型设置已保存",
     officialModelsRefreshed: "官方模型已刷新",
     officialModelsRefreshedSyncFailed: "官方模型已刷新；绑定客户端同步失败",
     openaiSourceExcluded: "OpenAI 来源已排除",
