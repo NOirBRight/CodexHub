@@ -23,6 +23,7 @@ import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToa
 import { SortableList } from "../components/SortableList";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
+import { historyIssueKey } from "../lib/history";
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
@@ -1073,7 +1074,7 @@ function ProvidersPageImpl({
         throw new Error(t("settings.historyManualExitRequired"));
       }
       if (result.status === "conflict") {
-        throw new Error(result.error ?? result.reason ?? t("settings.historyProviderConflict"));
+        throw new Error(t(historyIssueKey(result)));
       }
       const message = result.status === "repaired"
         ? t("settings.historyStartupRepaired", {
