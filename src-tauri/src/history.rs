@@ -1556,7 +1556,7 @@ mod tests {
             ])),
         };
         let controller = BudgetRecordingController {
-            running: false,
+            running: true,
             close_outcome: CloseOutcome::Released,
             launch_error: Some("history_operation_timeout: launch".to_string()),
             close_budget: Cell::new(None),
