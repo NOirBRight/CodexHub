@@ -146,7 +146,7 @@ def is_managed_gateway_provider(values: dict[str, str] | None) -> bool:
     if values.get("supports_websockets") != "false":
         return False
     legacy_auth = values.get("requires_openai_auth") == "true" and "experimental_bearer_token" not in values
-    keyed_auth = values.get("requires_openai_auth") == "false" and "experimental_bearer_token" in values
+    keyed_auth = "experimental_bearer_token" in values and values.get("requires_openai_auth") in {"true", "false"}
     if not (legacy_auth or keyed_auth):
         return False
     parsed = urlsplit(values.get("base_url", ""))
@@ -300,7 +300,7 @@ def build_provider_section(base_url: str, gateway_key: str) -> str:
             f'name = "{PROXY_PROVIDER_NAME}"',
             f"base_url = {toml_literal(base_url.rstrip('/') + '/v1')}",
             'wire_api = "responses"',
-            "requires_openai_auth = false",
+            "requires_openai_auth = true",
             f"experimental_bearer_token = {toml_basic_string(gateway_key)}",
             "supports_websockets = false",
             "",

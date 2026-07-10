@@ -126,7 +126,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("[model_providers.custom]", updated)
             self.assertIn("base_url = 'http://127.0.0.1:9099/v1'", updated)
             self.assertIn('wire_api = "responses"', updated)
-            self.assertIn("requires_openai_auth = false", updated)
+            self.assertIn("requires_openai_auth = true", updated)
             self.assertIn('experimental_bearer_token = "codexhub-proxy"', updated)
             self.assertIn("supports_websockets = false", updated)
             self.assertNotIn("responses_websockets = true", updated)

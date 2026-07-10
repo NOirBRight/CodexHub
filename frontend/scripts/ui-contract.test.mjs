@@ -6,6 +6,7 @@ const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
 const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta.url);
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
+const buildWindowsPortablePath = new URL("../../scripts/build-windows-portable.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
@@ -2096,6 +2097,14 @@ test("settings drawer reports the backend sync result", async () => {
   assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);
   assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) => call<string>\("restore_official_history_from_unified"\)/);
   assert.doesNotMatch(drawerSource, /History sync requested/);
+});
+
+test("Windows portable build uses the Tauri custom protocol pipeline", async () => {
+  const portableScript = await readFile(buildWindowsPortablePath, "utf8");
+
+  assert.match(portableScript, /Prepare-PythonRuntime\.ps1/);
+  assert.match(portableScript, /cargo tauri build --config \$generatedTauriConfigPath --no-bundle --ci/);
+  assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
 test("CodexHub route switches restart Codex so the new model catalog is loaded", async () => {
