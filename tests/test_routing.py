@@ -932,6 +932,84 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
         self.assertIn("model is required for provider path: volc", payload.get("error", ""))
 
+    def test_third_party_ultra_reasoning_effort_returns_openai_compatible_400(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": {"effort": "ultra"},
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp-third-party","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertIn("reasoning effort 'ultra'", payload["error"])
+        self.assertEqual(payload["detail"], payload["error"])
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+        self.assertEqual(payload["codexhub_error"]["details"]["type"], "invalid_request_error")
+        self.assertEqual(payload["codexhub_error"]["source"], "volcengine")
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+
+    def test_third_party_top_level_ultra_reasoning_effort_returns_400(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "ultra",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/chat/completions", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(
+                b'{"id":"chatcmpl-third-party","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}'
+            ),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="chat_completions")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertEqual(payload["error"]["type"], "invalid_request_error")
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+
+    def test_official_ultra_reasoning_effort_still_reaches_official_upstream(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": {"effort": "ultra"},
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"resp-official","output":[]}'),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 200)
+        open_upstream.assert_called_once()
+        forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(forwarded["reasoning"]["effort"], "ultra")
+
     def test_compressed_responses_request_extracts_model_after_decode(self):
         original = json.dumps(
             {

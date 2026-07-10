@@ -1776,6 +1776,24 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
     return False
 
 
+def _validate_reasoning_effort_for_upstream(
+    payload: Any,
+    upstream: Mapping[str, Any],
+) -> None:
+    is_official = upstream.get("name") == "official" and upstream.get("auth") == "codex_auth"
+    if is_official or not isinstance(payload, Mapping):
+        return
+    requested_efforts = [payload.get("reasoning_effort")]
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        requested_efforts.append(reasoning.get("effort"))
+    is_ultra = any(
+        isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
+    )
+    if is_ultra:
+        raise ValueError("reasoning effort 'ultra' is not supported for third-party models")
+
+
 def decoded_request_body(body: bytes, content_encoding: str | None = None) -> tuple[bytes, bool, str | None]:
     if not content_encoding:
         return body, False, None
@@ -11054,6 +11072,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
+            _validate_reasoning_effort_for_upstream(inbound_payload, upstream)
             route_decision = route_decision_for_request(
                 upstream,
                 request_context,
