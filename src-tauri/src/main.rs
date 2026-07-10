@@ -268,8 +268,8 @@ async fn get_status() -> Result<AppStatus, String> {
 }
 
 #[tauri::command]
-fn switch_mode(mode: String, auto_sync: bool) -> Result<AppStatus, String> {
-    config::switch_mode(&mode, auto_sync)
+fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> Result<AppStatus, String> {
+    config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
 }
 
 #[tauri::command]

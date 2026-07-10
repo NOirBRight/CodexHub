@@ -323,6 +323,7 @@ def apply_overlay(
     catalog_path: Path,
     base_url: str,
     owner: str = "release",
+    takeover: bool = False,
     gateway_key: str = "codexhub-proxy",
 ) -> None:
     if owner not in {"release", "beta"}:
@@ -334,7 +335,8 @@ def apply_overlay(
     ):
         raise ValueError("refusing to overwrite unknown custom provider")
     cleaned = strip_marked_overlay(original)
-    atomic_write_text(backup_path, cleaned if cleaned != original else original, encoding="utf-8")
+    backup = original if takeover else (cleaned if cleaned != original else original)
+    atomic_write_text(backup_path, backup, encoding="utf-8")
 
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
@@ -379,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--catalog", required=True, type=Path)
     apply_parser.add_argument("--base-url", required=True)
     apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
+    apply_parser.add_argument("--takeover", action="store_true")
     apply_parser.add_argument("--gateway-key", default="codexhub-proxy")
 
     restore_parser = subparsers.add_parser("restore")
@@ -392,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "apply":
-        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner, args.gateway_key)
+        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner, args.takeover, args.gateway_key)
     elif args.command == "restore":
         status = restore_overlay(args.config, args.backup, args.unified_history)
         if args.unified_history:

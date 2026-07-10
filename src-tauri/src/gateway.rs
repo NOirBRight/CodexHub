@@ -1539,11 +1539,17 @@ fn read_codex_auth_status() -> CodexAuthStatus {
 }
 
 fn codex_home() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-        .unwrap_or_else(|| PathBuf::from(".codex"))
+    crate::runtime_paths::codex_target_home_dir()
+        .unwrap_or_else(|_| PathBuf::from(".codex"))
+}
+
+fn runtime_home() -> PathBuf {
+    crate::runtime_paths::runtime_home_dir()
+        .unwrap_or_else(|_| PathBuf::from(crate::app_flavor::current().runtime_home_suffix()))
+}
+
+fn runtime_proxy_dir(home: &Path) -> PathBuf {
+    home.join("proxy")
 }
 
 fn official_models(settings: &Settings) -> Vec<GatewayModel> {
@@ -2293,12 +2299,11 @@ fn read_recent_events(
 }
 
 fn event_log_path() -> PathBuf {
-    codex_home().join("proxy").join("codex-proxy-events.jsonl")
+    runtime_proxy_dir(&runtime_home()).join("codex-proxy-events.jsonl")
 }
 
 fn telemetry_db_path() -> PathBuf {
-    codex_home()
-        .join("proxy")
+    runtime_proxy_dir(&runtime_home())
         .join("codex-proxy-telemetry.sqlite")
 }
 
@@ -4857,8 +4862,7 @@ fn windows_file_version(path: &Path) -> Option<String> {
 }
 
 fn client_backup_root(client_id: &str) -> PathBuf {
-    codex_home()
-        .join("proxy")
+    runtime_proxy_dir(&runtime_home())
         .join("client-backups")
         .join(client_id)
 }
@@ -6324,7 +6328,7 @@ mod tests {
         pi_settings_text, read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, sanitize_event,
-        sanitize_text, usage_pricing_by_model, zcode_catalog_text, UsagePricing,
+        sanitize_text, usage_pricing_by_model, zcode_catalog_text, runtime_proxy_dir, UsagePricing,
     };
     use crate::{Model, Provider, Settings, UpstreamFormat};
     use serde_json::json;
@@ -6336,6 +6340,12 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn runtime_artifacts_are_rooted_under_flavor_home() {
+        let runtime_home = PathBuf::from("C:\\Users\\tester\\.codexhub-beta");
+        assert_eq!(runtime_proxy_dir(&runtime_home), runtime_home.join("proxy"));
+    }
 
     #[test]
     fn write_text_replace_does_not_clobber_existing_stale_temp_file() {

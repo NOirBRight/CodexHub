@@ -254,7 +254,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "switch_mode" => {
             let mode = string_arg(&request.args, "mode")?;
             let auto_sync = bool_arg(&request.args, "autoSync")?;
-            to_value(config::switch_mode(&mode, auto_sync))
+            let force_takeover = optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"])
+                .unwrap_or(false);
+            to_value(config::switch_mode_with_takeover(&mode, auto_sync, force_takeover))
         }
         "start_proxy" => to_value(proxy::start()),
         "stop_proxy" => to_value(proxy::stop()),

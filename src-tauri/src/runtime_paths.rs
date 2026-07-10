@@ -1,5 +1,11 @@
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeHomes {
+    pub(crate) runtime: PathBuf,
+    pub(crate) codex_target: PathBuf,
+}
+
 pub(crate) fn set_resource_root(path: impl AsRef<Path>) {
     let path = path.as_ref();
     if path.exists() {
@@ -8,9 +14,42 @@ pub(crate) fn set_resource_root(path: impl AsRef<Path>) {
 }
 
 pub(crate) fn codex_home_dir() -> Result<PathBuf, String> {
+    runtime_home_dir()
+}
+
+pub(crate) fn runtime_home_dir() -> Result<PathBuf, String> {
+    match std::env::var_os("CODEXHUB_RUNTIME_HOME").filter(|value| !value.is_empty()) {
+        Some(value) => Ok(PathBuf::from(value)),
+        None if crate::app_flavor::current() == crate::app_flavor::RuntimeFlavor::Stable => {
+            match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+                Some(value) => Ok(PathBuf::from(value)),
+                None => dirs::home_dir()
+                    .ok_or_else(|| "failed to resolve user home directory".to_string())
+                    .map(|home| homes_for_flavor(&home, crate::app_flavor::current()).runtime),
+            }
+        }
+        None => dirs::home_dir()
+            .ok_or_else(|| "failed to resolve user home directory".to_string())
+            .map(|home| homes_for_flavor(&home, crate::app_flavor::current()).runtime),
+    }
+}
+
+pub(crate) fn codex_target_home_dir() -> Result<PathBuf, String> {
     match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
         Some(value) => Ok(PathBuf::from(value)),
-        None => crate::app_flavor::default_codex_home_dir(),
+        None => dirs::home_dir()
+            .ok_or_else(|| "failed to resolve user home directory".to_string())
+            .map(|home| homes_for_flavor(&home, crate::app_flavor::current()).codex_target),
+    }
+}
+
+pub(crate) fn homes_for_flavor(
+    user_home: &Path,
+    flavor: crate::app_flavor::RuntimeFlavor,
+) -> RuntimeHomes {
+    RuntimeHomes {
+        runtime: user_home.join(flavor.runtime_home_suffix()),
+        codex_target: user_home.join(flavor.codex_target_home_suffix()),
     }
 }
 
@@ -135,7 +174,8 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bundled_python_candidates, find_python};
+    use super::{bundled_python_candidates, find_python, homes_for_flavor};
+    use crate::app_flavor::RuntimeFlavor;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -159,6 +199,16 @@ mod tests {
         fs::write(&python, "").unwrap();
 
         assert_eq!(find_python(Some(&root)), python);
+    }
+
+    #[test]
+    fn beta_homes_keep_runtime_data_away_from_real_codex_target() {
+        let user_home = PathBuf::from("C:\\Users\\tester");
+
+        let homes = homes_for_flavor(&user_home, RuntimeFlavor::Beta);
+
+        assert_eq!(homes.runtime, user_home.join(".codexhub-beta"));
+        assert_eq!(homes.codex_target, user_home.join(".codex"));
     }
 
     fn bundled_python_path(root: &Path) -> PathBuf {

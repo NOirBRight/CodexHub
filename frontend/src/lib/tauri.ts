@@ -166,8 +166,8 @@ export const api = {
     call<AppUpdateCompletionStatus | null>("consume_app_update_completion"),
   installAppUpdate: () => call<AppUpdateInstallResult>("install_app_update"),
   getStatus: () => call<AppStatus>("get_status"),
-  switchMode: (mode: string, autoSync: boolean) =>
-    call<AppStatus>("switch_mode", { mode, autoSync }),
+  switchMode: (mode: string, autoSync: boolean, forceTakeover = false) =>
+    call<AppStatus>("switch_mode", { mode, autoSync, forceTakeover, force_takeover: forceTakeover }),
   startProxy: () => call<AppStatus>("start_proxy"),
   stopProxy: () => call<AppStatus>("stop_proxy"),
   restartProxy: () => call<AppStatus>("restart_proxy"),

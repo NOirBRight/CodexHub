@@ -1,5 +1,4 @@
 use serde::Serialize;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +25,10 @@ pub struct AppFlavorInfo {
     pub bridge_port: u16,
     pub gateway_port: u16,
     pub default_codex_home_suffix: &'static str,
+    pub runtime_home_suffix: &'static str,
+    pub codex_target_home_suffix: &'static str,
+    pub codex_target_owner: Option<RoutingOwner>,
+    pub codex_takeover_required: bool,
 }
 
 pub fn current() -> RuntimeFlavor {
@@ -53,6 +56,11 @@ impl RuntimeFlavor {
     }
 
     pub fn info(self) -> AppFlavorInfo {
+        let codex_target_owner = crate::runtime_paths::codex_target_home_dir()
+            .ok()
+            .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok())
+            .as_deref()
+            .and_then(crate::config::codex_overlay_owner);
         AppFlavorInfo {
             flavor: self,
             routing_owner: self.routing_owner(),
@@ -60,6 +68,10 @@ impl RuntimeFlavor {
             bridge_port: self.bridge_port(),
             gateway_port: self.gateway_port(),
             default_codex_home_suffix: self.default_codex_home_suffix(),
+            runtime_home_suffix: self.runtime_home_suffix(),
+            codex_target_home_suffix: self.codex_target_home_suffix(),
+            codex_target_owner,
+            codex_takeover_required: codex_target_owner.is_some_and(|owner| owner != self.routing_owner()),
         }
     }
 
@@ -92,10 +104,18 @@ impl RuntimeFlavor {
     }
 
     pub fn default_codex_home_suffix(self) -> &'static str {
+        self.runtime_home_suffix()
+    }
+
+    pub fn runtime_home_suffix(self) -> &'static str {
         match self {
             Self::Stable => ".codex",
-            Self::Beta => ".codexhub-beta/codex-home",
+            Self::Beta => ".codexhub-beta",
         }
+    }
+
+    pub fn codex_target_home_suffix(self) -> &'static str {
+        ".codex"
     }
 
     pub fn autostart_task_name(self) -> &'static str {
@@ -127,17 +147,6 @@ impl RuntimeFlavor {
     }
 }
 
-pub fn default_codex_home_dir() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .ok_or_else(|| "failed to resolve user home directory".to_string())
-        .map(|home| {
-            current()
-                .default_codex_home_suffix()
-                .split('/')
-                .fold(home, |path, segment| path.join(segment))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +173,14 @@ mod tests {
             flavor.default_codex_home_suffix(),
             RuntimeFlavor::Stable.default_codex_home_suffix()
         );
+    }
+
+    #[test]
+    fn beta_runtime_home_is_separate_but_codex_target_stays_real() {
+        let flavor = RuntimeFlavor::Beta;
+
+        assert_eq!(flavor.runtime_home_suffix(), ".codexhub-beta");
+        assert_eq!(flavor.codex_target_home_suffix(), ".codex");
+        assert_ne!(flavor.runtime_home_suffix(), flavor.codex_target_home_suffix());
     }
 }

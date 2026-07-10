@@ -1137,6 +1137,7 @@ export default function App() {
           >
             <div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">
               <ProvidersPage
+                appFlavor={appFlavor}
                 appStatus={appStatus}
                 catalogModels={catalogModels}
                 gatewayStatus={gatewayStatus}

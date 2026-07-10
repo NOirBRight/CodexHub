@@ -23,40 +23,64 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 pub fn switch_mode(mode: &str, auto_sync: bool) -> Result<AppStatus, String> {
+    switch_mode_with_takeover(mode, auto_sync, false)
+}
+
+pub fn switch_mode_with_takeover(
+    mode: &str,
+    auto_sync: bool,
+    force_takeover: bool,
+) -> Result<AppStatus, String> {
     let paths = ConfigPaths::runtime()?;
     let python = find_python();
     let runner = ProcessCommandRunner;
 
-    switch_mode_with_paths(mode, auto_sync, &paths, &python, &runner)
+    switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigPaths {
-    codex_dir: PathBuf,
+    runtime_dir: PathBuf,
+    codex_target_dir: PathBuf,
     repo_root: PathBuf,
 }
 
 impl ConfigPaths {
     pub(crate) fn runtime() -> Result<Self, String> {
-        let codex_dir = runtime_paths::codex_home_dir()?;
+        let runtime_dir = runtime_paths::runtime_home_dir()?;
+        let codex_target_dir = runtime_paths::codex_target_home_dir()?;
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, repo_root))
+        Ok(Self::new_isolated(runtime_dir, codex_target_dir, repo_root))
     }
 
     pub(crate) fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+        let codex_dir = codex_dir.into();
         Self {
-            codex_dir: codex_dir.into(),
+            runtime_dir: codex_dir.clone(),
+            codex_target_dir: codex_dir,
+            repo_root: repo_root.into(),
+        }
+    }
+
+    pub(crate) fn new_isolated(
+        runtime_dir: impl Into<PathBuf>,
+        codex_target_dir: impl Into<PathBuf>,
+        repo_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            runtime_dir: runtime_dir.into(),
+            codex_target_dir: codex_target_dir.into(),
             repo_root: repo_root.into(),
         }
     }
 
     pub(crate) fn codex_dir(&self) -> &Path {
-        &self.codex_dir
+        &self.codex_target_dir
     }
 
     pub(crate) fn proxy_dir(&self) -> PathBuf {
-        self.codex_dir.join("proxy")
+        self.runtime_dir.join("proxy")
     }
 
     fn runtime_providers_path(&self) -> PathBuf {
@@ -72,7 +96,7 @@ impl ConfigPaths {
     }
 
     pub(crate) fn codex_config_path(&self) -> PathBuf {
-        self.codex_dir.join("config.toml")
+        self.codex_target_dir.join("config.toml")
     }
 
     pub(crate) fn config_backup_path(&self) -> PathBuf {
@@ -84,7 +108,7 @@ impl ConfigPaths {
     }
 
     fn generated_catalog_path(&self) -> PathBuf {
-        self.codex_dir
+        self.runtime_dir
             .join("model-catalogs")
             .join("codexhub-model-catalog.json")
     }
@@ -333,7 +357,7 @@ fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
     }
 
     for path in [paths
-        .codex_dir
+        .runtime_dir
         .join("model-catalogs")
         .join("openai-plus-ollama-cloud.json")]
     {
@@ -466,11 +490,33 @@ pub(crate) fn switch_mode_with_paths(
     python: &Path,
     runner: &dyn CommandRunner,
 ) -> Result<AppStatus, String> {
+    switch_mode_with_paths_takeover(mode, _auto_sync, false, paths, python, runner)
+}
+
+pub(crate) fn switch_mode_with_paths_takeover(
+    mode: &str,
+    _auto_sync: bool,
+    force_takeover: bool,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AppStatus, String> {
     if mode != "official" && mode != "custom" {
         return Err(format!(
             "unsupported mode: {mode}; expected official or custom"
         ));
     }
+
+    let target_owner = fs::read_to_string(paths.codex_config_path())
+        .ok()
+        .as_deref()
+        .and_then(codex_overlay_owner);
+    ensure_codex_owner_mutation_allowed(
+        crate::app_flavor::current().routing_owner(),
+        target_owner,
+        mode,
+        force_takeover,
+    )?;
 
     let settings = match get_settings_with_paths(paths) {
         Ok(settings) => settings,
@@ -501,31 +547,32 @@ pub(crate) fn switch_mode_with_paths(
             runner,
         )
     } else {
+        let mut args = vec![
+            "apply".to_string(),
+            "--config".to_string(),
+            paths.codex_config_path().to_string_lossy().into_owned(),
+            "--backup".to_string(),
+            paths.config_backup_path().to_string_lossy().into_owned(),
+            "--catalog".to_string(),
+            paths.generated_catalog_path().to_string_lossy().into_owned(),
+            "--base-url".to_string(),
+            format!("http://127.0.0.1:{}", settings.proxy_port),
+            "--gateway-key".to_string(),
+            settings.gateway_client_key.clone(),
+            "--owner".to_string(),
+            match crate::app_flavor::current().routing_owner() {
+                crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
+                _ => "release".to_string(),
+            },
+        ];
+        if force_takeover {
+            args.push("--takeover".to_string());
+        }
         run_python_script(
             "config overlay apply",
             python,
             paths.config_overlay_script(),
-            vec![
-                "apply".to_string(),
-                "--config".to_string(),
-                paths.codex_config_path().to_string_lossy().into_owned(),
-                "--backup".to_string(),
-                paths.config_backup_path().to_string_lossy().into_owned(),
-                "--catalog".to_string(),
-                paths
-                    .generated_catalog_path()
-                    .to_string_lossy()
-                    .into_owned(),
-                "--base-url".to_string(),
-                format!("http://127.0.0.1:{}", settings.proxy_port),
-                "--gateway-key".to_string(),
-                settings.gateway_client_key.clone(),
-                "--owner".to_string(),
-                match crate::app_flavor::current().routing_owner() {
-                    crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
-                    _ => "release".to_string(),
-                },
-            ],
+            args,
             runner,
         )
     };
@@ -540,6 +587,37 @@ pub(crate) fn switch_mode_with_paths(
         history_sync_status: None,
         history_sync_message: None,
     })
+}
+
+pub(crate) fn codex_overlay_owner(text: &str) -> Option<crate::app_flavor::RoutingOwner> {
+    text.lines().find_map(|line| {
+        let owner = line.trim().strip_prefix("# owner = ")?.trim();
+        match owner {
+            "release" => Some(crate::app_flavor::RoutingOwner::Release),
+            "beta" => Some(crate::app_flavor::RoutingOwner::Beta),
+            _ => None,
+        }
+    })
+}
+
+fn ensure_codex_owner_mutation_allowed(
+    current_app_owner: crate::app_flavor::RoutingOwner,
+    current_target_owner: Option<crate::app_flavor::RoutingOwner>,
+    mode: &str,
+    force_takeover: bool,
+) -> Result<(), String> {
+    let Some(target_owner) = current_target_owner else {
+        return Ok(());
+    };
+    if target_owner == current_app_owner {
+        return Ok(());
+    }
+    if mode == "custom" && force_takeover {
+        return Ok(());
+    }
+    Err(format!(
+        "Codex is managed by {target_owner:?}; explicit takeover is required and only its owner may disconnect it."
+    ))
 }
 
 fn ensure_mode_switch_directories(paths: &ConfigPaths) -> Result<(), String> {
@@ -631,8 +709,8 @@ pub(crate) fn find_python() -> PathBuf {
 mod tests {
     use super::{
         get_providers_with_paths, get_settings_with_paths, save_providers_with_paths,
-        save_settings_with_paths, switch_mode_with_paths, CommandOutcome, CommandRunner,
-        ConfigPaths,
+        save_settings_with_paths, switch_mode_with_paths, codex_overlay_owner,
+        ensure_codex_owner_mutation_allowed, CommandOutcome, CommandRunner, ConfigPaths,
     };
     use crate::{Model, Provider, Settings, ToolProtocol, UpstreamFormat};
     use std::cell::RefCell;
@@ -1252,6 +1330,64 @@ sort_order = 7
         assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
         assert_eq!(status.history_sync_status, None);
         assert_eq!(status.history_sync_message, None);
+    }
+
+    #[test]
+    fn isolated_paths_keep_beta_runtime_artifacts_out_of_codex_target() {
+        let root = temp_root("isolated-beta-paths");
+        let runtime = root.join(".codexhub-beta");
+        let target = root.join(".codex");
+        let paths = ConfigPaths::new_isolated(&runtime, &target, root.join("repo"));
+
+        assert_eq!(paths.settings_path(), runtime.join("proxy/settings.json"));
+        assert_eq!(paths.config_backup_path(), runtime.join("proxy/config.toml.release.backup"));
+        assert_eq!(paths.codex_config_path(), target.join("config.toml"));
+        assert_eq!(paths.generated_catalog_path(), runtime.join("model-catalogs/codexhub-model-catalog.json"));
+    }
+
+    #[test]
+    fn codex_cross_channel_change_requires_explicit_takeover() {
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "custom",
+            false,
+        )
+        .is_err());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "custom",
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn codex_disconnect_restores_only_changes_owned_by_current_channel() {
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "official",
+            true,
+        )
+        .is_err());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Beta),
+            "official",
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn codex_overlay_owner_is_detected_from_managed_marker() {
+        let text = "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = beta\n# END CODEX PROXY SESSION CONFIG\n";
+        assert_eq!(
+            codex_overlay_owner(text),
+            Some(crate::app_flavor::RoutingOwner::Beta)
+        );
     }
 
     #[test]

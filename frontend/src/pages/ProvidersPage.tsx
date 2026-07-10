@@ -26,6 +26,7 @@ import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
+  AppFlavorInfo,
   AppStatus,
   GatewayStatus,
   GatewayClientSyncSummary,
@@ -274,6 +275,7 @@ type OfficialOpenAIUsageTooltipState = {
 };
 
 type ProvidersPageProps = {
+  appFlavor?: AppFlavorInfo | null;
   appStatus: AppStatus | null;
   catalogModels: Model[];
   gatewayStatus?: GatewayStatus | null;
@@ -288,6 +290,7 @@ type ProvidersPageProps = {
 };
 
 function ProvidersPageImpl({
+  appFlavor,
   appStatus: appStatusSnapshot,
   catalogModels,
   gatewayStatus: gatewayStatusSnapshot,
@@ -977,12 +980,24 @@ function ProvidersPageImpl({
 
   async function toggleCodexHubConnection() {
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
+    let forceTakeover = false;
+    if (nextMode === "custom" && appFlavor?.codex_takeover_required) {
+      const currentOwner = appFlavor.codex_target_owner ?? "unknown_external";
+      forceTakeover = window.confirm(
+        `Codex is managed by ${currentOwner}. ${appFlavor.product_name} must explicitly take over; disconnect will restore the previous owner. Continue?`,
+      );
+      if (!forceTakeover) {
+        return;
+      }
+    }
     const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
     setBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
-      let status = await api.switchMode(nextMode, false);
+      let status = forceTakeover
+        ? await api.switchMode(nextMode, false, true)
+        : await api.switchMode(nextMode, false);
       if (nextMode === "custom" && !status.proxy_running) {
         updateToast(toastId, {
           action: null,

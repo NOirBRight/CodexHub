@@ -2592,6 +2592,24 @@ test("gateway client cards render tri-state routing owner colors", async () => {
   assert.match(zhSource, /newEndpoint/);
 });
 
+test("Beta Codex takeover is explicit and exposes ownership conflict state", async () => {
+  const [typesSource, tauriSource, providersSource] = await Promise.all([
+    readFile(typesPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /runtime_home_suffix: string/);
+  assert.match(typesSource, /codex_target_home_suffix: string/);
+  assert.match(typesSource, /codex_target_owner: RoutingOwner \| null/);
+  assert.match(typesSource, /codex_takeover_required: boolean/);
+  assert.match(tauriSource, /switchMode: \(mode: string, autoSync: boolean, forceTakeover = false\)/);
+  assert.match(tauriSource, /forceTakeover/);
+  assert.match(providersSource, /appFlavor\?\.codex_takeover_required/);
+  assert.match(providersSource, /window\.confirm/);
+  assert.match(providersSource, /forceTakeover[\s\S]*api\.switchMode\(nextMode, false, true\)/);
+});
+
 test("startup update check is delayed and silent on failure", async () => {
   const appSource = await readFile(appPath, "utf8");
 

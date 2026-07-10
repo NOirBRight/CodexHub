@@ -224,6 +224,27 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("# owner = release", text)
             self.assertNotIn("# BEGIN CODEX PROXY SESSION CONFIG", text)
 
+    def test_explicit_takeover_restore_recovers_previous_channel_overlay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "beta-backup.toml"
+            catalog = tmp / "catalog.json"
+            previous = "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = release\n# END CODEX PROXY SESSION CONFIG\n"
+            config.write_text(previous, encoding="utf-8")
+
+            apply_overlay(
+                config,
+                backup,
+                catalog,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            restore_overlay(config, backup, unified_history=False)
+
+            self.assertEqual(config.read_text(encoding="utf-8"), previous)
+
     def test_restore_overlay_without_backup_strips_managed_overlay(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

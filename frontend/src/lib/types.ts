@@ -112,6 +112,10 @@ export interface AppFlavorInfo {
   bridge_port: number;
   gateway_port: number;
   default_codex_home_suffix: string;
+  runtime_home_suffix: string;
+  codex_target_home_suffix: string;
+  codex_target_owner: RoutingOwner | null;
+  codex_takeover_required: boolean;
 }
 
 export interface AppUpdateStatus {
