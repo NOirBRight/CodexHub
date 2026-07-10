@@ -15,6 +15,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
+
+Assert-ReleaseChannelVersion -Flavor $Flavor -Version $Version
 
 foreach ($path in @($ManifestPath, $InstallerPath, $SignaturePath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -37,13 +40,6 @@ if ($installerName -ne $expectedInstallerName) {
 if ([System.IO.Path]::GetFileName($SignaturePath) -ne "$expectedInstallerName.sig") {
     throw "$Flavor signature must be paired with $expectedInstallerName."
 }
-if ($Flavor -eq "beta" -and $Version -notmatch '^0\.1\.4-beta\.[1-9][0-9]*$') {
-    throw "Beta release requires a v0.1.4-beta.N prerelease version."
-}
-if ($Flavor -eq "stable" -and $Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw "Stable release requires a stable version."
-}
-
 $manifest = Get-Content -Raw -LiteralPath $ManifestPath | ConvertFrom-Json
 $platform = $manifest.platforms."windows-x86_64"
 $signature = (Get-Content -Raw -LiteralPath $SignaturePath).Trim()

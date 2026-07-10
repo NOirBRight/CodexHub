@@ -252,6 +252,15 @@ def test_beta_gate_rejects_stable_version(tmp_path):
     assert "prerelease version" in result.stderr
 
 
+def test_beta_gate_accepts_next_version_prerelease_via_shared_semver_validator(tmp_path):
+    repo, _, dev_commit = _release_repo(tmp_path)
+
+    result = _plan(repo, "beta", "0.1.5-beta.1", dev_commit)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["version"] == "0.1.5-beta.1"
+
+
 def test_stable_gate_requires_exact_main_and_stable_version(tmp_path):
     repo, main_commit, dev_commit = _release_repo(tmp_path)
 
@@ -331,3 +340,42 @@ def test_beta_manifest_validator_requires_immutable_asset_url_and_pair(tmp_path)
     assert accepted.returncode == 0, accepted.stderr
     assert rejected.returncode != 0
     assert "immutable version tag" in rejected.stderr
+
+
+def test_release_scripts_share_generic_semver_channel_validation():
+    plan_script = (ROOT / "scripts" / "New-ReleaseChannelPlan.ps1").read_text(encoding="utf-8-sig")
+    manifest_script = (ROOT / "scripts" / "Test-ReleaseManifest.ps1").read_text(encoding="utf-8-sig")
+
+    for script in (plan_script, manifest_script):
+        assert '. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")' in script
+        assert "Assert-ReleaseChannelVersion" in script
+        assert "0\\.1\\.4" not in script
+
+
+def test_stable_manifest_gate_rejects_prerelease_version(tmp_path):
+    version = "0.1.5-beta.1"
+    installer = tmp_path / f"CodexHub_{version}_x64-setup.exe"
+    signature = Path(f"{installer}.sig")
+    manifest = tmp_path / "latest.json"
+    installer.write_bytes(b"installer")
+    signature.write_text("signed-value", encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "platforms": {
+                    "windows-x86_64": {
+                        "signature": "signed-value",
+                        "url": f"https://github.com/NOirBRight/CodexHub/releases/download/v{version}/{installer.name}",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _validate_manifest("stable", version, manifest, installer, signature)
+
+    assert result.returncode != 0
+    assert "Stable" in result.stderr
+    assert "prerelease" in result.stderr

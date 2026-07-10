@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
 
 if (-not $DryRun) {
     throw "This tool is plan-only; -DryRun is required and no release will be published."
@@ -28,11 +29,9 @@ function Resolve-GitCommit([string]$Ref) {
 $commitSha = Resolve-GitCommit $Commit
 $mainSha = Resolve-GitCommit "main"
 $devSha = Resolve-GitCommit "dev"
+Assert-ReleaseChannelVersion -Flavor $Flavor -Version $Version
 
 if ($Flavor -eq "beta") {
-    if ($Version -notmatch '^0\.1\.4-beta\.[1-9][0-9]*$') {
-        throw "Beta publication requires a v0.1.4-beta.N prerelease version."
-    }
     & git -C $RepoRoot merge-base --is-ancestor $commitSha $devSha
     if ($LASTEXITCODE -ne 0) {
         throw "Beta publication requires a commit on or ancestor of dev."
@@ -61,9 +60,6 @@ if ($Flavor -eq "beta") {
     }
 }
 else {
-    if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-        throw "Stable publication requires a stable version without a prerelease suffix."
-    }
     if ($commitSha -ne $mainSha) {
         throw "Stable publication requires the exact main commit; dev must never publish Stable."
     }
