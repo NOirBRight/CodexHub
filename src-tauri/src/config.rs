@@ -55,6 +55,7 @@ impl ConfigPaths {
         Ok(Self::new_isolated(runtime_dir, codex_target_dir, repo_root))
     }
 
+    #[cfg(test)]
     pub(crate) fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
         let codex_dir = codex_dir.into();
         Self {
@@ -491,6 +492,7 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
     Ok(settings)
 }
 
+#[cfg(test)]
 pub(crate) fn switch_mode_with_paths(
     mode: &str,
     _auto_sync: bool,

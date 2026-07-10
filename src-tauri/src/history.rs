@@ -333,6 +333,7 @@ struct WindowsCodexDiscovery {
 }
 
 impl CodexProcessSnapshot {
+    #[cfg(test)]
     fn new(
         process_id: u32,
         process_name: impl Into<String>,
@@ -489,6 +490,7 @@ pub fn preflight_unified_history(
     )
 }
 
+#[cfg(test)]
 fn preflight_unified_history_with_paths(
     request: PreflightRequest,
     paths: &ConfigPaths,
@@ -1104,6 +1106,7 @@ fn target_unified_from_provider(target_provider: Option<&str>) -> Result<bool, S
     }
 }
 
+#[cfg(test)]
 fn reconcile_after_route_switch_with_paths(
     target: HistoryBucketTarget,
     paths: &ConfigPaths,

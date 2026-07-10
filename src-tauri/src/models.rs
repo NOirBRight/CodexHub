@@ -801,11 +801,10 @@ fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value 
                 .collect::<Vec<_>>()),
         );
     }
-    if payload.contains_key("defaultReasoningEffort")
-        && !payload.contains_key("default_reasoning_level")
-        && model.default_reasoning_level.is_some()
-    {
-        let default_reasoning_level = model.default_reasoning_level.as_ref().unwrap();
+    if let Some(default_reasoning_level) = model.default_reasoning_level.as_ref().filter(|_| {
+        payload.contains_key("defaultReasoningEffort")
+            && !payload.contains_key("default_reasoning_level")
+    }) {
         payload.insert(
             "default_reasoning_level".to_string(),
             json!(default_reasoning_level),

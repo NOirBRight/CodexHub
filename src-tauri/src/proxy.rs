@@ -56,6 +56,7 @@ impl ProxyPaths {
         Ok(Self::new_isolated(codex_dir, codex_target_dir, repo_root))
     }
 
+    #[cfg(test)]
     fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
         let codex_dir = codex_dir.into();
         Self {
