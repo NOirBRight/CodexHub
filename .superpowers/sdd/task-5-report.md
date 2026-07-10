@@ -1,7 +1,8 @@
 # Task 5 report — v0.1.4 Beta candidate integration
 
-Status: implementation and branch verification complete; human maintainer approval,
-live isolated E2E, and portable construction remain outside this report.
+Status: focused integration changes are implemented and tested; human maintainer
+approval, Cookie/live isolated E2E, final branch-wide gates, and portable construction
+remain pending.
 
 ## Version changes
 
@@ -20,8 +21,12 @@ observed RED against `0.1.4`, then GREEN after the manifest changes.
 
 `docs/reviews/v0.1.3-human-audit.md` now records:
 
-- restoration of intended commits `38e99408` and `08d507af` as reviewed,
-  patch-equivalent branch-native changes;
+- behavior-equivalent restoration of intended commits `38e99408` and `08d507af`;
+  these source commits are not ancestors and were not exact cherry-picks;
+- `5baf8cc0` restoring the title-area maximize gesture, interactive-control guard,
+  double-click drag suppression, and 930-pixel initial window height;
+- `009b58fe` restoring configured local Gateway auth on all three POST test shapes
+  while preserving explicit auth and rejecting remote, HTTPS, and wrong-port leakage;
 - `git rev-list --reverse --oneline 2c284bd0..08d507af` enumerating exactly those
   two commits, so no third intended v0.1.4 commit was missing;
 - retained patch-equivalent fixes, the model/history/Beta/review series, and the
@@ -36,7 +41,7 @@ and snapshots were not rewritten.
 
 ## Regression verification
 
-Focused results before the full gates:
+Focused results before the first branch-wide gates:
 
 - frontend UI contracts: 119 passed, including desktop-started Web Bridge,
   web fallback, Windows portable custom-protocol pipeline, official account usage,
@@ -47,23 +52,37 @@ Focused results before the full gates:
 - Rust simple-slider metadata, owner-safe disconnect, official alias dedupe, and
   official discovery/dedupe/sort: 1 passed each.
 
-No tracked Chrome password/cookie import implementation, test, or E2E entrypoint
+No tracked Chrome password/Cookie import implementation, test, or E2E entrypoint
 exists in this repository (`rg` and history searches returned no such surface).
 That reported regression therefore has no branch-local verification target and is
 not claimed as passing.
 
-## Complete quality gates
+Review-fix focused results:
 
-Final candidate results after the integration fix:
+- Gateway auth tests observed RED before implementation, then passed for all three
+  POST shapes and for explicit-header/no-leak boundaries; the existing model endpoint
+  loopback key and boundary tests also passed;
+- Gateway-focused clippy with all targets and warnings denied passed;
+- titlebar and exact-height UI tests observed RED before implementation, then passed;
+- `npm run test:ui-contract`: **120 passed** after the titlebar restoration;
+- `npm run build`: **passed** after the titlebar restoration;
+- Beta version contract: **passed**; `git diff --check`: **passed**.
+
+## Quality gate evidence
+
+The earlier branch-wide run, before the two review fixes above, recorded:
 
 - `python -m pytest`: **763 passed, 1 skipped**.
 - `cargo test --locked`: **266 passed**.
 - `cargo clippy --locked --all-targets -- -D warnings`: **passed**.
-- `npm run test:ui-contract`: **119 passed**.
+- `npm run test:ui-contract`: **119 passed** at that point.
 - `npm run build`: **passed** (`tsc` and Vite production build, 1638 modules).
 - `python scripts/report_quality_gates.py`: **exit 0, report-only**; 3 unused
   imports, 70 dead-function candidates, 127 duplicate names, and 0 parse errors.
 - `git diff --check`: **passed**.
+
+The full Python and Rust suites have intentionally not been rerun after `009b58fe`
+and `5baf8cc0`; the main agent will run final branch-wide gates after review.
 
 The first clippy run was RED on six test-only helpers exposed to non-test targets
 and one `is_some` followed by `unwrap`. The minimal fix gates those helpers with
@@ -103,11 +122,14 @@ GitHub mutation, updater pointer publication, or issue closure was performed.
 - `307b5035` — `chore: set 0.1.4 beta candidate version`
 - `9de80ce8` — `docs: record v0.1.4 candidate audit`
 - `eb0418bc` — `fix: satisfy release candidate clippy gate`
+- `009b58fe` — `fix: authenticate local gateway request tests`
+- `5baf8cc0` — `fix: restore titlebar maximize gesture`
 
 ## Self-review and candidate artifact
 
-The diff is limited to version manifests and lockfiles, one version/audit contract
-test, the tracked audit, and the minimal clippy fix. Excluded v0.2/TLS/FlClash/
+The diff is limited to version manifests and lockfiles, version/audit/UI/Gateway
+contracts, the tracked audit/report, local Gateway test authentication, titlebar
+behavior, initial height, and the minimal clippy fix. Excluded v0.2/TLS/FlClash/
 keepalive/proxy-node work is absent. Historical evidence is unchanged.
 
 No portable was built, per the integration assignment: the main agent will build

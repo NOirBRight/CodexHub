@@ -30,6 +30,9 @@ def test_v014_audit_records_reconciliation_and_display_contract():
     for evidence in (
         "38e99408",
         "08d507af",
+        "not exact cherry-picks",
+        "009b58fe",
+        "5baf8cc0",
         "No third intended v0.1.4 commit was missing",
         "patch-equivalent",
         "v0.2/TLS/FlClash/keepalive",
