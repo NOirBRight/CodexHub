@@ -311,6 +311,63 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config.read_bytes(), original)
             self.assertFalse(backup.exists())
 
+    def test_same_owner_force_with_missing_backup_does_not_create_takeover_restore(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "release-backup.toml"
+            catalog = tmp / "catalog.json"
+
+            apply_overlay(config, backup, catalog, "http://127.0.0.1:9099", owner="release")
+            backup.unlink()
+            apply_overlay(
+                config,
+                backup,
+                catalog,
+                "http://127.0.0.1:9099",
+                owner="release",
+                takeover=True,
+            )
+
+            self.assertEqual(list(tmp.glob("*.takeover.json")), [])
+            restore_overlay(config, backup, unified_history=True)
+            restored = config.read_text(encoding="utf-8")
+            self.assertIn('name = "OpenAI"', restored)
+            self.assertNotIn('name = "Codex Proxy"', restored)
+            self.assertNotIn("base_url", restored)
+
+    def test_restore_ignores_preexisting_same_owner_takeover_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "release-backup.toml"
+            metadata = tmp / "release-backup.toml.takeover.json"
+            config.write_text(
+                "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = release\n# END CODEX PROXY SESSION CONFIG\n",
+                encoding="utf-8",
+            )
+            backup.write_text(
+                "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = release\n# END CODEX PROXY SESSION CONFIG\n",
+                encoding="utf-8",
+            )
+            metadata.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "takeover_owner": "release",
+                        "original_owner": "release",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status = restore_overlay(config, backup, unified_history=True)
+            restored = config.read_text(encoding="utf-8")
+
+            self.assertNotEqual(status, "restored_takeover_backup")
+            self.assertIn('name = "OpenAI"', restored)
+            self.assertFalse(metadata.exists())
+
     def test_restore_overlay_without_backup_strips_managed_overlay(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

@@ -600,7 +600,7 @@ fn switch_mode_with_paths_takeover_as_owner(
                 _ => "release".to_string(),
             },
         ];
-        if force_takeover {
+        if force_takeover && target_owner != Some(current_app_owner) {
             args.push("--takeover".to_string());
         }
         run_python_script(
@@ -1625,6 +1625,62 @@ sort_order = 7
         assert!(restored.contains("name = \"OpenAI\""));
         assert!(restored.contains("requires_openai_auth = true"));
         assert!(!paths.config_backup_path().exists());
+    }
+
+    #[test]
+    fn stable_same_owner_force_with_missing_backup_disconnects_to_unified_official() {
+        let root = temp_root("stable-same-owner-force");
+        let runtime = root.join(".codexhub");
+        let target = root.join(".codex");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+        fs::create_dir_all(&target).unwrap();
+        save_settings_with_paths(Settings::default(), &paths).unwrap();
+        let python = super::find_python();
+        let runner = ProcessCommandRunner;
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+        fs::remove_file(paths.config_backup_path()).unwrap();
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            true,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let metadata = paths
+            .config_backup_path()
+            .with_file_name("config.toml.release.backup.takeover.json");
+        assert!(!metadata.exists());
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "official",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+        assert!(restored.contains("name = \"OpenAI\""));
+        assert!(!restored.contains("name = \"Codex Proxy\""));
+        assert!(!restored.contains("base_url"));
     }
 
     #[test]

@@ -334,6 +334,8 @@ def is_active_takeover_backup(config_text: str, backup_text: str, backup_path: P
         return False
     if original_owner not in {None, "release", "beta"}:
         return False
+    if original_owner == takeover_owner:
+        return False
     return overlay_owner(config_text) == takeover_owner and overlay_owner(backup_text) == original_owner
 
 
@@ -380,11 +382,12 @@ def apply_overlay(
         raise ValueError("refusing to overwrite unknown custom provider")
     cleaned = strip_marked_overlay(original)
     active_owner = overlay_owner(original)
+    cross_owner_takeover = takeover and active_owner != owner
     if active_owner != owner or not backup_path.exists():
-        backup = original if takeover else (cleaned if cleaned != original else original)
+        backup = original if cross_owner_takeover else (cleaned if cleaned != original else original)
         atomic_write_text(backup_path, backup, encoding="utf-8")
         metadata_path = takeover_metadata_path(backup_path)
-        if takeover:
+        if cross_owner_takeover:
             write_takeover_metadata(backup_path, owner, active_owner)
         elif metadata_path.exists():
             metadata_path.unlink()
