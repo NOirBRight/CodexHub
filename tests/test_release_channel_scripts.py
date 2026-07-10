@@ -1,9 +1,27 @@
 import json
 from pathlib import Path
 import subprocess
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_beta_candidate_version_is_consistent_across_manifests():
+    expected = "0.1.4-beta.1"
+    tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
+    cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
+    package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
+    package_lock = json.loads((ROOT / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    codexhub_lock = next(item for item in cargo_lock["package"] if item["name"] == "codexhub")
+
+    assert tauri["version"] == expected
+    assert cargo["package"]["version"] == expected
+    assert codexhub_lock["version"] == expected
+    assert package["version"] == expected
+    assert package_lock["version"] == expected
+    assert package_lock["packages"][""]["version"] == expected
 
 
 def test_portable_uses_flavor_executable_base_name():
