@@ -49,6 +49,21 @@ Branch: `codex/v0.1.4-codex-compat`
 - UI contracts/build — not run; no UI files touched
 - `cargo fmt` — intentionally not run
 
+## Same-owner takeover metadata follow-up
+
+- RED: forcing a Stable apply while the active overlay was already Stable and its backup was missing created same-owner takeover metadata. Official restore then treated the managed overlay as an exact cross-channel backup.
+- GREEN: Rust adds `--takeover` only when the detected original owner differs from the current routing owner. Python independently reduces takeover to cross-owner cases and rejects metadata whose original and takeover owners are equal.
+- A forged/preexisting same-owner sidecar is ignored, normal unified Official reconciliation runs, and the invalid sidecar is removed.
+- Cross-owner Beta takeover/reapply/disconnect still restores exact original bytes and owner state.
+- Commit: `e50c91f5`.
+
+### Verification
+
+- `python -m pytest tests/test_config_overlay.py -q` — 28 passed
+- `cargo test config::tests:: -- --nocapture` — 32 passed
+- `cargo clippy --all-targets -- -D warnings` — passed
+- `cargo fmt` — intentionally not run
+
 ## Self-review
 
 - Leakage: the generated local bearer is sourced only from the configured Gateway client key; tests use synthetic keys. No credential logging or real user data access was added.
