@@ -73,3 +73,16 @@ def test_online_history_e2e_uses_app_cli_and_isolated_codex_home():
     assert 'expected deferred while SQLite writer lock is held' in source
     assert 'expected completed after releasing SQLite writer lock' in source
     assert "app-server exited during online history migration" in source
+
+
+def test_codex_catalog_roundtrip_e2e_uses_live_app_catalog_and_isolated_custom_provider():
+    source = (ROOT / "scripts" / "e2e_codex_catalog_roundtrip.py").read_text(encoding="utf-8")
+
+    assert "OpenAI" in source and "Codex" in source and "bin" in source
+    assert '"model/list"' in source
+    assert '"CODEX_HOME"' in source
+    assert '"catalog_sync.py"' in source
+    assert '"config_overlay.py"' in source
+    assert "official model order changed after custom catalog roundtrip" in source
+    assert "custom catalog exposed a prefixed official model id" in source
+    assert "simple slider prerequisites were not preserved" in source
