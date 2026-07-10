@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -144,11 +145,15 @@ OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.4-mini": {
         "context_window": 272000,
         "max_context_window": 272000,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
         "default_reasoning_level": "medium",
     },
     "gpt-5.3-codex-spark": {
         "context_window": 128000,
         "max_context_window": 128000,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
         "default_reasoning_level": "high",
     },
 }
@@ -546,28 +551,26 @@ def sort_official_slugs(slugs: Iterable[str], sort_order: Iterable[str]) -> list
     return [slug for _, slug in sorted(enumerate(ordered_slugs), key=sort_key)]
 
 
-def official_proxy_display_name(slug: str, model: dict[str, Any], policy: CatalogPolicy) -> str:
-    policy_name = display_name_for(slug, policy)
+def official_short_display_name(slug: str, model: dict[str, Any], policy: CatalogPolicy) -> str:
     raw_name = model.get("display_name")
-    if canonical_model_id(slug) in policy.display_names:
-        display_name = policy_name
-    elif isinstance(raw_name, str) and raw_name.strip():
+    if isinstance(raw_name, str) and raw_name.strip():
         display_name = raw_name.strip()
     else:
-        display_name = policy_name
-    return display_name if display_name.startswith("OpenAI ") else f"OpenAI {display_name}"
+        display_name = display_name_for(slug, policy)
+    if display_name.lower().startswith("openai "):
+        display_name = display_name[7:].strip()
+    if display_name.lower().startswith("gpt-"):
+        display_name = display_name[4:]
+    return re.sub(r"[-_]+", " ", display_name).strip()
 
 
 def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
-    model = deepcopy(official_by_slug.get(slug) or build_minimal_official_model(slug, policy))
+    source_model = official_by_slug.get(slug)
+    model = deepcopy(source_model or build_minimal_official_model(slug, policy))
     model["slug"] = slug
-    model["display_name"] = official_proxy_display_name(slug, model, policy)
-    model.setdefault("description", MINIMAL_OFFICIAL_MODEL["description"])
-    model.setdefault("visibility", "list")
-    model.setdefault("supported_in_api", True)
-    apply_official_model_defaults(model, slug)
-    for key, value in DEFAULT_OLLAMA_MODEL.items():
-        model.setdefault(key, deepcopy(value))
+    model["display_name"] = official_short_display_name(slug, model, policy)
+    if source_model is None:
+        apply_official_model_defaults(model, slug)
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     proxy_metadata.update(
         {
@@ -583,9 +586,20 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
 def official_model_index(official_models: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for model in official_models:
-        slug = canonical_model_id(str(model.get("slug", "")))
-        if slug:
+        raw_slug = canonical_model_id(str(model.get("slug", "")))
+        if not raw_slug:
+            continue
+        slug = raw_slug.removeprefix("openai/") if raw_slug.startswith("openai/gpt-") else raw_slug
+        existing = index.get(slug)
+        if existing is None:
             index[slug] = model
+            continue
+
+        existing_slug = canonical_model_id(str(existing.get("slug", "")))
+        fresh = model if not raw_slug.startswith("openai/") or existing_slug.startswith("openai/") else existing
+        merged = deepcopy(fresh)
+        merged["enabled"] = bool(existing.get("enabled", True) or model.get("enabled", True))
+        index[slug] = merged
     return index
 
 
@@ -889,16 +903,38 @@ def load_official_disabled_models() -> list[str]:
     value = data.get("official_disabled_models")
     if not isinstance(value, list):
         return []
-    return [official_model_disable_key(model_id) for model_id in value if isinstance(model_id, str) and model_id.strip()]
+    output: list[str] = []
+    for model_id in value:
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        normalized = official_model_disable_key(model_id)
+        if normalized and normalized not in output:
+            output.append(normalized)
+    return output
 
 
-def official_model_disable_key(model_id: str) -> str:
+def official_model_disable_key(model_id: str) -> str | None:
     return normalize_official_model_id(model_id)
 
 
-def normalize_official_model_id(model_id: str) -> str:
+def known_official_model_ids() -> set[str]:
+    known = set(load_policy(POLICY_PATH).official_models)
+    for path in official_seed_catalog_paths():
+        for model in load_catalog_models(path):
+            slug = canonical_model_id(str(model.get("slug", "")))
+            if slug.startswith("openai/gpt-"):
+                slug = slug.removeprefix("openai/")
+            if slug.startswith("gpt-"):
+                known.add(slug)
+    return known
+
+
+def normalize_official_model_id(model_id: str) -> str | None:
     value = canonical_model_id(model_id)
-    return value.removeprefix("openai/") if value.startswith("openai/gpt-") else value
+    if value.startswith("openai/gpt-"):
+        bare = value.removeprefix("openai/")
+        return bare if bare in known_official_model_ids() else None
+    return value
 
 
 def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:

@@ -214,15 +214,95 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog(official, [], self.policy, "0.142.0")
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
-        self.assertEqual(by_slug["gpt-5.5"]["display_name"], "OpenAI GPT-5.5")
+        self.assertEqual(by_slug["gpt-5.5"]["display_name"], "5.5")
         self.assertEqual(by_slug["gpt-5.5"]["additional_speed_tiers"], ["fast"])
         self.assertEqual(by_slug["gpt-5.5"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
         self.assertEqual(by_slug["gpt-5.4"]["service_tiers"][0]["id"], "priority")
-        self.assertIn("base_instructions", by_slug["gpt-5.4-mini"])
-        self.assertIn("context_window", by_slug["gpt-5.4-mini"])
-        self.assertIn("shell_type", by_slug["gpt-5.4-mini"])
-        self.assertIn("supported_reasoning_levels", by_slug["gpt-5.4-mini"])
-        self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
+        self.assertNotIn("context_window", by_slug["gpt-5.4-mini"])
+        self.assertNotIn("additional_speed_tiers", by_slug["gpt-5.4-mini"])
+
+    def test_shared_model_identity_vectors_reject_only_unknown_official_aliases(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "model_identity_vectors.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        for vector in fixture["vectors"]:
+            with self.subTest(vector=vector["name"]):
+                self.assertEqual(
+                    catalog_sync.normalize_official_model_id(vector["input"]),
+                    vector["expected"],
+                )
+
+    def test_official_catalog_preserves_app_cli_metadata_without_generic_defaults(self):
+        official = [
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "context_window": 400000,
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Light"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "xhigh", "description": "Extra High"},
+                    {"effort": "ultra", "description": "Ultra"},
+                ],
+                "multi_agent_version": "v2",
+                "tool_mode": "native",
+                "model_messages": {"upgrade": "Use Sol"},
+                "skills_instructions": "Official skills contract",
+                "web_search_tool_type": "text",
+                "use_responses_lite": True,
+                "availability": {"plan": "plus"},
+                "upgrade": "gpt-5.7-sol",
+                "upgrade_info": {"message": "Upgrade available"},
+                "comp_hash": "sol-compat-hash",
+            }
+        ]
+
+        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        model = catalog["models"][0]
+
+        self.assertEqual(model["slug"], "gpt-5.6-sol")
+        self.assertEqual(model["display_name"], "5.6 Sol")
+        for key, value in official[0].items():
+            if key not in {"slug", "display_name"}:
+                self.assertEqual(model[key], value, key)
+        self.assertNotIn("shell_type", model)
+        self.assertNotIn("base_instructions", model)
+        self.assertNotIn("supported_in_api", model)
+        self.assertEqual(
+            model["codex_proxy_metadata"],
+            {
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": "gpt-5.6-sol",
+            },
+        )
+
+    def test_official_alias_duplicates_collapse_to_fresh_bare_record(self):
+        official = [
+            {
+                "slug": "openai/gpt-5.6-sol",
+                "display_name": "Legacy Sol",
+                "context_window": 1,
+                "enabled": True,
+            },
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "context_window": 400000,
+                "enabled": False,
+                "multi_agent_version": "v2",
+            },
+        ]
+
+        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        models = catalog["models"]
+
+        self.assertEqual([model["slug"] for model in models], ["gpt-5.6-sol"])
+        self.assertEqual(models[0]["display_name"], "5.6 Sol")
+        self.assertEqual(models[0]["context_window"], 400000)
+        self.assertEqual(models[0]["multi_agent_version"], "v2")
+        self.assertTrue(models[0]["enabled"])
 
     def test_load_official_seed_models_falls_back_to_runtime_seed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -281,7 +361,7 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog(official, [], self.policy, "0.142.0")
 
         self.assertEqual([model["slug"] for model in catalog["models"]], ["gpt-5.6"])
-        self.assertEqual(catalog["models"][0]["display_name"], "OpenAI GPT-5.6")
+        self.assertEqual(catalog["models"][0]["display_name"], "5.6")
 
     def test_build_catalog_exposes_official_models_without_provider_prefix(self):
         official = [{"slug": "gpt-5.6-sol", "display_name": "GPT-5.6 Sol", "visibility": "list"}]
