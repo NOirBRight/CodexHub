@@ -665,7 +665,7 @@ fn preflight_unified_history_with_budget(
         }
     };
 
-    if was_running || result.status == UnifiedHistoryStatus::Repaired {
+    if was_running {
         if let Err(launch_error) = controller.launch(budget.work_deadline) {
             let receipt_path = result.receipt_path.as_ref().map(PathBuf::from);
             let rollback_error = rollback_applied_repair(
@@ -1006,8 +1006,7 @@ impl CodexAppController for SystemCodexAppController {
     }
 
     fn launch(&self, deadline: Instant) -> Result<(), String> {
-        let script = "$ErrorActionPreference='Stop'; $app=Get-StartApps | Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } | Select-Object -First 1; if (-not $app) { throw 'Codex App is not installed.' }; Start-Process ('shell:AppsFolder\\' + $app.AppID)";
-        let output = run_powershell_until(script, deadline)?;
+        let output = run_powershell_until(&windows_codex_launch_script(), deadline)?;
         if output.code == Some(0) {
             Ok(())
         } else {
@@ -1020,8 +1019,13 @@ impl CodexAppController for SystemCodexAppController {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_codex_launch_script() -> String {
+    "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) { throw 'Codex App is not installed.' }; $manifest=Get-AppxPackageManifest -Package $package; $applications=@($manifest.Package.Applications.Application); $application=$applications | Where-Object { $_.Executable -and ([string]$_.Executable).EndsWith('ChatGPT.exe',[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1; if (-not $application) { $application=$applications | Select-Object -First 1 }; if (-not $application) { throw 'Codex App manifest has no launchable application.' }; $aumid=$package.PackageFamilyName + '!' + [string]$application.Id; Start-Process -FilePath 'explorer.exe' -ArgumentList ('shell:AppsFolder\\' + $aumid)".to_string()
+}
+
+#[cfg(target_os = "windows")]
 fn windows_codex_discovery_script() -> String {
-    "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) { @{ package_install_path=$null; processes=@() } | ConvertTo-Json -Compress -Depth 3; exit 0 }; $root=$package.InstallLocation.TrimEnd('\\'); $processes=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { $process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; @{ process_id=[uint32]$_.ProcessId; process_name=[string]$_.Name; executable_path=[string]$_.ExecutablePath; main_window_handle=if ($process) { [uint64]$process.MainWindowHandle } else { [uint64]0 } } }); @{ package_install_path=$root; processes=$processes } | ConvertTo-Json -Compress -Depth 3".to_string()
+    "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if (-not $package) { @{ package_install_path=$null; processes=@() } | ConvertTo-Json -Compress -Depth 3; exit 0 }; $root=$package.InstallLocation.TrimEnd('\\'); $processes=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { $process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; @{ process_id=[uint32]$_.ProcessId; process_name=[string]$_.Name; executable_path=[string]$_.ExecutablePath; main_window_handle=if ($process) { [uint64]$process.MainWindowHandle.ToInt64() } else { [uint64]0 } } }); @{ package_install_path=$root; processes=$processes } | ConvertTo-Json -Compress -Depth 3".to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -1382,7 +1386,10 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "windows")]
-    use super::{windows_codex_close_script, windows_codex_close_script_with_lock_probe};
+    use super::{
+        windows_codex_close_script, windows_codex_close_script_with_lock_probe,
+        windows_codex_discovery_script, windows_codex_launch_script,
+    };
     use super::{
         classify_codex_processes, CloseOutcome, CodexProcessSnapshot,
         acquire_history_repair, finalize_relaunch_failure, DeadlineCommandRunner,
@@ -1630,6 +1637,47 @@ mod tests {
             .expect("injected close script runs");
 
         assert_eq!(output.status.code(), Some(4), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_discovery_serializes_an_intptr_window_handle() {
+        let script = format!(
+            "function Get-AppxPackage {{ param($Name) [pscustomobject]@{{ InstallLocation='C:\\Program Files\\WindowsApps\\OpenAI.Codex_test' }} }}; function Get-CimInstance {{ param($ClassName) [pscustomobject]@{{ ExecutablePath='C:\\Program Files\\WindowsApps\\OpenAI.Codex_test\\ChatGPT.exe'; ProcessId=41; Name='ChatGPT.exe' }} }}; function Get-Process {{ param($Id,$ErrorAction) [pscustomobject]@{{ MainWindowHandle=[IntPtr]::new(9001) }} }}; {}",
+            windows_codex_discovery_script()
+        );
+
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .expect("injected discovery script runs");
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let discovery: super::WindowsCodexDiscovery =
+            serde_json::from_slice(&output.stdout).expect("valid discovery JSON");
+        assert_eq!(discovery.processes.len(), 1);
+        assert_eq!(discovery.processes[0].main_window_handle, 9001);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_launch_uses_the_codex_manifest_application_via_shell_activation() {
+        let script = format!(
+            "function Get-AppxPackage {{ param($Name) [pscustomobject]@{{ PackageFamilyName='OpenAI.Codex_test' }} }}; function Get-AppxPackageManifest {{ param($Package) [pscustomobject]@{{ Package=[pscustomobject]@{{ Applications=[pscustomobject]@{{ Application=@([pscustomobject]@{{ Id='Main'; Executable='ChatGPT.exe' }}) }} }} }} }}; function Start-Process {{ param($FilePath,$ArgumentList) Write-Output ($FilePath + '|' + $ArgumentList) }}; {}",
+            windows_codex_launch_script()
+        );
+
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .expect("injected launch script runs");
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            r"explorer.exe|shell:AppsFolder\OpenAI.Codex_test!Main"
+        );
+        assert!(!windows_codex_launch_script().contains("Get-StartApps"));
     }
 
     #[cfg(target_os = "windows")]
@@ -1915,8 +1963,8 @@ mod tests {
         .expect("preflight result");
 
         assert_eq!(result.status, UnifiedHistoryStatus::Repaired);
-        assert!(result.codex_restarted);
-        assert_eq!(controller.launch_calls.get(), 1);
+        assert!(!result.codex_restarted);
+        assert_eq!(controller.launch_calls.get(), 0);
         assert_eq!(result.changed_rows, 2);
         assert_eq!(result.changed_files, 3);
         assert!(result
