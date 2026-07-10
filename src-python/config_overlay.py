@@ -310,7 +310,7 @@ def build_provider_section(base_url: str, gateway_key: str) -> str:
             f'name = "{PROXY_PROVIDER_NAME}"',
             f"base_url = {toml_literal(base_url.rstrip('/') + '/v1')}",
             'wire_api = "responses"',
-            "requires_openai_auth = true",
+            "requires_openai_auth = false",
             f"experimental_bearer_token = {toml_basic_string(gateway_key)}",
             "supports_websockets = false",
             "",
