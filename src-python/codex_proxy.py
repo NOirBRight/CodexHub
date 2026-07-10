@@ -44,6 +44,7 @@ from codex_semantic_adapter import (
 )
 
 from catalog import (
+    CatalogPolicy,
     canonical_model_id,
     deny_match_model_id,
     load_catalog_models,
@@ -51,7 +52,14 @@ from catalog import (
     should_include_external_provider_model,
     should_include_model,
 )
-from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
+from catalog_sync import (
+    GENERATED_CATALOG_PATH,
+    POLICY_PATH,
+    existing_generated_catalog_path,
+    known_official_model_ids as catalog_known_official_model_ids,
+    official_short_display_name,
+    sync_catalog,
+)
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
 from subagent_policy import (
@@ -188,8 +196,8 @@ OFFICIAL_FAST_VARIANT_BASE_MODELS = {
     "gpt-5.4-fast": "gpt-5.4",
 }
 OFFICIAL_FAST_VARIANT_DISPLAY_NAMES = {
-    "gpt-5.5-fast": "OpenAI GPT-5.5 Fast",
-    "gpt-5.4-fast": "OpenAI GPT-5.4 Fast",
+    "gpt-5.5-fast": "5.5 Fast",
+    "gpt-5.4-fast": "5.4 Fast",
 }
 OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
 UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6", "kimi-k2.7")
@@ -9217,6 +9225,10 @@ def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, An
     if not isinstance(models, list):
         return catalog
 
+    policy = load_policy(POLICY_PATH)
+    models = canonical_catalog_models(models, policy)
+    catalog["models"] = models
+
     by_slug = {
         canonical_model_id(str(model.get("slug", ""))): model
         for model in models
@@ -9246,6 +9258,57 @@ def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, An
         models.append(fast_entry)
         by_slug[fast_slug] = fast_entry
     return catalog
+
+
+def canonical_catalog_models(
+    models: list[Any],
+    policy: CatalogPolicy,
+) -> list[Any]:
+    known_official_ids = catalog_known_official_model_ids()
+    for model in models:
+        if not isinstance(model, Mapping):
+            continue
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if slug.startswith("gpt-"):
+            known_official_ids.add(slug)
+
+    output: list[Any] = []
+    official_positions: dict[str, int] = {}
+    official_bare_sources: dict[str, bool] = {}
+    for model in models:
+        if not isinstance(model, Mapping):
+            output.append(model)
+            continue
+        raw_slug = canonical_model_id(str(model.get("slug", "")))
+        is_legacy_alias = raw_slug.startswith(OFFICIAL_ALIAS_PREFIX + "gpt-")
+        if is_legacy_alias:
+            canonical_slug = raw_slug[len(OFFICIAL_ALIAS_PREFIX) :]
+            if canonical_slug not in known_official_ids:
+                continue
+        elif raw_slug.startswith("gpt-"):
+            canonical_slug = raw_slug
+        else:
+            output.append(model)
+            continue
+
+        candidate = deepcopy(dict(model))
+        candidate["slug"] = canonical_slug
+        candidate["display_name"] = official_short_display_name(canonical_slug, candidate, policy)
+        position = official_positions.get(canonical_slug)
+        if position is None:
+            official_positions[canonical_slug] = len(output)
+            official_bare_sources[canonical_slug] = not is_legacy_alias
+            output.append(candidate)
+            continue
+
+        existing = output[position]
+        existing_is_bare = official_bare_sources.get(canonical_slug, False)
+        fresh = candidate if not is_legacy_alias or not existing_is_bare else deepcopy(dict(existing))
+        if "enabled" in existing or "enabled" in candidate:
+            fresh["enabled"] = bool(existing.get("enabled", True) or candidate.get("enabled", True))
+        output[position] = fresh
+        official_bare_sources[canonical_slug] = existing_is_bare or not is_legacy_alias
+    return output
 
 
 def _json_response_bytes(payload: dict[str, Any]) -> bytes:

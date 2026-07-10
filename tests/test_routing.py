@@ -3790,12 +3790,12 @@ class RoutingTests(unittest.TestCase):
                         "models": [
                             {
                                 "slug": "gpt-5.5",
-                                "display_name": "OpenAI GPT-5.5",
+                                "display_name": "5.5",
                                 "context_window": 258400,
                             },
                             {
                                 "slug": "gpt-5.4",
-                                "display_name": "OpenAI GPT-5.4",
+                                "display_name": "5.4",
                                 "context_window": 272000,
                             },
                         ]
@@ -3809,11 +3809,60 @@ class RoutingTests(unittest.TestCase):
 
         by_slug = {model["slug"]: model for model in catalog["models"]}
         self.assertNotIn("openai/gpt-5.5-fast", by_slug)
-        self.assertEqual(by_slug["gpt-5.5-fast"]["display_name"], "OpenAI GPT-5.5 Fast")
+        self.assertEqual(by_slug["gpt-5.5-fast"]["display_name"], "5.5 Fast")
         self.assertEqual(by_slug["gpt-5.5-fast"]["context_window"], 258400)
         self.assertEqual(by_slug["gpt-5.5-fast"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
         self.assertEqual(by_slug["gpt-5.5-fast"]["codex_proxy_metadata"]["service_tier"], "priority")
-        self.assertEqual(by_slug["gpt-5.4-fast"]["display_name"], "OpenAI GPT-5.4 Fast")
+        self.assertEqual(by_slug["gpt-5.4-fast"]["display_name"], "5.4 Fast")
+
+    def test_current_catalog_data_dedupes_official_aliases_without_touching_third_party_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "openai/gpt-5.5",
+                                "display_name": "Legacy GPT-5.5",
+                                "context_window": 1,
+                                "enabled": True,
+                            },
+                            {
+                                "slug": "gpt-5.5",
+                                "display_name": "GPT-5.5",
+                                "context_window": 258400,
+                                "enabled": False,
+                            },
+                            {
+                                "slug": "acme/gpt-5.6-sol",
+                                "display_name": "Acme Sol",
+                            },
+                            {
+                                "slug": "ollama-cloud/glm-5.2",
+                                "display_name": "GLM-5.2",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path):
+                catalog = codex_proxy.current_catalog_data()
+
+        models = catalog["models"]
+        by_slug = {model["slug"]: model for model in models}
+        self.assertEqual(
+            [model["slug"] for model in models if not model["slug"].endswith("-fast")],
+            ["gpt-5.5", "acme/gpt-5.6-sol", "ollama-cloud/glm-5.2"],
+        )
+        self.assertNotIn("openai/gpt-5.5", by_slug)
+        self.assertEqual(by_slug["gpt-5.5"]["display_name"], "5.5")
+        self.assertEqual(by_slug["gpt-5.5"]["context_window"], 258400)
+        self.assertTrue(by_slug["gpt-5.5"]["enabled"])
+        self.assertIn("acme/gpt-5.6-sol", by_slug)
+        self.assertIn("ollama-cloud/glm-5.2", by_slug)
 
     def test_responses_to_chat_completion_body_preserves_input_images(self):
         body = json.dumps(
