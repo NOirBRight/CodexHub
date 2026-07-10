@@ -74,3 +74,20 @@ Review verification:
   - No parse errors.
 - `git diff --check`
   - Passed.
+
+## Final catalog metadata hardening
+
+The final Task 2 review found that filtering only explicit, already-canonical strings was insufficient: whitespace/case variants, duplicate levels, invalid defaults, and fallback-template metadata could still expose Ultra or unknown efforts.
+
+- RED: four focused tests failed for normalized/deduplicated explicit levels, configured default `ultra`, fallback-template Ultra leakage, and an all-invalid fallback that produced no safe valid level set.
+- GREEN: all external model reasoning metadata now passes through one sanitizer that trims, lowercases, allowlists, and deduplicates while preserving order.
+- Explicit configured levels take precedence; without them, fallback-template levels/default are sanitized using the same rules.
+- An empty sanitized set falls back to the existing safe third-party defaults.
+- A normalized default is retained only when present in the sanitized levels; otherwise `xhigh` is selected when available, then the first supported level. Ultra is never mapped to `max`.
+
+Final catalog verification:
+
+- `pytest -q tests/test_catalog_sync.py`
+  - 41 passed, 5 subtests passed.
+- `git diff --check`
+  - Passed.

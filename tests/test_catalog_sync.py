@@ -580,6 +580,81 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertNotIn("context_source", metadata)
         self.assertNotIn("max_output_source", metadata)
 
+    def test_external_reasoning_levels_normalize_dedupe_and_preserve_order(self):
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "supported_reasoning_levels": (" HIGH ", "low", " high", "MAX", "turbo", " ultra ", "xhigh", "MAX"),
+            "default_reasoning_level": " MAX ",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
+
+        self.assertEqual(
+            [item["effort"] for item in model["supported_reasoning_levels"]],
+            ["high", "low", "max", "xhigh"],
+        )
+        self.assertEqual(model["default_reasoning_level"], "max")
+
+    def test_external_reasoning_default_ultra_falls_back_without_mapping_to_max(self):
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "supported_reasoning_levels": ("low", "max", "xhigh"),
+            "default_reasoning_level": " ultra ",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
+
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
+
+    def test_external_reasoning_sanitizes_fallback_template_ultra_metadata(self):
+        fallback_template = {
+            "supported_reasoning_levels": [
+                {"effort": " Ultra ", "description": "must not leak"},
+                {"effort": " HIGH ", "description": "fallback high"},
+                {"effort": "high", "description": "duplicate"},
+                {"effort": "turbo", "description": "unknown"},
+            ],
+            "default_reasoning_level": "ULTRA",
+        }
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, fallback_template)
+
+        self.assertEqual([item["effort"] for item in model["supported_reasoning_levels"]], ["high"])
+        self.assertEqual(model["default_reasoning_level"], "high")
+        self.assertNotIn("ultra", json.dumps(model).lower())
+
+    def test_external_reasoning_uses_safe_defaults_when_fallback_has_no_valid_levels(self):
+        fallback_template = {
+            "supported_reasoning_levels": [{"effort": "ultra"}, {"effort": "turbo"}],
+            "default_reasoning_level": "ultra",
+        }
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, fallback_template)
+
+        self.assertEqual(
+            [item["effort"] for item in model["supported_reasoning_levels"]],
+            ["low", "medium", "high", "xhigh"],
+        )
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
+
     def test_sync_catalog_ignores_provider_alias_entries_for_external_catalog_state(self):
         providers = [
             ProviderConfig(

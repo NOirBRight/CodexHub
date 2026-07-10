@@ -201,6 +201,32 @@ REASONING_LEVEL_DESCRIPTIONS = {
     "xhigh": "Extra high reasoning depth for complex problems",
     "max": "Maximum upstream reasoning depth",
 }
+THIRD_PARTY_REASONING_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def sanitize_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    sanitized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        raw_effort = item.get("effort") if isinstance(item, dict) else item
+        effort = str(raw_effort).strip().lower()
+        if effort not in THIRD_PARTY_REASONING_LEVELS or effort in seen:
+            continue
+        seen.add(effort)
+        description = item.get("description") if isinstance(item, dict) else None
+        sanitized.append(
+            {
+                "effort": effort,
+                "description": (
+                    description
+                    if isinstance(description, str) and description.strip()
+                    else REASONING_LEVEL_DESCRIPTIONS.get(effort, f"{effort} reasoning effort")
+                ),
+            }
+        )
+    return sanitized
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -705,19 +731,33 @@ def build_external_provider_model(
     model.setdefault("supported_in_api", True)
     model["input_modalities"] = list(external_model.get("input_modalities") or ("text",))
 
-    reasoning_levels = external_model.get("supported_reasoning_levels")
-    if isinstance(reasoning_levels, (list, tuple)) and reasoning_levels:
-        model["supported_reasoning_levels"] = [
-            {
-                "effort": str(level),
-                "description": REASONING_LEVEL_DESCRIPTIONS.get(str(level), f"{level} reasoning effort"),
-            }
-            for level in reasoning_levels
-            if str(level).strip() in {"low", "medium", "high", "xhigh", "max"}
-        ]
-    default_reasoning_level = external_model.get("default_reasoning_level")
-    if isinstance(default_reasoning_level, str) and default_reasoning_level.strip():
-        model["default_reasoning_level"] = default_reasoning_level.strip()
+    explicit_reasoning_levels = external_model.get("supported_reasoning_levels")
+    has_explicit_reasoning_levels = (
+        isinstance(explicit_reasoning_levels, (list, tuple)) and bool(explicit_reasoning_levels)
+    )
+    reasoning_levels_source = (
+        explicit_reasoning_levels
+        if has_explicit_reasoning_levels
+        else model.get("supported_reasoning_levels")
+    )
+    sanitized_reasoning_levels = sanitize_third_party_reasoning_levels(reasoning_levels_source)
+    if not sanitized_reasoning_levels:
+        sanitized_reasoning_levels = sanitize_third_party_reasoning_levels(
+            DEFAULT_OLLAMA_MODEL["supported_reasoning_levels"]
+        )
+    model["supported_reasoning_levels"] = sanitized_reasoning_levels
+
+    configured_default = external_model.get("default_reasoning_level")
+    default_source = (
+        configured_default
+        if isinstance(configured_default, str) and configured_default.strip()
+        else model.get("default_reasoning_level")
+    )
+    normalized_default = str(default_source).strip().lower()
+    supported_efforts = [item["effort"] for item in sanitized_reasoning_levels]
+    if normalized_default not in supported_efforts:
+        normalized_default = "xhigh" if "xhigh" in supported_efforts else supported_efforts[0]
+    model["default_reasoning_level"] = normalized_default
 
     context_window = external_model.get("context_window")
     if isinstance(context_window, int) and context_window > 0:
