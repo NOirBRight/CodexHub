@@ -31,7 +31,6 @@ const TRAY_CONNECT_HUB: &str = "connect_hub";
 const TRAY_START_GATEWAY: &str = "start_gateway";
 const TRAY_STOP_GATEWAY: &str = "stop_gateway";
 const TRAY_RESTART_GATEWAY: &str = "restart_gateway";
-const TRAY_RESTART_CODEX_APP: &str = "restart_codex_app";
 const TRAY_EXIT: &str = "exit";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,11 +546,11 @@ async fn restore_official_history_from_unified() -> Result<String, String> {
 
 #[tauri::command]
 async fn preflight_unified_history(
-    request_restart: bool,
+    apply_repairs: bool,
     target_unified: Option<bool>,
 ) -> Result<history::UnifiedHistoryResult, String> {
     run_blocking("preflight_unified_history", move || {
-        history::preflight_unified_history(request_restart, target_unified)
+        history::preflight_unified_history(apply_repairs, target_unified)
     })
     .await
 }
@@ -618,19 +617,10 @@ fn run_tray_action(app: &AppHandle, id: &str) {
     match id {
         TRAY_SHOW => show_main_window(app),
         TRAY_CONNECT_OFFICIAL => {
-            if config::switch_mode("official", false).is_ok() {
-                let target = config::get_settings()
-                    .ok()
-                    .filter(|settings| !settings.unified_codex_history)
-                    .map(|_| "openai")
-                    .unwrap_or("custom");
-                let _ = history::reconcile_after_route_switch(Some(target));
-            }
+            let _ = config::switch_mode("official", false);
         }
         TRAY_CONNECT_HUB => {
-            if config::switch_mode("custom", false).is_ok() {
-                let _ = history::reconcile_after_route_switch(Some("custom"));
-            }
+            let _ = config::switch_mode("custom", false);
         }
         TRAY_START_GATEWAY => {
             let _ = proxy::start();
@@ -640,9 +630,6 @@ fn run_tray_action(app: &AppHandle, id: &str) {
         }
         TRAY_RESTART_GATEWAY => {
             let _ = proxy::restart();
-        }
-        TRAY_RESTART_CODEX_APP => {
-            let _ = restart_codex_app();
         }
         TRAY_EXIT => app.exit(0),
         _ => {}
@@ -710,30 +697,6 @@ fn launch_codex_app() -> Result<String, String> {
     Err("Open Codex App is currently implemented on Windows only. Run `codex login` from a terminal to sign in.".to_string())
 }
 
-#[cfg(target_os = "windows")]
-fn restart_codex_app() -> Result<String, String> {
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$app = Get-StartApps |
-  Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } |
-  Select-Object -First 1
-if (-not $app) {
-  throw 'Codex App is not installed or does not expose a Start menu AppID.'
-}
-Get-Process -Name Codex -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 800
-Start-Process ('shell:AppsFolder\' + $app.AppID)
-Write-Output ('Restarted Codex App via ' + $app.AppID)
-"#;
-
-    run_codex_app_script("restart", script)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn restart_codex_app() -> Result<String, String> {
-    Err("Restart Codex App is currently implemented on Windows only.".to_string())
-}
-
 #[cfg(desktop)]
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
@@ -746,7 +709,6 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .text(TRAY_STOP_GATEWAY, "Stop Gateway")
         .text(TRAY_RESTART_GATEWAY, "Restart Gateway")
         .separator()
-        .text(TRAY_RESTART_CODEX_APP, "Restart Codex App")
         .text(TRAY_EXIT, "Exit")
         .build()?;
 

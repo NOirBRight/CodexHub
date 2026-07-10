@@ -651,7 +651,7 @@ class HistoryOverlayTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(row, ("custom", "kimi-k2.7-code"))
 
-    def test_ledger_scoped_repair_rolls_back_state_when_jsonl_write_fails(self):
+    def test_ledger_scoped_repair_defers_partial_work_and_retries_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
             sessions_dir = codex_dir / "sessions"
@@ -688,8 +688,14 @@ class HistoryOverlayTests(unittest.TestCase):
                 ).fetchone()[0]
             finally:
                 connection.close()
-            self.assertEqual(provider, "openai")
-            self.assertEqual(json.loads((backup_root / "ledger.json").read_text())["status"], "rolled-back-after-error")
+            self.assertEqual(provider, "custom")
+            self.assertEqual(json.loads((backup_root / "ledger.json").read_text())["status"], "deferred-after-error")
+
+            retry = repair_history_bucket(codex_dir, backup_root, "custom")
+
+            self.assertEqual(retry["status"], "completed")
+            first_line = json.loads(session_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first_line["payload"]["model_provider"], "custom")
 
     def test_restore_repair_backups_restores_sqlite_and_jsonl_after_completed_migration(self):
         with tempfile.TemporaryDirectory() as tmpdir:

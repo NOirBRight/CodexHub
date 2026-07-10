@@ -506,13 +506,20 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             to_value(history::restore_official_history_from_unified())
         }
         "preflight_unified_history" => {
-            let request_restart =
-                optional_bool_arg(&request.args, &["requestRestart", "request_restart"])
-                    .unwrap_or(false);
+            let apply_repairs = optional_bool_arg(
+                &request.args,
+                &[
+                    "applyRepairs",
+                    "apply_repairs",
+                    "requestRestart",
+                    "request_restart",
+                ],
+            )
+            .unwrap_or(false);
             let target_unified =
                 optional_bool_arg(&request.args, &["targetUnified", "target_unified"]);
             to_value(history::preflight_unified_history(
-                request_restart,
+                apply_repairs,
                 target_unified,
             ))
         }

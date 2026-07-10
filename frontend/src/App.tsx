@@ -662,11 +662,11 @@ export default function App() {
     }
   }, [loadAppUpdateStatus, showToast, t]);
 
-  const repairUnifiedHistoryAfterClose = useCallback(async () => {
+  const repairConversationHistory = useCallback(async () => {
     setBusy("history");
     const toastId = showToast({
       dedupeKey: "unified-history-preflight",
-      text: t("settings.repairingHistoryBucket"),
+      text: t("settings.syncingConversationHistory"),
       timeoutMs: null,
       tone: "loading",
     });
@@ -680,6 +680,12 @@ export default function App() {
             files: result.changed_files,
           }),
           tone: "success",
+        });
+      } else if (result.status === "deferred") {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.historySyncDeferred"),
+          tone: "info",
         });
       } else if (result.status === "restart_required" || result.status === "conflict") {
         updateToast(toastId, {
@@ -777,11 +783,11 @@ export default function App() {
         } else if (result.status === "restart_required") {
           showToast({
             action: {
-              label: t("settings.closeCodexAndRepair"),
-              onClick: () => void repairUnifiedHistoryAfterClose(),
+              label: t("settings.syncConversationHistory"),
+              onClick: () => void repairConversationHistory(),
             },
             dedupeKey: "unified-history-preflight",
-            text: t("settings.historyRestartRequired"),
+            text: t("settings.conversationHistorySyncRequired"),
             timeoutMs: null,
             tone: "info",
           });
@@ -803,7 +809,7 @@ export default function App() {
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [repairUnifiedHistoryAfterClose, settingsLoaded, showToast, t]);
+  }, [repairConversationHistory, settingsLoaded, showToast, t]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -994,6 +1000,9 @@ export default function App() {
       let historyMessage: string | null = null;
       if (previousUnified !== nextUnified) {
         const result = await api.preflightUnifiedHistory(true, nextUnified);
+        if (result.status === "deferred") {
+          throw new Error(t("settings.historySyncDeferred"));
+        }
         if (result.status === "restart_required" || result.status === "conflict") {
           throw new Error(t(historyIssueKey(result)));
         }
@@ -1036,7 +1045,21 @@ export default function App() {
   const syncHistory = useCallback(async (targetProvider: string) => {
     setBusy("history");
     try {
-      const message = await api.syncHistory(targetProvider);
+      const result = await api.preflightUnifiedHistory(true, targetProvider !== "openai");
+      if (result.status === "deferred" || result.status === "restart_required") {
+        const message = t("settings.historySyncDeferred");
+        setBanner(null);
+        return message;
+      }
+      if (result.status === "conflict") {
+        throw new Error(result.error ?? t("settings.historyProviderConflict"));
+      }
+      const message = result.status === "repaired"
+        ? t("settings.historyStartupRepaired", {
+            rows: result.changed_rows,
+            files: result.changed_files,
+          })
+        : t("settings.conversationHistoryAlreadySynced");
       setBanner(message);
       return message;
     } catch (err) {
@@ -1046,7 +1069,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [t]);
 
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);

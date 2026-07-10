@@ -78,7 +78,7 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
-test("startup unified history preflight exposes a safe graceful-restart action", async () => {
+test("startup history sync preflight is read-only and repair never controls Codex", async () => {
   const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
@@ -89,21 +89,24 @@ test("startup unified history preflight exposes a safe graceful-restart action",
   ]);
 
   assert.match(typesSource, /export interface UnifiedHistoryResult/);
-  assert.match(tauriSource, /preflightUnifiedHistory: \(requestRestart = false, targetUnified\?: boolean\)/);
+  assert.match(tauriSource, /preflightUnifiedHistory: \(applyRepairs = false, targetUnified\?: boolean\)/);
   assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
-  assert.match(mainSource, /fn preflight_unified_history\([\s\S]*request_restart: bool/);
+  assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
   assert.match(webBridgeSource, /"preflight_unified_history"/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(false\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
   assert.match(appSource, /result\.status === "restart_required"/);
-  assert.match(historySource, /CloseMainWindow\(\)/);
+  assert.match(appSource, /result\.status === "deferred"/);
+  assert.match(historySource, /preflight_unified_history_with_budget\([\s\S]*&budget,\s*false,\s*\)/);
+  assert.doesNotMatch(historySource, /CloseMainWindow\(\)/);
+  assert.doesNotMatch(historySource, /Start-Process/);
   assert.doesNotMatch(historySource, /Stop-Process\s+-Force/);
 });
 
 test("history repair action waits for the bounded backend and always unlocks", async () => {
   const appSource = await readFile(appPath, "utf8");
-  const action = appSource.match(/const repairUnifiedHistoryAfterClose = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  const action = appSource.match(/const repairConversationHistory = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
   assert.equal((action.match(/api\.preflightUnifiedHistory\(true\)/g) ?? []).length, 1);
   assert.match(action, /await api\.preflightUnifiedHistory\(true\)/);
@@ -333,7 +336,8 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(tauriSource, /WindowEvent::CloseRequested/);
   assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
   assert.match(tauriSource, /Connect Codex to CodexHub/);
-  assert.match(tauriSource, /Restart Codex App/);
+  assert.doesNotMatch(tauriSource, /Restart Codex App/);
+  assert.doesNotMatch(tauriSource, /Stop-Process/);
   assert.match(tauriSource, /Get-StartApps/);
   assert.doesNotMatch(tauriSource, /Restart CodexHub/);
   assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
@@ -2228,25 +2232,19 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPendingMode\(null\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /function updateToastWithError\(toastId: string, err: unknown\)[\s\S]*label: t\("gateway\.startBackend"\)[\s\S]*startBackendFromToast\(toastId\)/);
   assert.doesNotMatch(action, /historyHint/);
-  assert.match(action, /repairUnifiedHistoryInBackground\(targetProvider, toastId, codexHubConnectionSuccessMessage\(nextMode, tr\)\)/);
-  assert.doesNotMatch(action, /updateToast\(toastId,[\s\S]*text: codexHubConnectionSuccessMessage\(nextMode\),[\s\S]*tone: "success"/);
+  assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
+  assert.doesNotMatch(action, /reconcileAfterRouteSwitch/);
+  assert.match(action, /updateToast\(toastId,[\s\S]*reopenCodexForRoute[\s\S]*codexHubConnectionSuccessMessage\(nextMode, tr\)[\s\S]*tone: "success"/);
   assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
 
-test("background history repair can reuse the connection toast", async () => {
+test("connection switching never mutates history", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
-  const repair = providersSource.match(/async function repairUnifiedHistoryInBackground[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
+  const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(repair, /toastId\?: string/);
-  assert.match(repair, /prefix\?: string/);
-  assert.match(repair, /const activeToastId = toastId \?\? showToast\(t\("settings\.repairingHistoryBucket"\), "loading"\)/);
-  assert.match(repair, /await api\.reconcileAfterRouteSwitch\(targetProvider\)/);
-  assert.match(repair, /result\.status === "restart_required"/);
-  assert.match(repair, /result\.codex_restarted/);
-  assert.match(repair, /updateToast\(activeToastId,[\s\S]*text: prefix \? `\$\{prefix\}; \$\{message\}` : message,[\s\S]*tone: "success"/);
-  assert.match(repair, /t\("providers\.historyRepairFailed", \{ message: messageFromError\(err\) \}\)/);
-  assert.match(repair, /updateToast\(activeToastId,[\s\S]*t\("providers\.historyRepairFailed", \{ message: messageFromError\(err\) \}\)[\s\S]*tone: "error"/);
-  assert.doesNotMatch(repair, /historyRepairSuccessMessage/);
+  assert.doesNotMatch(action, /targetProvider/);
+  assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
+  assert.doesNotMatch(action, /reconcileAfterRouteSwitch/);
 });
 
 test("Codex Hub connection failures no longer mention history sync", async () => {
@@ -2368,21 +2366,22 @@ test("provider catalog writes trigger best-effort bound client sync", async () =
   assert.match(providersSource, /auto_sync_clients/);
 });
 
-test("settings drawer reports the backend sync result", async () => {
+test("settings drawer reports a localized structured sync result", async () => {
   const [appSource, drawerSource, tauriSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(settingsDrawerPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
   ]);
 
-  assert.match(appSource, /const message = await api\.syncHistory\(targetProvider\)/);
+  assert.match(appSource, /api\.preflightUnifiedHistory\(true, targetProvider !== "openai"\)/);
+  assert.doesNotMatch(appSource, /const message = await api\.syncHistory\(targetProvider\)/);
   assert.doesNotMatch(appSource, /api\.migrateOfficialHistoryToUnified\(\)/);
   assert.doesNotMatch(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
   assert.match(appSource, /const restoredSettings = await api\.saveSettings\(settings\)/);
   assert.match(appSource, /return message/);
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
-  assert.match(drawerSource, /showToast\(t\("settings\.repairingHistoryBucket"\), "loading"\)/);
+  assert.match(drawerSource, /showToast\(t\("settings\.syncingConversationHistory"\), "loading"\)/);
   assert.match(drawerSource, /const message = await onSyncHistory\(targetProvider\)/);
   assert.match(drawerSource, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "success"/);
   assert.doesNotMatch(drawerSource, /onMigrateOfficialHistory/);
@@ -2400,7 +2399,7 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
   assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
-test("CodexHub route switches restart Codex so the new model catalog is loaded", async () => {
+test("CodexHub route switches never control Codex processes", async () => {
   const [providersSource, tauriSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
@@ -2408,9 +2407,9 @@ test("CodexHub route switches restart Codex so the new model catalog is loaded",
 
   assert.match(tauriSource, /reconcileAfterRouteSwitch/);
   assert.match(tauriSource, /"reconcile_after_route_switch"/);
-  assert.match(providersSource, /api\.reconcileAfterRouteSwitch\(targetProvider\)/);
-  assert.match(providersSource, /result\.codex_restarted/);
-  assert.match(providersSource, /codexRestartedForRoute/);
+  assert.doesNotMatch(providersSource, /api\.reconcileAfterRouteSwitch/);
+  assert.doesNotMatch(providersSource, /codexRestartedForRoute/);
+  assert.match(providersSource, /reopenCodexForRoute/);
 });
 
 test("settings drawer keeps language immediate and protects unsaved drafts", async () => {

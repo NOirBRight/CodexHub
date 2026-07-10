@@ -23,7 +23,6 @@ import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToa
 import { SortableList } from "../components/SortableList";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
-import { historyIssueKey } from "../lib/history";
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
@@ -1029,9 +1028,13 @@ function ProvidersPageImpl({
       onStatusChanged?.(status);
       setConnectionPendingMode(null);
       setError(null);
-      const targetProvider =
-        nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
-      void repairUnifiedHistoryInBackground(targetProvider, toastId, codexHubConnectionSuccessMessage(nextMode, tr));
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.reopenCodexForRoute", {
+          status: codexHubConnectionSuccessMessage(nextMode, tr),
+        }),
+        tone: "success",
+      });
     } catch (err) {
       const message = messageFromError(err);
       if (isBackendDisconnectedMessage(message)) {
@@ -1054,49 +1057,6 @@ function ProvidersPageImpl({
       });
     } finally {
       setBusy(null);
-    }
-  }
-
-  async function repairUnifiedHistoryInBackground(
-    targetProvider: "custom" | "openai",
-    toastId?: string,
-    prefix?: string,
-  ) {
-    const activeToastId = toastId ?? showToast(t("settings.repairingHistoryBucket"), "loading");
-    updateToast(activeToastId, {
-      action: null,
-      text: prefix ? `${prefix}; ${t("settings.repairingHistoryBucket")}` : t("settings.repairingHistoryBucket"),
-      tone: "loading",
-    });
-    try {
-      const result = await api.reconcileAfterRouteSwitch(targetProvider);
-      if (result.status === "restart_required") {
-        throw new Error(t("settings.historyManualExitRequired"));
-      }
-      if (result.status === "conflict") {
-        throw new Error(t(historyIssueKey(result)));
-      }
-      const message = result.status === "repaired"
-        ? t("settings.historyStartupRepaired", {
-            rows: result.changed_rows,
-            files: result.changed_files,
-          })
-        : result.codex_restarted
-          ? t("providers.codexRestartedForRoute")
-          : t("providers.historyAlreadyClean");
-      updateToast(activeToastId, {
-        action: null,
-        text: prefix ? `${prefix}; ${message}` : message,
-        tone: "success",
-      });
-    } catch (err) {
-      updateToast(activeToastId, {
-        action: null,
-        text: prefix
-          ? `${prefix}; ${t("providers.historyRepairFailed", { message: messageFromError(err) })}`
-          : t("providers.historyRepairFailed", { message: messageFromError(err) }),
-        tone: "error",
-      });
     }
   }
 

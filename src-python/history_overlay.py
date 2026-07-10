@@ -22,6 +22,7 @@ TARGET_PROVIDER = "custom"
 STATE_DB_FILENAME = "state_5.sqlite"
 SESSION_DIR_NAMES = ("sessions", "archived_sessions")
 SQLITE_ID_CHUNK = 500
+SQLITE_BUSY_TIMEOUT_MILLIS = 5_000
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
 
 
@@ -95,12 +96,11 @@ def backup_file(source: Path, codex_dir: Path, backup_root: Path, category: str)
 
 def backup_sqlite(db_path: Path, backup_path: Path) -> None:
     backup_path.parent.mkdir(parents=True, exist_ok=True)
-    source = sqlite3.connect(db_path)
+    source = connect_state_db(db_path)
     try:
-        source.execute("PRAGMA wal_checkpoint(FULL)")
         destination = sqlite3.connect(backup_path)
         try:
-            source.backup(destination)
+            source.backup(destination, pages=5, sleep=0.025)
         finally:
             destination.close()
     finally:
@@ -129,12 +129,18 @@ def table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def connect_state_db(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MILLIS / 1_000)
+    connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MILLIS}")
+    return connection
+
+
 def migrate_state_db(db_path: Path, codex_dir: Path, backup_root: Path) -> dict[str, Any]:
     if not db_path.exists():
         return {"path": str(db_path), "thread_ids": [], "target_thread_ids": [], "skipped": "missing"}
 
     backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir, backup_root))
-    connection = sqlite3.connect(db_path)
+    connection = connect_state_db(db_path)
     try:
         target_rows = connection.execute(
             "SELECT id FROM threads WHERE model_provider = ?",
@@ -163,7 +169,7 @@ def restore_state_db(entry: dict[str, Any]) -> int:
     if not db_path.exists() or not thread_ids:
         return 0
 
-    connection = sqlite3.connect(db_path)
+    connection = connect_state_db(db_path)
     try:
         restored = 0
         for group in chunks(thread_ids):
@@ -535,7 +541,7 @@ def convert_state_provider(
         return 0
 
     backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir or db_path.parent, backup_root))
-    connection = sqlite3.connect(db_path)
+    connection = connect_state_db(db_path)
     try:
         cursor = connection.execute(
             "UPDATE threads SET model_provider = ? WHERE model_provider = ?",
@@ -554,7 +560,7 @@ def state_provider_dirty_count(
 ) -> int:
     if not db_path.exists():
         return 0
-    connection = sqlite3.connect(db_path)
+    connection = connect_state_db(db_path)
     try:
         columns = table_columns(connection, "threads")
         if "model_provider" not in columns:
@@ -616,7 +622,7 @@ def repair_state_db_provider_only(
         entry["skipped"] = "missing"
         return entry
 
-    connection = sqlite3.connect(db_path)
+    connection = connect_state_db(db_path)
     try:
         columns = table_columns(connection, "threads")
         if "model_provider" not in columns:
@@ -995,7 +1001,8 @@ def repair_history_bucket(
 
     backup_root.mkdir(parents=True, exist_ok=True)
     ledger_path = backup_root / "ledger.json"
-    written_entries: list[dict[str, str]] = []
+    state_entries: list[dict[str, Any]] = []
+    jsonl_results: list[dict[str, str]] = []
     try:
         state_entries = [
             repair_state_db_provider_only(
@@ -1037,26 +1044,24 @@ def repair_history_bucket(
             )
         jsonl_candidates = dedupe_jsonl_candidates(jsonl_candidates)
 
-        jsonl_results: list[dict[str, str]] = []
         for candidate in jsonl_candidates:
             result = apply_session_file_provider_fast(candidate, codex_dir, backup_root)
             jsonl_results.append(result)
-            if result.get("status") == "applied":
-                written_entries.append(result)
         jsonl_done_at = time.perf_counter()
-    except Exception:
-        rollback = rollback_provider_changes(codex_dir, backup_root, written_entries)
+    except Exception as error:
         write_json_atomic(
             ledger_path,
             {
                 "version": 1,
                 "mode": "repair-history",
-                "status": "rolled-back-after-error",
+                "status": "deferred-after-error",
                 "created_at": utc_now_iso(),
                 "codex_dir": str(codex_dir),
                 "source_provider": source_provider,
                 "target_provider": target_provider,
-                **rollback,
+                "error": str(error),
+                "state": state_entries,
+                "jsonl": jsonl_results,
             },
         )
         raise
@@ -1227,7 +1232,7 @@ def normalize_state_provider_fast(db_path: Path, codex_dir: Path, backup_root: P
 
     source_provider = TARGET_PROVIDER if target_provider == SOURCE_PROVIDER else SOURCE_PROVIDER
     backup_sqlite(db_path, sqlite_backup_path(db_path, codex_dir, backup_root))
-    connection = sqlite3.connect(db_path)
+    connection = connect_state_db(db_path)
     try:
         columns = table_columns(connection, "threads")
         if "model_provider" not in columns:

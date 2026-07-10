@@ -88,7 +88,7 @@ export interface AppStatus {
 }
 
 export interface UnifiedHistoryResult {
-  status: "clean" | "repaired" | "restart_required" | "conflict";
+  status: "clean" | "repaired" | "deferred" | "restart_required" | "conflict";
   changed_rows: number;
   changed_files: number;
   backup_path?: string | null;
