@@ -289,6 +289,7 @@ trait CodexAppController {
     fn is_running(&self, deadline: Instant) -> Result<bool, String>;
     fn close_gracefully(
         &self,
+        codex_dir: &Path,
         timeout: Duration,
         deadline: Instant,
     ) -> Result<CloseOutcome, String>;
@@ -607,6 +608,7 @@ fn preflight_unified_history_with_budget(
         ));
     }
     let close_outcome = match controller.close_gracefully(
+        paths.codex_dir(),
         budget.close_timeout(),
         budget.work_deadline,
     ) {
@@ -988,10 +990,11 @@ impl CodexAppController for SystemCodexAppController {
 
     fn close_gracefully(
         &self,
+        codex_dir: &Path,
         timeout: Duration,
         deadline: Instant,
     ) -> Result<CloseOutcome, String> {
-        let script = windows_codex_close_script(timeout);
+        let script = windows_codex_close_script(timeout, codex_dir);
         let output = run_powershell_until(&script, deadline)?;
         match output.code {
             Some(0) => Ok(CloseOutcome::Released),
@@ -1022,10 +1025,29 @@ fn windows_codex_discovery_script() -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_codex_close_script(timeout: Duration) -> String {
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_close_script(timeout: Duration, codex_dir: &Path) -> String {
+    windows_codex_close_script_with_lock_probe(timeout, codex_dir, None)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_close_script_with_lock_probe(
+    timeout: Duration,
+    codex_dir: &Path,
+    lock_probe: Option<&str>,
+) -> String {
     let timeout_millis = timeout.as_millis().min(u64::MAX as u128) as u64;
+    let codex_dir = powershell_single_quoted(&codex_dir.to_string_lossy());
+    let lock_probe = match lock_probe {
+        Some(probe) => format!("$lockProbe={probe};"),
+        None => "$lockProbe=$null;".to_string(),
+    };
     format!(
-        "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; $root=if ($package) {{ $package.InstallLocation.TrimEnd('\\') }} else {{ $null }}; $codex=Join-Path $env:USERPROFILE '.codex'; function Relevant {{ if (-not $root) {{ return @() }}; @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; function Locked {{ if (-not (Test-Path -LiteralPath $codex)) {{ return $false }}; $files=@(Get-ChildItem -LiteralPath $codex -File -Recurse -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq 'config.toml' -or $_.Name -like 'state*.sqlite*' -or $_.Extension -eq '.jsonl' }}); foreach ($file in $files) {{ try {{ $stream=[System.IO.File]::Open($file.FullName,'Open','Read','None'); $stream.Dispose() }} catch {{ return $true }} }}; return $false }}; $relevant=@(Relevant); if ($relevant) {{ $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }} }}; $deadline=(Get-Date).AddMilliseconds({timeout_millis}); do {{ $relevant=@(Relevant); $locked=Locked; if (-not $relevant -and -not $locked) {{ exit 0 }}; Start-Sleep -Milliseconds 200 }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} elseif ($relevant) {{ exit 3 }} else {{ exit 4 }}"
+        "$ErrorActionPreference='Stop'; {lock_probe} $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; $root=if ($package) {{ $package.InstallLocation.TrimEnd('\\') }} else {{ $null }}; $codex={codex_dir}; function Relevant {{ if (-not $root) {{ return @() }}; @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; function Locked {{ if (-not (Test-Path -LiteralPath $codex)) {{ return $false }}; $files=@(Get-ChildItem -LiteralPath $codex -File -Recurse -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq 'config.toml' -or $_.Name -like 'state*.sqlite*' -or $_.Extension -eq '.jsonl' }}); foreach ($file in $files) {{ if ($lockProbe) {{ if (& $lockProbe $file.FullName) {{ return $true }} }} else {{ try {{ $stream=[System.IO.File]::Open($file.FullName,'Open','Read','None'); $stream.Dispose() }} catch {{ return $true }} }} }}; return $false }}; $relevant=@(Relevant); if ($relevant) {{ $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }} }}; $deadline=(Get-Date).AddMilliseconds({timeout_millis}); do {{ $relevant=@(Relevant); $locked=Locked; if (-not $relevant -and -not $locked) {{ exit 0 }}; Start-Sleep -Milliseconds 200 }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} elseif ($relevant) {{ exit 3 }} else {{ exit 4 }}"
     )
 }
 
@@ -1054,6 +1076,7 @@ impl CodexAppController for SystemCodexAppController {
     }
     fn close_gracefully(
         &self,
+        _codex_dir: &Path,
         _timeout: Duration,
         _deadline: Instant,
     ) -> Result<CloseOutcome, String> {
@@ -1152,6 +1175,7 @@ fn reconcile_after_route_switch_with_budget(
         return Ok(result);
     }
     let close_outcome = match controller.close_gracefully(
+        paths.codex_dir(),
         budget.close_timeout(),
         budget.work_deadline,
     ) {
@@ -1357,6 +1381,8 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::{windows_codex_close_script, windows_codex_close_script_with_lock_probe};
     use super::{
         classify_codex_processes, CloseOutcome, CodexProcessSnapshot,
         acquire_history_repair, finalize_relaunch_failure, DeadlineCommandRunner,
@@ -1422,6 +1448,7 @@ mod tests {
         close_outcome: CloseOutcome,
         launch_error: Option<String>,
         close_budget: Cell<Option<Duration>>,
+        close_codex_dir: RefCell<Option<PathBuf>>,
         launch_deadline: Cell<Option<Instant>>,
     }
 
@@ -1432,9 +1459,11 @@ mod tests {
 
         fn close_gracefully(
             &self,
+            codex_dir: &Path,
             timeout: Duration,
             _deadline: Instant,
         ) -> Result<CloseOutcome, String> {
+            self.close_codex_dir.replace(Some(codex_dir.to_path_buf()));
             self.close_budget.set(Some(timeout));
             Ok(self.close_outcome)
         }
@@ -1471,6 +1500,7 @@ mod tests {
             close_outcome: CloseOutcome::CloseTimedOut,
             launch_error: None,
             close_budget: Cell::new(None),
+            close_codex_dir: RefCell::new(None),
             launch_deadline: Cell::new(None),
         };
 
@@ -1489,6 +1519,7 @@ mod tests {
 
         assert_eq!(result.reason.as_deref(), Some("graceful_close_failed"));
         assert_eq!(controller.close_budget.get(), Some(Duration::from_secs(4)));
+        assert_eq!(controller.close_codex_dir.borrow().as_deref(), Some(paths.codex_dir()));
     }
 
     #[test]
@@ -1522,6 +1553,7 @@ mod tests {
             close_outcome: CloseOutcome::Released,
             launch_error: Some("history_operation_timeout: launch".to_string()),
             close_budget: Cell::new(None),
+            close_codex_dir: RefCell::new(None),
             launch_deadline: Cell::new(None),
         };
 
@@ -1563,6 +1595,41 @@ mod tests {
         assert_eq!(mutations, 0);
         drop(first);
         assert!(acquire_history_repair(true, &gate).is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_close_script_targets_supplied_codex_home_without_force_kill() {
+        let target = Path::new(r"C:\Users\O'Brien\custom codex");
+
+        let script = windows_codex_close_script(Duration::from_millis(25), target);
+
+        assert!(script.contains(r"$codex='C:\Users\O''Brien\custom codex'"));
+        assert!(!script.contains("USERPROFILE"));
+        assert!(!script.contains("Stop-Process"));
+        assert!(!script.contains("taskkill"));
+        assert!(script.contains("Test-Path -LiteralPath $codex"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_close_script_reports_injected_lock_for_custom_codex_home() {
+        let target = Path::new(r"D:\Codex Homes\target");
+        let script = format!(
+            "function Get-AppxPackage {{ param($Name) @() }}; function Test-Path {{ param($LiteralPath) $LiteralPath -eq 'D:\\Codex Homes\\target' }}; function Get-ChildItem {{ param($LiteralPath,[switch]$File,[switch]$Recurse,$ErrorAction) [pscustomobject]@{{ Name='config.toml'; Extension='.toml'; FullName=($LiteralPath + '\\config.toml') }} }}; {}",
+            windows_codex_close_script_with_lock_probe(
+                Duration::ZERO,
+                target,
+                Some("{ param($path) $path -eq 'D:\\Codex Homes\\target\\config.toml' }"),
+            )
+        );
+
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .expect("injected close script runs");
+
+        assert_eq!(output.status.code(), Some(4), "{}", String::from_utf8_lossy(&output.stderr));
     }
 
     #[cfg(target_os = "windows")]
@@ -2438,6 +2505,7 @@ mod tests {
 
         fn close_gracefully(
             &self,
+            _codex_dir: &Path,
             _timeout: Duration,
             _deadline: Instant,
         ) -> Result<CloseOutcome, String> {
@@ -2496,6 +2564,7 @@ mod tests {
 
         fn close_gracefully(
             &self,
+            _codex_dir: &Path,
             timeout: Duration,
             _deadline: Instant,
         ) -> Result<CloseOutcome, String> {
