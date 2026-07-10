@@ -47,7 +47,6 @@ interface GatewayPageProps {
   clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<void>;
   onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
-  onRestartProxy: () => Promise<void>;
   onStartProxy: () => Promise<void>;
   onStopProxy: () => Promise<void>;
   onUsageWindowChange: (window: UsageQueryWindow) => void;
@@ -63,7 +62,6 @@ function GatewayPageImpl({
   clients,
   onApplySettings,
   onRefreshClients,
-  onRestartProxy,
   onStartProxy,
   onStopProxy,
   onUsageWindowChange,
@@ -268,9 +266,6 @@ function GatewayPageImpl({
 
     try {
       await onApplySettings(next);
-      if (restartRequired) {
-        await onRestartProxy();
-      }
       const message = restartRequired
         ? t("gateway.gatewaySettingsSavedRestarted")
         : keyChanged && !portChanged && !timeoutChanged

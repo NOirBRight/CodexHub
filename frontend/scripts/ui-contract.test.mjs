@@ -101,6 +101,32 @@ test("startup unified history preflight exposes a safe graceful-restart action",
   assert.doesNotMatch(historySource, /Stop-Process\s+-Force/);
 });
 
+test("history repair action is single-shot, bounded, reason-preserving, and always unlocks", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const action = appSource.match(/const repairUnifiedHistoryAfterClose = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.equal((action.match(/api\.preflightUnifiedHistory\(true\)/g) ?? []).length, 1);
+  assert.match(appSource, /const HISTORY_OPERATION_TIMEOUT_MS = 30_000/);
+  assert.match(action, /settleWithin\(api\.preflightUnifiedHistory\(true\), HISTORY_OPERATION_TIMEOUT_MS\)/);
+  assert.match(action, /result\.error \?\? result\.reason/);
+  assert.match(action, /setBusy\("history"\)/);
+  assert.match(action, /finally \{[\s\S]*setBusy\(null\)/);
+});
+
+test("one Gateway Apply delegates its single restart to App settings save", async () => {
+  const [appSource, gatewaySource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+  ]);
+  const applyAction = gatewaySource.match(/async function applyGatewaySettings\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.equal((applyAction.match(/onApplySettings\(next\)/g) ?? []).length, 1);
+  assert.equal((applyAction.match(/onRestartProxy\(/g) ?? []).length, 0);
+  assert.equal((saveAction.match(/api\.restartProxy\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(gatewaySource, /onRestartProxy:/);
+});
+
 test("default locale resolution treats Chinese system variants as Chinese and otherwise falls back to English", async () => {
   const indexSource = await readFile(i18nIndexPath, "utf8");
 
@@ -1415,6 +1441,8 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.match(appSource, /gateway_auto_retry_max_attempts/);
   assert.match(appSource, /gateway_image_proxy_enabled/);
   assert.match(appSource, /gateway_image_proxy_model/);
+  assert.match(appSource, /previous\.proxy_port !== next\.proxy_port/);
+  assert.match(appSource, /previous\.gateway_request_timeout_seconds !== next\.gateway_request_timeout_seconds/);
   assert.match(appSource, /appStatus\?\.proxy_running/);
   assert.match(appSource, /api\.restartProxy\(\)/);
   assert.match(appSource, /t\("gateway\.gatewaySettingsSavedRestarted"\)/);

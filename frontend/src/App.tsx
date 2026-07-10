@@ -79,6 +79,24 @@ const BACKGROUND_VERSION_PROBE_DELAY_MS = 1000;
 const STARTUP_UPDATE_CHECK_DELAY_MS = 2500;
 const APP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_INSTALL_STATUS_POLL_MS = 500;
+const HISTORY_OPERATION_TIMEOUT_MS = 30_000;
+
+async function settleWithin<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(
+      () => reject(new Error("history_operation_timeout")),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
 
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
@@ -266,7 +284,9 @@ function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings
     previous.gateway_auto_retry_enabled !== next.gateway_auto_retry_enabled ||
     previous.gateway_auto_retry_max_attempts !== next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
-    previous.gateway_image_proxy_model !== next.gateway_image_proxy_model
+    previous.gateway_image_proxy_model !== next.gateway_image_proxy_model ||
+    previous.proxy_port !== next.proxy_port ||
+    previous.gateway_request_timeout_seconds !== next.gateway_request_timeout_seconds
   );
 }
 
@@ -652,6 +672,7 @@ export default function App() {
   }, [loadAppUpdateStatus, showToast, t]);
 
   const repairUnifiedHistoryAfterClose = useCallback(async () => {
+    setBusy("history");
     const toastId = showToast({
       dedupeKey: "unified-history-preflight",
       text: t("settings.repairingHistoryBucket"),
@@ -659,7 +680,7 @@ export default function App() {
       tone: "loading",
     });
     try {
-      const result = await api.preflightUnifiedHistory(true);
+      const result = await settleWithin(api.preflightUnifiedHistory(true), HISTORY_OPERATION_TIMEOUT_MS);
       if (result.status === "repaired") {
         updateToast(toastId, {
           action: null,
@@ -672,15 +693,15 @@ export default function App() {
       } else if (result.status === "restart_required") {
         updateToast(toastId, {
           action: null,
-          text: t("settings.historyManualExitRequired"),
+          text: result.error ?? result.reason ?? t("settings.historyManualExitRequired"),
           timeoutMs: null,
           tone: "error",
         });
       } else if (result.status === "conflict") {
         updateToast(toastId, {
           action: null,
-          text: result.error
-            ? t("settings.historyStartupRepairFailed", { message: result.error })
+          text: result.error ?? result.reason
+            ? t("settings.historyStartupRepairFailed", { message: result.error ?? result.reason })
             : t("settings.historyProviderConflict"),
           timeoutMs: null,
           tone: "error",
@@ -695,6 +716,8 @@ export default function App() {
         timeoutMs: null,
         tone: "error",
       });
+    } finally {
+      setBusy(null);
     }
   }, [dismissToast, showToast, t, updateToast]);
 
@@ -1062,10 +1085,6 @@ export default function App() {
     () => runRuntimeAction("start", api.startProxy, { toast: false }),
     [runRuntimeAction],
   );
-  const restartProxyQuiet = useCallback(
-    () => runRuntimeAction("restart", api.restartProxy, { toast: false }),
-    [runRuntimeAction],
-  );
   const stopProxyQuiet = useCallback(
     () => runRuntimeAction("stop", api.stopProxy, { toast: false }),
     [runRuntimeAction],
@@ -1167,7 +1186,6 @@ export default function App() {
                 clients={contract.gatewayClients as GatewayClientContract[]}
                 onApplySettings={applyGatewaySettings}
                 onRefreshClients={loadGatewayClients}
-                onRestartProxy={restartProxyQuiet}
                 onStartProxy={startProxyQuiet}
                 onStopProxy={stopProxyQuiet}
                 onUsageWindowChange={updateUsageWindow}
