@@ -261,6 +261,33 @@ def test_beta_gate_accepts_next_version_prerelease_via_shared_semver_validator(t
     assert json.loads(result.stdout)["version"] == "0.1.5-beta.1"
 
 
+def test_semver_accepts_alphanumeric_prerelease_starting_with_zero(tmp_path):
+    repo, _, dev_commit = _release_repo(tmp_path)
+
+    result = _plan(repo, "beta", "1.2.3-0alpha", dev_commit)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["version"] == "1.2.3-0alpha"
+
+
+def test_semver_rejects_numeric_prerelease_with_leading_zero(tmp_path):
+    repo, _, dev_commit = _release_repo(tmp_path)
+
+    result = _plan(repo, "beta", "1.2.3-01", dev_commit)
+
+    assert result.returncode != 0
+    assert "valid SemVer" in result.stderr
+
+
+def test_semver_rejects_trailing_line_feed(tmp_path):
+    repo, _, dev_commit = _release_repo(tmp_path)
+
+    result = _plan(repo, "beta", "1.2.3-beta.1\n", dev_commit)
+
+    assert result.returncode != 0
+    assert "valid SemVer" in result.stderr
+
+
 def test_stable_gate_requires_exact_main_and_stable_version(tmp_path):
     repo, main_commit, dev_commit = _release_repo(tmp_path)
 
