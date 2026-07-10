@@ -79,24 +79,6 @@ const BACKGROUND_VERSION_PROBE_DELAY_MS = 1000;
 const STARTUP_UPDATE_CHECK_DELAY_MS = 2500;
 const APP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_INSTALL_STATUS_POLL_MS = 500;
-const HISTORY_OPERATION_TIMEOUT_MS = 30_000;
-
-async function settleWithin<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
-  let timeoutId: number | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutId = window.setTimeout(
-      () => reject(new Error("history_operation_timeout")),
-      timeoutMs,
-    );
-  });
-  try {
-    return await Promise.race([operation, timeout]);
-  } finally {
-    if (timeoutId !== undefined) {
-      window.clearTimeout(timeoutId);
-    }
-  }
-}
 
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
@@ -288,6 +270,14 @@ function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings
     previous.proxy_port !== next.proxy_port ||
     previous.gateway_request_timeout_seconds !== next.gateway_request_timeout_seconds
   );
+}
+
+function shouldRestartGateway(
+  previous: Settings | null,
+  next: Settings,
+  status: Pick<GatewayStatus, "proxy_running"> | null,
+) {
+  return Boolean(status?.proxy_running && gatewayRuntimeSettingsChanged(previous, next));
 }
 
 function visionModelOptions(models: Model[]) {
@@ -680,7 +670,7 @@ export default function App() {
       tone: "loading",
     });
     try {
-      const result = await settleWithin(api.preflightUnifiedHistory(true), HISTORY_OPERATION_TIMEOUT_MS);
+      const result = await api.preflightUnifiedHistory(true);
       if (result.status === "repaired") {
         updateToast(toastId, {
           action: null,
@@ -1002,9 +992,7 @@ export default function App() {
     let savedSettingsApplied = false;
     let historyReconciled = previousUnified === nextUnified;
     try {
-      const shouldRestartGateway = Boolean(
-        appStatus?.proxy_running && gatewayRuntimeSettingsChanged(settings, next),
-      );
+      const restartGateway = shouldRestartGateway(settings, next, gatewayStatus);
       if (settings && next.auto_start_software !== settings.auto_start_software) {
         if (next.auto_start_software) {
           await api.setAutostart(true);
@@ -1037,7 +1025,7 @@ export default function App() {
             : t("settings.officialHistoryRestored");
       }
       let saveMessage = historyMessage ?? t("settings.settingsSaved");
-      if (shouldRestartGateway) {
+      if (restartGateway) {
         const status = await api.restartProxy();
         setRuntimeCacheData("status", status);
         saveMessage = t("gateway.gatewaySettingsSavedRestarted");
@@ -1060,7 +1048,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [appStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
+  }, [gatewayStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
 
   const syncHistory = useCallback(async (targetProvider: string) => {
     setBusy("history");
@@ -1102,7 +1090,7 @@ export default function App() {
     [setRuntimeCacheData],
   );
   const applyGatewaySettings = useCallback(async (nextSettings: Settings) => {
-    await saveSettings(nextSettings);
+    return await saveSettings(nextSettings);
   }, [saveSettings]);
 
   return (

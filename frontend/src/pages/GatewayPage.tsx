@@ -45,7 +45,7 @@ interface GatewayPageProps {
   usageStatus: TelemetryStatus | null;
   recentEvents: GatewayEvent[];
   clientInfos: GatewayClientInfo[];
-  onApplySettings: (settings: Settings) => Promise<void>;
+  onApplySettings: (settings: Settings) => Promise<string>;
   onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
   onStartProxy: () => Promise<void>;
   onStopProxy: () => Promise<void>;
@@ -255,22 +255,10 @@ function GatewayPageImpl({
       proxy_port: Math.min(65535, Math.max(1024, cleanPort)),
       gateway_request_timeout_seconds: Math.min(600, Math.max(5, cleanTimeout)),
     };
-    const portChanged = next.proxy_port !== settings.proxy_port;
-    const timeoutChanged = next.gateway_request_timeout_seconds !== settings.gateway_request_timeout_seconds;
-    const keyChanged = next.gateway_client_key !== settings.gateway_client_key;
-    const restartRequired = running && (portChanged || timeoutChanged);
-    const toastId = showToast(
-      restartRequired ? t("gateway.saveRestarting") : t("gateway.savingSettings"),
-      "loading",
-    );
+    const toastId = showToast(t("gateway.savingSettings"), "loading");
 
     try {
-      await onApplySettings(next);
-      const message = restartRequired
-        ? t("gateway.gatewaySettingsSavedRestarted")
-        : keyChanged && !portChanged && !timeoutChanged
-          ? t("gateway.apiKeySavedNoRestart")
-          : t("gateway.gatewaySettingsSaved");
+      const message = await onApplySettings(next);
       updateToast(toastId, {
         action: null,
         text: message,

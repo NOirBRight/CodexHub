@@ -101,13 +101,13 @@ test("startup unified history preflight exposes a safe graceful-restart action",
   assert.doesNotMatch(historySource, /Stop-Process\s+-Force/);
 });
 
-test("history repair action is single-shot, bounded, reason-preserving, and always unlocks", async () => {
+test("history repair action waits for the bounded backend and always unlocks", async () => {
   const appSource = await readFile(appPath, "utf8");
   const action = appSource.match(/const repairUnifiedHistoryAfterClose = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
   assert.equal((action.match(/api\.preflightUnifiedHistory\(true\)/g) ?? []).length, 1);
-  assert.match(appSource, /const HISTORY_OPERATION_TIMEOUT_MS = 30_000/);
-  assert.match(action, /settleWithin\(api\.preflightUnifiedHistory\(true\), HISTORY_OPERATION_TIMEOUT_MS\)/);
+  assert.match(action, /await api\.preflightUnifiedHistory\(true\)/);
+  assert.doesNotMatch(appSource, /HISTORY_OPERATION_TIMEOUT_MS|settleWithin|Promise\.race/);
   assert.match(action, /result\.error \?\? result\.reason/);
   assert.match(action, /setBusy\("history"\)/);
   assert.match(action, /finally \{[\s\S]*setBusy\(null\)/);
@@ -125,6 +125,8 @@ test("one Gateway Apply delegates its single restart to App settings save", asyn
   assert.equal((applyAction.match(/onRestartProxy\(/g) ?? []).length, 0);
   assert.equal((saveAction.match(/api\.restartProxy\(\)/g) ?? []).length, 1);
   assert.doesNotMatch(gatewaySource, /onRestartProxy:/);
+  assert.match(gatewaySource, /const message = await onApplySettings\(next\)/);
+  assert.doesNotMatch(applyAction, /gatewaySettingsSavedRestarted|restartRequired/);
 });
 
 test("default locale resolution treats Chinese system variants as Chinese and otherwise falls back to English", async () => {
@@ -1435,6 +1437,7 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
 
 test("settings save restarts running gateway when retry or image proxy runtime settings change", async () => {
   const appSource = await readFile(appPath, "utf8");
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
   assert.match(appSource, /function gatewayRuntimeSettingsChanged/);
   assert.match(appSource, /gateway_auto_retry_enabled/);
@@ -1443,7 +1446,9 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.match(appSource, /gateway_image_proxy_model/);
   assert.match(appSource, /previous\.proxy_port !== next\.proxy_port/);
   assert.match(appSource, /previous\.gateway_request_timeout_seconds !== next\.gateway_request_timeout_seconds/);
-  assert.match(appSource, /appStatus\?\.proxy_running/);
+  assert.match(appSource, /status\?\.proxy_running/);
+  assert.match(saveAction, /shouldRestartGateway\(settings, next, gatewayStatus\)/);
+  assert.doesNotMatch(saveAction, /appStatus\?\.proxy_running/);
   assert.match(appSource, /api\.restartProxy\(\)/);
   assert.match(appSource, /t\("gateway\.gatewaySettingsSavedRestarted"\)/);
   assert.match(appSource, /setBanner\(null\)/);
@@ -1693,6 +1698,26 @@ test("official model rows only toggle from the switch while provider rows can st
   assert.match(modelSection, /role=\{rowInteractable \? "button" : undefined\}/);
   assert.match(modelSection, /tabIndex=\{rowInteractable \? 0 : undefined\}/);
   assert.match(modelSection, /onClick=\{rowInteractable \? activateModelRow : undefined\}/);
+});
+
+test("Gateway restart planning uses only the current Gateway running snapshot", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const functionSource = appSource.match(/function gatewayRuntimeSettingsChanged[\s\S]*?function shouldRestartGateway[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    functionSource.replace("function shouldRestartGateway", "export function shouldRestartGateway"),
+    {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+    },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { shouldRestartGateway } = await import(moduleUrl);
+  const previous = { proxy_port: 9099, gateway_request_timeout_seconds: 300 };
+  const changed = { ...previous, proxy_port: 9100 };
+
+  assert.equal(shouldRestartGateway(previous, changed, { proxy_running: true }), true);
+  assert.equal(shouldRestartGateway(previous, changed, { proxy_running: false }), false);
+  assert.equal(shouldRestartGateway(previous, changed, null), false);
+  assert.doesNotMatch(functionSource, /appStatus/);
 });
 
 test("official OpenAI model edits are draft-only until the footer Save action", async () => {
