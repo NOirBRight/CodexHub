@@ -43,20 +43,36 @@ pub fn restart() -> Result<AppStatus, String> {
 #[derive(Debug, Clone)]
 struct ProxyPaths {
     codex_dir: PathBuf,
+    codex_target_dir: PathBuf,
     repo_root: PathBuf,
 }
 
 impl ProxyPaths {
     fn runtime() -> Result<Self, String> {
-        let codex_dir = runtime_paths::codex_home_dir()?;
+        let codex_dir = runtime_paths::runtime_home_dir()?;
+        let codex_target_dir = runtime_paths::codex_target_home_dir()?;
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, repo_root))
+        Ok(Self::new_isolated(codex_dir, codex_target_dir, repo_root))
     }
 
     fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+        let codex_dir = codex_dir.into();
         Self {
-            codex_dir: codex_dir.into(),
+            codex_target_dir: codex_dir.clone(),
+            codex_dir,
+            repo_root: repo_root.into(),
+        }
+    }
+
+    fn new_isolated(
+        runtime_dir: impl Into<PathBuf>,
+        codex_target_dir: impl Into<PathBuf>,
+        repo_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            codex_dir: runtime_dir.into(),
+            codex_target_dir: codex_target_dir.into(),
             repo_root: repo_root.into(),
         }
     }
@@ -74,7 +90,7 @@ impl ProxyPaths {
     }
 
     fn codex_config_path(&self) -> PathBuf {
-        self.codex_dir.join("config.toml")
+        self.codex_target_dir.join("config.toml")
     }
 
     fn proxy_script_path(&self) -> PathBuf {
@@ -665,6 +681,7 @@ fn build_start_command(
         .current_dir(paths.proxy_script_dir())
         .env("PYTHONPATH", paths.proxy_script_dir())
         .env("CODEX_HOME", paths.codex_dir.clone())
+        .env("CODEXHUB_CODEX_TARGET_HOME", paths.codex_target_dir.clone())
         .env(
             "CODEX_PROXY_GATEWAY_CLIENT_KEY",
             settings.gateway_client_key.trim(),
@@ -1881,6 +1898,28 @@ time.sleep(10)
                 .and_then(|value| value.to_str()),
             Some("minimax-cn/MiniMax-M3")
         );
+    }
+
+    #[test]
+    fn beta_style_start_command_separates_runtime_and_codex_target_homes() {
+        let root = temp_root("isolated-start-homes");
+        let runtime_home = root.join(".codexhub-beta");
+        let target_home = root.join(".codex");
+        let paths = ProxyPaths::new_isolated(&runtime_home, &target_home, root.join("repo"));
+        let command = build_start_command(
+            Path::new("python-test"),
+            &paths.proxy_script_path(),
+            &paths,
+            &Settings::default(),
+        );
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| (key.to_string_lossy().into_owned(), value.map(PathBuf::from)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("CODEX_HOME"), Some(&Some(runtime_home)));
+        assert_eq!(envs.get("CODEXHUB_CODEX_TARGET_HOME"), Some(&Some(target_home)));
+        assert_eq!(paths.codex_config_path(), root.join(".codex/config.toml"));
     }
 
     #[test]

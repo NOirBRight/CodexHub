@@ -76,6 +76,17 @@ class DecodeJwtPayloadTests(unittest.TestCase):
 
 
 class LoadAuthJsonTests(unittest.TestCase):
+    def test_target_home_override_wins_over_runtime_codex_home(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_HOME": str(Path("runtime-home")),
+                "CODEXHUB_CODEX_TARGET_HOME": str(Path("real-codex-home")),
+            },
+            clear=False,
+        ):
+            self.assertEqual(codex_auth.codex_home(), Path("real-codex-home"))
+
     def test_load_auth_json_rejects_non_chatgpt_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _make_auth_json(Path(tmp), access_token=_make_jwt({"exp": 9999999999}), auth_mode="apikey")

@@ -20,6 +20,7 @@ from urllib.error import URLError, HTTPError
 from atomic_io import atomic_write_text
 
 CODEX_HOME_ENV = "CODEX_HOME"
+CODEX_TARGET_HOME_ENV = "CODEXHUB_CODEX_TARGET_HOME"
 DEFAULT_CODEX_HOME = Path.home() / ".codex"
 AUTH_FILENAME = "auth.json"
 PRIVATE_AUTH_FILE_MODE = 0o600
@@ -39,6 +40,9 @@ class CodexAuthError(RuntimeError):
 
 
 def codex_home() -> Path:
+    target_value = os.environ.get(CODEX_TARGET_HOME_ENV)
+    if target_value:
+        return Path(target_value)
     env_value = os.environ.get(CODEX_HOME_ENV)
     if env_value:
         return Path(env_value)
