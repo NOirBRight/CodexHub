@@ -24,6 +24,24 @@ def test_beta_candidate_version_is_consistent_across_manifests():
     assert package_lock["packages"][""]["version"] == expected
 
 
+def test_v014_audit_records_reconciliation_and_display_contract():
+    audit = (ROOT / "docs" / "reviews" / "v0.1.3-human-audit.md").read_text(encoding="utf-8")
+
+    for evidence in (
+        "38e99408",
+        "08d507af",
+        "No third intended v0.1.4 commit was missing",
+        "patch-equivalent",
+        "v0.2/TLS/FlClash/keepalive",
+        "OpenAI 5.6 Sol",
+        "`5.6 Sol`",
+        "`gpt-5.6-sol`",
+        "`codexhub-openai/gpt-5.6-sol`",
+        "AI review is not a substitute for human maintainer approval",
+    ):
+        assert evidence in audit
+
+
 def test_portable_uses_flavor_executable_base_name():
     flavors = json.loads((ROOT / "config" / "build-flavors.json").read_text(encoding="utf-8"))
     script = (ROOT / "scripts" / "build-windows-portable.ps1").read_text(encoding="utf-8-sig")
