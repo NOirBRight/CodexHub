@@ -475,6 +475,14 @@ pub fn gateway_test_request(
     model: Option<String>,
 ) -> Result<GatewayTestResult, String> {
     let settings = config::get_settings()?;
+    gateway_test_request_with_settings(kind, model, &settings)
+}
+
+fn gateway_test_request_with_settings(
+    kind: GatewayTestKind,
+    model: Option<String>,
+    settings: &Settings,
+) -> Result<GatewayTestResult, String> {
     let model = model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
@@ -494,6 +502,7 @@ pub fn gateway_test_request(
             "chat_completions",
             &endpoints.chat_completions,
             Some(model.clone()),
+            Some(settings),
             json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "Say hello in one word."}],
@@ -506,6 +515,7 @@ pub fn gateway_test_request(
             "chat_completions_stream",
             &endpoints.chat_completions,
             Some(model.clone()),
+            Some(settings),
             json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "Say hello in one word."}],
@@ -518,6 +528,7 @@ pub fn gateway_test_request(
             "responses_stream",
             &endpoints.responses,
             Some(model.clone()),
+            Some(settings),
             json!({
                 "model": model,
                 "input": "Say hello in one word.",
@@ -1325,15 +1336,19 @@ fn request_json(
     kind: &str,
     endpoint: &str,
     model: Option<String>,
+    local_gateway_settings: Option<&Settings>,
     body: Value,
     stream: bool,
 ) -> Result<GatewayTestResult, String> {
     let started = Instant::now();
-    let response = client
+    let mut request = client
         .post(endpoint)
         .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send();
+        .body(body.to_string());
+    if let Some(settings) = local_gateway_settings {
+        request = attach_local_gateway_authorization(request, endpoint, settings);
+    }
+    let response = request.send();
 
     match response {
         Ok(mut response) => {
@@ -1397,6 +1412,45 @@ fn request_json(
             error: Some(error.without_url().to_string()),
         }),
     }
+}
+
+fn attach_local_gateway_authorization(
+    request: reqwest::blocking::RequestBuilder,
+    endpoint: &str,
+    settings: &Settings,
+) -> reqwest::blocking::RequestBuilder {
+    let has_authorization = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .is_some_and(|request| request.headers().contains_key("Authorization"));
+    if has_authorization {
+        return request;
+    }
+    let Some(key) = local_gateway_client_key_for_endpoint(endpoint, settings) else {
+        return request;
+    };
+    request.header("Authorization", format!("Bearer {key}"))
+}
+
+fn local_gateway_client_key_for_endpoint<'a>(
+    endpoint: &str,
+    settings: &'a Settings,
+) -> Option<&'a str> {
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    if url.scheme() != "http" || url.port_or_known_default() != Some(settings.proxy_port) {
+        return None;
+    }
+    let host = url.host_str()?;
+    if !host.eq_ignore_ascii_case("localhost")
+        && host.parse::<std::net::IpAddr>().ok().is_none_or(|host| !host.is_loopback())
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    if path != "/v1" && !path.starts_with("/v1/") {
+        return None;
+    }
+    non_empty_str(&settings.gateway_client_key)
 }
 
 fn endpoints(port: u16) -> GatewayEndpoints {
@@ -6334,9 +6388,12 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -6417,6 +6474,146 @@ mod tests {
         assert!(!diagnostics
             .iter()
             .any(|item| item.category == "proxy" && item.level == "error"));
+    }
+
+    #[test]
+    fn gateway_post_tests_attach_configured_client_key_to_every_shape() {
+        let server = CapturingPostServer::start(3);
+        let settings = Settings {
+            proxy_port: server.port,
+            gateway_client_key: "local-test-key".to_string(),
+            gateway_request_timeout_seconds: 5,
+            ..Settings::default()
+        };
+
+        for kind in [
+            super::GatewayTestKind::ChatCompletions,
+            super::GatewayTestKind::ChatCompletionsStream,
+            super::GatewayTestKind::ResponsesStream,
+        ] {
+            let result = super::gateway_test_request_with_settings(
+                kind,
+                Some("gpt-5.6-sol".to_string()),
+                &settings,
+            )
+            .expect("Gateway POST test");
+            assert!(result.ok, "{result:?}");
+        }
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(request_path(&requests[0]), "/v1/chat/completions");
+        assert_eq!(request_path(&requests[1]), "/v1/chat/completions");
+        assert_eq!(request_path(&requests[2]), "/v1/responses");
+        for request in requests {
+            assert_eq!(header_value(&request, "authorization"), Some("Bearer local-test-key"));
+        }
+    }
+
+    #[test]
+    fn gateway_request_auth_preserves_explicit_header_and_never_leaks() {
+        let client = reqwest::blocking::Client::new();
+        let settings = Settings {
+            proxy_port: 4555,
+            gateway_client_key: "local-test-key".to_string(),
+            ..Settings::default()
+        };
+        let local_endpoint = "http://127.0.0.1:4555/v1/responses";
+        let explicit = super::attach_local_gateway_authorization(
+            client
+                .post(local_endpoint)
+                .header("Authorization", "Bearer explicit-key"),
+            local_endpoint,
+            &settings,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            explicit.headers().get("Authorization").unwrap(),
+            "Bearer explicit-key"
+        );
+
+        for endpoint in [
+            "https://api.openai.com/v1/responses",
+            "https://127.0.0.1:4555/v1/responses",
+            "http://127.0.0.1:4556/v1/responses",
+        ] {
+            let request = super::attach_local_gateway_authorization(
+                client.post(endpoint),
+                endpoint,
+                &settings,
+            )
+            .build()
+            .unwrap();
+            assert!(
+                request.headers().get("Authorization").is_none(),
+                "Gateway key leaked to {endpoint}"
+            );
+        }
+    }
+
+    struct CapturingPostServer {
+        port: u16,
+        requests: mpsc::Receiver<String>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl CapturingPostServer {
+        fn start(request_count: usize) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (sender, requests) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                for _ in 0..request_count {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    sender.send(request).unwrap();
+                    let body = "{}";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            Self {
+                port,
+                requests,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<String> {
+            self.handle.join().unwrap();
+            self.requests.try_iter().collect()
+        }
+    }
+
+    fn read_http_request(stream: &mut impl Read) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn request_path(request: &str) -> &str {
+        request.lines().next().unwrap().split_whitespace().nth(1).unwrap()
+    }
+
+    fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
     }
 
     fn case_sensitive_client_export_test_providers() -> Vec<Provider> {
