@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{error::Error, fmt};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     get_providers_with_paths(&ConfigPaths::runtime()?)
@@ -100,7 +101,14 @@ impl ConfigPaths {
     }
 
     pub(crate) fn config_backup_path(&self) -> PathBuf {
-        let name = match crate::app_flavor::current().routing_owner() {
+        self.config_backup_path_for_owner(crate::app_flavor::current().routing_owner())
+    }
+
+    pub(crate) fn config_backup_path_for_owner(
+        &self,
+        owner: crate::app_flavor::RoutingOwner,
+    ) -> PathBuf {
+        let name = match owner {
             crate::app_flavor::RoutingOwner::Beta => "config.toml.beta.backup",
             _ => "config.toml.release.backup",
         };
@@ -501,6 +509,24 @@ pub(crate) fn switch_mode_with_paths_takeover(
     python: &Path,
     runner: &dyn CommandRunner,
 ) -> Result<AppStatus, String> {
+    switch_mode_with_paths_takeover_as_owner(
+        crate::app_flavor::current().routing_owner(),
+        mode,
+        force_takeover,
+        paths,
+        python,
+        runner,
+    )
+}
+
+fn switch_mode_with_paths_takeover_as_owner(
+    current_app_owner: crate::app_flavor::RoutingOwner,
+    mode: &str,
+    force_takeover: bool,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AppStatus, String> {
     if mode != "official" && mode != "custom" {
         return Err(format!(
             "unsupported mode: {mode}; expected official or custom"
@@ -512,11 +538,12 @@ pub(crate) fn switch_mode_with_paths_takeover(
         .as_deref()
         .and_then(codex_overlay_owner);
     ensure_codex_owner_mutation_allowed(
-        crate::app_flavor::current().routing_owner(),
+        current_app_owner,
         target_owner,
         mode,
         force_takeover,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
 
     let settings = match get_settings_with_paths(paths) {
         Ok(settings) => settings,
@@ -534,7 +561,10 @@ pub(crate) fn switch_mode_with_paths_takeover(
             "--config".to_string(),
             paths.codex_config_path().to_string_lossy().into_owned(),
             "--backup".to_string(),
-            paths.config_backup_path().to_string_lossy().into_owned(),
+            paths
+                .config_backup_path_for_owner(current_app_owner)
+                .to_string_lossy()
+                .into_owned(),
         ];
         if settings.unified_codex_history {
             args.push("--unified-history".to_string());
@@ -552,7 +582,10 @@ pub(crate) fn switch_mode_with_paths_takeover(
             "--config".to_string(),
             paths.codex_config_path().to_string_lossy().into_owned(),
             "--backup".to_string(),
-            paths.config_backup_path().to_string_lossy().into_owned(),
+            paths
+                .config_backup_path_for_owner(current_app_owner)
+                .to_string_lossy()
+                .into_owned(),
             "--catalog".to_string(),
             paths.generated_catalog_path().to_string_lossy().into_owned(),
             "--base-url".to_string(),
@@ -560,7 +593,7 @@ pub(crate) fn switch_mode_with_paths_takeover(
             "--gateway-key".to_string(),
             settings.gateway_client_key.clone(),
             "--owner".to_string(),
-            match crate::app_flavor::current().routing_owner() {
+            match current_app_owner {
                 crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
                 _ => "release".to_string(),
             },
@@ -600,24 +633,90 @@ pub(crate) fn codex_overlay_owner(text: &str) -> Option<crate::app_flavor::Routi
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexOwnerMutationError {
+    TakeoverRequired {
+        current_app_owner: crate::app_flavor::RoutingOwner,
+        current_target_owner: Option<crate::app_flavor::RoutingOwner>,
+    },
+    OwnerMismatch {
+        current_app_owner: crate::app_flavor::RoutingOwner,
+        current_target_owner: Option<crate::app_flavor::RoutingOwner>,
+    },
+}
+
+impl CodexOwnerMutationError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::TakeoverRequired { .. } => "route.takeover_required",
+            Self::OwnerMismatch { .. } => "route.owner_mismatch",
+        }
+    }
+}
+
+impl fmt::Display for CodexOwnerMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (current_app_owner, current_target_owner) = match self {
+            Self::TakeoverRequired {
+                current_app_owner,
+                current_target_owner,
+            }
+            | Self::OwnerMismatch {
+                current_app_owner,
+                current_target_owner,
+            } => (current_app_owner, current_target_owner),
+        };
+        write!(
+            formatter,
+            "{}: Codex target owner is {:?}; current channel owner is {:?}",
+            self.code(),
+            current_target_owner,
+            current_app_owner
+        )
+    }
+}
+
+impl Error for CodexOwnerMutationError {}
+
 fn ensure_codex_owner_mutation_allowed(
     current_app_owner: crate::app_flavor::RoutingOwner,
     current_target_owner: Option<crate::app_flavor::RoutingOwner>,
     mode: &str,
     force_takeover: bool,
-) -> Result<(), String> {
-    let Some(target_owner) = current_target_owner else {
-        return Ok(());
-    };
-    if target_owner == current_app_owner {
+) -> Result<(), CodexOwnerMutationError> {
+    if current_target_owner == Some(current_app_owner) {
         return Ok(());
     }
-    if mode == "custom" && force_takeover {
+
+    if mode == "custom" {
+        let stable_backward_compatible_target = current_app_owner
+            == crate::app_flavor::RoutingOwner::Release
+            && matches!(
+                current_target_owner,
+                None | Some(crate::app_flavor::RoutingOwner::Official)
+            );
+        if stable_backward_compatible_target || force_takeover {
+            return Ok(());
+        }
+        return Err(CodexOwnerMutationError::TakeoverRequired {
+            current_app_owner,
+            current_target_owner,
+        });
+    }
+
+    let stable_backward_compatible_disconnect = current_app_owner
+        == crate::app_flavor::RoutingOwner::Release
+        && matches!(
+            current_target_owner,
+            None | Some(crate::app_flavor::RoutingOwner::Official)
+        );
+    if stable_backward_compatible_disconnect {
         return Ok(());
     }
-    Err(format!(
-        "Codex is managed by {target_owner:?}; explicit takeover is required and only its owner may disconnect it."
-    ))
+    Err(CodexOwnerMutationError::OwnerMismatch {
+        current_app_owner,
+        current_target_owner,
+    })
 }
 
 fn ensure_mode_switch_directories(paths: &ConfigPaths) -> Result<(), String> {
@@ -710,7 +809,8 @@ mod tests {
     use super::{
         get_providers_with_paths, get_settings_with_paths, save_providers_with_paths,
         save_settings_with_paths, switch_mode_with_paths, codex_overlay_owner,
-        ensure_codex_owner_mutation_allowed, CommandOutcome, CommandRunner, ConfigPaths,
+        ensure_codex_owner_mutation_allowed, switch_mode_with_paths_takeover_as_owner,
+        CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
     };
     use crate::{Model, Provider, Settings, ToolProtocol, UpstreamFormat};
     use std::cell::RefCell;
@@ -1361,6 +1461,118 @@ sort_order = 7
             true,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn beta_requires_explicit_takeover_for_unowned_and_official_codex() {
+        for owner in [None, Some(crate::app_flavor::RoutingOwner::Official)] {
+            let error = ensure_codex_owner_mutation_allowed(
+                crate::app_flavor::RoutingOwner::Beta,
+                owner,
+                "custom",
+                false,
+            )
+            .expect_err("Beta must never silently claim real Codex");
+            assert_eq!(error.code(), "route.takeover_required");
+
+            assert!(ensure_codex_owner_mutation_allowed(
+                crate::app_flavor::RoutingOwner::Beta,
+                owner,
+                "custom",
+                true,
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn stable_keeps_backward_compatible_unowned_and_official_connect() {
+        for owner in [None, Some(crate::app_flavor::RoutingOwner::Official)] {
+            assert!(ensure_codex_owner_mutation_allowed(
+                crate::app_flavor::RoutingOwner::Release,
+                owner,
+                "custom",
+                false,
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn beta_backend_takeover_chain_restores_unowned_and_stable_bytes() {
+        for (name, original) in [
+            ("unowned", b"model_reasoning_effort = \"high\"\r\n".as_slice()),
+            (
+                "stable",
+                b"# BEGIN CODEX PROXY SESSION CONFIG\n# owner = release\n# END CODEX PROXY SESSION CONFIG\nmodel_reasoning_effort = \"high\"\n".as_slice(),
+            ),
+        ] {
+            let root = temp_root(name);
+            let runtime = root.join(".codexhub-beta");
+            let target = root.join(".codex");
+            let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+            fs::create_dir_all(&target).unwrap();
+            fs::write(paths.codex_config_path(), original).unwrap();
+            save_settings_with_paths(
+                Settings {
+                    unified_codex_history: false,
+                    proxy_port: 9109,
+                    ..Settings::default()
+                },
+                &paths,
+            )
+            .unwrap();
+            let python = super::find_python();
+            let runner = ProcessCommandRunner;
+
+            let rejected = switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "custom",
+                false,
+                &paths,
+                &python,
+                &runner,
+            )
+            .expect_err("normal Beta connect must be rejected");
+            assert!(rejected.contains("route.takeover_required"));
+            assert_eq!(fs::read(paths.codex_config_path()).unwrap(), original);
+            assert!(!paths.config_backup_path_for_owner(crate::app_flavor::RoutingOwner::Beta).exists());
+
+            switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "custom",
+                true,
+                &paths,
+                &python,
+                &runner,
+            )
+            .unwrap();
+            switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "custom",
+                false,
+                &paths,
+                &python,
+                &runner,
+            )
+            .unwrap();
+            switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "official",
+                false,
+                &paths,
+                &python,
+                &runner,
+            )
+            .unwrap();
+
+            assert_eq!(fs::read(paths.codex_config_path()).unwrap(), original);
+            assert!(!paths.config_backup_path_for_owner(crate::app_flavor::RoutingOwner::Beta).exists());
+        }
     }
 
     #[test]

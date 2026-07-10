@@ -245,6 +245,43 @@ class ConfigOverlayTests(unittest.TestCase):
 
             self.assertEqual(config.read_text(encoding="utf-8"), previous)
 
+    def test_beta_takeover_reapply_disconnect_restores_unowned_bytes_exactly(self):
+        original = b'model = "original"\r\n[features]\r\nfoo = true\r\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "beta-backup.toml"
+            catalog = tmp / "catalog.json"
+            config.write_bytes(original)
+
+            apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta", takeover=True)
+            apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta")
+            restore_overlay(config, backup, unified_history=False)
+
+            self.assertEqual(config.read_bytes(), original)
+            self.assertFalse(backup.exists())
+
+    def test_beta_takeover_reapply_disconnect_restores_stable_owner_bytes_exactly(self):
+        original = (
+            b"# BEGIN CODEX PROXY SESSION CONFIG\n"
+            b"# owner = release\n"
+            b"# END CODEX PROXY SESSION CONFIG\n"
+            b'model_reasoning_effort = "high"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "beta-backup.toml"
+            catalog = tmp / "catalog.json"
+            config.write_bytes(original)
+
+            apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta", takeover=True)
+            apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta")
+            restore_overlay(config, backup, unified_history=False)
+
+            self.assertEqual(config.read_bytes(), original)
+            self.assertFalse(backup.exists())
+
     def test_restore_overlay_without_backup_strips_managed_overlay(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

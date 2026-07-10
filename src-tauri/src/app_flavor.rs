@@ -71,7 +71,7 @@ impl RuntimeFlavor {
             runtime_home_suffix: self.runtime_home_suffix(),
             codex_target_home_suffix: self.codex_target_home_suffix(),
             codex_target_owner,
-            codex_takeover_required: codex_target_owner.is_some_and(|owner| owner != self.routing_owner()),
+            codex_takeover_required: self.codex_takeover_required(codex_target_owner),
         }
     }
 
@@ -116,6 +116,15 @@ impl RuntimeFlavor {
 
     pub fn codex_target_home_suffix(self) -> &'static str {
         ".codex"
+    }
+
+    pub fn codex_takeover_required(self, target_owner: Option<RoutingOwner>) -> bool {
+        match self {
+            Self::Beta => target_owner != Some(RoutingOwner::Beta),
+            Self::Stable => target_owner.is_some_and(|owner| {
+                owner != RoutingOwner::Official && owner != RoutingOwner::Release
+            }),
+        }
     }
 
     pub fn autostart_task_name(self) -> &'static str {
@@ -182,5 +191,14 @@ mod tests {
         assert_eq!(flavor.runtime_home_suffix(), ".codexhub-beta");
         assert_eq!(flavor.codex_target_home_suffix(), ".codex");
         assert_ne!(flavor.runtime_home_suffix(), flavor.codex_target_home_suffix());
+    }
+
+    #[test]
+    fn beta_frontend_takeover_state_includes_unowned_and_official_targets() {
+        assert!(RuntimeFlavor::Beta.codex_takeover_required(None));
+        assert!(RuntimeFlavor::Beta.codex_takeover_required(Some(RoutingOwner::Official)));
+        assert!(!RuntimeFlavor::Beta.codex_takeover_required(Some(RoutingOwner::Beta)));
+        assert!(!RuntimeFlavor::Stable.codex_takeover_required(None));
+        assert!(!RuntimeFlavor::Stable.codex_takeover_required(Some(RoutingOwner::Official)));
     }
 }

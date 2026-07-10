@@ -293,6 +293,16 @@ def build_overlay(catalog_value: str, owner: str) -> str:
     )
 
 
+def overlay_owner(text: str) -> str | None:
+    match = re.search(r"(?m)^\s*# owner = (release|beta)\s*$", text)
+    return match.group(1) if match else None
+
+
+def read_text_preserving_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
 def build_provider_section(base_url: str, gateway_key: str) -> str:
     return "\n".join(
         [
@@ -328,15 +338,17 @@ def apply_overlay(
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
-    original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    original = read_text_preserving_newlines(config_path) if config_path.exists() else ""
     custom_section = section_key_values(original, f"model_providers.{PROXY_PROVIDER_ID}")
     if custom_section is not None and not (
         custom_section == unified_official_provider_values() or is_managed_gateway_provider(custom_section)
     ):
         raise ValueError("refusing to overwrite unknown custom provider")
     cleaned = strip_marked_overlay(original)
-    backup = original if takeover else (cleaned if cleaned != original else original)
-    atomic_write_text(backup_path, backup, encoding="utf-8")
+    active_owner = overlay_owner(original)
+    if active_owner != owner or not backup_path.exists():
+        backup = original if takeover else (cleaned if cleaned != original else original)
+        atomic_write_text(backup_path, backup, encoding="utf-8")
 
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
@@ -349,7 +361,7 @@ def apply_overlay(
 
 def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
     if backup_path.exists():
-        restored = backup_path.read_text(encoding="utf-8")
+        restored = read_text_preserving_newlines(backup_path)
         restore_from_backup = True
     elif config_path.exists():
         restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
