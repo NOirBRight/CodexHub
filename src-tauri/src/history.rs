@@ -1,4 +1,4 @@
-use crate::config::{self, CommandRunner, ConfigPaths, ProcessCommandRunner};
+use crate::config::{self, CommandRunner, ConfigPaths};
 use crate::safe_file;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -13,6 +13,44 @@ const GRACEFUL_CLOSE_TIMEOUT_SECONDS: u64 = 10;
 const HISTORY_OPERATION_TIMEOUT: Duration = Duration::from_secs(29);
 const HISTORY_ROLLBACK_RESERVE: Duration = Duration::from_secs(5);
 static HISTORY_REPAIR_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+trait HistoryClock {
+    fn now(&self) -> Instant;
+}
+
+struct SystemHistoryClock;
+
+impl HistoryClock for SystemHistoryClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+struct HistoryOperationBudget<'a> {
+    clock: &'a dyn HistoryClock,
+    deadline: Instant,
+    work_deadline: Instant,
+}
+
+impl<'a> HistoryOperationBudget<'a> {
+    fn new(clock: &'a dyn HistoryClock) -> Self {
+        let started = clock.now();
+        let deadline = started + HISTORY_OPERATION_TIMEOUT;
+        Self {
+            clock,
+            deadline,
+            work_deadline: deadline
+                .checked_sub(HISTORY_ROLLBACK_RESERVE)
+                .unwrap_or(deadline),
+        }
+    }
+
+    fn close_timeout(&self) -> Duration {
+        self.work_deadline
+            .saturating_duration_since(self.clock.now())
+            .min(Duration::from_secs(GRACEFUL_CLOSE_TIMEOUT_SECONDS))
+    }
+}
 
 #[derive(Debug)]
 struct HistoryRepairGuard<'a> {
@@ -103,9 +141,9 @@ struct HistoryDeadlineRunner {
 }
 
 impl HistoryDeadlineRunner {
-    fn new() -> Self {
+    fn with_deadline(operation_deadline: Instant) -> Self {
         Self {
-            operation_deadline: Instant::now() + HISTORY_OPERATION_TIMEOUT,
+            operation_deadline,
         }
     }
 
@@ -214,6 +252,12 @@ impl UnifiedHistoryResult {
         result.error = Some(error);
         result
     }
+
+    fn process_timeout(error: String) -> Self {
+        let mut result = Self::pending(UnifiedHistoryStatus::Conflict, "process_timeout");
+        result.error = Some(error);
+        result
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,9 +286,13 @@ enum InspectionStatus {
 }
 
 trait CodexAppController {
-    fn is_running(&self) -> Result<bool, String>;
-    fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String>;
-    fn launch(&self) -> Result<(), String>;
+    fn is_running(&self, deadline: Instant) -> Result<bool, String>;
+    fn close_gracefully(
+        &self,
+        timeout: Duration,
+        deadline: Instant,
+    ) -> Result<CloseOutcome, String>;
+    fn launch(&self, deadline: Instant) -> Result<(), String>;
 }
 
 struct SystemCodexAppController;
@@ -414,12 +462,14 @@ pub fn preflight_unified_history(
         Ok(guard) => guard,
         Err(result) => return Ok(result),
     };
+    let clock = SystemHistoryClock;
+    let budget = HistoryOperationBudget::new(&clock);
     let settings = config::get_settings()?;
     let paths = ConfigPaths::runtime()?;
     let python = config::find_python();
-    let runner = HistoryDeadlineRunner::new();
+    let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
     let controller = SystemCodexAppController;
-    preflight_unified_history_with_paths(
+    preflight_unified_history_with_budget(
         PreflightRequest {
             target: match target_unified {
                 Some(unified) => {
@@ -435,6 +485,7 @@ pub fn preflight_unified_history(
         &python,
         &runner,
         &controller,
+        &budget,
     )
 }
 
@@ -444,6 +495,26 @@ fn preflight_unified_history_with_paths(
     python: &Path,
     runner: &dyn CommandRunner,
     controller: &dyn CodexAppController,
+) -> Result<UnifiedHistoryResult, String> {
+    let clock = SystemHistoryClock;
+    let budget = HistoryOperationBudget::new(&clock);
+    preflight_unified_history_with_budget(
+        request,
+        paths,
+        python,
+        runner,
+        controller,
+        &budget,
+    )
+}
+
+fn preflight_unified_history_with_budget(
+    request: PreflightRequest,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+    controller: &dyn CodexAppController,
+    budget: &HistoryOperationBudget<'_>,
 ) -> Result<UnifiedHistoryResult, String> {
     let target = request.target.bucket();
     let startup_separated = matches!(
@@ -520,14 +591,29 @@ fn preflight_unified_history_with_paths(
         ));
     }
 
-    let was_running = controller.is_running()?;
+    let was_running = match controller.is_running(budget.work_deadline) {
+        Ok(running) => running,
+        Err(error) if error.contains("history_operation_timeout") => {
+            return Ok(UnifiedHistoryResult::process_timeout(error));
+        }
+        Err(error) => return Err(error),
+    };
     if !request.request_restart {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
             if was_running { "codex_running" } else { "repair_required" },
         ));
     }
-    let close_outcome = controller.close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)?;
+    let close_outcome = match controller.close_gracefully(
+        budget.close_timeout(),
+        budget.work_deadline,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) if error.contains("history_operation_timeout") => {
+            return Ok(UnifiedHistoryResult::process_timeout(error));
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(reason) = close_outcome.restart_reason() {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
@@ -561,7 +647,7 @@ fn preflight_unified_history_with_paths(
         Err(error) => {
             let mut result = UnifiedHistoryResult::failed(error, &backup_root);
             if was_running {
-                match controller.launch() {
+                match controller.launch(budget.work_deadline) {
                     Ok(()) => result.codex_restarted = true,
                     Err(launch_error) => {
                         result.error = Some(format!(
@@ -576,7 +662,7 @@ fn preflight_unified_history_with_paths(
     };
 
     if was_running || result.status == UnifiedHistoryStatus::Repaired {
-        if let Err(launch_error) = controller.launch() {
+        if let Err(launch_error) = controller.launch(budget.work_deadline) {
             let receipt_path = result.receipt_path.as_ref().map(PathBuf::from);
             let rollback_error = rollback_applied_repair(
                 AppliedRepairRollback {
@@ -880,8 +966,8 @@ fn parse_key_value_output(output: &str) -> std::collections::HashMap<String, usi
 
 #[cfg(target_os = "windows")]
 impl CodexAppController for SystemCodexAppController {
-    fn is_running(&self) -> Result<bool, String> {
-        let output = run_powershell(&windows_codex_discovery_script())?;
+    fn is_running(&self, deadline: Instant) -> Result<bool, String> {
+        let output = run_powershell_until(&windows_codex_discovery_script(), deadline)?;
         if output.code != Some(0) {
             return Err(format!(
                 "failed to discover Codex App processes: {}",
@@ -898,9 +984,13 @@ impl CodexAppController for SystemCodexAppController {
             .is_empty())
     }
 
-    fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String> {
-        let script = windows_codex_close_script(timeout_seconds);
-        let output = run_powershell(&script)?;
+    fn close_gracefully(
+        &self,
+        timeout: Duration,
+        deadline: Instant,
+    ) -> Result<CloseOutcome, String> {
+        let script = windows_codex_close_script(timeout);
+        let output = run_powershell_until(&script, deadline)?;
         match output.code {
             Some(0) => Ok(CloseOutcome::Released),
             Some(2) => Ok(CloseOutcome::CloseTimedOut),
@@ -910,9 +1000,9 @@ impl CodexAppController for SystemCodexAppController {
         }
     }
 
-    fn launch(&self) -> Result<(), String> {
+    fn launch(&self, deadline: Instant) -> Result<(), String> {
         let script = "$ErrorActionPreference='Stop'; $app=Get-StartApps | Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } | Select-Object -First 1; if (-not $app) { throw 'Codex App is not installed.' }; Start-Process ('shell:AppsFolder\\' + $app.AppID)";
-        let output = run_powershell(script)?;
+        let output = run_powershell_until(script, deadline)?;
         if output.code == Some(0) {
             Ok(())
         } else {
@@ -930,16 +1020,19 @@ fn windows_codex_discovery_script() -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_codex_close_script(timeout_seconds: u64) -> String {
+fn windows_codex_close_script(timeout: Duration) -> String {
+    let timeout_millis = timeout.as_millis().min(u64::MAX as u128) as u64;
     format!(
-        "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; $root=if ($package) {{ $package.InstallLocation.TrimEnd('\\') }} else {{ $null }}; $codex=Join-Path $env:USERPROFILE '.codex'; function Relevant {{ if (-not $root) {{ return @() }}; @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; function Locked {{ if (-not (Test-Path -LiteralPath $codex)) {{ return $false }}; $files=@(Get-ChildItem -LiteralPath $codex -File -Recurse -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq 'config.toml' -or $_.Name -like 'state*.sqlite*' -or $_.Extension -eq '.jsonl' }}); foreach ($file in $files) {{ try {{ $stream=[System.IO.File]::Open($file.FullName,'Open','Read','None'); $stream.Dispose() }} catch {{ return $true }} }}; return $false }}; $relevant=@(Relevant); if ($relevant) {{ $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }} }}; $deadline=(Get-Date).AddSeconds({timeout_seconds}); do {{ $relevant=@(Relevant); $locked=Locked; if (-not $relevant -and -not $locked) {{ exit 0 }}; Start-Sleep -Milliseconds 200 }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} elseif ($relevant) {{ exit 3 }} else {{ exit 4 }}"
+        "$ErrorActionPreference='Stop'; $package=Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; $root=if ($package) {{ $package.InstallLocation.TrimEnd('\\') }} else {{ $null }}; $codex=Join-Path $env:USERPROFILE '.codex'; function Relevant {{ if (-not $root) {{ return @() }}; @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\',[System.StringComparison]::OrdinalIgnoreCase)) }}) }}; function Locked {{ if (-not (Test-Path -LiteralPath $codex)) {{ return $false }}; $files=@(Get-ChildItem -LiteralPath $codex -File -Recurse -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq 'config.toml' -or $_.Name -like 'state*.sqlite*' -or $_.Extension -eq '.jsonl' }}); foreach ($file in $files) {{ try {{ $stream=[System.IO.File]::Open($file.FullName,'Open','Read','None'); $stream.Dispose() }} catch {{ return $true }} }}; return $false }}; $relevant=@(Relevant); if ($relevant) {{ $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if (-not $visible) {{ exit 3 }}; $visible | ForEach-Object {{ [void]$_.CloseMainWindow() }} }}; $deadline=(Get-Date).AddMilliseconds({timeout_millis}); do {{ $relevant=@(Relevant); $locked=Locked; if (-not $relevant -and -not $locked) {{ exit 0 }}; Start-Sleep -Milliseconds 200 }} while ((Get-Date) -lt $deadline); $visible=@($relevant | ForEach-Object {{ Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }} | Where-Object {{ $_.MainWindowHandle -ne 0 }}); if ($visible) {{ exit 2 }} elseif ($relevant) {{ exit 3 }} else {{ exit 4 }}"
     )
 }
 
 #[cfg(target_os = "windows")]
-fn run_powershell(script: &str) -> Result<config::CommandOutcome, String> {
-    let runner = ProcessCommandRunner;
-    runner.run(
+fn run_powershell_until(
+    script: &str,
+    deadline: Instant,
+) -> Result<config::CommandOutcome, String> {
+    DeadlineCommandRunner.run_until(
         Path::new("powershell"),
         &[
             "-NoProfile".to_string(),
@@ -948,18 +1041,23 @@ fn run_powershell(script: &str) -> Result<config::CommandOutcome, String> {
             "-Command".to_string(),
             script.to_string(),
         ],
+        deadline,
     )
 }
 
 #[cfg(not(target_os = "windows"))]
 impl CodexAppController for SystemCodexAppController {
-    fn is_running(&self) -> Result<bool, String> {
+    fn is_running(&self, _deadline: Instant) -> Result<bool, String> {
         Ok(false)
     }
-    fn close_gracefully(&self, _timeout_seconds: u64) -> Result<CloseOutcome, String> {
+    fn close_gracefully(
+        &self,
+        _timeout: Duration,
+        _deadline: Instant,
+    ) -> Result<CloseOutcome, String> {
         Ok(CloseOutcome::Released)
     }
-    fn launch(&self) -> Result<(), String> {
+    fn launch(&self, _deadline: Instant) -> Result<(), String> {
         Err("Codex App restart is supported on Windows only".to_string())
     }
 }
@@ -979,17 +1077,20 @@ pub fn reconcile_after_route_switch(
         Ok(guard) => guard,
         Err(result) => return Ok(result),
     };
+    let clock = SystemHistoryClock;
+    let budget = HistoryOperationBudget::new(&clock);
     let target_unified = target_unified_from_provider(target_provider)?;
     let paths = ConfigPaths::runtime()?;
     let python = config::find_python();
-    let runner = HistoryDeadlineRunner::new();
+    let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
     let controller = SystemCodexAppController;
-    reconcile_after_route_switch_with_paths(
+    reconcile_after_route_switch_with_budget(
         HistoryBucketTarget::from_unified(target_unified),
         &paths,
         &python,
         &runner,
         &controller,
+        &budget,
     )
 }
 
@@ -1010,7 +1111,20 @@ fn reconcile_after_route_switch_with_paths(
     runner: &dyn CommandRunner,
     controller: &dyn CodexAppController,
 ) -> Result<UnifiedHistoryResult, String> {
-    let mut result = preflight_unified_history_with_paths(
+    let clock = SystemHistoryClock;
+    let budget = HistoryOperationBudget::new(&clock);
+    reconcile_after_route_switch_with_budget(target, paths, python, runner, controller, &budget)
+}
+
+fn reconcile_after_route_switch_with_budget(
+    target: HistoryBucketTarget,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+    controller: &dyn CodexAppController,
+    budget: &HistoryOperationBudget<'_>,
+) -> Result<UnifiedHistoryResult, String> {
+    let mut result = preflight_unified_history_with_budget(
         PreflightRequest {
             target: PreflightTarget::Explicit(target),
             request_restart: true,
@@ -1019,20 +1133,43 @@ fn reconcile_after_route_switch_with_paths(
         python,
         runner,
         controller,
+        budget,
     )?;
-    if result.status != UnifiedHistoryStatus::Clean || !controller.is_running()? {
+    if result.status != UnifiedHistoryStatus::Clean {
         return Ok(result);
     }
-    if let Some(reason) = controller
-        .close_gracefully(GRACEFUL_CLOSE_TIMEOUT_SECONDS)?
-        .restart_reason()
-    {
+    let running = match controller.is_running(budget.work_deadline) {
+        Ok(running) => running,
+        Err(error) if error.contains("history_operation_timeout") => {
+            return Ok(UnifiedHistoryResult::process_timeout(error));
+        }
+        Err(error) => return Err(error),
+    };
+    if !running {
+        return Ok(result);
+    }
+    let close_outcome = match controller.close_gracefully(
+        budget.close_timeout(),
+        budget.work_deadline,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) if error.contains("history_operation_timeout") => {
+            return Ok(UnifiedHistoryResult::process_timeout(error));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(reason) = close_outcome.restart_reason() {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::RestartRequired,
             reason,
         ));
     }
-    controller.launch()?;
+    if let Err(error) = controller.launch(budget.work_deadline) {
+        if error.contains("history_operation_timeout") {
+            return Ok(UnifiedHistoryResult::process_timeout(error));
+        }
+        return Err(error);
+    }
     result.codex_restarted = true;
     Ok(result)
 }
@@ -1220,6 +1357,7 @@ mod tests {
     use super::{
         classify_codex_processes, CloseOutcome, CodexProcessSnapshot,
         acquire_history_repair, finalize_relaunch_failure, DeadlineCommandRunner,
+        preflight_unified_history_with_budget, HistoryClock, HistoryOperationBudget,
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
         reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
         sync_history_with_paths, CodexAppController, HistoryBucketTarget, PreflightRequest,
@@ -1233,6 +1371,175 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
+
+    struct ManualClock {
+        now: Cell<Instant>,
+    }
+
+    impl ManualClock {
+        fn new(now: Instant) -> Self {
+            Self { now: Cell::new(now) }
+        }
+
+        fn advance(&self, duration: Duration) {
+            self.now.set(self.now.get() + duration);
+        }
+    }
+
+    impl HistoryClock for ManualClock {
+        fn now(&self) -> Instant {
+            self.now.get()
+        }
+    }
+
+    struct AdvancingRunner<'a> {
+        clock: &'a ManualClock,
+        commands: RefCell<Vec<RecordedCommand>>,
+        outcomes: RefCell<VecDeque<(Duration, CommandOutcome)>>,
+    }
+
+    impl CommandRunner for AdvancingRunner<'_> {
+        fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
+            self.commands.borrow_mut().push(RecordedCommand {
+                program: program.to_path_buf(),
+                args: args.to_vec(),
+            });
+            let (duration, outcome) = self
+                .outcomes
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| "unexpected command".to_string())?;
+            self.clock.advance(duration);
+            Ok(outcome)
+        }
+    }
+
+    struct BudgetRecordingController {
+        running: bool,
+        close_outcome: CloseOutcome,
+        launch_error: Option<String>,
+        close_budget: Cell<Option<Duration>>,
+        launch_deadline: Cell<Option<Instant>>,
+    }
+
+    impl CodexAppController for BudgetRecordingController {
+        fn is_running(&self, _deadline: Instant) -> Result<bool, String> {
+            Ok(self.running)
+        }
+
+        fn close_gracefully(
+            &self,
+            timeout: Duration,
+            _deadline: Instant,
+        ) -> Result<CloseOutcome, String> {
+            self.close_budget.set(Some(timeout));
+            Ok(self.close_outcome)
+        }
+
+        fn launch(&self, deadline: Instant) -> Result<(), String> {
+            self.launch_deadline.set(Some(deadline));
+            match &self.launch_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn inspections_reduce_the_graceful_close_budget() {
+        let started = Instant::now();
+        let clock = ManualClock::new(started);
+        let budget = HistoryOperationBudget::new(&clock);
+        let root = temp_root("inspection-close-budget");
+        let paths = test_paths(&root);
+        let runner = AdvancingRunner {
+            clock: &clock,
+            commands: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(VecDeque::from([
+                (Duration::from_secs(10), successful_outcome(r#"{"status":"needs_repair"}"#)),
+                (
+                    Duration::from_secs(10),
+                    successful_outcome(r#"{"status":"needs_repair","dirty_state_rows":1}"#),
+                ),
+            ])),
+        };
+        let controller = BudgetRecordingController {
+            running: true,
+            close_outcome: CloseOutcome::CloseTimedOut,
+            launch_error: None,
+            close_budget: Cell::new(None),
+            launch_deadline: Cell::new(None),
+        };
+
+        let result = preflight_unified_history_with_budget(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+            &budget,
+        )
+        .expect("bounded close result");
+
+        assert_eq!(result.reason.as_deref(), Some("graceful_close_failed"));
+        assert_eq!(controller.close_budget.get(), Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn launch_uses_work_deadline_and_rollback_uses_reserved_budget() {
+        let started = Instant::now();
+        let clock = ManualClock::new(started);
+        let budget = HistoryOperationBudget::new(&clock);
+        let root = temp_root("launch-budget");
+        let paths = test_paths(&root);
+        let runner = AdvancingRunner {
+            clock: &clock,
+            commands: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(VecDeque::from([
+                (Duration::ZERO, successful_outcome(r#"{"status":"clean"}"#)),
+                (
+                    Duration::ZERO,
+                    successful_outcome(r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_state_files":1}"#),
+                ),
+                (
+                    Duration::from_secs(23),
+                    successful_outcome("status=completed\nstate_rows=1\n"),
+                ),
+                (
+                    Duration::from_secs(1),
+                    successful_outcome("restored_state_backups=1\n"),
+                ),
+            ])),
+        };
+        let controller = BudgetRecordingController {
+            running: false,
+            close_outcome: CloseOutcome::Released,
+            launch_error: Some("history_operation_timeout: launch".to_string()),
+            close_budget: Cell::new(None),
+            launch_deadline: Cell::new(None),
+        };
+
+        let result = preflight_unified_history_with_budget(
+            PreflightRequest {
+                target: PreflightTarget::Explicit(HistoryBucketTarget::Unified),
+                request_restart: true,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+            &budget,
+        )
+        .expect("bounded launch result");
+
+        assert_eq!(result.reason.as_deref(), Some("relaunch_failed"));
+        assert_eq!(controller.launch_deadline.get(), Some(started + Duration::from_secs(24)));
+        assert!(clock.now() <= started + Duration::from_secs(29));
+        assert_contains_sequence(&runner.commands.borrow()[3].args, &["rollback-repair"]);
+    }
 
     #[test]
     fn history_repair_gate_allows_only_one_mutation_at_a_time() {
@@ -1399,6 +1706,29 @@ mod tests {
         assert_eq!(controller.close_calls.get(), 1);
         assert_eq!(controller.launch_calls.get(), 1);
         assert_eq!(runner.commands.borrow().len(), 2);
+    }
+
+    #[test]
+    fn route_switch_process_timeout_returns_typed_result() {
+        let root = temp_root("route-switch-process-timeout");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"clean"}"#,
+            r#"{"status":"clean","dirty_state_rows":0,"dirty_jsonl_files":0}"#,
+        ]);
+        let controller = ProcessTimeoutController;
+
+        let result = reconcile_after_route_switch_with_paths(
+            HistoryBucketTarget::Unified,
+            &paths,
+            Path::new("python-test"),
+            &runner,
+            &controller,
+        )
+        .expect("typed process timeout");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Conflict);
+        assert_eq!(result.reason.as_deref(), Some("process_timeout"));
     }
 
     #[test]
@@ -2096,6 +2426,26 @@ mod tests {
         launch_error: Option<String>,
     }
 
+    struct ProcessTimeoutController;
+
+    impl CodexAppController for ProcessTimeoutController {
+        fn is_running(&self, _deadline: Instant) -> Result<bool, String> {
+            Err("history_operation_timeout: process discovery".to_string())
+        }
+
+        fn close_gracefully(
+            &self,
+            _timeout: Duration,
+            _deadline: Instant,
+        ) -> Result<CloseOutcome, String> {
+            unreachable!()
+        }
+
+        fn launch(&self, _deadline: Instant) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+
     impl RecordingCodexController {
         fn running() -> Self {
             Self::running_with_close_result(true)
@@ -2137,17 +2487,21 @@ mod tests {
     }
 
     impl CodexAppController for RecordingCodexController {
-        fn is_running(&self) -> Result<bool, String> {
+        fn is_running(&self, _deadline: Instant) -> Result<bool, String> {
             Ok(self.running)
         }
 
-        fn close_gracefully(&self, timeout_seconds: u64) -> Result<CloseOutcome, String> {
-            assert_eq!(timeout_seconds, GRACEFUL_CLOSE_TIMEOUT_SECONDS);
+        fn close_gracefully(
+            &self,
+            timeout: Duration,
+            _deadline: Instant,
+        ) -> Result<CloseOutcome, String> {
+            assert!(timeout <= Duration::from_secs(GRACEFUL_CLOSE_TIMEOUT_SECONDS));
             self.close_calls.set(self.close_calls.get() + 1);
             Ok(self.close_outcome)
         }
 
-        fn launch(&self) -> Result<(), String> {
+        fn launch(&self, _deadline: Instant) -> Result<(), String> {
             self.launch_calls.set(self.launch_calls.get() + 1);
             match &self.launch_error {
                 Some(error) => Err(error.clone()),
