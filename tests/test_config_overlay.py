@@ -270,7 +270,7 @@ class ConfigOverlayTests(unittest.TestCase):
                 owner="beta",
                 takeover=True,
             )
-            restore_overlay(config, backup, unified_history=False)
+            restore_overlay(config, backup, unified_history=True)
 
             self.assertEqual(config.read_text(encoding="utf-8"), previous)
 
@@ -285,7 +285,7 @@ class ConfigOverlayTests(unittest.TestCase):
 
             apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta", takeover=True)
             apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta")
-            restore_overlay(config, backup, unified_history=False)
+            restore_overlay(config, backup, unified_history=True)
 
             self.assertEqual(config.read_bytes(), original)
             self.assertFalse(backup.exists())
@@ -306,7 +306,7 @@ class ConfigOverlayTests(unittest.TestCase):
 
             apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta", takeover=True)
             apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta")
-            restore_overlay(config, backup, unified_history=False)
+            restore_overlay(config, backup, unified_history=True)
 
             self.assertEqual(config.read_bytes(), original)
             self.assertFalse(backup.exists())
@@ -333,7 +333,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("# owner = release", text)
             self.assertNotIn("# BEGIN CODEX PROXY SESSION CONFIG", text)
 
-    def test_restore_overlay_can_inject_unified_official_history_bucket(self):
+    def test_restore_overlay_preserves_backup_exactly_before_history_reconciliation(self):
         original = "\n".join(
             [
                 'model = "gpt-5.5"',
@@ -354,16 +354,9 @@ class ConfigOverlayTests(unittest.TestCase):
             status = restore_overlay(config_path, backup_path, unified_history=True)
             updated = config_path.read_text(encoding="utf-8")
 
-            self.assertEqual(status, "injected")
+            self.assertEqual(status, "restored_backup")
             self.assertFalse(backup_path.exists())
-            self.assertIn('model_provider = "custom"', updated)
-            self.assertIn("[model_providers.custom]", updated)
-            self.assertIn('name = "OpenAI"', updated)
-            self.assertIn("requires_openai_auth = true", updated)
-            self.assertIn("supports_websockets = true", updated)
-            self.assertIn('wire_api = "responses"', updated)
-            self.assertIn('model_reasoning_effort = "high"', updated)
-            self.assertIn("[features]", updated)
+            self.assertEqual(updated, original)
 
     def test_restore_overlay_keeps_backup_when_config_write_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -362,13 +362,13 @@ def apply_overlay(
 def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
     if backup_path.exists():
         restored = read_text_preserving_newlines(backup_path)
-        restore_from_backup = True
+        atomic_write_text(config_path, restored, encoding="utf-8")
+        backup_path.unlink()
+        return "restored_backup"
     elif config_path.exists():
         restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
-        restore_from_backup = False
     else:
         restored = ""
-        restore_from_backup = False
 
     if unified_history:
         restored, status = inject_unified_history_config(restored)
@@ -378,8 +378,6 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
 
     if restored or config_path.exists() or unified_history:
         atomic_write_text(config_path, restored, encoding="utf-8")
-    if restore_from_backup:
-        backup_path.unlink()
     return status
 
 

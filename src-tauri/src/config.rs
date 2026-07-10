@@ -1501,9 +1501,13 @@ sort_order = 7
     }
 
     #[test]
-    fn beta_backend_takeover_chain_restores_unowned_and_stable_bytes() {
+    fn beta_backend_takeover_chain_with_default_unified_history_restores_original_bytes() {
         for (name, original) in [
             ("unowned", b"model_reasoning_effort = \"high\"\r\n".as_slice()),
+            (
+                "official",
+                b"model_provider = \"openai\"\nmodel_reasoning_effort = \"medium\"\n".as_slice(),
+            ),
             (
                 "stable",
                 b"# BEGIN CODEX PROXY SESSION CONFIG\n# owner = release\n# END CODEX PROXY SESSION CONFIG\nmodel_reasoning_effort = \"high\"\n".as_slice(),
@@ -1521,7 +1525,6 @@ sort_order = 7
             fs::write(paths.codex_config_path(), original).unwrap();
             save_settings_with_paths(
                 Settings {
-                    unified_codex_history: false,
                     proxy_port: 9109,
                     ..Settings::default()
                 },
