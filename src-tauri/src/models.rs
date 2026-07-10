@@ -481,6 +481,7 @@ fn write_app_server_json_line(stdin: &mut impl Write, value: &Value) -> Result<(
 
 #[derive(Debug, Clone)]
 struct OfficialSubscriptionModel {
+    raw: Value,
     slug: String,
     display_name: String,
     description: Option<String>,
@@ -558,6 +559,7 @@ fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionMode
     .unwrap_or_else(|| slug.clone());
 
     Some(OfficialSubscriptionModel {
+        raw: item.clone(),
         slug,
         display_name,
         description: first_string(object, &["description"]),
@@ -663,10 +665,10 @@ fn subscription_model_display_name(
         if raw.eq_ignore_ascii_case(&subscription_model.slug)
             || raw.eq_ignore_ascii_case(&format!("openai/{}", subscription_model.slug))
         {
-            return official_display_name(default_name);
+            return official_short_display_name(default_name);
         }
     }
-    official_display_name(raw)
+    official_short_display_name(raw)
 }
 
 fn write_official_subscription_caches(
@@ -720,9 +722,12 @@ fn write_official_subscription_seed(
 }
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
-    let mut payload = serde_json::Map::new();
+    let mut payload = model.raw.as_object().cloned().unwrap_or_default();
     payload.insert("slug".to_string(), json!(model.slug));
-    payload.insert("display_name".to_string(), json!(model.display_name));
+    payload.insert(
+        "display_name".to_string(),
+        json!(official_short_display_name(&model.display_name)),
+    );
     if let Some(description) = model.description.as_ref() {
         payload.insert("description".to_string(), json!(description));
     }
@@ -813,13 +818,25 @@ fn reasoning_level_entries(value: Option<&Value>) -> Vec<ReasoningLevelEntry> {
         .collect()
 }
 
-fn official_display_name(display_name: &str) -> String {
-    let display_name = display_name.trim();
-    if display_name.starts_with("OpenAI ") {
-        display_name.to_string()
-    } else {
-        format!("OpenAI {display_name}")
+pub(crate) fn official_short_display_name(display_name: &str) -> String {
+    let mut display_name = display_name.trim();
+    if display_name
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("OpenAI "))
+    {
+        display_name = display_name.get(7..).unwrap_or_default().trim();
     }
+    if display_name
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPT-"))
+    {
+        display_name = display_name.get(4..).unwrap_or_default();
+    }
+    display_name
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn current_unix_timestamp() -> u64 {
@@ -2026,7 +2043,7 @@ mod tests {
         let models = subscription_models_to_metadata_models(&subscription_models);
 
         assert_eq!(model_ids(&models), ["gpt-5.4"]);
-        assert_eq!(models[0].display_name.as_deref(), Some("OpenAI GPT-5.4"));
+        assert_eq!(models[0].display_name.as_deref(), Some("5.4"));
         assert_eq!(models[0].upstream_model.as_deref(), Some("gpt-5.4"));
         assert!(models[0].pricing.is_some());
     }
@@ -2080,7 +2097,7 @@ mod tests {
         assert_eq!(model_ids(&models), ["gpt-subscription-live", "gpt-5.4"]);
         assert_eq!(
             models[0].display_name.as_deref(),
-            Some("OpenAI GPT Subscription Live")
+            Some("GPT Subscription Live")
         );
         assert_eq!(
             models[0].upstream_model.as_deref(),
@@ -2099,7 +2116,7 @@ mod tests {
             .iter()
             .find(|model| model.id == "gpt-5.4")
             .expect("known subscription model");
-        assert_eq!(known_model.display_name.as_deref(), Some("OpenAI GPT-5.4"));
+        assert_eq!(known_model.display_name.as_deref(), Some("5.4"));
 
         let cached_metadata =
             read_models_json(&paths.metadata_cache_path()).expect("metadata cache");
@@ -2118,6 +2135,82 @@ mod tests {
         assert_eq!(cached_model["additional_speed_tiers"], json!(["fast"]));
         assert_eq!(cached_model["service_tiers"][0]["id"], "priority");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subscription_seed_preserves_app_cli_metadata_and_simple_slider_presets() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
+                    "displayName": "GPT-5.6-Terra",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Light"}
+                    ],
+                    "defaultReasoningEffort": "low"
+                },
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "context_window": 400000,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Light"},
+                        {"reasoningEffort": "medium", "description": "Medium"},
+                        {"reasoningEffort": "high", "description": "High"},
+                        {"reasoningEffort": "xhigh", "description": "Extra High"},
+                        {"reasoningEffort": "ultra", "description": "Ultra"}
+                    ],
+                    "defaultReasoningEffort": "low",
+                    "multi_agent_version": "v2",
+                    "tool_mode": "native",
+                    "model_messages": {"upgrade": "Use Sol"},
+                    "skills_instructions": "Official skills contract",
+                    "web_search_tool_type": "text",
+                    "use_responses_lite": true,
+                    "availability": {"plan": "plus"},
+                    "upgrade": "gpt-5.7-sol",
+                    "upgradeInfo": {"message": "Upgrade available"},
+                    "comp_hash": "sol-compat-hash"
+                }
+            ]
+        }))
+        .expect("subscription models");
+        let seeds = subscription_models
+            .iter()
+            .map(super::official_subscription_seed_model)
+            .collect::<Vec<_>>();
+        let terra = &seeds[0];
+        let sol = &seeds[1];
+
+        assert_eq!(terra["display_name"], "5.6 Terra");
+        assert_eq!(sol["display_name"], "5.6 Sol");
+        assert_eq!(sol["context_window"], 400000);
+        assert_eq!(sol["multi_agent_version"], "v2");
+        assert_eq!(sol["tool_mode"], "native");
+        assert_eq!(sol["model_messages"]["upgrade"], "Use Sol");
+        assert_eq!(sol["skills_instructions"], "Official skills contract");
+        assert_eq!(sol["web_search_tool_type"], "text");
+        assert_eq!(sol["use_responses_lite"], true);
+        assert_eq!(sol["availability"]["plan"], "plus");
+        assert_eq!(sol["upgrade"], "gpt-5.7-sol");
+        assert_eq!(sol["upgradeInfo"]["message"], "Upgrade available");
+        assert_eq!(sol["comp_hash"], "sol-compat-hash");
+        let terra_efforts = terra["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["effort"].as_str())
+            .collect::<Vec<_>>();
+        let sol_efforts = sol["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(terra_efforts, ["low"]);
+        assert_eq!(sol_efforts, ["low", "medium", "high", "xhigh", "ultra"]);
     }
 
     #[test]
@@ -2151,7 +2244,7 @@ mod tests {
         assert_eq!(model_ids(&models), ["gpt-cached-subscription"]);
         assert_eq!(
             models[0].display_name.as_deref(),
-            Some("OpenAI GPT Cached Subscription")
+            Some("GPT Cached Subscription")
         );
         assert_eq!(
             models[0].upstream_model.as_deref(),

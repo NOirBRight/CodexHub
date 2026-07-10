@@ -1,5 +1,6 @@
 use crate::{runtime_paths, safe_file, AppStatus, Provider, Settings};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -176,7 +177,7 @@ struct SettingsDocument {
 }
 
 impl SettingsDocument {
-    fn into_settings(self) -> Settings {
+    fn into_settings(self, known_official_models: &HashSet<String>) -> Settings {
         let defaults = Settings::default();
         Settings {
             locale: self.locale.unwrap_or_default(),
@@ -245,11 +246,11 @@ impl SettingsDocument {
                 .unwrap_or(defaults.gateway_fast_model_variants),
             official_disabled_models: self
                 .official_disabled_models
-                .map(sanitize_model_ids)
+                .map(|values| sanitize_model_ids_with_known(values, known_official_models))
                 .unwrap_or(defaults.official_disabled_models),
             official_model_sort_order: self
                 .official_model_sort_order
-                .map(sanitize_model_ids)
+                .map(|values| sanitize_model_ids_with_known(values, known_official_models))
                 .unwrap_or(defaults.official_model_sort_order),
             official_provider_sort_order: self
                 .official_provider_sort_order
@@ -272,9 +273,18 @@ fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
 }
 
 fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
+    sanitize_model_ids_with_known(values, &static_official_model_ids())
+}
+
+fn sanitize_model_ids_with_known(
+    values: Vec<String>,
+    known_official_models: &HashSet<String>,
+) -> Vec<String> {
     let mut output = Vec::new();
     for value in values {
-        let value = normalize_official_model_id(&value);
+        let Some(value) = normalize_official_model_id(&value, known_official_models) else {
+            continue;
+        };
         if !value.is_empty() && !output.contains(&value) {
             output.push(value);
         }
@@ -282,13 +292,81 @@ fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
     output
 }
 
-fn normalize_official_model_id(value: &str) -> String {
+fn normalize_official_model_id(
+    value: &str,
+    known_official_models: &HashSet<String>,
+) -> Option<String> {
     let value = value.trim();
-    value
+    if let Some(bare) = value
         .strip_prefix("openai/")
         .filter(|bare| bare.starts_with("gpt-"))
-        .unwrap_or(value)
-        .to_string()
+    {
+        return known_official_models
+            .contains(bare)
+            .then(|| bare.to_string());
+    }
+    Some(value.to_string())
+}
+
+fn static_official_model_ids() -> HashSet<String> {
+    ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
+    let mut known = static_official_model_ids();
+    let policy_path = paths.repo_root.join("config").join("catalog_policy.toml");
+    if let Ok(text) = fs::read_to_string(policy_path) {
+        if let Ok(policy) = toml::from_str::<toml::Value>(&text) {
+            if let Some(models) = policy
+                .get("visibility")
+                .and_then(|visibility| visibility.get("official_models"))
+                .and_then(toml::Value::as_array)
+            {
+                for model in models.iter().filter_map(toml::Value::as_str) {
+                    insert_known_official_model(&mut known, model);
+                }
+            }
+        }
+    }
+
+    for path in [
+        paths
+            .codex_dir
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json"),
+        paths.generated_catalog_path(),
+        paths
+            .repo_root
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json"),
+    ] {
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(catalog) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(models) = catalog.get("models").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for model in models {
+            if let Some(slug) = model.get("slug").and_then(serde_json::Value::as_str) {
+                insert_known_official_model(&mut known, slug);
+            }
+        }
+    }
+    known
+}
+
+fn insert_known_official_model(known: &mut HashSet<String>, value: &str) {
+    let value = value.trim();
+    let bare = value.strip_prefix("openai/").unwrap_or(value);
+    if bare.starts_with("gpt-") {
+        known.insert(bare.to_string());
+    }
 }
 
 fn sanitize_locale(value: String) -> String {
@@ -299,12 +377,17 @@ fn sanitize_locale(value: String) -> String {
     }
 }
 
-fn sanitize_settings_for_save(mut settings: Settings) -> Settings {
+fn sanitize_settings_for_save(
+    mut settings: Settings,
+    known_official_models: &HashSet<String>,
+) -> Settings {
     settings.locale = sanitize_locale(settings.locale);
     settings.gateway_fast_model_variants =
         sanitize_fast_model_variants(settings.gateway_fast_model_variants);
-    settings.official_disabled_models = sanitize_model_ids(settings.official_disabled_models);
-    settings.official_model_sort_order = sanitize_model_ids(settings.official_model_sort_order);
+    settings.official_disabled_models =
+        sanitize_model_ids_with_known(settings.official_disabled_models, known_official_models);
+    settings.official_model_sort_order =
+        sanitize_model_ids_with_known(settings.official_model_sort_order, known_official_models);
     settings
 }
 
@@ -359,11 +442,11 @@ fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, String> {
     let document: SettingsDocument = serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse settings JSON {}: {error}", path.display()))?;
 
-    Ok(document.into_settings())
+    Ok(document.into_settings(&known_official_model_ids(paths)))
 }
 
 fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<Settings, String> {
-    let settings = sanitize_settings_for_save(settings);
+    let settings = sanitize_settings_for_save(settings, &known_official_model_ids(paths));
     let path = paths.settings_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -852,6 +935,76 @@ sort_order = 7
         assert_eq!(saved.official_model_sort_order, vec!["gpt-5.5".to_string()]);
         let written = fs::read_to_string(paths.settings_path()).expect("normalized settings text");
         assert!(!written.contains("openai/gpt-"));
+    }
+
+    #[test]
+    fn shared_model_identity_vectors_reject_only_unknown_official_aliases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/model_identity_vectors.json"
+        ))
+        .expect("identity fixture");
+        let inputs = fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|vector| vector["input"].as_str().unwrap().to_string())
+            .collect();
+        let mut expected = Vec::<String>::new();
+        for value in fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|vector| vector["expected"].as_str())
+        {
+            if !expected.iter().any(|existing| existing == value) {
+                expected.push(value.to_string());
+            }
+        }
+
+        assert_eq!(super::sanitize_model_ids(inputs), expected);
+    }
+
+    #[test]
+    fn settings_accept_current_catalog_alias_and_reject_unknown_official_alias() {
+        let root = temp_root("current-official-alias");
+        let paths = test_paths(&root);
+        let catalog_path = root
+            .join("codex-home")
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol"}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "official_disabled_models": [
+                "openai/gpt-5.6-sol",
+                "openai/gpt-9.9-unknown",
+                "acme/gpt-5.6-sol"
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert_eq!(
+            loaded.official_disabled_models,
+            vec!["gpt-5.6-sol".to_string(), "acme/gpt-5.6-sol".to_string()]
+        );
+        let saved = save_settings_with_paths(loaded, &paths).expect("settings save");
+        assert_eq!(
+            saved.official_disabled_models,
+            vec!["gpt-5.6-sol".to_string(), "acme/gpt-5.6-sol".to_string()]
+        );
+        let written = fs::read_to_string(paths.settings_path()).unwrap();
+        assert!(!written.contains("openai/gpt-"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

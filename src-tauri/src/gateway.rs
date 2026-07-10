@@ -24,15 +24,15 @@ const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_MODEL: &str = "gpt-5.5";
 
 const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
-    ("gpt-5.5", "OpenAI GPT-5.5", 258400),
-    ("gpt-5.4", "OpenAI GPT-5.4", 272000),
-    ("gpt-5.4-mini", "OpenAI GPT-5.4-Mini", 272000),
-    ("gpt-5.3-codex-spark", "OpenAI GPT-5.3-Codex-Spark", 128000),
+    ("gpt-5.5", "5.5", 258400),
+    ("gpt-5.4", "5.4", 272000),
+    ("gpt-5.4-mini", "5.4 Mini", 272000),
+    ("gpt-5.3-codex-spark", "5.3 Codex Spark", 128000),
 ];
 
 const OFFICIAL_FAST_VARIANTS: &[(&str, &str, &str, u32)] = &[
-    ("gpt-5.5", "gpt-5.5-fast", "OpenAI GPT-5.5 Fast", 258400),
-    ("gpt-5.4", "gpt-5.4-fast", "OpenAI GPT-5.4 Fast", 272000),
+    ("gpt-5.5", "gpt-5.5-fast", "5.5 Fast", 258400),
+    ("gpt-5.4", "gpt-5.4-fast", "5.4 Fast", 272000),
 ];
 
 const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
@@ -1557,10 +1557,35 @@ fn official_models_from_metadata(
 ) -> Vec<GatewayModel> {
     let mut models: Vec<GatewayModel> =
         match subscription_models.filter(|models| !models.is_empty()) {
-            Some(models) => models
-                .into_iter()
-                .filter_map(|model| official_gateway_model_from_metadata(settings, model))
-                .collect(),
+            Some(source_models) => {
+                let mut models = Vec::<GatewayModel>::new();
+                let mut positions = HashMap::<String, usize>::new();
+                let mut bare_sources = HashMap::<String, bool>::new();
+                for model in source_models {
+                    let source_is_bare = !model.id.trim().starts_with("openai/");
+                    let Some(gateway_model) = official_gateway_model_from_metadata(settings, model)
+                    else {
+                        continue;
+                    };
+                    if let Some(position) = positions.get(&gateway_model.id).copied() {
+                        let existing_is_bare = bare_sources
+                            .get(&gateway_model.id)
+                            .copied()
+                            .unwrap_or(false);
+                        if source_is_bare || !existing_is_bare {
+                            let id = gateway_model.id.clone();
+                            models[position] = gateway_model;
+                            bare_sources.insert(id, source_is_bare);
+                        }
+                        continue;
+                    }
+                    let id = gateway_model.id.clone();
+                    positions.insert(id.clone(), models.len());
+                    bare_sources.insert(id, source_is_bare);
+                    models.push(gateway_model);
+                }
+                models
+            }
             None => fallback_official_gateway_models(settings),
         };
 
@@ -1602,7 +1627,11 @@ fn official_gateway_model_from_metadata(
     }
     Some(GatewayModel {
         id: id.clone(),
-        display_name: model.display_name.unwrap_or_else(|| id.clone()),
+        display_name: model
+            .display_name
+            .as_deref()
+            .map(models::official_short_display_name)
+            .unwrap_or_else(|| models::official_short_display_name(&id)),
         source: "Official Codex subscription".to_string(),
         source_kind: "official".to_string(),
         supports_responses: true,
@@ -6830,17 +6859,43 @@ mod tests {
         let models = official_models_from_metadata(
             &settings,
             Some(vec![Model {
-                id: "openai/gpt-5.6".to_string(),
-                display_name: Some("OpenAI GPT-5.6".to_string()),
-                context_window: Some(300_000),
+                id: "openai/gpt-5.6-sol".to_string(),
+                display_name: Some("GPT-5.6-Sol".to_string()),
+                context_window: Some(400_000),
                 ..Model::default()
             }]),
         );
 
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "gpt-5.6");
-        assert_eq!(models[0].display_name, "OpenAI GPT-5.6");
-        assert_eq!(models[0].context_window, 300_000);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert_eq!(models[0].display_name, "5.6 Sol");
+        assert_eq!(models[0].context_window, 400_000);
+    }
+
+    #[test]
+    fn official_gateway_models_dedupe_legacy_alias_with_fresh_metadata_winning() {
+        let models = official_models_from_metadata(
+            &Settings::default(),
+            Some(vec![
+                Model {
+                    id: "openai/gpt-5.6-sol".to_string(),
+                    display_name: Some("Legacy Sol".to_string()),
+                    context_window: Some(1),
+                    ..Model::default()
+                },
+                Model {
+                    id: "gpt-5.6-sol".to_string(),
+                    display_name: Some("GPT-5.6-Sol".to_string()),
+                    context_window: Some(400_000),
+                    ..Model::default()
+                },
+            ]),
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert_eq!(models[0].display_name, "5.6 Sol");
+        assert_eq!(models[0].context_window, 400_000);
     }
 
     #[test]
