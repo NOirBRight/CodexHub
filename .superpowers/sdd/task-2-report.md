@@ -55,3 +55,22 @@
 
 - Live Ollama Cloud / Codex App CLI E2E was not run because it depends on local App state and credentials. Per the brief, live E2E remains for Task 5; deterministic routing and script-contract tests passed here.
 - The report-only quality gate findings are repository-wide pre-existing observations and remain non-blocking.
+
+## Review fixes
+
+The Task 2 review identified five compatibility gaps; all were handled test-first.
+
+- RED: a third-party Responses request with string-form `reasoning: "ultra"` reached upstream with HTTP 200. GREEN: string reasoning now participates in the same third-party Ultra validation; supported string `high` and official string `ultra` remain accepted.
+- RED: configured external catalog levels `ultra` and `turbo` were exported. GREEN: external `supported_reasoning_levels` is filtered to `low`, `medium`, `high`, `xhigh`, and `max` while preserving configured order.
+- RED: smoke contract tests found no Windows command-shim launcher and accepted substring statuses such as `not-completed`. GREEN: `.cmd`/`.bat` launch through `cmd.exe /d /s /c` with escaped command/arguments, `.exe` remains direct, and parsed status must equal case-sensitive `completed`.
+- Added focused coverage showing supported third-party `high` effort remains independent of explicit `spawn_agent -> wait_agent -> close_agent` normalization.
+- Verified the shim path against the installed `codex.cmd --version`: exit 0, `codex-cli 0.142.5`.
+
+Review verification:
+
+- `pytest -q tests/test_routing.py tests/test_catalog_sync.py tests/test_smoke_scripts.py`
+  - 408 passed, 72 subtests passed.
+- PowerShell parser for `scripts/codex-tool-exposure-smoke.ps1`
+  - No parse errors.
+- `git diff --check`
+  - Passed.

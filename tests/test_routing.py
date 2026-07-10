@@ -984,6 +984,48 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "invalid_request_error")
         self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
 
+    def test_third_party_string_ultra_reasoning_effort_returns_400(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": "ultra",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp-third-party","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+
+    def test_supported_string_reasoning_effort_reaches_third_party_upstream(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": "high",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp-third-party","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 200)
+        open_upstream.assert_called_once()
+
     def test_official_ultra_reasoning_effort_still_reaches_official_upstream(self):
         body = json.dumps(
             {
@@ -1009,6 +1051,31 @@ class RoutingTests(unittest.TestCase):
         open_upstream.assert_called_once()
         forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
         self.assertEqual(forwarded["reasoning"]["effort"], "ultra")
+
+    def test_official_string_ultra_reasoning_effort_still_reaches_official_upstream(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": "ultra",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"resp-official","output":[]}'),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 200)
+        forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(forwarded["reasoning"], "ultra")
 
     def test_compressed_responses_request_extracts_model_after_decode(self):
         original = json.dumps(
@@ -12651,6 +12718,46 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(call["namespace"], "mcp__node_repl")
         self.assertEqual(call["name"], "js")
         self.assertEqual(json.loads(call["arguments"])["code"], "1+1")
+
+    def test_supported_third_party_effort_preserves_explicit_subagent_lifecycle_calls(self):
+        codex_proxy._validate_reasoning_effort_for_upstream(
+            {"reasoning": {"effort": "high"}},
+            {"name": "ollama_cloud", "auth": "api_key"},
+        )
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "return sentinel"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "name": "multi_agent_v1__wait_agent",
+                        "arguments": json.dumps({"targets": ["child-1"]}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "name": "multi_agent_v1__close_agent",
+                        "arguments": json.dumps({"target": "child-1"}),
+                    },
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(
+            body,
+            "ollama_cloud",
+            event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_NONE},
+        )
+        calls = json.loads(transformed)["output"]
+
+        self.assertEqual([call["namespace"] for call in calls], ["multi_agent_v1"] * 3)
+        self.assertEqual([call["name"] for call in calls], ["spawn_agent", "wait_agent", "close_agent"])
 
     def test_external_response_repairs_generic_trailing_argument_json(self):
         body = json.dumps(

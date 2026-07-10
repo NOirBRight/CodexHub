@@ -16,6 +16,22 @@ def test_codex_tool_smoke_prefers_app_cli_and_runs_ephemeral():
     assert "'--ephemeral'" in source
 
 
+def test_codex_tool_smoke_launches_command_shims_through_cmd_exe():
+    source = (ROOT / "scripts" / "codex-tool-exposure-smoke.ps1").read_text(encoding="utf-8-sig")
+
+    assert "function Test-CodexCommandShim" in source
+    assert "cmd.exe" in source
+    assert "@('/d', '/s', '/c')" in source
+    assert "ConvertTo-ProcessArgument $CodexCommand" in source
+
+
+def test_codex_tool_smoke_requires_exact_completed_child_status():
+    source = (ROOT / "scripts" / "codex-tool-exposure-smoke.ps1").read_text(encoding="utf-8-sig")
+
+    assert "$stateText -cne 'completed'" in source
+    assert "$stateText -notmatch '(?i)completed'" not in source
+
+
 def test_codex_tool_smoke_validates_structured_subagent_lifecycle():
     source = (ROOT / "scripts" / "codex-tool-exposure-smoke.ps1").read_text(encoding="utf-8-sig")
 

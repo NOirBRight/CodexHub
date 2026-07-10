@@ -1787,6 +1787,8 @@ def _validate_reasoning_effort_for_upstream(
     reasoning = payload.get("reasoning")
     if isinstance(reasoning, Mapping):
         requested_efforts.append(reasoning.get("effort"))
+    elif isinstance(reasoning, str):
+        requested_efforts.append(reasoning)
     is_ultra = any(
         isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
     )

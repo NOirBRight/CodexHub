@@ -49,6 +49,13 @@ function Resolve-CodexCommand {
     throw 'Codex CLI was not found in the desktop App bundle or on PATH. Use -CodexCommand to override.'
 }
 
+function Test-CodexCommandShim {
+    param([string]$CommandPath)
+
+    $extension = [System.IO.Path]::GetExtension($CommandPath)
+    return $extension -in @('.cmd', '.bat')
+}
+
 function New-SmokeCase {
     param(
         [string]$Name,
@@ -134,7 +141,7 @@ function Test-SubagentLifecycle {
         else {
             $stateValue | ConvertTo-Json -Depth 20 -Compress
         }
-        if ($stateText -notmatch '(?i)completed') {
+        if ($stateText -cne 'completed') {
             [void]$failures.Add("child $childId was not completed after wait: $stateText")
         }
     }
@@ -265,7 +272,24 @@ function Invoke-CodexSmokeCase {
         Add-ProcessArgument -StartInfo $psi -Arguments $processArgs -Argument $config
     }
     Add-ProcessArgument -StartInfo $psi -Arguments $processArgs -Argument '-'
-    if ($null -eq $psi.ArgumentList) {
+    if (Test-CodexCommandShim -CommandPath $CodexCommand) {
+        $commandLine = @(
+            (ConvertTo-ProcessArgument $CodexCommand)
+            ($processArgs | ForEach-Object { ConvertTo-ProcessArgument $_ })
+        ) -join ' '
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+        if ($null -ne $psi.ArgumentList) {
+            foreach ($shimArg in @('/d', '/s', '/c')) {
+                [void]$psi.ArgumentList.Add($shimArg)
+            }
+            [void]$psi.ArgumentList.Add($commandLine)
+        }
+        else {
+            $psi.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $commandLine)"
+        }
+    }
+    elseif ($null -eq $psi.ArgumentList) {
         $psi.Arguments = ($processArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
     }
     $psi.RedirectStandardInput = $true

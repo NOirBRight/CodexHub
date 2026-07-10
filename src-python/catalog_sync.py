@@ -713,7 +713,7 @@ def build_external_provider_model(
                 "description": REASONING_LEVEL_DESCRIPTIONS.get(str(level), f"{level} reasoning effort"),
             }
             for level in reasoning_levels
-            if str(level).strip()
+            if str(level).strip() in {"low", "medium", "high", "xhigh", "max"}
         ]
     default_reasoning_level = external_model.get("default_reasoning_level")
     if isinstance(default_reasoning_level, str) and default_reasoning_level.strip():

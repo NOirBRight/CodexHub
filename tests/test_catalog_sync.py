@@ -498,7 +498,7 @@ class CatalogSyncTests(unittest.TestCase):
                 "context_window": 1024000,
                 "max_output_tokens": 4096,
                 "input_modalities": ("text", "image"),
-                "supported_reasoning_levels": ("low", "high", "xhigh"),
+                "supported_reasoning_levels": ("high", "ultra", "low", "turbo", "max", "xhigh"),
                 "default_reasoning_level": "high",
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
@@ -533,7 +533,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["volc/glm-5.2"]["default_reasoning_level"], "high")
         self.assertEqual(
             [item["effort"] for item in by_slug["volc/glm-5.2"]["supported_reasoning_levels"]],
-            ["low", "high", "xhigh"],
+            ["high", "low", "max", "xhigh"],
         )
         self.assertEqual(by_slug["volc/minimax-m3"]["priority"], 201)
         self.assertEqual(by_slug["volc/minimax-m3"]["input_modalities"], ["text", "image"])
