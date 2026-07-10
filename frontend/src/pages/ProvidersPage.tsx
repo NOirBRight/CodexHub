@@ -42,11 +42,17 @@ import type {
 
 const OFFICIAL_ID = "__official__";
 const ADD_ID = "__add__";
-const DEFAULT_OFFICIAL_MODEL_ORDER = [
+const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = [
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
   "gpt-5.3-codex-spark",
+];
+const DEFAULT_OFFICIAL_MODEL_ORDER = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  ...LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER,
 ];
 const OPENAI_USAGE_DAY_SECONDS = 86_400;
 const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
@@ -345,6 +351,7 @@ function ProvidersPageImpl({
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
+  const officialModelRefreshStartedRef = useRef(false);
   const [selectedId, setSelectedId] = useState<string>(OFFICIAL_ID);
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
@@ -414,6 +421,7 @@ function ProvidersPageImpl({
     if (selectedId !== OFFICIAL_ID || codexAuthState !== "authorized") {
       return;
     }
+    void primeOfficialModels();
     void primeOfficialOpenAIUsage();
     const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(true), OPENAI_USAGE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(usageRefreshTimer);
@@ -692,6 +700,14 @@ function ProvidersPageImpl({
       return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
     }
     return baseMessage ?? null;
+  }
+
+  async function primeOfficialModels() {
+    if (officialModelRefreshStartedRef.current) {
+      return;
+    }
+    officialModelRefreshStartedRef.current = true;
+    await refreshOfficialModels({ quiet: true });
   }
 
   async function primeOfficialOpenAIUsage() {
@@ -1144,24 +1160,37 @@ function ProvidersPageImpl({
     }
   }
 
-  async function refreshOfficialModels() {
-    setBusy("official-refresh");
-    const toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
+  async function refreshOfficialModels(options?: { quiet?: boolean }) {
+    const quiet = options?.quiet ?? false;
+    if (!quiet) {
+      setBusy("official-refresh");
+    }
+    const toastId = quiet
+      ? null
+      : showToast(t("providers.refreshingOfficialModels"), "loading");
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
-      const nextOrder = refreshedOfficialModelOrder(officialModelOrderDraft, refreshed);
+      const nextOrder = shouldFollowOfficialCatalogOrder(officialModelOrderDraft)
+        ? refreshed.map((model) => model.id)
+        : refreshedOfficialModelOrder(officialModelOrderDraft, refreshed);
       setOfficialModelOrderDraft(nextOrder);
       setOfficialModels(sortOfficialModels(refreshed, nextOrder));
-      const syncResult = await updateGatewayAfterCatalog(undefined, toastId);
+      if (quiet) {
+        await api.generateCatalog();
+        await refreshGatewayState();
+        setModelDiscoveryError(null);
+        return;
+      }
+      const syncResult = await updateGatewayAfterCatalog(undefined, toastId ?? undefined);
       const toastMessage = catalogSyncToastMessage(t("providers.officialModelsRefreshed"), syncResult);
       if (syncResult?.failed) {
-        updateToast(toastId, {
+        updateToast(toastId!, {
           action: null,
           text: toastMessage ?? t("providers.officialModelsRefreshedSyncFailed"),
           tone: "error",
         });
       } else {
-        updateToast(toastId, {
+        updateToast(toastId!, {
           action: null,
           text: toastMessage ?? t("providers.officialModelsRefreshed"),
           tone: "success",
@@ -1169,9 +1198,16 @@ function ProvidersPageImpl({
         setError(null);
       }
     } catch (err) {
-      updateToastWithError(toastId, err);
+      if (quiet) {
+        officialModelRefreshStartedRef.current = false;
+        setModelDiscoveryError(messageFromError(err));
+      } else {
+        updateToastWithError(toastId!, err);
+      }
     } finally {
-      setBusy(null);
+      if (!quiet) {
+        setBusy(null);
+      }
     }
   }
 
@@ -3562,13 +3598,14 @@ function isFiveHourUsageLimit(limit: OpenAIUsageLimit) {
   return (
     /\b5\s*h(?:our)?s?\b/.test(value) ||
     /\bfive[-_\s]?h(?:our)?s?\b/.test(value) ||
-    ((value.includes("5") || value.includes("five")) && value.includes("hour"))
+    ((value.includes("5") || value.includes("five")) && value.includes("hour")) ||
+    /\bprimary\b/.test(value)
   );
 }
 
 function isWeeklyUsageLimit(limit: OpenAIUsageLimit) {
   const value = usageLimitSearchText(limit);
-  return value.includes("week") || value.includes("weekly");
+  return value.includes("week") || value.includes("weekly") || /\bsecondary\b/.test(value);
 }
 
 function usageLimitSearchText(limit: OpenAIUsageLimit) {
@@ -4003,7 +4040,9 @@ function mondayWeekdayIndex(date: Date) {
 
 function sortOfficialModels(models: Model[], sortOrder: string[]) {
   const order = new Map<string, number>();
-  const effectiveOrder = sortOrder.length ? sortOrder : DEFAULT_OFFICIAL_MODEL_ORDER;
+  const effectiveOrder = shouldFollowOfficialCatalogOrder(sortOrder)
+    ? DEFAULT_OFFICIAL_MODEL_ORDER
+    : sortOrder;
   effectiveOrder.forEach((id, index) => {
     for (const key of officialModelSortKeys(id)) {
       order.set(key, index);
@@ -4023,6 +4062,29 @@ function sortOfficialModels(models: Model[], sortOrder: string[]) {
     }
     return (left.sort_order ?? Number.MAX_SAFE_INTEGER) - (right.sort_order ?? Number.MAX_SAFE_INTEGER);
   });
+}
+
+function shouldFollowOfficialCatalogOrder(currentOrder: string[]) {
+  if (!currentOrder.length) {
+    return true;
+  }
+  const normalized = currentOrder
+    .map((id) => normalizeOfficialModelId(id))
+    .filter((id): id is string => Boolean(id));
+  let legacyIndex = 0;
+  let sawNewModel = false;
+  for (const id of normalized) {
+    const index = LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER.indexOf(id);
+    if (index < 0) {
+      sawNewModel = true;
+      continue;
+    }
+    if (sawNewModel || index !== legacyIndex) {
+      return false;
+    }
+    legacyIndex += 1;
+  }
+  return legacyIndex > 0;
 }
 
 function refreshedOfficialModelOrder(currentOrder: string[], refreshedModels: Model[]) {
