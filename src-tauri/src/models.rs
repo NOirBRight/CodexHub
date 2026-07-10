@@ -2,7 +2,7 @@ use crate::{runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, U
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -483,6 +483,7 @@ fn write_app_server_json_line(stdin: &mut impl Write, value: &Value) -> Result<(
 struct OfficialSubscriptionModel {
     raw: Value,
     slug: String,
+    legacy_prefixed: bool,
     display_name: String,
     description: Option<String>,
     context_window: Option<u32>,
@@ -493,6 +494,8 @@ struct OfficialSubscriptionModel {
     additional_speed_tiers: Vec<String>,
     service_tiers: Vec<Value>,
     is_default: bool,
+    enabled: bool,
+    enabled_present: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -522,13 +525,31 @@ fn subscription_models_from_payload(
         .ok_or_else(|| {
             "Codex subscription model list response did not contain a model array".to_string()
         })?;
-    let mut seen = HashSet::new();
+    let mut positions = HashMap::new();
     let mut output = Vec::new();
     for item in items {
-        let Some(model) = subscription_model_from_item(item) else {
+        let Some(mut model) = subscription_model_from_item(item) else {
             continue;
         };
-        if seen.insert(model.slug.clone()) {
+        if let Some(&position) = positions.get(&model.slug) {
+            let existing: &OfficialSubscriptionModel = &output[position];
+            let enabled = existing.enabled || model.enabled;
+            let enabled_present = existing.enabled_present || model.enabled_present;
+            if existing.legacy_prefixed && !model.legacy_prefixed {
+                // A bare App CLI record is the authoritative metadata shape.
+            } else if !existing.legacy_prefixed && model.legacy_prefixed {
+                model = existing.clone();
+            }
+            model.enabled = enabled;
+            model.enabled_present = enabled_present;
+            if enabled_present {
+                if let Some(raw) = model.raw.as_object_mut() {
+                    raw.insert("enabled".to_string(), json!(enabled));
+                }
+            }
+            output[position] = model;
+        } else {
+            positions.insert(model.slug.clone(), output.len());
             output.push(model);
         }
     }
@@ -561,6 +582,7 @@ fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionMode
     Some(OfficialSubscriptionModel {
         raw: item.clone(),
         slug,
+        legacy_prefixed: raw_slug.starts_with("openai/"),
         display_name,
         description: first_string(object, &["description"]),
         context_window: numeric_limit(item, &["context_window", "max_context_window"], "context"),
@@ -598,6 +620,11 @@ fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionMode
             .or_else(|| object.get("is_default"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        enabled: object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        enabled_present: object.contains_key("enabled"),
     })
 }
 
@@ -650,7 +677,7 @@ fn subscription_models_to_metadata_models(
                 confidence: "high".to_string(),
             }),
             sort_order: defaults.and_then(|model| model.sort_order),
-            enabled: true,
+            enabled: subscription_model.enabled,
         });
     }
     output
@@ -723,26 +750,40 @@ fn write_official_subscription_seed(
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
-    payload.insert("slug".to_string(), json!(model.slug));
-    payload.insert(
-        "display_name".to_string(),
-        json!(official_short_display_name(&model.display_name)),
-    );
+    payload
+        .entry("slug".to_string())
+        .or_insert_with(|| json!(model.slug));
+    payload
+        .entry("display_name".to_string())
+        .or_insert_with(|| json!(official_short_display_name(&model.display_name)));
     if let Some(description) = model.description.as_ref() {
-        payload.insert("description".to_string(), json!(description));
+        payload
+            .entry("description".to_string())
+            .or_insert_with(|| json!(description));
     }
     if let Some(context_window) = model.context_window {
-        payload.insert("context_window".to_string(), json!(context_window));
-        payload.insert("max_context_window".to_string(), json!(context_window));
+        payload
+            .entry("context_window".to_string())
+            .or_insert_with(|| json!(context_window));
+        payload
+            .entry("max_context_window".to_string())
+            .or_insert_with(|| json!(context_window));
     }
     if let Some(max_output_tokens) = model.max_output_tokens {
-        payload.insert("max_output_tokens".to_string(), json!(max_output_tokens));
+        payload
+            .entry("max_output_tokens".to_string())
+            .or_insert_with(|| json!(max_output_tokens));
     }
-    payload.insert(
-        "input_modalities".to_string(),
-        json!(model.input_modalities),
-    );
-    if !model.reasoning_levels.is_empty() {
+    if payload.contains_key("inputModalities") && !payload.contains_key("input_modalities") {
+        payload.insert(
+            "input_modalities".to_string(),
+            json!(model.input_modalities),
+        );
+    }
+    if payload.contains_key("supportedReasoningEfforts")
+        && !payload.contains_key("supported_reasoning_levels")
+        && !model.reasoning_levels.is_empty()
+    {
         payload.insert(
             "supported_reasoning_levels".to_string(),
             json!(model
@@ -759,18 +800,33 @@ fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value 
                 .collect::<Vec<_>>()),
         );
     }
-    if let Some(default_reasoning_level) = model.default_reasoning_level.as_ref() {
+    if payload.contains_key("defaultReasoningEffort")
+        && !payload.contains_key("default_reasoning_level")
+        && model.default_reasoning_level.is_some()
+    {
+        let default_reasoning_level = model.default_reasoning_level.as_ref().unwrap();
         payload.insert(
             "default_reasoning_level".to_string(),
             json!(default_reasoning_level),
         );
     }
-    payload.insert(
-        "additional_speed_tiers".to_string(),
-        json!(model.additional_speed_tiers),
-    );
-    payload.insert("service_tiers".to_string(), json!(model.service_tiers));
-    payload.insert("is_default".to_string(), json!(model.is_default));
+    if payload.contains_key("additionalSpeedTiers")
+        && !payload.contains_key("additional_speed_tiers")
+    {
+        payload.insert(
+            "additional_speed_tiers".to_string(),
+            json!(model.additional_speed_tiers),
+        );
+    }
+    if payload.contains_key("serviceTiers") && !payload.contains_key("service_tiers") {
+        payload.insert("service_tiers".to_string(), json!(model.service_tiers));
+    }
+    if payload.contains_key("isDefault") && !payload.contains_key("is_default") {
+        payload.insert("is_default".to_string(), json!(model.is_default));
+    }
+    if model.enabled_present {
+        payload.insert("enabled".to_string(), json!(model.enabled));
+    }
     Value::Object(payload)
 }
 
@@ -2214,6 +2270,96 @@ mod tests {
     }
 
     #[test]
+    fn subscription_seed_does_not_overwrite_or_default_raw_app_metadata() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "context_window": 400000,
+                    "max_context_window": 999999
+                }
+            ]
+        }))
+        .expect("subscription models");
+
+        let seed = super::official_subscription_seed_model(&subscription_models[0]);
+        let seed = seed.as_object().expect("seed object");
+
+        assert_eq!(seed.get("context_window"), Some(&json!(400000)));
+        assert_eq!(seed.get("max_context_window"), Some(&json!(999999)));
+        assert!(!seed.contains_key("input_modalities"));
+        assert!(!seed.contains_key("additional_speed_tiers"));
+        assert!(!seed.contains_key("service_tiers"));
+        assert!(!seed.contains_key("is_default"));
+    }
+
+    #[test]
+    fn subscription_duplicate_app_records_prefer_bare_metadata_and_or_enabled() {
+        let legacy = json!({
+            "id": "openai/gpt-5.6-sol",
+            "model": "openai/gpt-5.6-sol",
+            "displayName": "Legacy Sol",
+            "context_window": 1,
+            "enabled": true
+        });
+        let bare = json!({
+            "id": "gpt-5.6-sol",
+            "model": "gpt-5.6-sol",
+            "displayName": "GPT-5.6-Sol",
+            "context_window": 400000,
+            "enabled": false
+        });
+        let other = json!({
+            "id": "gpt-5.5",
+            "model": "gpt-5.5",
+            "displayName": "GPT-5.5"
+        });
+
+        for items in [
+            vec![legacy.clone(), other.clone(), bare.clone()],
+            vec![bare.clone(), other.clone(), legacy.clone()],
+        ] {
+            let subscription_models = subscription_models_from_payload(&json!({ "data": items }))
+                .expect("subscription models");
+            assert_eq!(
+                subscription_models
+                    .iter()
+                    .map(|model| model.slug.as_str())
+                    .collect::<Vec<_>>(),
+                ["gpt-5.6-sol", "gpt-5.5"]
+            );
+            let seed = super::official_subscription_seed_model(&subscription_models[0]);
+            assert_eq!(seed["display_name"], "5.6 Sol");
+            assert_eq!(seed["context_window"], 400000);
+            assert_eq!(seed["enabled"], true);
+            let metadata = subscription_models_to_metadata_models(&subscription_models);
+            assert!(metadata[0].enabled);
+        }
+
+        let all_disabled = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "openai/gpt-5.6-sol",
+                    "model": "openai/gpt-5.6-sol",
+                    "enabled": false
+                },
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "enabled": false
+                }
+            ]
+        }))
+        .expect("all-disabled subscription models");
+        let seed = super::official_subscription_seed_model(&all_disabled[0]);
+        assert_eq!(seed["enabled"], false);
+        let metadata = subscription_models_to_metadata_models(&all_disabled);
+        assert!(!metadata[0].enabled);
+    }
+
+    #[test]
     fn subscription_refresh_uses_cached_subscription_models_when_app_server_fails() {
         let root = temp_root("subscription-cache-fallback");
         let paths = test_paths(&root);
@@ -2805,9 +2951,7 @@ mod tests {
         assert_eq!(
             models
                 .iter()
-                .filter(|model| {
-                    model.id == "gpt-5.5" || model.id == "openai/gpt-5.5"
-                })
+                .filter(|model| { model.id == "gpt-5.5" || model.id == "openai/gpt-5.5" })
                 .count(),
             1
         );

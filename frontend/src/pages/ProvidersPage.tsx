@@ -318,6 +318,14 @@ function ProvidersPageImpl({
   const [officialModelOrderDraft, setOfficialModelOrderDraft] = useState<string[]>(() => (
     settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order : []
   ));
+  const persistedOfficialSettingsRef = useRef({
+    disabledModels: settingsSnapshot
+      ? withDefaultFastVariants(settingsSnapshot).official_disabled_models
+      : [],
+    modelOrder: settingsSnapshot
+      ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order
+      : [],
+  });
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
@@ -355,10 +363,19 @@ function ProvidersPageImpl({
 
   useEffect(() => {
     const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
+    const disabledModels = normalizedSettings?.official_disabled_models ?? [];
+    const modelOrder = normalizedSettings?.official_model_sort_order ?? [];
+    const persistedOfficialSettings = persistedOfficialSettingsRef.current;
+    const officialSettingsChanged =
+      JSON.stringify(disabledModels) !== JSON.stringify(persistedOfficialSettings.disabledModels) ||
+      JSON.stringify(modelOrder) !== JSON.stringify(persistedOfficialSettings.modelOrder);
     setSettings(normalizedSettings);
     setSettingsDraft(normalizedSettings);
-    setOfficialDisabledModelsDraft(normalizedSettings?.official_disabled_models ?? []);
-    setOfficialModelOrderDraft(normalizedSettings?.official_model_sort_order ?? []);
+    if (officialSettingsChanged) {
+      setOfficialDisabledModelsDraft(disabledModels);
+      setOfficialModelOrderDraft(modelOrder);
+      persistedOfficialSettingsRef.current = { disabledModels, modelOrder };
+    }
   }, [settingsSnapshot]);
 
   useEffect(() => {
@@ -4003,7 +4020,9 @@ function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
       ...existing,
       ...model,
       id: canonicalId,
-      enabled: (existing?.enabled ?? true) || (model.enabled ?? true),
+      enabled: existing
+        ? (existing.enabled ?? true) || (model.enabled ?? true)
+        : model.enabled ?? true,
     });
   }
   for (const model of metadata.filter(isOfficialModel)) {
@@ -4016,7 +4035,9 @@ function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
       ...existing,
       ...model,
       id: canonicalId,
-      enabled: (existing?.enabled ?? true) || (model.enabled ?? true),
+      enabled: existing
+        ? (existing.enabled ?? true) || (model.enabled ?? true)
+        : model.enabled ?? true,
     });
   }
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));

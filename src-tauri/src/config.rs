@@ -332,17 +332,11 @@ fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
         }
     }
 
-    for path in [
-        paths
-            .codex_dir
-            .join("model-catalogs")
-            .join("openai-plus-ollama-cloud.json"),
-        paths.generated_catalog_path(),
-        paths
-            .repo_root
-            .join("model-catalogs")
-            .join("openai-plus-ollama-cloud.json"),
-    ] {
+    for path in [paths
+        .codex_dir
+        .join("model-catalogs")
+        .join("openai-plus-ollama-cloud.json")]
+    {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
@@ -1004,6 +998,45 @@ sort_order = 7
         );
         let written = fs::read_to_string(paths.settings_path()).unwrap();
         assert!(!written.contains("openai/gpt-"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_and_bundled_catalogs_do_not_authorize_legacy_aliases() {
+        let root = temp_root("untrusted-official-alias-catalogs");
+        let paths = test_paths(&root);
+        let generated_path = paths.generated_catalog_path();
+        fs::create_dir_all(generated_path.parent().unwrap()).unwrap();
+        fs::write(
+            generated_path,
+            r#"{"models":[{"slug":"gpt-forged-generated"}]}"#,
+        )
+        .unwrap();
+        let bundled_path = root
+            .join("repo-root")
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json");
+        fs::create_dir_all(bundled_path.parent().unwrap()).unwrap();
+        fs::write(
+            bundled_path,
+            r#"{"models":[{"slug":"gpt-forged-bundled"}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "official_disabled_models": [
+                "openai/gpt-forged-generated",
+                "openai/gpt-forged-bundled"
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert!(loaded.official_disabled_models.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 

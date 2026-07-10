@@ -210,3 +210,19 @@ Result: `2 failed, 356 deselected`.
 ## Concerns
 
 - `cargo fmt --check` remains nonzero because the branch already contains rustfmt differences outside this task, including `autostart.rs`, `proxy.rs`, and unrelated existing sections of `gateway.rs`/`models.rs`. Those files were not bulk-formatted to avoid unrelated churn. Required Rust tests and `git diff --check` pass.
+
+## Review-fix verification
+
+Review feedback was reproduced with five focused RED failures:
+
+- UI draft persistence and alias-enabled merge: `2 failed`.
+- Rust trust boundary, raw seed preservation, and order-independent duplicate merge: three focused tests failed individually.
+
+After the fixes:
+
+- Focused UI contracts (existing merge contract plus the two regressions): `3 passed`.
+- Focused Rust trust-boundary regressions: `2 passed` across two individual config runs.
+- Focused Rust subscription-model coverage: `10 passed`.
+- Frontend production build: passed.
+
+The fixes preserve unsaved official-model drafts across unrelated settings snapshots, use exact enabled-state OR semantics, trust only static policy and the current App CLI official cache for legacy aliases, preserve existing raw App fields without injecting absent modality/tier/default fields, and prefer bare App records independently of duplicate order while retaining the earliest list position.

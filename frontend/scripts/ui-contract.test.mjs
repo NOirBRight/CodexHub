@@ -1722,7 +1722,64 @@ test("frontend official merge canonicalizes aliases with fresh metadata winning"
   assert.match(merge, /for \(const model of metadata\.filter\(isOfficialModel\)\)/);
   assert.match(merge, /const canonicalId = normalizeOfficialModelId\(model\.id, knownOfficialIds\);/);
   assert.match(merge, /\.\.\.existing,[\s\S]*\.\.\.model,[\s\S]*id: canonicalId/);
-  assert.match(merge, /enabled: \(existing\?\.enabled \?\? true\) \|\| \(model\.enabled \?\? true\)/);
+  assert.match(
+    merge,
+    /enabled: existing[\s\S]*\? \(existing\.enabled \?\? true\) \|\| \(model\.enabled \?\? true\)[\s\S]*: model\.enabled \?\? true/,
+  );
+});
+
+test("unrelated settings snapshots preserve unsaved official model drafts", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
+  const settingsSync = pageSource.match(/useEffect\(\(\) => \{[\s\S]*?setSettings\(normalizedSettings\);[\s\S]*?\}, \[settingsSnapshot\]\);/)?.[0] ?? "";
+
+  assert.match(pageSource, /const persistedOfficialSettingsRef = useRef/);
+  assert.match(settingsSync, /const officialSettingsChanged =/);
+  assert.match(
+    settingsSync,
+    /if \(officialSettingsChanged\) \{[\s\S]*setOfficialDisabledModelsDraft[\s\S]*setOfficialModelOrderDraft/,
+  );
+  assert.doesNotMatch(settingsSync, /setSettingsDraft\(normalizedSettings\);\s*setOfficialDisabledModelsDraft/);
+});
+
+test("official alias merge keeps all-false disabled and ORs any true", async () => {
+  const [providersSource, settingsSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(settingsLibPath, "utf8"),
+  ]);
+  const functionNames = [
+    "mergeOfficialModelSources",
+    "officialModelIdSet",
+    "isOfficialModel",
+    "filterCodexVisibleOfficialModels",
+    "isOfficialGatewayFastVariant",
+  ];
+  const blocks = functionNames.map((name) => {
+    const block = providersSource.match(new RegExp(`function ${name}\\([\\s\\S]*?^}`, "m"))?.[0];
+    assert.ok(block, `${name} source`);
+    return block;
+  });
+  const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    `${normalizeSource}\n${blocks.join("\n")}\nexport { mergeOfficialModelSources };`,
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { mergeOfficialModelSources } = await import(moduleUrl);
+
+  const cases = [
+    { catalog: false, metadata: false, expected: false, name: "all false" },
+    { catalog: false, metadata: true, expected: true, name: "metadata true" },
+    { catalog: true, metadata: false, expected: true, name: "catalog true" },
+  ];
+  for (const item of cases) {
+    const merged = mergeOfficialModelSources(
+      [{ id: "openai/gpt-5.5", enabled: item.catalog }],
+      [{ id: "gpt-5.5", enabled: item.metadata }],
+    );
+    assert.equal(merged.length, 1, item.name);
+    assert.equal(merged[0].enabled, item.expected, item.name);
+  }
 });
 
 test("official OpenAI controls are locked while Codex auth is missing", async () => {
