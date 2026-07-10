@@ -55,3 +55,28 @@ Branch: `codex/v0.1.4-codex-compat`
 - Restore/data loss: backup deletion occurs only after the atomic config write succeeds. Write failure keeps the backup. Exact bytes, line endings, and prior owner marker are preserved on backup restoration.
 - Process safety: Windows handling still uses graceful `CloseMainWindow`; no `Stop-Process`, `taskkill`, or force-kill fallback exists.
 - Release safety: dry-run returns before runtime preparation and builds; no publication, tag, merge, signing, or release mutation was performed.
+
+## Final re-review follow-up
+
+### Takeover-scoped exact restore
+
+- RED: an ordinary Stable custom-to-official restore with default unified history returned the raw backup instead of producing the unified Official provider configuration.
+- GREEN: apply writes a versioned takeover sidecar only for explicit takeover. Exact restoration requires that sidecar plus matching active takeover owner and original backup owner state.
+- Repeated takeover apply preserves the sidecar. Successful exact restore removes both the backup and sidecar.
+- Ordinary same-channel backups continue through normal unified-history reconciliation.
+- Commit: `e63a436c`.
+
+### Strict SemVer boundaries
+
+- RED: the shared regex rejected `1.2.3-0alpha` and accepted a version with a trailing line feed.
+- GREEN: validation now uses `\A...\z`; numeric prerelease identifiers are `0|[1-9][0-9]*`, while non-numeric identifiers must contain at least one letter or hyphen.
+- Executable PowerShell contracts accept `1.2.3-0alpha`, reject `1.2.3-01`, reject trailing LF, and retain next-version and Stable/Beta channel checks.
+- Commit: `f87b3354`.
+
+### Follow-up verification
+
+- `python -m pytest tests/test_config_overlay.py -q` — 26 passed
+- `python -m pytest tests/test_release_channel_scripts.py -q` — 21 passed
+- `cargo test config::tests:: -- --nocapture` — 31 passed
+- `cargo clippy --all-targets -- -D warnings` — passed
+- `cargo fmt` — intentionally not run
