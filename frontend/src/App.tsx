@@ -5,6 +5,7 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
+import { historyIssueKey } from "./lib/history";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
 import type {
@@ -680,19 +681,10 @@ export default function App() {
           }),
           tone: "success",
         });
-      } else if (result.status === "restart_required") {
+      } else if (result.status === "restart_required" || result.status === "conflict") {
         updateToast(toastId, {
           action: null,
-          text: result.error ?? result.reason ?? t("settings.historyManualExitRequired"),
-          timeoutMs: null,
-          tone: "error",
-        });
-      } else if (result.status === "conflict") {
-        updateToast(toastId, {
-          action: null,
-          text: result.error ?? result.reason
-            ? t("settings.historyStartupRepairFailed", { message: result.error ?? result.reason })
-            : t("settings.historyProviderConflict"),
+          text: t(historyIssueKey(result)),
           timeoutMs: null,
           tone: "error",
         });
@@ -702,7 +694,7 @@ export default function App() {
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: t("settings.historyStartupRepairFailed", { message: messageFromError(err) }),
+        text: t("settings.historyUnexpectedFailure"),
         timeoutMs: null,
         tone: "error",
       });
@@ -796,11 +788,7 @@ export default function App() {
         } else if (result.status === "conflict") {
           showToast({
             dedupeKey: "unified-history-preflight",
-            text: result.reason === "separated_history_drift"
-              ? t("settings.historySeparatedDrift")
-              : result.error
-                ? t("settings.historyStartupRepairFailed", { message: result.error })
-                : t("settings.historyProviderConflict"),
+            text: t(historyIssueKey(result)),
             timeoutMs: null,
             tone: "error",
           });
@@ -808,7 +796,7 @@ export default function App() {
       } catch (err) {
         showToast({
           dedupeKey: "unified-history-preflight",
-          text: t("settings.historyStartupRepairFailed", { message: messageFromError(err) }),
+          text: t("settings.historyUnexpectedFailure"),
           timeoutMs: null,
           tone: "error",
         });
@@ -1006,13 +994,8 @@ export default function App() {
       let historyMessage: string | null = null;
       if (previousUnified !== nextUnified) {
         const result = await api.preflightUnifiedHistory(true, nextUnified);
-        if (result.status === "restart_required") {
-          throw new Error(t("settings.historyManualExitRequired"));
-        }
-        if (result.status === "conflict") {
-          throw new Error(
-            result.error ?? t("settings.historyProviderConflict"),
-          );
+        if (result.status === "restart_required" || result.status === "conflict") {
+          throw new Error(t(historyIssueKey(result)));
         }
         historyReconciled = true;
         historyMessage = result.status === "repaired"
