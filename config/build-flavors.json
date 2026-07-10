@@ -1,7 +1,7 @@
 {
   "stable": {
     "productName": "CodexHub",
-    "executableBaseName": "codexhub",
+    "executableBaseName": "CodexHub",
     "identifier": "com.codexhub.app",
     "windowTitle": "CodexHub",
     "frontendPort": 1420,
@@ -19,7 +19,7 @@
   },
   "beta": {
     "productName": "CodexHub Beta",
-    "executableBaseName": "codexhub-beta",
+    "executableBaseName": "CodexHubBeta",
     "identifier": "com.codexhub.beta",
     "windowTitle": "CodexHub Beta",
     "frontendPort": 1430,

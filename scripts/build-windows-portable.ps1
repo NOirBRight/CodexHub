@@ -83,7 +83,8 @@ if (Test-Path -LiteralPath $portableZip) {
 }
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $tauriDir "target\release\codexhub.exe") -Destination (Join-Path $portableDir "CodexHub.exe")
+$portableExecutable = "{0}.exe" -f ([string]$flavorConfig.executableBaseName)
+Copy-Item -LiteralPath (Join-Path $tauriDir "target\release\codexhub.exe") -Destination (Join-Path $portableDir $portableExecutable)
 foreach ($resource in @("config", "src-python", "python")) {
     Copy-Item -LiteralPath (Join-Path $tauriDir "target\release\$resource") -Destination $portableDir -Recurse
 }
