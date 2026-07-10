@@ -108,9 +108,27 @@ test("history repair action waits for the bounded backend and always unlocks", a
   assert.equal((action.match(/api\.preflightUnifiedHistory\(true\)/g) ?? []).length, 1);
   assert.match(action, /await api\.preflightUnifiedHistory\(true\)/);
   assert.doesNotMatch(appSource, /HISTORY_OPERATION_TIMEOUT_MS|settleWithin|Promise\.race/);
-  assert.match(action, /result\.error \?\? result\.reason/);
+  assert.match(action, /t\(historyIssueKey\(result\)\)/);
+  assert.doesNotMatch(action, /result\.error|result\.reason/);
   assert.match(action, /setBusy\("history"\)/);
   assert.match(action, /finally \{[\s\S]*setBusy\(null\)/);
+});
+
+test("history sync uses user-facing terminology and hides internal timeout details", async () => {
+  const [appSource, historyUiSource, enSource, zhSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(new URL("../src/lib/history.ts", import.meta.url), "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(appSource, /historyIssueKey\(result\)/);
+  assert.match(historyUiSource, /case "helper_timeout":[\s\S]*case "process_timeout":[\s\S]*historyOperationTimedOut/);
+  assert.doesNotMatch(appSource, /text: result\.error|message: result\.error|text: result\.reason/);
+  assert.match(enSource, /unifiedCodexHistory: "Conversation history sync"/);
+  assert.match(zhSource, /unifiedCodexHistory: "历史对话同步"/);
+  assert.doesNotMatch(enSource, /"[^"]*[Hh]istory bucket[^"]*"/);
+  assert.doesNotMatch(zhSource, /"[^"]*(统一桶|历史桶)[^"]*"/);
 });
 
 test("one Gateway Apply delegates its single restart to App settings save", async () => {
@@ -612,6 +630,18 @@ test("gateway empty states are localized outside the static contract", async () 
   assert.ok(!("pendingBackend" in contract));
   assert.match(gatewaySource, /t\("gateway\.pendingUsage"\)/);
   assert.match(usageSource, /t\("usage\.pendingData"\)/);
+});
+
+test("Beta empty usage state explains isolated Gateway telemetry", async () => {
+  const [gatewaySource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /appFlavor\?\.flavor === "beta"[\s\S]*t\("gateway\.betaUsageIsolated"\)/);
+  assert.match(enSource, /betaUsageIsolated: "Beta uses isolated Gateway usage data/);
+  assert.match(zhSource, /betaUsageIsolated: "Beta 使用独立的 Gateway 用量数据/);
 });
 
 test("gateway page is wired to real usage and client backend APIs", async () => {
@@ -2595,7 +2625,7 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.match(zhSource, /installUpdate: "安装更新"/);
 });
 
-test("gateway client cards render tri-state routing owner colors", async () => {
+test("gateway client takeover is a single compact footer row without endpoint chips", async () => {
   const [cardSource, typesSource, tauriSource, gatewaySource, enSource, zhSource] = await Promise.all([
     readFile(gatewayClientCardPath, "utf8"),
     readFile(typesPath, "utf8"),
@@ -2609,10 +2639,15 @@ test("gateway client cards render tri-state routing owner colors", async () => {
   assert.match(typesSource, /route_owner: RoutingOwner/);
   assert.match(tauriSource, /getAppFlavor/);
   assert.match(tauriSource, /forceTakeover/);
-  assert.match(cardSource, /ROUTING_OWNER_STYLES/);
-  assert.match(cardSource, /release:[\s\S]*border-sky-300[\s\S]*bg-sky-50[\s\S]*text-sky-800/);
-  assert.match(cardSource, /beta:[\s\S]*border-amber-300[\s\S]*bg-amber-50[\s\S]*text-amber-800/);
-  assert.match(cardSource, /Managed by/);
+  assert.doesNotMatch(cardSource, /ROUTING_OWNER_STYLES|ownerLabel\(|hostPort\(|route_endpoint/);
+  assert.match(cardSource, /const managedLabel = managedByLabel\(routeOwner, t\);/);
+  assert.match(cardSource, /grid min-h-8 grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-2/);
+  assert.match(cardSource, /<span className="truncate text-xs font-medium text-slate-600" title=\{managedLabel\}>[\s\S]*\{managedLabel\}/);
+  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("takeover"\)\}/);
+  assert.ok(
+    cardSource.indexOf('t("common.version")') < cardSource.indexOf('onSwitchMode("takeover")'),
+    "takeover row should be the card footer",
+  );
   assert.match(cardSource, /runtimeOwner: RoutingOwner \| null/);
   assert.match(cardSource, /ownerUnavailable/);
   assert.match(gatewaySource, /takeover/i);
@@ -2622,15 +2657,7 @@ test("gateway client cards render tri-state routing owner colors", async () => {
   assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{port\}\/v1/);
   assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
   assert.match(enSource, /managedByRelease/);
-  assert.match(enSource, /managedByBeta/);
-  assert.match(enSource, /ownerUnavailable/);
-  assert.match(enSource, /oldEndpoint/);
-  assert.match(enSource, /newEndpoint/);
   assert.match(zhSource, /managedByRelease/);
-  assert.match(zhSource, /managedByBeta/);
-  assert.match(zhSource, /ownerUnavailable/);
-  assert.match(zhSource, /oldEndpoint/);
-  assert.match(zhSource, /newEndpoint/);
 });
 
 test("Beta Codex takeover is explicit and exposes ownership conflict state", async () => {
