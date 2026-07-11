@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -5,6 +6,17 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_official_transport_wheel_is_pinned_and_packaged():
+    wheel = ROOT / "src-python" / "vendor" / "urllib3-2.7.0-py3-none-any.whl"
+    tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+
+    assert wheel.is_file()
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == (
+        "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+    )
+    assert tauri["bundle"]["resources"]["../src-python/vendor/*.whl"] == "src-python/vendor"
 
 
 def test_beta_candidate_version_is_consistent_across_manifests():

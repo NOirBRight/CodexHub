@@ -2081,11 +2081,22 @@ time.sleep(10)
         let target = repo_root.join("src-python");
         fs::create_dir_all(&target).unwrap();
 
-        for entry in fs::read_dir(source).unwrap() {
+        for entry in fs::read_dir(&source).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) == Some("py") {
                 fs::copy(&path, target.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+
+        let vendor_source = source.join("vendor");
+        let vendor_target = target.join("vendor");
+        fs::create_dir_all(&vendor_target).unwrap();
+        for entry in fs::read_dir(vendor_source).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("whl") {
+                fs::copy(&path, vendor_target.join(path.file_name().unwrap())).unwrap();
             }
         }
 

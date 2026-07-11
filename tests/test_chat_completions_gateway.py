@@ -326,6 +326,16 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
         self.assertEqual(payload["input"][2]["call_id"], "call_list_skills")
         self.assertIn("ask-matt", payload["input"][2]["output"])
 
+    def test_unresolved_auto_tool_protocol_stays_on_text_compatibility_route(self):
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "auto",
+            "tool_protocol": "auto",
+        }
+
+        self.assertEqual(codex_proxy._external_tool_protocol(upstream), "text_compat")
+
 
 class RequestKindDetectionTests(unittest.TestCase):
     def test_compact_header_marks_request_kind_without_prompt_heuristic(self):
@@ -3647,6 +3657,87 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn("messages", chat_payload)
         result = json.loads(b"".join(handler.wfile.writes))
         self.assertEqual(result["choices"][0]["message"]["content"], "Chat fallback OK")
+
+    def test_auto_handler_preserves_completed_tool_lifecycle_through_chat_fallback(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "auto/glm-5.2",
+            "provider_alias": "auto",
+            "upstream_name": "auto_provider",
+            "display_prefix": "Auto",
+            "base_url": "https://auto.example.test/v1",
+            "api_key": "auto-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "auto",
+            "tool_protocol": "auto",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [
+                {"role": "user", "content": "test"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_list_skills",
+                        "type": "function",
+                        "function": {
+                            "name": "shell_command",
+                            "arguments": '{"command":"Get-ChildItem skills"}',
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_list_skills",
+                    "content": "Exit code: 0\nOutput:\nask-matt\ncode-review\n",
+                },
+            ],
+            "tools": [{"type": "function", "function": {
+                "name": "shell_command",
+                "parameters": {"type": "object"},
+            }}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
+        chat_body = json.dumps({
+            "id": "chatcmpl_auto_tools",
+            "object": "chat.completion",
+            "model": "glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Done after one tool result."},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", side_effect=[_http_error(404), _FakeJsonResponse(chat_body)]) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        responses_payload = json.loads(mock_urlopen.call_args_list[0].args[0].data)
+        self.assertEqual(responses_payload["input"][1]["type"], "function_call")
+        self.assertEqual(responses_payload["input"][2]["type"], "function_call_output")
+        chat_payload = json.loads(mock_urlopen.call_args_list[1].args[0].data)
+        self.assertEqual(chat_payload["messages"][1]["tool_calls"][0]["id"], "call_list_skills")
+        self.assertEqual(chat_payload["messages"][2]["role"], "tool")
+        self.assertEqual(chat_payload["messages"][2]["tool_call_id"], "call_list_skills")
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["choices"][0]["message"]["content"], "Done after one tool result.")
 
     def test_auto_upstream_format_does_not_fallback_after_responses_stream_starts(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)

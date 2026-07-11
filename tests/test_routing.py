@@ -4,9 +4,11 @@ import io
 import json
 import ssl
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
@@ -2048,7 +2050,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 10000)
 
-    def test_official_open_uses_gateway_owned_keepalive_opener(self):
+    def test_official_open_uses_gateway_owned_pooled_transport(self):
         request = codex_proxy.Request("https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST")
         success = FakeResponse(b'{"id":"resp_keepalive"}')
 
@@ -2068,6 +2070,66 @@ class RoutingTests(unittest.TestCase):
         self.assertIs(response, success)
         official_urlopen.assert_called_once_with(request, timeout=1)
         mock_urlopen.assert_not_called()
+
+    def test_official_retry_closes_failed_http_response_before_reusing_pool(self):
+        request = codex_proxy.Request("https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST")
+        failed_body = Mock()
+        failed_body.read.return_value = b'{"error":"temporarily unavailable"}'
+        error = HTTPError(request.full_url, 503, "Unavailable", {}, failed_body)
+        success = FakeResponse(b'{"id":"resp_recovered"}')
+
+        with (
+            patch("codex_proxy._official_urlopen", side_effect=[error, success]),
+            patch("codex_proxy.time.sleep"),
+        ):
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=1,
+                event_context={"request_id": "req-official-http-retry"},
+                max_attempts=2,
+            )
+
+        self.assertIs(response, success)
+        failed_body.close.assert_called_once()
+
+    def test_official_transport_reuses_connection_across_sequential_requests(self):
+        client_ports: set[int] = set()
+
+        class KeepaliveHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                client_ports.add(self.client_address[1])
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length:
+                    self.rfile.read(content_length)
+                body = b'{"id":"resp_keepalive"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), KeepaliveHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/responses"
+            for _ in range(2):
+                request = codex_proxy.Request(url, data=b"{}", method="POST")
+                with codex_proxy._official_urlopen(request, timeout=2) as response:
+                    self.assertEqual(response.read(), b'{"id":"resp_keepalive"}')
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(len(client_ports), 1)
 
     def test_official_then_third_party_does_not_leak_keepalive_transport(self):
         official_request = codex_proxy.Request(
@@ -2103,30 +2165,70 @@ class RoutingTests(unittest.TestCase):
         official_urlopen.assert_called_once_with(official_request, timeout=1)
         mock_urlopen.assert_called_once_with(third_party_request, timeout=1)
 
-    def test_official_keepalive_opener_is_cached_without_global_install(self):
-        private_opener = Mock()
+    def test_official_connection_pool_is_cached_and_bounded(self):
+        private_pool = Mock()
+        private_pool.pool_classes_by_scheme = {}
         with (
-            patch.object(codex_proxy, "OFFICIAL_KEEPALIVE_OPENER", None),
-            patch("codex_proxy.build_opener", return_value=private_opener) as build,
+            patch.object(codex_proxy, "OFFICIAL_HTTP_POOLS", {}),
+            patch("codex_proxy._official_proxy_url", return_value=None),
+            patch("codex_proxy.urllib3.PoolManager", return_value=private_pool) as pool_manager,
         ):
-            first = codex_proxy._official_keepalive_opener()
-            second = codex_proxy._official_keepalive_opener()
+            first = codex_proxy._official_pool_manager("https://chatgpt.com/backend-api/codex/responses")
+            second = codex_proxy._official_pool_manager("https://chatgpt.com/backend-api/codex/responses")
 
-        self.assertIs(first, private_opener)
-        self.assertIs(second, private_opener)
-        build.assert_called_once()
+        self.assertIs(first, private_pool)
+        self.assertIs(second, private_pool)
+        pool_manager.assert_called_once()
+        options = pool_manager.call_args.kwargs
+        self.assertTrue(options["block"])
+        self.assertEqual(options["maxsize"], codex_proxy.OFFICIAL_POOL_MAX_CONNECTIONS)
+        self.assertIn(
+            (codex_proxy.socket.SOL_SOCKET, codex_proxy.socket.SO_KEEPALIVE, 1),
+            options["socket_options"],
+        )
+        self.assertIs(
+            private_pool.pool_classes_by_scheme["https"],
+            codex_proxy._OfficialHTTPSConnectionPool,
+        )
 
-    def test_configure_tcp_keepalive_enables_windows_probe_intervals(self):
+    def test_official_pool_retains_five_second_tcp_keepalive_tuning(self):
+        with patch("codex_proxy.sys.platform", "linux"):
+            options = codex_proxy._official_socket_options()
+
+        self.assertIn((codex_proxy.socket.SOL_SOCKET, codex_proxy.socket.SO_KEEPALIVE, 1), options)
+        if hasattr(codex_proxy.socket, "TCP_KEEPIDLE"):
+            self.assertIn((codex_proxy.socket.IPPROTO_TCP, codex_proxy.socket.TCP_KEEPIDLE, 5), options)
+        if hasattr(codex_proxy.socket, "TCP_KEEPINTVL"):
+            self.assertIn((codex_proxy.socket.IPPROTO_TCP, codex_proxy.socket.TCP_KEEPINTVL, 5), options)
+        if hasattr(codex_proxy.socket, "TCP_KEEPCNT"):
+            self.assertIn((codex_proxy.socket.IPPROTO_TCP, codex_proxy.socket.TCP_KEEPCNT, 3), options)
+
+    def test_official_windows_pool_applies_keepalive_intervals(self):
         fake_socket = Mock()
-        fake_socket.ioctl = Mock()
-        fake_socket.setsockopt = Mock()
-        with patch("codex_proxy.sys.platform", "win32"):
-            codex_proxy._configure_tcp_keepalive(fake_socket)
+        with (
+            patch("codex_proxy.sys.platform", "win32"),
+            patch.object(codex_proxy.socket, "SIO_KEEPALIVE_VALS", 0x98000004, create=True),
+        ):
+            codex_proxy._configure_official_windows_keepalive(fake_socket)
 
-        fake_socket.setsockopt.assert_called_with(codex_proxy.socket.SOL_SOCKET, codex_proxy.socket.SO_KEEPALIVE, 1)
-        fake_socket.ioctl.assert_called_once()
-        self.assertEqual(fake_socket.ioctl.call_args.args[0], codex_proxy.socket.SIO_KEEPALIVE_VALS)
-        self.assertEqual(fake_socket.ioctl.call_args.args[1], (1, 5000, 5000))
+        fake_socket.ioctl.assert_called_once_with(0x98000004, (1, 5000, 5000))
+
+    def test_official_pooled_stream_translates_reset_and_discards_connection(self):
+        raw_response = Mock()
+        raw_response.status = 200
+        raw_response.reason = "OK"
+        raw_response.headers = {"Content-Type": "text/event-stream"}
+        raw_response.read.side_effect = codex_proxy.urllib3.exceptions.ProtocolError(
+            "stream reset",
+            ConnectionResetError("connection reset"),
+        )
+
+        with self.assertRaises(ConnectionResetError):
+            with codex_proxy._OfficialPooledResponse(raw_response) as response:
+                response.read(65536)
+
+        raw_response.close.assert_called_once()
+        raw_response.release_conn.assert_not_called()
 
     def test_transparent_retry_retries_open_failure_without_downstream_notice(self):
         request = codex_proxy.Request("https://example.test/v1/chat/completions", data=b"{}", method="POST")

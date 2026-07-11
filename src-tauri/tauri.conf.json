@@ -31,6 +31,7 @@
       "../config/*.toml": "config",
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
+      "../src-python/vendor/*.whl": "src-python/vendor",
       "resources/python/*": "python"
     },
     "icon": [

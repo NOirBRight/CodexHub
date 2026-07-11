@@ -9,7 +9,6 @@ import gzip
 import hashlib
 import hmac
 import html
-import http.client
 import io
 import json
 import logging
@@ -32,7 +31,15 @@ import uuid
 import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit
-from urllib.request import HTTPSHandler, OpenerDirector, Request, build_opener, urlopen
+from urllib.request import Request, getproxies, proxy_bypass, urlopen
+
+VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+VENDORED_URLLIB3_WHEEL = VENDOR_DIR / "urllib3-2.7.0-py3-none-any.whl"
+if not VENDORED_URLLIB3_WHEEL.is_file():
+    raise RuntimeError(f"missing pinned Gateway transport dependency: {VENDORED_URLLIB3_WHEEL}")
+sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
+
+import urllib3
 
 from codex_semantic_adapter import (
     coerce_number as _semantic_coerce_number,
@@ -88,58 +95,194 @@ except ImportError:  # pragma: no cover - optional dependency on older Python in
 
 DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is not None else ())
 
+OFFICIAL_POOL_MAX_CONNECTIONS = 16
 OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
-OFFICIAL_KEEPALIVE_OPENER: OpenerDirector | None = None
-OFFICIAL_KEEPALIVE_OPENER_LOCK = threading.Lock()
+OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
+OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
 
 
-def _configure_tcp_keepalive(sock: socket.socket) -> None:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+def _official_socket_options() -> list[tuple[int, int, int]]:
+    options = list(urllib3.connection.HTTPConnection.default_socket_options)
+    options.append((socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1))
+    if not sys.platform.startswith("win"):
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            options.append(
+                (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, max(1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS // 1000))
+            )
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            options.append(
+                (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, max(1, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS // 1000))
+            )
+        if hasattr(socket, "TCP_KEEPCNT"):
+            options.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3))
+    return options
+
+
+def _configure_official_windows_keepalive(sock: Any) -> None:
     if sys.platform.startswith("win") and hasattr(socket, "SIO_KEEPALIVE_VALS"):
         sock.ioctl(
             socket.SIO_KEEPALIVE_VALS,
-            (
-                1,
-                OFFICIAL_TCP_KEEPALIVE_IDLE_MS,
-                OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS,
-            ),
+            (1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS),
         )
-        return
-    if hasattr(socket, "TCP_KEEPIDLE"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, max(1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS // 1000))
-    if hasattr(socket, "TCP_KEEPINTVL"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, max(1, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS // 1000))
-    if hasattr(socket, "TCP_KEEPCNT"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
 
-class _OfficialKeepaliveHTTPSConnection(http.client.HTTPSConnection):
+class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
     def connect(self) -> None:
-        http.client.HTTPConnection.connect(self)
+        super().connect()
         if self.sock is not None:
-            _configure_tcp_keepalive(self.sock)
-        server_hostname = self._tunnel_host if self._tunnel_host else self.host
-        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+            _configure_official_windows_keepalive(self.sock)
 
 
-class _OfficialKeepaliveHTTPSHandler(HTTPSHandler):
-    def https_open(self, req: Request) -> Any:
-        return self.do_open(_OfficialKeepaliveHTTPSConnection, req, context=self._context)
+class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
+    ConnectionCls = _OfficialHTTPSConnection
 
 
-def _official_keepalive_opener() -> OpenerDirector:
-    global OFFICIAL_KEEPALIVE_OPENER
-    if OFFICIAL_KEEPALIVE_OPENER is not None:
-        return OFFICIAL_KEEPALIVE_OPENER
-    with OFFICIAL_KEEPALIVE_OPENER_LOCK:
-        if OFFICIAL_KEEPALIVE_OPENER is None:
-            OFFICIAL_KEEPALIVE_OPENER = build_opener(_OfficialKeepaliveHTTPSHandler())
-        return OFFICIAL_KEEPALIVE_OPENER
+class _OfficialPooledResponse:
+    def __init__(self, response: Any):
+        self._response = response
+        self._exhausted = False
+        self._released = False
+        self.status = response.status
+        self.reason = response.reason
+        self.headers = response.headers
+
+    def read(self, amount: int | None = None) -> bytes:
+        try:
+            data = self._response.read(amount)
+        except urllib3.exceptions.HTTPError as exc:
+            translated = _stdlib_transport_error(exc)
+            raise translated from exc
+        if amount is None or data == b"":
+            self._exhausted = True
+        return data
+
+    def readline(self, limit: int = -1) -> bytes:
+        try:
+            data = self._response.readline(limit)
+        except urllib3.exceptions.HTTPError as exc:
+            translated = _stdlib_transport_error(exc)
+            raise translated from exc
+        if data == b"":
+            self._exhausted = True
+        return data
+
+    def getcode(self) -> int:
+        return self.status
+
+    def close(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._exhausted:
+            self._response.release_conn()
+        else:
+            self._response.close()
+
+    def __enter__(self) -> "_OfficialPooledResponse":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        self.close()
+        return False
+
+
+def _official_proxy_url(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if parsed.hostname:
+        try:
+            if proxy_bypass(parsed.hostname):
+                return None
+        except OSError:
+            pass
+    proxy = getproxies().get(parsed.scheme)
+    return str(proxy) if proxy else None
+
+
+def _official_pool_manager(url: str) -> Any:
+    proxy_url = _official_proxy_url(url)
+    pool_key = proxy_url or "direct"
+    existing = OFFICIAL_HTTP_POOLS.get(pool_key)
+    if existing is not None:
+        return existing
+    with OFFICIAL_HTTP_POOLS_LOCK:
+        existing = OFFICIAL_HTTP_POOLS.get(pool_key)
+        if existing is None:
+            pool_options = {
+                "num_pools": 4,
+                "maxsize": OFFICIAL_POOL_MAX_CONNECTIONS,
+                "block": True,
+                "retries": False,
+                "socket_options": _official_socket_options(),
+            }
+            existing = (
+                urllib3.ProxyManager(proxy_url, **pool_options)
+                if proxy_url is not None
+                else urllib3.PoolManager(**pool_options)
+            )
+            existing.pool_classes_by_scheme = {
+                **existing.pool_classes_by_scheme,
+                "https": _OfficialHTTPSConnectionPool,
+            }
+            OFFICIAL_HTTP_POOLS[pool_key] = existing
+        return existing
+
+
+def _stdlib_transport_error(exc: BaseException) -> BaseException:
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if not isinstance(candidate, BaseException) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        if isinstance(candidate, (ssl.SSLError, TimeoutError, ConnectionError, OSError, IncompleteRead)):
+            return candidate
+        pending.extend(
+            value
+            for value in (
+                getattr(candidate, "reason", None),
+                candidate.__cause__,
+                candidate.__context__,
+                *candidate.args,
+            )
+            if isinstance(value, BaseException)
+        )
+    if isinstance(exc, urllib3.exceptions.TimeoutError):
+        return TimeoutError(str(exc))
+    return URLError(exc)
 
 
 def _official_urlopen(request: Request, *, timeout: float) -> Any:
-    return _official_keepalive_opener().open(request, timeout=timeout)
+    manager = _official_pool_manager(request.full_url)
+    headers = {key: value for key, value in request.header_items() if key.lower() != "connection"}
+    try:
+        response = manager.request(
+            request.get_method(),
+            request.full_url,
+            body=request.data,
+            headers=headers,
+            preload_content=False,
+            decode_content=False,
+            redirect=False,
+            retries=False,
+            timeout=urllib3.Timeout(connect=timeout, read=timeout),
+            pool_timeout=timeout,
+        )
+    except urllib3.exceptions.HTTPError as exc:
+        translated = _stdlib_transport_error(exc)
+        raise translated from exc
+
+    pooled_response = _OfficialPooledResponse(response)
+    if response.status >= 400:
+        raise HTTPError(
+            request.full_url,
+            response.status,
+            str(response.reason or "upstream error"),
+            response.headers,
+            pooled_response,
+        )
+    return pooled_response
 
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
@@ -188,7 +331,7 @@ PROXY_FEATURES = [
     "third-party-multi-agent-deterministic-repair",
     "third-party-required-subagent-action-repair",
     "third-party-chat-output-repair-parity",
-    "official-upstream-tcp-keepalive",
+    "official-upstream-connection-pool",
     "raw-provider-probe-opt-out",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
@@ -10204,7 +10347,12 @@ def _http_error_body_bytes(exc: HTTPError) -> bytes:
     try:
         body = fp.read()
     except OSError:
-        return b""
+        body = b""
+    finally:
+        try:
+            fp.close()
+        except OSError:
+            pass
     replacement = io.BytesIO(body)
     exc.fp = replacement
     exc.file = replacement
@@ -11329,9 +11477,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     model_id=model,
                 )
             else:
+                compatibility_upstream = upstream
+                if upstream_format == "auto":
+                    compatibility_upstream = {**upstream, "upstream_format": "responses"}
                 body = compatible_request_body(
                     body,
-                    upstream,
+                    compatibility_upstream,
                     model_id=model,
                     event_context=adapter_event_context,
                     inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT and not raw_provider_probe,
@@ -11503,6 +11654,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             selected_upstream_format = upstream_format
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
             for format_index, selected_upstream_format in enumerate(upstream_format_options):
+                if isinstance(adapter_event_context, dict):
+                    adapter_event_context["tool_protocol"] = _external_tool_protocol(
+                        {**upstream, "upstream_format": selected_upstream_format}
+                    )
                 base_relay_attempts = 1 if is_official_http_passthrough else _upstream_retry_attempts(request_kind)
                 relay_attempts = base_relay_attempts
                 lifecycle_final_extra_attempts = (
