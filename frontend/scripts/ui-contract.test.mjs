@@ -704,6 +704,20 @@ test("web preview infers the bridge port from alternate local dev ports", async 
   assert.match(tauriSource, /import\.meta\.env\.VITE_CODEXHUB_BRIDGE_URL \|\|/);
 });
 
+test("web preview falls back between stable and Beta bridge ports", async () => {
+  const tauriSource = await readFile(tauriSourcePath, "utf8");
+  const bridgeInvoke =
+    tauriSource.match(/async function bridgeInvoke[\s\S]*?function shouldFallbackToBridge/)?.[0] ?? "";
+
+  assert.match(tauriSource, /const KNOWN_BRIDGE_URLS = \[/);
+  assert.match(tauriSource, /http:\/\/127\.0\.0\.1:1421\/api\/invoke/);
+  assert.match(tauriSource, /http:\/\/127\.0\.0\.1:1431\/api\/invoke/);
+  assert.match(tauriSource, /function bridgeUrls\(\)/);
+  assert.match(bridgeInvoke, /for \(const url of bridgeUrls\(\)\)/);
+  assert.match(bridgeInvoke, /continue;/);
+  assert.match(bridgeInvoke, /throw new Error\("Backend is not connected"\)/);
+});
+
 test("web bridge calls use simple POST requests that avoid CORS preflight", async () => {
   const tauriSource = await readFile(tauriSourcePath, "utf8");
   const bridgeInvoke =

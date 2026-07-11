@@ -126,7 +126,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("[model_providers.custom]", updated)
             self.assertIn("base_url = 'http://127.0.0.1:9099/v1'", updated)
             self.assertIn('wire_api = "responses"', updated)
-            self.assertIn("requires_openai_auth = false", updated)
+            self.assertIn("requires_openai_auth = true", updated)
             self.assertIn('experimental_bearer_token = "codexhub-proxy"', updated)
             self.assertIn("supports_websockets = false", updated)
             self.assertNotIn("responses_websockets = true", updated)
@@ -143,7 +143,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
             self.assertFalse(backup_path.exists())
 
-    def test_apply_cli_routes_gateway_with_local_bearer_without_openai_oauth(self):
+    def test_apply_cli_keeps_openai_account_with_local_gateway_bearer(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             config_path = tmp / "config.toml"
@@ -168,9 +168,9 @@ class ConfigOverlayTests(unittest.TestCase):
 
             generated = config_path.read_text(encoding="utf-8")
             self.assertEqual(exit_code, 0)
-            self.assertIn("requires_openai_auth = false", generated)
+            self.assertIn("requires_openai_auth = true", generated)
             self.assertIn('experimental_bearer_token = "local-test-key"', generated)
-            self.assertNotIn("requires_openai_auth = true", generated)
+            self.assertNotIn("requires_openai_auth = false", generated)
 
     def test_proxy_overlay_stays_non_websocket_for_phase1(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -59,6 +59,10 @@ export class CodexHubBridgeError extends Error {
 }
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:1421/api/invoke";
+const KNOWN_BRIDGE_URLS = [
+  DEFAULT_BRIDGE_URL,
+  "http://127.0.0.1:1431/api/invoke",
+];
 const LOCAL_DEV_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -82,22 +86,28 @@ async function desktopCall<T>(command: string, args?: Record<string, unknown>): 
 }
 
 async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(bridgeUrl(), {
-    method: "POST",
-    body: JSON.stringify({ command, args: args ?? {} }),
-  }).catch((error: unknown) => {
-    console.debug("CodexHub web bridge unavailable", error);
-    throw new Error("Backend is not connected");
-  });
+  for (const url of bridgeUrls()) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({ command, args: args ?? {} }),
+      });
+    } catch (error) {
+      console.debug(`CodexHub web bridge unavailable at ${url}`, error);
+      continue;
+    }
 
-  const payload = (await response.json().catch(() => null)) as BridgeResponse<T> | null;
-  if (!response.ok || !payload?.ok) {
-    throw new CodexHubBridgeError(
-      payload?.codexhub_error?.message || payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`,
-      payload?.codexhub_error ?? null,
-    );
+    const payload = (await response.json().catch(() => null)) as BridgeResponse<T> | null;
+    if (!response.ok || !payload?.ok) {
+      throw new CodexHubBridgeError(
+        payload?.codexhub_error?.message || payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`,
+        payload?.codexhub_error ?? null,
+      );
+    }
+    return payload.value as T;
   }
-  return payload.value as T;
+  throw new Error("Backend is not connected");
 }
 
 function shouldFallbackToBridge(error: unknown) {
@@ -120,6 +130,14 @@ function bridgeUrl() {
     localBridgeUrlFromLocation(window.location) ||
     DEFAULT_BRIDGE_URL
   );
+}
+
+function bridgeUrls() {
+  const explicit = import.meta.env.VITE_CODEXHUB_BRIDGE_URL;
+  if (explicit) {
+    return [explicit];
+  }
+  return Array.from(new Set([bridgeUrl(), ...KNOWN_BRIDGE_URLS]));
 }
 
 function localBridgeUrlFromLocation(location: Location) {
