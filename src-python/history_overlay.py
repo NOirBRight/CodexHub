@@ -386,18 +386,39 @@ def rewritten_provider_line(first_line: str, record: dict[str, Any], source_prov
     return json.dumps(record, ensure_ascii=False, separators=(",", ":")) + line_ending
 
 
-def write_first_line_in_place(path: Path, old_line: str, new_line: str) -> None:
-    old_bytes = old_line.encode("utf-8")
-    new_bytes = new_line.encode("utf-8")
-    if len(old_bytes) != len(new_bytes):
-        raise ValueError("rewritten session_meta line changed byte length")
-
-    with path.open("r+b") as handle:
-        current = handle.readline()
-        if current != old_bytes:
-            raise ValueError("session_meta line changed while rewriting")
-        handle.seek(0)
-        handle.write(new_bytes)
+def rewritten_session_meta_records(
+    data: bytes,
+    session_id: str | None,
+    source_provider: str,
+    target_provider: str,
+    line_indexes: set[int] | None = None,
+) -> tuple[bytes, int, list[int]]:
+    rewritten_lines: list[bytes] = []
+    rewritten_count = 0
+    rewritten_indexes: list[int] = []
+    for line_index, raw_line in enumerate(data.splitlines(keepends=True)):
+        line = raw_line.decode("utf-8", errors="replace")
+        line_session_id, provider, record = parse_session_meta(line)
+        if (
+            record is None
+            or provider != source_provider
+            or (session_id and line_session_id != session_id)
+            or (line_indexes is not None and line_index not in line_indexes)
+        ):
+            rewritten_lines.append(raw_line)
+            continue
+        rewritten_line = rewritten_provider_line(
+            line,
+            record,
+            source_provider,
+            target_provider,
+        ).encode("utf-8")
+        if len(rewritten_line) != len(raw_line):
+            raise ValueError("rewritten session_meta line changed byte length")
+        rewritten_lines.append(rewritten_line)
+        rewritten_count += 1
+        rewritten_indexes.append(line_index)
+    return b"".join(rewritten_lines), rewritten_count, rewritten_indexes
 
 
 def skipped_session_file_provider_fast(entry: dict[str, Any], reason: str, current_line: str = "") -> dict[str, Any]:
@@ -420,18 +441,6 @@ def deferred_session_file_provider_fast(
     if current_line:
         result["current_first_line"] = current_line
     return result
-
-
-def write_rewritten_lines(path: Path, lines: list[str]) -> None:
-    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.writelines(lines)
-        temp_path.replace(path)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
 
 
 def stable_file_snapshot(path: Path) -> tuple[bytes, os.stat_result]:
@@ -513,30 +522,43 @@ def rewrite_session_file(
     allowed_session_ids: set[str] | None = None,
     sanitize_for_official: bool = False,
 ) -> dict[str, str] | None:
-    first_line = read_first_line(path)
+    try:
+        data, metadata = stable_file_snapshot(path)
+    except FileNotFoundError:
+        return None
+    _, first_line = first_line_from_bytes(data)
     if not first_line:
         return None
 
     session_id, provider, record = parse_session_meta(first_line)
-    if record is None or provider != source_provider:
+    if record is None or provider not in (source_provider, target_provider):
         return None
     if allowed_session_ids is not None and session_id not in allowed_session_ids:
         return None
 
-    new_first_line = rewritten_provider_line(first_line, record, source_provider, target_provider)
+    replacement, rewritten_count, _ = rewritten_session_meta_records(
+        data,
+        session_id,
+        source_provider,
+        target_provider,
+    )
+    if rewritten_count == 0:
+        return None
     backup_file(path, codex_dir, backup_root, "jsonl")
     if sanitize_for_official:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        lines = replacement.decode("utf-8", errors="replace").splitlines(keepends=True)
         if not lines:
             return None
-        lines[0] = new_first_line
         sanitized_lines = sanitize_session_lines_for_official(lines)
-        if sanitized_lines != lines:
-            write_rewritten_lines(path, sanitized_lines)
-        else:
-            write_first_line_in_place(path, first_line, new_first_line)
-    else:
-        write_first_line_in_place(path, first_line, new_first_line)
+        replacement = "".join(sanitized_lines).encode("utf-8")
+    current_data, current_metadata = stable_file_snapshot(path)
+    if (
+        current_data != data
+        or current_metadata.st_mtime_ns != metadata.st_mtime_ns
+        or current_metadata.st_ino != metadata.st_ino
+    ):
+        raise ConcurrentHistoryChange(f"history file changed before rewriting: {path}")
+    atomic_replace_bytes(path, replacement, metadata.st_mode & 0o7777)
 
     return {"path": relative_to_codex_dir(path, codex_dir), "session_id": session_id or ""}
 
@@ -1419,19 +1441,30 @@ def plan_session_file_provider_fast(path: Path, codex_dir: Path, target_provider
         return None
 
     session_id, provider, record = parse_session_meta(first_line)
-    if record is None or provider not in (SOURCE_PROVIDER, TARGET_PROVIDER) or provider == target_provider:
+    if record is None or provider not in (SOURCE_PROVIDER, TARGET_PROVIDER):
         return None
 
-    new_first_line = rewritten_provider_line(first_line, record, provider, target_provider)
-    if len(first_line.encode("utf-8")) != len(new_first_line.encode("utf-8")):
+    source_provider = TARGET_PROVIDER if target_provider == SOURCE_PROVIDER else SOURCE_PROVIDER
+    replacement, rewritten_count, rewritten_indexes = rewritten_session_meta_records(
+        data,
+        session_id,
+        source_provider,
+        target_provider,
+    )
+    if rewritten_count == 0:
+        return None
+    _, new_first_line = first_line_from_bytes(replacement)
+    if len(data) != len(replacement):
         raise ValueError(f"rewritten session_meta line changed byte length: {path}")
     return {
         "path": relative_to_codex_dir(path, codex_dir),
         "session_id": session_id or "",
-        "source_provider": provider,
+        "source_provider": source_provider,
         "target_provider": target_provider,
         "old_first_line": first_line,
         "new_first_line": new_first_line,
+        "rewritten_session_meta_records": rewritten_count,
+        "rewritten_session_meta_line_indexes": rewritten_indexes,
         **snapshot_fields(data, metadata),
     }
 
@@ -1458,18 +1491,22 @@ def apply_session_file_provider_fast(
     session_id, provider, record = parse_session_meta(first_line)
     if record is None:
         return deferred_session_file_provider_fast(entry, "invalid_session_meta", first_line)
-    if provider == target_provider:
-        return skipped_session_file_provider_fast(entry, "already_target", first_line)
-    if provider != source_provider:
+    if provider not in (source_provider, target_provider):
         return deferred_session_file_provider_fast(entry, "provider_changed", first_line)
+
+    replacement, rewritten_count, rewritten_indexes = rewritten_session_meta_records(
+        data,
+        session_id,
+        source_provider,
+        target_provider,
+    )
+    if rewritten_count == 0:
+        return skipped_session_file_provider_fast(entry, "already_target", first_line)
     if not snapshot_matches_entry(data, metadata, entry):
         return deferred_session_file_provider_fast(entry, "file_changed", first_line)
-
-    new_first_line = rewritten_provider_line(first_line, record, provider, target_provider)
-    new_first_line_bytes = new_first_line.encode("utf-8")
-    if len(first_line_bytes) != len(new_first_line_bytes):
+    _, new_first_line = first_line_from_bytes(replacement)
+    if len(data) != len(replacement):
         return deferred_session_file_provider_fast(entry, "byte_length_changed", first_line)
-    replacement = new_first_line_bytes + data[len(first_line_bytes) :]
     applied = dict(entry)
     applied.update(
         {
@@ -1477,6 +1514,8 @@ def apply_session_file_provider_fast(
             "session_id": session_id or entry.get("session_id", ""),
             "old_first_line": first_line,
             "new_first_line": new_first_line,
+            "rewritten_session_meta_records": rewritten_count,
+            "rewritten_session_meta_line_indexes": rewritten_indexes,
         }
     )
 
@@ -1504,10 +1543,21 @@ def apply_session_file_provider_fast(
 
 def rollback_session_file_provider_fast(entry: dict[str, str], codex_dir: Path) -> None:
     path = codex_dir / entry["path"]
-    first_line = read_first_line(path)
-    if first_line != entry["new_first_line"]:
-        return
-    write_first_line_in_place(path, entry["new_first_line"], entry["old_first_line"])
+    data, metadata = stable_file_snapshot(path)
+    line_indexes = {
+        int(index)
+        for index in entry.get("rewritten_session_meta_line_indexes", [0])
+    }
+    replacement, rewritten_count, _ = rewritten_session_meta_records(
+        data,
+        entry.get("session_id") or None,
+        entry["target_provider"],
+        entry["source_provider"],
+        line_indexes,
+    )
+    if rewritten_count != len(line_indexes):
+        raise ValueError("session_meta records changed before rollback")
+    atomic_replace_bytes(path, replacement, metadata.st_mode & 0o7777)
 
 
 def restore_fast_state_backups(codex_dir: Path, backup_root: Path) -> int:

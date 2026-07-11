@@ -830,6 +830,50 @@ class HistoryOverlayTests(unittest.TestCase):
             self.assertEqual(session_file.read_text(encoding="utf-8"), original + appended)
             self.assertFalse((codex_dir / "backup" / "jsonl" / "sessions" / session_file.name).exists())
 
+    def test_session_file_apply_rewrites_every_session_meta_record_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            session_file = codex_dir / "sessions" / "rollout-repeated-meta.jsonl"
+            session_file.parent.mkdir(parents=True)
+            records = [
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "thread-repeated", "model_provider": "custom"},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "message": 'keep literal "model_provider":"openai" in message text',
+                    },
+                },
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "thread-repeated", "model_provider": "openai"},
+                },
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "thread-repeated", "model_provider": "openai"},
+                },
+            ]
+            original_lines = [json.dumps(record, separators=(",", ":")) + "\n" for record in records]
+            session_file.write_text("".join(original_lines), encoding="utf-8")
+
+            plan = plan_session_file_provider_fast(session_file, codex_dir, "custom")
+            self.assertIsNotNone(plan)
+            result = apply_session_file_provider_fast(plan, codex_dir, codex_dir / "backup")
+
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(result["rewritten_session_meta_records"], 2)
+            rewritten_lines = session_file.read_text(encoding="utf-8").splitlines()
+            rewritten = [json.loads(line) for line in rewritten_lines]
+            self.assertEqual(rewritten[0]["payload"]["model_provider"], "custom")
+            self.assertEqual(rewritten[2]["payload"]["model_provider"], "custom")
+            self.assertEqual(rewritten[3]["payload"]["model_provider"], "custom")
+            self.assertEqual(rewritten_lines[1], original_lines[1].rstrip("\n"))
+
+            history_overlay.rollback_session_file_provider_fast(result, codex_dir)
+            self.assertEqual(session_file.read_text(encoding="utf-8"), "".join(original_lines))
+
     def test_history_repair_defers_while_sqlite_is_busy_then_retries(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
