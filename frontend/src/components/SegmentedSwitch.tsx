@@ -8,6 +8,7 @@ export interface SegmentedOption<T extends string> {
 }
 
 interface SegmentedSwitchProps<T extends string> {
+  activeTone?: "default" | "foreign";
   ariaLabel: string;
   className?: string;
   disabled?: boolean;
@@ -18,6 +19,7 @@ interface SegmentedSwitchProps<T extends string> {
 }
 
 export function SegmentedSwitch<T extends string>({
+  activeTone = "default",
   ariaLabel,
   className,
   disabled,
@@ -45,7 +47,9 @@ export function SegmentedSwitch<T extends string>({
             className={cx(
               "focus-ring min-h-8 rounded-control px-3 py-1.5 text-sm font-semibold transition-[box-shadow,background-color,color,transform] duration-150 ease-out active:scale-[0.96]",
               active
-                ? "bg-ink text-white shadow-raised"
+                ? activeTone === "foreign"
+                  ? "bg-[#e7e7e4] text-slate-500 shadow-control"
+                  : "bg-ink text-white shadow-raised"
                 : pending
                   ? "bg-slate-200/80 text-slate-500 shadow-control"
                   : "text-slate-600 hover:bg-surface",

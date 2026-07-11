@@ -21,7 +21,6 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useTranslation } from "react-i18next";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
-import { TakeoverSummaryDialog, type TakeoverSummary } from "../components/TakeoverSummaryDialog";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
@@ -338,7 +337,8 @@ function ProvidersPageImpl({
   });
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
-  const [pendingCodexTakeover, setPendingCodexTakeover] = useState<TakeoverSummary | null>(null);
+  const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] =
+    useState<AppFlavorInfo["codex_target_owner"] | undefined>(undefined);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>(() => {
@@ -496,7 +496,21 @@ function ProvidersPageImpl({
   const canAdd = Boolean(form.name.trim());
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
   const realCodexConnected = codexStatus?.mode === "custom" && codexStatus.proxy_running === true;
-  const codexConnected = realCodexConnected;
+  const effectiveCodexTargetOwner = codexTargetOwnerOverride === undefined
+    ? appFlavor?.codex_target_owner ?? null
+    : codexTargetOwnerOverride;
+  const codexOwnedByOtherApp = Boolean(
+    !realCodexConnected &&
+      effectiveCodexTargetOwner !== null &&
+      effectiveCodexTargetOwner !== "official" &&
+      effectiveCodexTargetOwner !== appFlavor?.routing_owner,
+  );
+  const codexConnected = realCodexConnected || codexOwnedByOtherApp;
+  const codexRouteOwnerLabel = realCodexConnected
+    ? codexTakeoverOwnerLabel(appFlavor?.routing_owner ?? null, tr)
+    : codexOwnedByOtherApp
+      ? codexTakeoverOwnerLabel(effectiveCodexTargetOwner, tr)
+      : null;
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
@@ -998,19 +1012,7 @@ function ProvidersPageImpl({
 
   async function toggleCodexHubConnection() {
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
-    if (nextMode === "custom" && appFlavor?.codex_takeover_required) {
-      const currentOwner = codexTakeoverOwnerLabel(appFlavor.codex_target_owner, tr);
-      setPendingCodexTakeover({
-        configPath: `~/${appFlavor.codex_target_home_suffix}/config.toml`,
-        currentOwner,
-        name: "Codex",
-        newEndpoint: `http://127.0.0.1:${appFlavor.gateway_port}/v1`,
-        nextOwner: appFlavor.product_name,
-        oldEndpoint: t("gateway.officialRoute"),
-      });
-      return;
-    }
-    await applyCodexHubConnection(nextMode, false);
+    await applyCodexHubConnection(nextMode, Boolean(appFlavor?.codex_takeover_required));
   }
 
   async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
@@ -1032,6 +1034,7 @@ function ProvidersPageImpl({
         status = refreshedStatus ?? status;
       }
       setCodexStatus(status);
+      setCodexTargetOwnerOverride(nextMode === "custom" ? appFlavor?.routing_owner ?? null : "official");
       onStatusChanged?.(status);
       setConnectionPendingMode(null);
       setError(null);
@@ -1347,20 +1350,13 @@ function ProvidersPageImpl({
 
   return (
     <>
-    <TakeoverSummaryDialog
-      busy={busy === "route"}
-      summary={pendingCodexTakeover}
-      onCancel={() => setPendingCodexTakeover(null)}
-      onConfirm={() => {
-        setPendingCodexTakeover(null);
-        void applyCodexHubConnection("custom", true);
-      }}
-    />
     <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[430px_minmax(0,1fr)] gap-4 overflow-hidden">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
           codexConnected={codexConnected}
+          codexForeignOwner={codexOwnedByOtherApp}
+          codexOwnerLabel={codexRouteOwnerLabel}
           connectionPendingMode={connectionPendingMode}
           gatewayStatus={gatewayStatus}
           busy={busy}
@@ -1527,6 +1523,8 @@ function ProviderSourceSidebar({
   busy,
   codexAuthState,
   codexConnected,
+  codexForeignOwner,
+  codexOwnerLabel,
   connectionPendingMode,
   enabledProviderModels,
   gatewayStatus,
@@ -1546,6 +1544,8 @@ function ProviderSourceSidebar({
   busy: string | null;
   codexAuthState: CodexAuthState;
   codexConnected: boolean;
+  codexForeignOwner: boolean;
+  codexOwnerLabel: string | null;
   connectionPendingMode: ConnectionMode | null;
   enabledProviderModels: number;
   gatewayStatus: GatewayStatus | null;
@@ -1577,6 +1577,8 @@ function ProviderSourceSidebar({
       />
       <HubConnectionBridge
         connected={codexConnected}
+        foreignOwner={codexForeignOwner}
+        ownerLabel={codexOwnerLabel}
         pendingMode={connectionPendingMode}
         disabled={busy === "route" || Boolean(connectionPendingMode)}
         onToggle={onToggleConnection}
@@ -1693,12 +1695,16 @@ function OfficialOpenAICard({
 function HubConnectionBridge({
   connected,
   disabled,
+  foreignOwner,
   onToggle,
+  ownerLabel,
   pendingMode,
 }: {
   connected: boolean;
   disabled: boolean;
+  foreignOwner: boolean;
   onToggle: () => void;
+  ownerLabel: string | null;
   pendingMode: ConnectionMode | null;
 }) {
   const { t } = useTranslation();
@@ -1707,7 +1713,9 @@ function HubConnectionBridge({
     : pendingMode === "official"
       ? t("providers.disconnecting")
     : connected
-      ? t("providers.connectedToHub")
+      ? ownerLabel
+        ? t("providers.connectedToHubChannel", { channel: ownerLabel })
+        : t("providers.connectedToHub")
       : t("providers.connectToHub");
   const icon = pendingMode === "official" || (!pendingMode && !connected)
     ? <Link2Off size={15} className={pendingMode ? "opacity-70" : undefined} />
@@ -1721,8 +1729,10 @@ function HubConnectionBridge({
         className={cx(
           "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-100",
           pendingMode && "animate-pulse bg-slate-200/85 text-slate-600",
-          !pendingMode && connected
-            ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
+          !pendingMode && foreignOwner
+            ? "border border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:shadow-raised"
+            : !pendingMode && connected
+              ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
             : !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
         )}
         disabled={disabled}
@@ -1732,8 +1742,10 @@ function HubConnectionBridge({
             ? t("providers.connectingToHub")
             : pendingMode === "official"
               ? t("providers.disconnectingFromHub")
-              : connected
-                ? t("providers.disconnectFromHubTitle")
+               : foreignOwner
+                 ? t("providers.takeOverFromChannelTitle", { channel: ownerLabel ?? t("common.unknown") })
+               : connected
+                 ? t("providers.disconnectFromHubTitle")
                 : t("providers.connectToHubTitle")
         }
       >

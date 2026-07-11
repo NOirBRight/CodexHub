@@ -3,7 +3,6 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
-import { TakeoverSummaryDialog, type TakeoverSummary } from "../components/TakeoverSummaryDialog";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
@@ -87,11 +86,6 @@ function GatewayPageImpl({
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [autoRetryBusy, setAutoRetryBusy] = useState(false);
-  const [pendingTakeover, setPendingTakeover] = useState<{
-    clientId: string;
-    owner: RoutingOwner;
-    summary: TakeoverSummary;
-  } | null>(null);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
   const running = status?.proxy_running ?? false;
@@ -150,7 +144,6 @@ function GatewayPageImpl({
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
-  const currentAppGatewayUrl = currentAppGatewayEndpoint(appFlavor, settings, status);
 
   function markCopied(target: string) {
     setCopiedTarget(target);
@@ -291,31 +284,17 @@ function GatewayPageImpl({
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const client = clientInfoById.get(clientId);
-    if (!forceTakeover && client && client.managed_by_current_app === false) {
-      if (!runtimeOwner) {
-        setClientBusy(null);
-        showToast(t("gateway.ownerUnavailable"), "error");
-        return;
-      }
-      setPendingTakeover({
-        clientId,
-        owner: runtimeOwner,
-        summary: {
-          configPath: client.config_path ?? t("common.unknown"),
-          currentOwner: ownerDisplayName(client.route_owner, t),
-          name: client.name,
-          newEndpoint: currentAppGatewayUrl ?? t("common.unknown"),
-          nextOwner: ownerDisplayName(runtimeOwner, t),
-          oldEndpoint: client.route_endpoint ?? t("common.unknown"),
-        },
-      });
+    const takeoverRequired = client?.route_owner !== "official" && client?.managed_by_current_app === false;
+    if (takeoverRequired && !runtimeOwner) {
       setClientBusy(null);
+      showToast(t("gateway.ownerUnavailable"), "error");
       return;
     }
+    const shouldForceTakeover = forceTakeover || takeoverRequired;
     const routeName = ownerDisplayName(owner, t);
     const toastId = showToast(t("gateway.switchClient", { clientName, routeName }), "loading");
     try {
-      await api.switchGatewayClientRoute(clientId, owner, defaultModel, forceTakeover);
+      await api.switchGatewayClientRoute(clientId, owner, defaultModel, shouldForceTakeover);
       await onRefreshClients();
       updateToast(toastId, {
         action: null,
@@ -388,6 +367,9 @@ function GatewayPageImpl({
     if (action === "official") {
       return void switchClientMode(clientId, "official");
     }
+    if (action === "takeover") {
+      return void switchClientMode(clientId, runtimeOwner, true);
+    }
     return void switchClientMode(clientId, runtimeOwner);
   }
 
@@ -423,16 +405,6 @@ function GatewayPageImpl({
 
   return (
     <main className="relative grid h-full min-h-[704px] w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(300px,340px)] gap-4 overflow-hidden">
-      <TakeoverSummaryDialog
-        busy={Boolean(clientBusy)}
-        summary={pendingTakeover?.summary ?? null}
-        onCancel={() => setPendingTakeover(null)}
-        onConfirm={() => {
-          const pending = pendingTakeover;
-          setPendingTakeover(null);
-          if (pending) void switchClientMode(pending.clientId, pending.owner, true);
-        }}
-      />
       <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(320px,1fr)] gap-2.5">
         <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
           <div className="flex min-w-0 items-center justify-between gap-3">
@@ -1103,18 +1075,6 @@ function isRecoveryRetryStillActive(event: GatewayEvent) {
 function recoveryEventTime(event: GatewayEvent) {
   const timestamp = event.ts ? Date.parse(event.ts) : NaN;
   return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function currentAppGatewayEndpoint(
-  appFlavor?: AppFlavorInfo | null,
-  settings?: Settings | null,
-  status?: GatewayStatus | null,
-) {
-  const port = settings?.proxy_port ?? status?.port ?? appFlavor?.gateway_port;
-  if (!port) {
-    return null;
-  }
-  return `http://127.0.0.1:${port}/v1`;
 }
 
 function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {

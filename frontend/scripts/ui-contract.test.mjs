@@ -1194,7 +1194,8 @@ test("gateway client route switching reports completion", async () => {
 
   assert.match(gatewaySource, /t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
   assert.match(gatewaySource, /showToast\(t\("gateway\.switchClient", \{ clientName, routeName \}\), "loading"\)/);
-  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, forceTakeover\)/);
+  assert.match(gatewaySource, /const shouldForceTakeover = forceTakeover \|\| takeoverRequired;/);
+  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, shouldForceTakeover\)/);
   assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDone", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
   assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
   assert.match(cardSource, /const pendingRouteValue = busy && busyMode !== "takeover" \? busyMode \?\? null : null;/);
@@ -2244,7 +2245,9 @@ test("Codex Hub connection action reports progress immediately", async () => {
 
   assert.match(providersSource, /const \[connectionPendingMode, setConnectionPendingMode\] = useState<ConnectionMode \| null>\(null\);/);
   assert.match(providersSource, /const realCodexConnected = codexStatus\?\.mode === "custom" && codexStatus\.proxy_running === true;/);
-  assert.match(providersSource, /const codexConnected = realCodexConnected;/);
+  assert.match(providersSource, /const codexOwnedByOtherApp = Boolean\(/);
+  assert.match(providersSource, /!realCodexConnected &&[\s\S]*effectiveCodexTargetOwner !== appFlavor\?\.routing_owner/);
+  assert.match(providersSource, /const codexConnected = realCodexConnected \|\| codexOwnedByOtherApp;/);
   assert.doesNotMatch(providersSource, /connectionPreview/);
   assert.doesNotMatch(action, /if \(!settingsDraft\) \{\s*return;\s*\}/);
   assert.match(action, /const actionLabel = nextMode === "custom" \? t\("providers\.connectingToHub"\) : t\("providers\.disconnectingFromHub"\);/);
@@ -2654,7 +2657,7 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.match(zhSource, /installUpdate: "安装更新"/);
 });
 
-test("gateway client takeover is a single compact footer row without endpoint chips", async () => {
+test("gateway client takeover stays inside the original two-option control", async () => {
   const [cardSource, typesSource, tauriSource, gatewaySource, enSource, zhSource] = await Promise.all([
     readFile(gatewayClientCardPath, "utf8"),
     readFile(typesPath, "utf8"),
@@ -2668,28 +2671,24 @@ test("gateway client takeover is a single compact footer row without endpoint ch
   assert.match(typesSource, /route_owner: RoutingOwner/);
   assert.match(tauriSource, /getAppFlavor/);
   assert.match(tauriSource, /forceTakeover/);
-  assert.doesNotMatch(cardSource, /ROUTING_OWNER_STYLES|ownerLabel\(|hostPort\(|route_endpoint/);
-  assert.match(cardSource, /const managedLabel = managedByLabel\(routeOwner, t\);/);
-  assert.match(cardSource, /grid min-h-8 grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-2/);
-  assert.match(cardSource, /<span className="truncate text-xs font-medium text-slate-600" title=\{managedLabel\}>[\s\S]*\{managedLabel\}/);
-  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("takeover"\)\}/);
-  assert.ok(
-    cardSource.indexOf('t("common.version")') < cardSource.indexOf('onSwitchMode("takeover")'),
-    "takeover row should be the card footer",
-  );
+  assert.doesNotMatch(cardSource, /ROUTING_OWNER_STYLES|hostPort\(|route_endpoint/);
+  assert.doesNotMatch(cardSource, /\{t\("gateway\.takeover"\)\}/);
+  assert.match(cardSource, /const takeoverRequired = routeOwner !== "official" && info\?\.managed_by_current_app === false/);
+  assert.match(cardSource, /<SegmentedSwitch/);
+  assert.match(cardSource, /activeTone=\{takeoverRequired \? "foreign" : "default"\}/);
+  assert.match(cardSource, /takeoverRequired && mode === "current_owner" \? "takeover" : mode/);
+  assert.match(cardSource, /`\$\{t\("common\.codexHub"\)\} · \$\{routeOwnerLabel\}`/);
   assert.match(cardSource, /runtimeOwner: RoutingOwner \| null/);
   assert.match(cardSource, /ownerUnavailable/);
   assert.match(gatewaySource, /takeover/i);
-  assert.match(gatewaySource, /newEndpoint:/);
-  assert.match(gatewaySource, /oldEndpoint:/);
-  assert.match(gatewaySource, /const port = settings\?\.proxy_port \?\? status\?\.port \?\? appFlavor\?\.gateway_port;/);
-  assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{port\}\/v1/);
+  assert.match(gatewaySource, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
+  assert.doesNotMatch(gatewaySource, /TakeoverSummaryDialog/);
   assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
   assert.match(enSource, /managedByRelease/);
   assert.match(zhSource, /managedByRelease/);
 });
 
-test("Beta Codex takeover is explicit and exposes ownership conflict state", async () => {
+test("Codex takeover uses the existing connected control and exposes ownership state", async () => {
   const [typesSource, tauriSource, providersSource, enSource, zhSource] = await Promise.all([
     readFile(typesPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
@@ -2706,21 +2705,23 @@ test("Beta Codex takeover is explicit and exposes ownership conflict state", asy
   assert.match(tauriSource, /forceTakeover/);
   assert.match(providersSource, /appFlavor\?\.codex_takeover_required/);
   assert.doesNotMatch(providersSource, /window\.confirm\(t\("providers\.betaTakeoverConfirm"/);
-  assert.match(providersSource, /TakeoverSummaryDialog/);
+  assert.doesNotMatch(providersSource, /TakeoverSummaryDialog/);
   assert.match(providersSource, /forceTakeover[\s\S]*api\.switchMode\(nextMode, false, true\)/);
-  assert.match(providersSource, /setPendingCodexTakeover/);
+  assert.match(providersSource, /await applyCodexHubConnection\(nextMode, Boolean\(appFlavor\?\.codex_takeover_required\)\)/);
+  assert.match(providersSource, /setCodexTargetOwnerOverride\(nextMode === "custom" \? appFlavor\?\.routing_owner \?\? null : "official"\)/);
+  assert.match(providersSource, /codexForeignOwner=\{codexOwnedByOtherApp\}/);
+  assert.match(providersSource, /bg-emerald-100 text-emerald-700/);
   assert.doesNotMatch(providersSource, /Codex is managed by/);
-  assert.match(enSource, /takeoverTitle:/);
-  assert.match(zhSource, /takeoverTitle:/);
+  assert.match(enSource, /connectedToHubChannel:/);
+  assert.match(zhSource, /connectedToHubChannel:/);
 });
 
-test("gateway takeover uses an in-app summary dialog instead of browser confirm", async () => {
+test("gateway takeover is direct and does not add a confirmation surface", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
   assert.doesNotMatch(gatewaySource, /window\.confirm/);
-  assert.match(gatewaySource, /TakeoverSummaryDialog/);
-  assert.match(gatewaySource, /oldEndpoint/);
-  assert.match(gatewaySource, /newEndpoint/);
+  assert.doesNotMatch(gatewaySource, /TakeoverSummaryDialog/);
+  assert.match(gatewaySource, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {
