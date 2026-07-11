@@ -11,3 +11,9 @@ _Avoid_: Proxy, runtime proxy, local proxy
 **Vision Proxy**:
 The Gateway feature that lets a non-vision target model handle image requests by using a configured image-capable model to produce text visual context.
 _Avoid_: Image conversion, image workaround
+
+## Operations
+
+If ChatGPT/Codex cannot start or native Windows sandbox commands hang, follow
+[`docs/runbooks/codex-windows-sandbox-recovery-handoff.md`](docs/runbooks/codex-windows-sandbox-recovery-handoff.md).
+Do not reset ACLs, reinstall the AppX package, or delete `.codex` as a first-line response.
