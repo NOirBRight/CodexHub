@@ -248,7 +248,7 @@ const enUS = {
     savingSettings: "Saving gateway settings...",
     disablingAutoRetry: "Disabling Gateway auto retry...",
     enablingAutoRetry: "Enabling Gateway auto retry...",
-    managedByRelease: "Managed by Release",
+    managedByRelease: "Managed by Stable",
     managedByBeta: "Managed by Beta",
     signedIn: "Signed in",
     startBackend: "Start",

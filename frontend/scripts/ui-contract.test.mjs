@@ -2714,6 +2714,7 @@ test("Codex takeover uses the existing connected control and exposes ownership s
   assert.doesNotMatch(providersSource, /Codex is managed by/);
   assert.match(enSource, /connectedToHubChannel:/);
   assert.match(zhSource, /connectedToHubChannel:/);
+  assert.match(zhSource, /connectedToHubChannel: "已连接到 CodexHub · \{\{channel\}\}"/);
 });
 
 test("gateway takeover is direct and does not add a confirmation surface", async () => {

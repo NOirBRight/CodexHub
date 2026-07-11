@@ -859,7 +859,7 @@ pub fn apply_gateway_client_config(
         });
     }
     let current_app_owner = crate::app_flavor::current().routing_owner();
-    with_gateway_client_mutation_owner_gate(id, current_app_owner, false, move |id| {
+    with_gateway_client_mutation_owner_gate(id, current_app_owner, false, move |id, _| {
         apply_gateway_client_config_locked(id, model)
     })
 }
@@ -941,29 +941,31 @@ pub fn restore_gateway_client_config(
             message: "Restore is not available for this copy-only client.".to_string(),
         });
     }
-    with_gateway_client_mutation_owner_gate(id, RoutingOwner::Official, false, |id| {
-        restore_gateway_client_config_locked(id)
+    with_gateway_client_mutation_owner_gate(id, RoutingOwner::Official, false, |id, owner| {
+        restore_gateway_client_config_locked(id, owner)
     })
 }
 
 fn restore_gateway_client_config_locked(
     client_id: String,
+    backup_owner: RoutingOwner,
 ) -> Result<GatewayClientApplyResult, String> {
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
+    let backup_root = client_backup_root_for_owner(&client_id, backup_owner);
     match client_id.as_str() {
         "opencode" => {
             let path = detect_opencode_config_path()
                 .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-            restore_latest_backup("opencode", &path, &client_backup_root("opencode"))
+            restore_latest_backup("opencode", &path, &backup_root)
         }
         "pi" => {
             let paths = detect_pi_config_paths();
             restore_pi_config_with_paths(
                 &paths.settings_path,
                 &paths.models_path,
-                &client_backup_root("pi"),
+                &backup_root,
             )
         }
         "omp" => {
@@ -971,12 +973,12 @@ fn restore_gateway_client_config_locked(
             restore_omp_config_with_paths(
                 &paths.config_path,
                 &paths.models_path,
-                &client_backup_root("omp"),
+                &backup_root,
             )
         }
         "zcode" => {
             let targets = detect_zcode_config_targets();
-            restore_zcode_config_with_targets(&targets, &client_backup_root("zcode"))
+            restore_zcode_config_with_targets(&targets, &backup_root)
         }
         _ => Ok(GatewayClientApplyResult {
             client_id,
@@ -1010,9 +1012,9 @@ pub fn switch_gateway_client_route(
         normalize_client_id(&client_id),
         next_owner,
         force_takeover.unwrap_or(false),
-        move |id| {
+        move |id, current_target_owner| {
             if next_owner == RoutingOwner::Official {
-                restore_gateway_client_config_locked(id)
+                restore_gateway_client_config_locked(id, current_target_owner)
             } else if next_owner == current_app_owner {
                 apply_gateway_client_config_locked(id, model)
             } else {
@@ -1199,7 +1201,7 @@ fn with_gateway_client_mutation_owner_gate<F>(
     operation: F,
 ) -> Result<GatewayClientApplyResult, String>
 where
-    F: FnOnce(String) -> Result<GatewayClientApplyResult, String>,
+    F: FnOnce(String, RoutingOwner) -> Result<GatewayClientApplyResult, String>,
 {
     let current_app_owner = crate::app_flavor::current().routing_owner();
     let current_target_owner = list_gateway_clients(false)?
@@ -1208,7 +1210,7 @@ where
         .map(|client| client.route_owner)
         .ok_or_else(|| format!("unknown gateway client: {client_id}"))?;
     if !gateway_client_has_existing_config(&client_id) {
-        return operation(client_id);
+        return operation(client_id, current_target_owner);
     }
     ensure_route_owner_mutation_allowed(
         current_app_owner,
@@ -1216,7 +1218,7 @@ where
         next_owner,
         force_takeover,
     )?;
-    operation(client_id)
+    operation(client_id, current_target_owner)
 }
 
 fn gateway_client_has_existing_config(client_id: &str) -> bool {
@@ -1994,13 +1996,13 @@ fn owner_label(owner: RoutingOwner) -> &'static str {
 fn ensure_route_owner_mutation_allowed(
     current_app_owner: RoutingOwner,
     current_target_owner: RoutingOwner,
-    next_owner: RoutingOwner,
+    _next_owner: RoutingOwner,
     force_takeover: bool,
 ) -> Result<(), String> {
     if current_target_owner == RoutingOwner::Official || current_target_owner == current_app_owner {
         return Ok(());
     }
-    if force_takeover && next_owner != RoutingOwner::Official {
+    if force_takeover {
         return Ok(());
     }
     Err(format!(
@@ -4914,6 +4916,26 @@ fn windows_file_version(path: &Path) -> Option<String> {
 
 fn client_backup_root(client_id: &str) -> PathBuf {
     runtime_proxy_dir(&runtime_home())
+        .join("client-backups")
+        .join(client_id)
+}
+
+fn client_backup_root_for_owner(client_id: &str, owner: RoutingOwner) -> PathBuf {
+    let current_owner = crate::app_flavor::current().routing_owner();
+    let owner_home = if owner == current_owner {
+        Some(runtime_home())
+    } else {
+        let flavor = match owner {
+            RoutingOwner::Release => Some(crate::app_flavor::RuntimeFlavor::Stable),
+            RoutingOwner::Beta => Some(crate::app_flavor::RuntimeFlavor::Beta),
+            RoutingOwner::Official | RoutingOwner::UnknownExternal => None,
+        };
+        dirs::home_dir().and_then(|home| {
+            flavor.map(|flavor| crate::runtime_paths::homes_for_flavor(&home, flavor).runtime)
+        })
+    }
+    .unwrap_or_else(runtime_home);
+    runtime_proxy_dir(&owner_home)
         .join("client-backups")
         .join(client_id)
 }
@@ -9121,6 +9143,40 @@ mod tests {
             true,
         )
         .expect("explicit takeover should be allowed");
+    }
+
+    #[test]
+    fn takeover_allows_cross_channel_switch_to_official_when_explicit() {
+        super::ensure_route_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Release,
+            crate::app_flavor::RoutingOwner::Beta,
+            crate::app_flavor::RoutingOwner::Official,
+            true,
+        )
+        .expect("explicit Official selection should disconnect a foreign-owned route");
+    }
+
+    #[test]
+    fn foreign_owner_restore_uses_the_owning_channel_backup_root() {
+        let user_home = dirs::home_dir().expect("user home");
+        let foreign_owner = match crate::app_flavor::current().routing_owner() {
+            crate::app_flavor::RoutingOwner::Release => crate::app_flavor::RoutingOwner::Beta,
+            _ => crate::app_flavor::RoutingOwner::Release,
+        };
+        let foreign_flavor = match foreign_owner {
+            crate::app_flavor::RoutingOwner::Release => crate::app_flavor::RuntimeFlavor::Stable,
+            _ => crate::app_flavor::RuntimeFlavor::Beta,
+        };
+        let expected_runtime =
+            crate::runtime_paths::homes_for_flavor(&user_home, foreign_flavor).runtime;
+
+        assert_eq!(
+            super::client_backup_root_for_owner("opencode", foreign_owner),
+            expected_runtime
+                .join("proxy")
+                .join("client-backups")
+                .join("opencode")
+        );
     }
 
     #[test]
