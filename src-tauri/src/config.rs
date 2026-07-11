@@ -325,7 +325,7 @@ fn sanitize_model_ids_with_known(
     output
 }
 
-fn normalize_official_model_id(
+pub(crate) fn normalize_official_model_id(
     value: &str,
     known_official_models: &HashSet<String>,
 ) -> Option<String> {
@@ -348,7 +348,7 @@ fn static_official_model_ids() -> HashSet<String> {
         .collect()
 }
 
-fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
+pub(crate) fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
     let mut known = static_official_model_ids();
     let policy_path = paths.repo_root.join("config").join("catalog_policy.toml");
     if let Ok(text) = fs::read_to_string(policy_path) {

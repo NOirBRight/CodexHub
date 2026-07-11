@@ -217,10 +217,20 @@ pub fn list_models() -> Result<Vec<Model>, String> {
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
+    let config_paths = config::ConfigPaths::runtime()?;
+    let known_official_models = config::known_official_model_ids(&config_paths);
     let cached = read_metadata_cache(&paths).unwrap_or_default();
-    let cached = merge_metadata_with_overrides(builtin_model_metadata(), cached);
+    let cached = merge_metadata_with_overrides(
+        builtin_model_metadata(),
+        cached,
+        &known_official_models,
+    );
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    Ok(merge_metadata_with_overrides(cached, overrides))
+    Ok(merge_metadata_with_overrides(
+        cached,
+        overrides,
+        &known_official_models,
+    ))
 }
 
 pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, String> {
@@ -1650,12 +1660,25 @@ fn write_models_json(path: &Path, models: &[Model]) -> Result<(), String> {
         .map_err(|error| format!("failed to write model metadata {}: {error}", path.display()))
 }
 
-fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) -> Vec<Model> {
-    for model in &mut base {
-        model.id = normalize_official_model_metadata_id(&model.id);
-    }
+fn merge_metadata_with_overrides(
+    base: Vec<Model>,
+    overrides: Vec<Model>,
+    known_official_models: &HashSet<String>,
+) -> Vec<Model> {
+    let mut base = base
+        .into_iter()
+        .filter_map(|mut model| {
+            model.id = config::normalize_official_model_id(&model.id, known_official_models)?;
+            Some(model)
+        })
+        .collect::<Vec<_>>();
     for mut override_model in overrides {
-        override_model.id = normalize_official_model_metadata_id(&override_model.id);
+        let Some(model_id) =
+            config::normalize_official_model_id(&override_model.id, known_official_models)
+        else {
+            continue;
+        };
+        override_model.id = model_id;
         override_model.metadata_provenance = Some(MetadataProvenance {
             source: "user_override".to_string(),
             source_url: None,
@@ -1670,14 +1693,6 @@ fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) ->
     }
     base.sort_by(|left, right| left.id.cmp(&right.id));
     base
-}
-
-fn normalize_official_model_metadata_id(id: &str) -> String {
-    let id = id.trim();
-    id.strip_prefix("openai/")
-        .filter(|bare| bare.starts_with("gpt-"))
-        .unwrap_or(id)
-        .to_string()
 }
 
 fn merge_model_override(base: &mut Model, override_model: Model) {
@@ -2080,6 +2095,7 @@ mod tests {
     use reqwest::blocking::Client;
     use serde_json::{json, Value};
     use std::cell::RefCell;
+    use std::collections::HashSet;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2702,13 +2718,56 @@ mod tests {
             ..Model::default()
         }];
 
-        let merged = merge_metadata_with_overrides(base, overrides);
+        let merged = merge_metadata_with_overrides(base, overrides, &HashSet::new());
 
         assert_eq!(merged[0].context_window, Some(245_000));
         assert_eq!(merged[0].display_name.as_deref(), Some("MiniMax M3 Custom"));
         assert_eq!(
             merged[0].metadata_provenance.as_ref().unwrap().source,
             "user_override"
+        );
+    }
+
+    #[test]
+    fn metadata_merge_normalizes_only_known_official_aliases() {
+        let known_official_models = HashSet::from(["gpt-5.5".to_string()]);
+        let base = vec![Model {
+            id: "gpt-5.5".to_string(),
+            display_name: Some("5.5".to_string()),
+            ..Model::default()
+        }];
+        let overrides = vec![
+            Model {
+                id: "openai/gpt-5.5".to_string(),
+                display_name: Some("Known override".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "openai/gpt-9.9-unknown".to_string(),
+                display_name: Some("Unknown alias".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "acme/gpt-5.6-sol".to_string(),
+                display_name: Some("Third-party GPT".to_string()),
+                ..Model::default()
+            },
+        ];
+
+        let merged =
+            merge_metadata_with_overrides(base, overrides, &known_official_models);
+        let ids = merged
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, ["acme/gpt-5.6-sol", "gpt-5.5"]);
+        assert_eq!(
+            merged
+                .iter()
+                .find(|model| model.id == "gpt-5.5")
+                .and_then(|model| model.display_name.as_deref()),
+            Some("Known override")
         );
     }
 
