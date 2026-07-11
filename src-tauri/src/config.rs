@@ -689,6 +689,9 @@ fn ensure_codex_owner_mutation_allowed(
     if current_target_owner == Some(current_app_owner) {
         return Ok(());
     }
+    if force_takeover {
+        return Ok(());
+    }
 
     if mode == "custom" {
         let stable_backward_compatible_target = current_app_owner
@@ -697,7 +700,7 @@ fn ensure_codex_owner_mutation_allowed(
                 current_target_owner,
                 None | Some(crate::app_flavor::RoutingOwner::Official)
             );
-        if stable_backward_compatible_target || force_takeover {
+        if stable_backward_compatible_target {
             return Ok(());
         }
         return Err(CodexOwnerMutationError::TakeoverRequired {
@@ -1463,6 +1466,60 @@ sort_order = 7
             true,
         )
         .is_ok());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "official",
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn beta_can_explicitly_switch_stable_owned_codex_to_unified_official() {
+        let root = temp_root("beta-force-stable-to-official");
+        let runtime = root.join(".codexhub-beta");
+        let target = root.join(".codex");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            paths.codex_config_path(),
+            b"model_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        save_settings_with_paths(Settings::default(), &paths).unwrap();
+        let python = super::find_python();
+        let runner = ProcessCommandRunner;
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Beta,
+            "official",
+            true,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+        assert!(restored.contains("model_provider = \"custom\""));
+        assert!(restored.contains("name = \"OpenAI\""));
+        assert!(!restored.contains("# owner = release"));
+        assert!(!restored.contains("base_url"));
     }
 
     #[test]
@@ -1693,14 +1750,21 @@ sort_order = 7
     }
 
     #[test]
-    fn codex_disconnect_restores_only_changes_owned_by_current_channel() {
+    fn codex_foreign_disconnect_requires_explicit_takeover() {
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "official",
+            false,
+        )
+        .is_err());
         assert!(ensure_codex_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Beta,
             Some(crate::app_flavor::RoutingOwner::Release),
             "official",
             true,
         )
-        .is_err());
+        .is_ok());
         assert!(ensure_codex_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Beta,
             Some(crate::app_flavor::RoutingOwner::Beta),

@@ -858,8 +858,7 @@ pub fn apply_gateway_client_config(
             message: "This client is copy-only; no native adapter is registered.".to_string(),
         });
     }
-    let current_app_owner = crate::app_flavor::current().routing_owner();
-    with_gateway_client_mutation_owner_gate(id, current_app_owner, false, move |id, _| {
+    with_gateway_client_mutation_owner_gate(id, false, move |id, _| {
         apply_gateway_client_config_locked(id, model)
     })
 }
@@ -941,7 +940,7 @@ pub fn restore_gateway_client_config(
             message: "Restore is not available for this copy-only client.".to_string(),
         });
     }
-    with_gateway_client_mutation_owner_gate(id, RoutingOwner::Official, false, |id, owner| {
+    with_gateway_client_mutation_owner_gate(id, false, |id, owner| {
         restore_gateway_client_config_locked(id, owner)
     })
 }
@@ -953,32 +952,38 @@ fn restore_gateway_client_config_locked(
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
-    let backup_root = client_backup_root_for_owner(&client_id, backup_owner);
+    let backup_roots = client_backup_roots_for_restore(&client_id, backup_owner);
     match client_id.as_str() {
         "opencode" => {
             let path = detect_opencode_config_path()
                 .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-            restore_latest_backup("opencode", &path, &backup_root)
+            restore_opencode_config_with_backup_roots(&path, &backup_roots)
         }
         "pi" => {
             let paths = detect_pi_config_paths();
-            restore_pi_config_with_paths(
-                &paths.settings_path,
-                &paths.models_path,
-                &backup_root,
-            )
+            restore_with_backup_roots(&backup_roots, |backup_root| {
+                restore_pi_config_with_paths(
+                    &paths.settings_path,
+                    &paths.models_path,
+                    backup_root,
+                )
+            })
         }
         "omp" => {
             let paths = detect_omp_config_paths();
-            restore_omp_config_with_paths(
-                &paths.config_path,
-                &paths.models_path,
-                &backup_root,
-            )
+            restore_with_backup_roots(&backup_roots, |backup_root| {
+                restore_omp_config_with_paths(
+                    &paths.config_path,
+                    &paths.models_path,
+                    backup_root,
+                )
+            })
         }
         "zcode" => {
             let targets = detect_zcode_config_targets();
-            restore_zcode_config_with_targets(&targets, &backup_root)
+            restore_with_backup_roots(&backup_roots, |backup_root| {
+                restore_zcode_config_with_targets(&targets, backup_root)
+            })
         }
         _ => Ok(GatewayClientApplyResult {
             client_id,
@@ -1010,7 +1015,6 @@ pub fn switch_gateway_client_route(
     };
     with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
-        next_owner,
         force_takeover.unwrap_or(false),
         move |id, current_target_owner| {
             if next_owner == RoutingOwner::Official {
@@ -1196,7 +1200,6 @@ fn gateway_client_supports_native_apply(client_id: &str) -> bool {
 
 fn with_gateway_client_mutation_owner_gate<F>(
     client_id: String,
-    next_owner: RoutingOwner,
     force_takeover: bool,
     operation: F,
 ) -> Result<GatewayClientApplyResult, String>
@@ -1215,7 +1218,6 @@ where
     ensure_route_owner_mutation_allowed(
         current_app_owner,
         current_target_owner,
-        next_owner,
         force_takeover,
     )?;
     operation(client_id, current_target_owner)
@@ -1996,7 +1998,6 @@ fn owner_label(owner: RoutingOwner) -> &'static str {
 fn ensure_route_owner_mutation_allowed(
     current_app_owner: RoutingOwner,
     current_target_owner: RoutingOwner,
-    _next_owner: RoutingOwner,
     force_takeover: bool,
 ) -> Result<(), String> {
     if current_target_owner == RoutingOwner::Official || current_target_owner == current_app_owner {
@@ -4915,7 +4916,11 @@ fn windows_file_version(path: &Path) -> Option<String> {
 }
 
 fn client_backup_root(client_id: &str) -> PathBuf {
-    runtime_proxy_dir(&runtime_home())
+    client_backup_root_at(&runtime_home(), client_id)
+}
+
+fn client_backup_root_at(owner_home: &Path, client_id: &str) -> PathBuf {
+    runtime_proxy_dir(owner_home)
         .join("client-backups")
         .join(client_id)
 }
@@ -4935,9 +4940,30 @@ fn client_backup_root_for_owner(client_id: &str, owner: RoutingOwner) -> PathBuf
         })
     }
     .unwrap_or_else(runtime_home);
-    runtime_proxy_dir(&owner_home)
-        .join("client-backups")
-        .join(client_id)
+    client_backup_root_at(&owner_home, client_id)
+}
+
+fn client_backup_roots_for_restore(client_id: &str, owner: RoutingOwner) -> Vec<PathBuf> {
+    let candidates = [
+        client_backup_root_for_owner(client_id, owner),
+        client_backup_root_for_owner(client_id, RoutingOwner::Release),
+        client_backup_root_for_owner(client_id, RoutingOwner::Beta),
+        client_backup_root(client_id),
+    ];
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        if !roots.contains(&candidate) {
+            roots.push(candidate);
+        }
+    }
+    roots.sort_by_key(|root| !backup_root_has_entries(root));
+    roots
+}
+
+fn backup_root_has_entries(root: &Path) -> bool {
+    fs::read_dir(root)
+        .ok()
+        .is_some_and(|mut entries| entries.next().is_some())
 }
 
 fn preview_opencode_config_with_path(
@@ -5240,6 +5266,36 @@ fn restore_latest_backup(
         config_path: Some(config_path.to_path_buf()),
         backup_path: Some(latest),
         message: "OpenCode official config restored.".to_string(),
+    })
+}
+
+fn restore_opencode_config_with_backup_roots(
+    config_path: &Path,
+    backup_roots: &[PathBuf],
+) -> Result<GatewayClientApplyResult, String> {
+    restore_with_backup_roots(backup_roots, |backup_root| {
+        restore_latest_backup("opencode", config_path, backup_root)
+    })
+}
+
+fn restore_with_backup_roots<F>(
+    backup_roots: &[PathBuf],
+    mut restore: F,
+) -> Result<GatewayClientApplyResult, String>
+where
+    F: FnMut(&Path) -> Result<GatewayClientApplyResult, String>,
+{
+    let mut errors = Vec::new();
+    for backup_root in backup_roots {
+        match restore(backup_root) {
+            Ok(result) => return Ok(result),
+            Err(error) => errors.push(format!("{}: {error}", backup_root.display())),
+        }
+    }
+    Err(if errors.is_empty() {
+        "no channel backup roots are available".to_string()
+    } else {
+        errors.join("; ")
     })
 }
 
@@ -8497,6 +8553,45 @@ mod tests {
     }
 
     #[test]
+    fn opencode_official_restore_survives_stable_then_beta_takeover() {
+        let root = unique_temp_dir("codexhub-opencode-cross-channel-restore");
+        let config_path = root.join("opencode.json");
+        let stable_backups = root.join("stable-backups");
+        let beta_backups = root.join("beta-backups");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&config_path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+        let settings = Settings::default();
+
+        apply_opencode_config_with_paths(
+            &config_path,
+            &stable_backups,
+            &settings,
+            &[],
+            "openai/gpt-5.5",
+        )
+        .unwrap();
+        apply_opencode_config_with_paths(
+            &config_path,
+            &beta_backups,
+            &settings,
+            &[],
+            "openai/gpt-5.4",
+        )
+        .unwrap();
+
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[beta_backups, stable_backups],
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("anthropic/claude-sonnet-4"));
+    }
+
+    #[test]
     fn pi_apply_writes_models_and_settings_with_backup() {
         let root = unique_temp_dir("codexhub-pi");
         let settings_path = root.join("settings.json");
@@ -9079,7 +9174,6 @@ mod tests {
         let error = super::ensure_route_owner_mutation_allowed(
             current,
             target,
-            crate::app_flavor::RoutingOwner::Official,
             false,
         )
         .expect_err("release must not disconnect beta-owned config");
@@ -9091,7 +9185,6 @@ mod tests {
         let error = super::ensure_route_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Release,
             crate::app_flavor::RoutingOwner::Beta,
-            crate::app_flavor::RoutingOwner::Release,
             false,
         )
         .expect_err("release must not apply over beta-owned config");
@@ -9139,21 +9232,9 @@ mod tests {
         super::ensure_route_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Release,
             crate::app_flavor::RoutingOwner::Beta,
-            crate::app_flavor::RoutingOwner::Release,
             true,
         )
         .expect("explicit takeover should be allowed");
-    }
-
-    #[test]
-    fn takeover_allows_cross_channel_switch_to_official_when_explicit() {
-        super::ensure_route_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Release,
-            crate::app_flavor::RoutingOwner::Beta,
-            crate::app_flavor::RoutingOwner::Official,
-            true,
-        )
-        .expect("explicit Official selection should disconnect a foreign-owned route");
     }
 
     #[test]
