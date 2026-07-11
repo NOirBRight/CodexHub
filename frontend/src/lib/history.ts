@@ -7,6 +7,7 @@ export type HistoryIssueKey =
   | "settings.historyRepairInProgress"
   | "settings.historyRelaunchFailed"
   | "settings.historySeparatedDrift"
+  | "settings.historyTakeoverRequired"
   | "settings.historyUnexpectedFailure";
 
 export function historyIssueKey(result: UnifiedHistoryResult): HistoryIssueKey {
@@ -27,6 +28,8 @@ export function historyIssueKey(result: UnifiedHistoryResult): HistoryIssueKey {
       return "settings.historyProviderConflict";
     case "separated_history_drift":
       return "settings.historySeparatedDrift";
+    case "route_takeover_required":
+      return "settings.historyTakeoverRequired";
     default:
       return "settings.historyUnexpectedFailure";
   }

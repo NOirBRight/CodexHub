@@ -96,6 +96,7 @@ const zhCN = {
     historySyncDeferred: "历史文件正在使用或发生变化，本次同步已安全延期；已完成的进度会保留，并在下次启动时重试。",
     conversationHistoryAlreadySynced: "历史对话已同步。",
     historyProviderConflict: "检测到未知的第三方 Codex 配置，未修改历史对话设置。",
+    historyTakeoverRequired: "请先由当前应用接管 Codex 路由，再同步历史对话。",
     historySeparatedDrift: "历史对话同步已关闭，但检测到以前同步的数据。可在设置中执行一次历史对话同步。",
     conversationHistorySyncRequired: "检测到历史对话需要同步。此操作不会关闭或重新启动 Codex。",
     historyStartupRepaired: "历史对话同步完成（{{rows}} 行，{{files}} 个文件）。",

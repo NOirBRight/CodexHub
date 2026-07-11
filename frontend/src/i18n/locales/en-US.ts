@@ -96,6 +96,7 @@ const enUS = {
     historySyncDeferred: "History files were busy or changed, so sync was safely deferred. Completed progress is preserved and startup will retry.",
     conversationHistoryAlreadySynced: "Conversation history is already synced.",
     historyProviderConflict: "Conversation history was not changed because an unknown third-party Codex configuration is active.",
+    historyTakeoverRequired: "Take over Codex routing with this app before syncing conversation history.",
     historySeparatedDrift: "Conversation history sync is off, but previously synced data remains. You can run conversation history sync once from Settings.",
     conversationHistorySyncRequired: "Conversation history needs to be synced. This will not close or restart Codex.",
     historyStartupRepaired: "Conversation history synced ({{rows}} rows, {{files}} files).",

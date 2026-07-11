@@ -1,3 +1,4 @@
+use crate::app_flavor::RoutingOwner;
 use crate::config::{self, CommandRunner, ConfigPaths};
 use crate::safe_file;
 use serde::{Deserialize, Serialize};
@@ -332,34 +333,73 @@ pub fn preflight_unified_history(
     apply_repairs: bool,
     target_unified: Option<bool>,
 ) -> Result<UnifiedHistoryResult, String> {
-    let _repair_guard = match acquire_history_repair(apply_repairs, &HISTORY_REPAIR_IN_PROGRESS) {
+    let settings = config::get_settings()?;
+    let paths = ConfigPaths::runtime()?;
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    let target_owner = fs::read_to_string(paths.codex_config_path())
+        .ok()
+        .as_deref()
+        .and_then(config::codex_overlay_owner);
+    let mutation_blocked = apply_repairs
+        && !history_mutation_allowed_for_owner(current_app_owner, target_owner);
+    let effective_apply_repairs = apply_repairs && !mutation_blocked;
+    let _repair_guard = match acquire_history_repair(
+        effective_apply_repairs,
+        &HISTORY_REPAIR_IN_PROGRESS,
+    ) {
         Ok(guard) => guard,
         Err(result) => return Ok(result),
     };
     let clock = SystemHistoryClock;
     let budget = HistoryOperationBudget::new(&clock);
-    let settings = config::get_settings()?;
-    let paths = ConfigPaths::runtime()?;
     let python = config::find_python();
     let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
-    preflight_unified_history_with_budget(
+    let result = preflight_unified_history_with_budget(
         PreflightRequest {
-            target: match target_unified {
-                Some(unified) => {
-                    PreflightTarget::Explicit(HistoryBucketTarget::from_unified(unified))
-                }
-                None => PreflightTarget::Startup(HistoryBucketTarget::from_unified(
-                    settings.unified_codex_history,
-                )),
-            },
-            apply_repairs,
+            target: preflight_target(
+                settings.unified_codex_history,
+                apply_repairs,
+                target_unified,
+            ),
+            apply_repairs: effective_apply_repairs,
         },
         &paths,
         &python,
         &runner,
         &budget,
         true,
-    )
+    )?;
+    if mutation_blocked && result.status != UnifiedHistoryStatus::Clean {
+        return Ok(UnifiedHistoryResult::pending(
+            UnifiedHistoryStatus::Conflict,
+            "route_takeover_required",
+        ));
+    }
+    Ok(result)
+}
+
+fn preflight_target(
+    configured_unified: bool,
+    apply_repairs: bool,
+    target_unified: Option<bool>,
+) -> PreflightTarget {
+    let target = HistoryBucketTarget::from_unified(target_unified.unwrap_or(configured_unified));
+    if apply_repairs || target_unified.is_some() {
+        PreflightTarget::Explicit(target)
+    } else {
+        PreflightTarget::Startup(target)
+    }
+}
+
+fn history_mutation_allowed_for_owner(
+    current_app_owner: RoutingOwner,
+    target_owner: Option<RoutingOwner>,
+) -> bool {
+    match current_app_owner {
+        RoutingOwner::Release => target_owner != Some(RoutingOwner::Beta),
+        RoutingOwner::Beta => target_owner == Some(RoutingOwner::Beta),
+        RoutingOwner::Official | RoutingOwner::UnknownExternal => false,
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +476,8 @@ fn preflight_unified_history_with_budget(
         Err(error) => return Err(error),
     };
 
+    let startup = matches!(request.target, PreflightTarget::Startup(_));
+    let repair_bucket = bucket_inspection.status == InspectionStatus::NeedsRepair;
     if config_inspection.status == InspectionStatus::Conflict {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::Conflict,
@@ -443,8 +485,7 @@ fn preflight_unified_history_with_budget(
         ));
     }
 
-    let repair_config = config_inspection.status == InspectionStatus::NeedsRepair;
-    let repair_bucket = bucket_inspection.status == InspectionStatus::NeedsRepair;
+    let repair_config = !startup && config_inspection.status == InspectionStatus::NeedsRepair;
     if !repair_config && !repair_bucket {
         return Ok(UnifiedHistoryResult::clean(
             startup_separated.then_some("unified_history_disabled"),
@@ -904,12 +945,14 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_history_repair, DeadlineCommandRunner,
+        acquire_history_repair, history_mutation_allowed_for_owner, preflight_target,
+        DeadlineCommandRunner,
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
         reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
         sync_history_with_paths, HistoryBucketTarget, PreflightRequest, PreflightTarget,
         UnifiedHistoryStatus,
     };
+    use crate::app_flavor::RoutingOwner;
     use crate::config::{CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -1006,6 +1049,70 @@ mod tests {
 
         assert_eq!(result.status, UnifiedHistoryStatus::RestartRequired);
         assert_eq!(result.reason.as_deref(), Some("repair_required"));
+        assert_eq!(runner.commands.borrow().len(), 2);
+        assert!(!paths.proxy_dir().exists());
+    }
+
+    #[test]
+    fn beta_history_mutation_requires_beta_routing_ownership() {
+        assert!(!history_mutation_allowed_for_owner(
+            RoutingOwner::Beta,
+            None,
+        ));
+        assert!(!history_mutation_allowed_for_owner(
+            RoutingOwner::Beta,
+            Some(RoutingOwner::Release),
+        ));
+        assert!(history_mutation_allowed_for_owner(
+            RoutingOwner::Beta,
+            Some(RoutingOwner::Beta),
+        ));
+        assert!(history_mutation_allowed_for_owner(
+            RoutingOwner::Release,
+            None,
+        ));
+        assert!(!history_mutation_allowed_for_owner(
+            RoutingOwner::Release,
+            Some(RoutingOwner::Beta),
+        ));
+    }
+
+    #[test]
+    fn read_only_preflight_is_startup_and_user_repair_is_explicit() {
+        assert!(matches!(
+            preflight_target(true, false, None),
+            PreflightTarget::Startup(HistoryBucketTarget::Unified)
+        ));
+        assert!(matches!(
+            preflight_target(true, true, None),
+            PreflightTarget::Explicit(HistoryBucketTarget::Unified)
+        ));
+        assert!(matches!(
+            preflight_target(true, true, Some(false)),
+            PreflightTarget::Explicit(HistoryBucketTarget::Separated)
+        ));
+    }
+
+    #[test]
+    fn startup_config_drift_without_history_drift_is_clean_and_never_repaired() {
+        let root = temp_root("preflight-config-only-drift");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"needs_repair"}"#,
+            r#"{"status":"clean","dirty_state_rows":0,"dirty_jsonl_files":0}"#,
+        ]);
+        let result = preflight_unified_history_with_paths(
+            PreflightRequest {
+                target: PreflightTarget::Startup(HistoryBucketTarget::Unified),
+                apply_repairs: false,
+            },
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("preflight result");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Clean);
         assert_eq!(runner.commands.borrow().len(), 2);
         assert!(!paths.proxy_dir().exists());
     }

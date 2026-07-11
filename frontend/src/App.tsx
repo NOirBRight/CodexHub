@@ -771,7 +771,7 @@ export default function App() {
     historyPreflightStarted.current = true;
     const timer = window.setTimeout(async () => {
       try {
-        const result: UnifiedHistoryResult = await api.preflightUnifiedHistory(true);
+        const result: UnifiedHistoryResult = await api.preflightUnifiedHistory(false);
         if (result.status === "repaired") {
           showToast(
             t("settings.historyStartupRepaired", {

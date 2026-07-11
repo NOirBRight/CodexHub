@@ -78,7 +78,7 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
-test("startup history sync safely retries online and never controls Codex", async () => {
+test("startup history preflight is read-only and explicit sync never controls Codex", async () => {
   const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
@@ -93,7 +93,9 @@ test("startup history sync safely retries online and never controls Codex", asyn
   assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
   assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
   assert.match(webBridgeSource, /"preflight_unified_history"/);
-  assert.doesNotMatch(appSource, /api\.preflightUnifiedHistory\(false\)/);
+  const startupEffect = appSource.match(/if \(historyPreflightStarted\.current[\s\S]*?return \(\) => window\.clearTimeout\(timer\);[\s\S]*?\}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.match(startupEffect, /api\.preflightUnifiedHistory\(false\)/);
+  assert.doesNotMatch(startupEffect, /api\.preflightUnifiedHistory\(true\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true\)/);
   assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
   assert.match(appSource, /result\.status === "restart_required"/);
