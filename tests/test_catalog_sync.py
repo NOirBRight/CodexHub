@@ -460,6 +460,22 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["gpt-5.4-mini"]["context_window"], 272000)
         self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
         self.assertEqual(by_slug["gpt-5.3-codex-spark"]["context_window"], 128000)
+        for model_id in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"):
+            self.assertEqual(
+                [entry["effort"] for entry in by_slug[model_id]["supported_reasoning_levels"]],
+                ["low", "medium", "high", "xhigh"],
+            )
+            for required_key in (
+                "shell_type",
+                "priority",
+                "base_instructions",
+                "model_messages",
+                "include_skills_usage_instructions",
+                "truncation_policy",
+                "input_modalities",
+                "supports_parallel_tool_calls",
+            ):
+                self.assertIn(required_key, by_slug[model_id])
 
     def test_build_catalog_preserves_fallback_metadata_for_ollama_models(self):
         fallback_models = [

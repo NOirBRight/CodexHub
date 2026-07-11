@@ -108,8 +108,45 @@ OLLAMA_MODEL_LIMIT_OVERRIDES: dict[str, dict[str, Any]] = {
 
 MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
     "description": "Official OpenAI model.",
+    "shell_type": "shell_command",
     "visibility": "list",
     "supported_in_api": True,
+    "priority": 10,
+    "additional_speed_tiers": [],
+    "service_tiers": [],
+    "supported_reasoning_levels": [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {
+            "effort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks",
+        },
+        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+        {
+            "effort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems",
+        },
+    ],
+    "base_instructions": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
+    "model_messages": {
+        "instructions_template": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
+        "instructions_variables": {},
+        "approvals": None,
+    },
+    "include_skills_usage_instructions": False,
+    "supports_reasoning_summaries": True,
+    "default_reasoning_summary": "none",
+    "support_verbosity": True,
+    "default_verbosity": "low",
+    "apply_patch_tool_type": "freeform",
+    "web_search_tool_type": "text_and_image",
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "supports_parallel_tool_calls": True,
+    "supports_image_detail_original": True,
+    "effective_context_window_percent": 95,
+    "experimental_supported_tools": [],
+    "input_modalities": ["text"],
+    "supports_search_tool": True,
+    "use_responses_lite": True,
 }
 
 OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
@@ -539,7 +576,7 @@ def apply_official_model_defaults(model: dict[str, Any], slug: str) -> None:
     if not defaults:
         return
     for key, value in defaults.items():
-        model.setdefault(key, deepcopy(value))
+        model[key] = deepcopy(value)
 
 
 def official_proxy_alias(slug: str) -> str:
