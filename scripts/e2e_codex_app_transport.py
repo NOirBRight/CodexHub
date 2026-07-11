@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--session-jsonl", type=Path)
     parser.add_argument("--tool-calls", type=int, default=0)
+    parser.add_argument("--pause-between-turns", type=float, default=0.0)
     args = parser.parse_args()
 
     env = os.environ.copy()
@@ -175,6 +176,8 @@ def main() -> int:
 
         durations: list[float] = []
         for index in range(1, args.turns + 1):
+            if index > 1 and args.pause_between_turns > 0:
+                time.sleep(args.pause_between_turns)
             started = time.monotonic()
             if args.tool_calls:
                 prompt = (
@@ -199,10 +202,17 @@ def main() -> int:
             turn_response = wait_response(turn_request)
             if "error" in turn_response:
                 raise RuntimeError(f"turn/start {index} failed: {turn_response['error']}")
+            turn_result = turn_response.get("result")
+            started_turn = turn_result.get("turn") if isinstance(turn_result, dict) else None
+            turn_id = started_turn.get("id") if isinstance(started_turn, dict) else None
+            if not isinstance(turn_id, str):
+                raise RuntimeError(f"turn/start {index} returned no turn id: {turn_response}")
             completed = receive_until(
                 lambda message: message.get("method") == "turn/completed"
                 and isinstance(message.get("params"), dict)
-                and message["params"].get("threadId") == thread_id,
+                and message["params"].get("threadId") == thread_id
+                and isinstance(message["params"].get("turn"), dict)
+                and message["params"]["turn"].get("id") == turn_id,
                 args.timeout,
             )
             completed_params = completed.get("params")

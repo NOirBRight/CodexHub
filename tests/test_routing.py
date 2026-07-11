@@ -1167,7 +1167,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(event.kwargs["route_reason"], "request_body_limit")
         self.assertEqual(event.kwargs["status"], 413)
 
-    def test_official_http_passthrough_uses_bounded_open_attempts_and_no_stream_retry_deferral(self):
+    def test_official_http_passthrough_uses_bounded_open_attempts_and_defers_empty_stream_errors(self):
         body = json.dumps(
             {
                 "model": "gpt-5.5-fast",
@@ -1201,8 +1201,91 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(open_response.call_args.kwargs.get("max_attempts"), codex_proxy.official_upstream_open_attempts())
         self.assertFalse(open_response.call_args.kwargs.get("retry_http_errors"))
-        self.assertFalse(relayed[0]["defer_stream_errors"])
+        self.assertTrue(relayed[0]["defer_stream_errors"])
         self.assert_no_official_passthrough_gateway_events()
+
+    def test_official_http_passthrough_retries_incomplete_read_before_first_sse_byte(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5-fast",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        interrupted = FakeSseResponse([codex_proxy.IncompleteRead(b"")])
+        success = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_retry"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", side_effect=[interrupted, success]) as open_response,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(open_response.call_count, 2)
+        mock_sleep.assert_called_once()
+        self.assertEqual(fake.status, 200)
+        downstream = b"".join(fake.wfile.writes)
+        self.assertIn(b"response.completed", downstream)
+        self.assertNotIn(b"response.failed", downstream)
+        retry_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["failure_phase"], "stream_body")
+
+    def test_official_http_passthrough_never_retries_after_first_sse_byte(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5-fast",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        interrupted = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_partial"}}\n\n',
+                codex_proxy.IncompleteRead(b""),
+            ]
+        )
+        unused_success = FakeSseResponse(
+            [
+                b'data: {"type":"response.completed","response":{"id":"resp_unused","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", side_effect=[interrupted, unused_success]) as open_response,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(open_response.call_count, 1)
+        mock_sleep.assert_not_called()
+        downstream = b"".join(fake.wfile.writes)
+        self.assertIn(b"response.created", downstream)
+        self.assertIn(b"response.failed", downstream)
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "upstream_retry"
+                for call in self.write_proxy_event.call_args_list
+            )
+        )
 
     def test_official_http_passthrough_converts_compaction_input_before_upstream(self):
         input_items = [
@@ -2253,6 +2336,39 @@ class RoutingTests(unittest.TestCase):
             codex_proxy._OfficialHTTPSConnectionPool,
         )
 
+    def test_official_proxy_uses_windows_registry_when_environment_only_has_no_proxy(self):
+        with (
+            patch("codex_proxy.sys.platform", "win32"),
+            patch("codex_proxy.getproxies", return_value={"no": "localhost,127.0.0.1"}),
+            patch(
+                "codex_proxy.getproxies_registry",
+                return_value={"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"},
+            ),
+            patch("codex_proxy.proxy_bypass", return_value=False),
+        ):
+            proxy_url = codex_proxy._official_proxy_url(
+                "https://chatgpt.com/backend-api/codex/responses"
+            )
+
+        self.assertEqual(proxy_url, "http://127.0.0.1:7890")
+
+    def test_official_proxy_prefers_explicit_environment_proxy_over_windows_registry(self):
+        with (
+            patch("codex_proxy.sys.platform", "win32"),
+            patch(
+                "codex_proxy.getproxies",
+                return_value={"https": "http://127.0.0.1:7891", "no": "localhost"},
+            ),
+            patch("codex_proxy.getproxies_registry") as registry_proxies,
+            patch("codex_proxy.proxy_bypass", return_value=False),
+        ):
+            proxy_url = codex_proxy._official_proxy_url(
+                "https://chatgpt.com/backend-api/codex/responses"
+            )
+
+        self.assertEqual(proxy_url, "http://127.0.0.1:7891")
+        registry_proxies.assert_not_called()
+
     def test_official_pool_discards_connection_after_idle_reuse_limit(self):
         connection = Mock()
         connection._codexhub_released_at = 100.0
@@ -2270,6 +2386,66 @@ class RoutingTests(unittest.TestCase):
 
         self.assertIs(returned, connection)
         connection.close.assert_called_once()
+
+    def test_official_proxy_pool_keeps_connection_past_direct_idle_limit(self):
+        connection = Mock()
+        connection._codexhub_released_at = 100.0
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "chatgpt.com",
+            _proxy=codex_proxy.urllib3.util.parse_url("http://127.0.0.1:7890"),
+        )
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_get_conn",
+                return_value=connection,
+            ),
+            patch("codex_proxy.time.monotonic", return_value=100.0 + codex_proxy.OFFICIAL_POOL_MAX_IDLE_SECONDS + 1),
+        ):
+            returned = pool._get_conn()
+
+        self.assertIs(returned, connection)
+        connection.close.assert_not_called()
+
+    def test_official_proxy_pool_discards_connection_after_proxy_idle_limit(self):
+        connection = Mock()
+        connection._codexhub_released_at = 100.0
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "chatgpt.com",
+            _proxy=codex_proxy.urllib3.util.parse_url("http://127.0.0.1:7890"),
+        )
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_get_conn",
+                return_value=connection,
+            ),
+            patch(
+                "codex_proxy.time.monotonic",
+                return_value=100.0 + codex_proxy.OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS + 1,
+            ),
+        ):
+            returned = pool._get_conn()
+
+        self.assertIs(returned, connection)
+        connection.close.assert_called_once()
+
+    def test_official_transport_caps_connect_timeout_but_preserves_read_timeout(self):
+        manager = Mock()
+        response = Mock(status=200, reason="OK", headers={})
+        manager.request.return_value = response
+        request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST"
+        )
+
+        with patch("codex_proxy._official_pool_manager", return_value=manager):
+            codex_proxy._official_urlopen(request, timeout=60)
+
+        timeout = manager.request.call_args.kwargs["timeout"]
+        self.assertEqual(timeout.connect_timeout, codex_proxy.OFFICIAL_CONNECT_TIMEOUT_SECONDS)
+        self.assertEqual(timeout.read_timeout, 60)
 
     def test_official_pool_records_release_time_for_idle_reuse_limit(self):
         connection = Mock()

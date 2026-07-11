@@ -33,6 +33,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit
 from urllib.request import Request, getproxies, proxy_bypass, urlopen
 
+try:
+    from urllib.request import getproxies_registry
+except ImportError:  # pragma: no cover - Windows-only urllib helper.
+    getproxies_registry = None
+
 VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
 VENDORED_URLLIB3_WHEEL = VENDOR_DIR / "urllib3-2.7.0-py3-none-any.whl"
 if not VENDORED_URLLIB3_WHEEL.is_file():
@@ -97,6 +102,9 @@ DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is 
 
 OFFICIAL_POOL_MAX_CONNECTIONS = 16
 OFFICIAL_POOL_MAX_IDLE_SECONDS = 30.0
+OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS = 300.0
+OFFICIAL_CONNECT_TIMEOUT_SECONDS = 15.0
+OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
 OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS = 1.0
 OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
@@ -142,7 +150,11 @@ class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     def _get_conn(self, timeout: float | None = None) -> Any:
         connection = super()._get_conn(timeout)
         released_at = getattr(connection, "_codexhub_released_at", None)
-        if isinstance(released_at, (int, float)) and time.monotonic() - released_at >= OFFICIAL_POOL_MAX_IDLE_SECONDS:
+        idle_seconds = time.monotonic() - released_at if isinstance(released_at, (int, float)) else None
+        max_idle_seconds = (
+            OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS if self.proxy is not None else OFFICIAL_POOL_MAX_IDLE_SECONDS
+        )
+        if idle_seconds is not None and idle_seconds >= max_idle_seconds:
             connection.close()
         return connection
 
@@ -235,7 +247,18 @@ def _official_proxy_url(url: str) -> str | None:
                 return None
         except OSError:
             pass
-    proxy = getproxies().get(parsed.scheme)
+    proxies = getproxies()
+    proxy = proxies.get(parsed.scheme)
+    if (
+        not proxy
+        and sys.platform.startswith("win")
+        and callable(getproxies_registry)
+        and not any(proxies.get(scheme) for scheme in ("http", "https"))
+    ):
+        try:
+            proxy = getproxies_registry().get(parsed.scheme)
+        except OSError:
+            proxy = None
     return str(proxy) if proxy else None
 
 
@@ -306,7 +329,7 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
             decode_content=False,
             redirect=False,
             retries=False,
-            timeout=urllib3.Timeout(connect=timeout, read=timeout),
+            timeout=urllib3.Timeout(connect=min(timeout, OFFICIAL_CONNECT_TIMEOUT_SECONDS), read=timeout),
             pool_timeout=timeout,
         )
     except urllib3.exceptions.HTTPError as exc:
@@ -10606,6 +10629,7 @@ def _emit_upstream_retry_event(
     exc: BaseException,
     delay_seconds: int,
     failure_class: str | None = None,
+    failure_phase: str | None = None,
 ) -> None:
     resolved_failure_class = failure_class or _upstream_failure_class(exc)
     _write_adapter_event(
@@ -10623,7 +10647,7 @@ def _emit_upstream_retry_event(
         delay_ms=delay_seconds * 1000,
         error=type(exc).__name__,
         detail=safe_upstream_error_detail(exc),
-        failure_phase=transport_failure_phase(exc),
+        failure_phase=failure_phase or transport_failure_phase(exc),
     )
 
 
@@ -10637,6 +10661,7 @@ def _downstream_retry_payload(
     exc: BaseException,
     delay_seconds: int,
     failure_class: str | None = None,
+    failure_phase: str | None = None,
 ) -> dict[str, Any]:
     return {
         "type": "codexhub.retry",
@@ -10650,7 +10675,7 @@ def _downstream_retry_payload(
         "delay_ms": delay_seconds * 1000,
         "error": type(exc).__name__,
         "detail": safe_upstream_error_detail(exc),
-        "failure_phase": transport_failure_phase(exc),
+        "failure_phase": failure_phase or transport_failure_phase(exc),
     }
 
 
@@ -11701,7 +11726,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     adapter_event_context["tool_protocol"] = _external_tool_protocol(
                         {**upstream, "upstream_format": selected_upstream_format}
                     )
-                base_relay_attempts = 1 if is_official_http_passthrough else _upstream_retry_attempts(request_kind)
+                base_relay_attempts = (
+                    OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS
+                    if is_official_http_passthrough
+                    else _upstream_retry_attempts(request_kind)
+                )
                 relay_attempts = base_relay_attempts
                 lifecycle_final_extra_attempts = (
                     1
@@ -11744,9 +11773,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
-                                    defer_stream_errors=False
-                                    if is_official_http_passthrough
-                                    else relay_attempt < relay_attempts,
+                                    defer_stream_errors=relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                     behavior_profile=behavior_profile,
                                 )
@@ -11823,6 +11850,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 exc=retry_exc,
                                 delay_seconds=delay_seconds,
                                 failure_class=failure_class,
+                                failure_phase="stream_body" if stream_failure else None,
                             )
                             emit_downstream_retry(
                                 _downstream_retry_payload(
@@ -11834,6 +11862,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     exc=retry_exc,
                                     delay_seconds=delay_seconds,
                                     failure_class=failure_class,
+                                    failure_phase="stream_body" if stream_failure else None,
                                 )
                             )
                             time.sleep(delay_seconds)
@@ -12735,10 +12764,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         headers_already_sent: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
         event_context: Mapping[str, Any] | None = None,
+        defer_stream_errors: bool = False,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         headers_sent_downstream = bool(headers_already_sent)
-        if not headers_already_sent:
+
+        def send_downstream_headers_once() -> None:
+            nonlocal headers_sent_downstream
+            if headers_sent_downstream:
+                return
             self.send_response(status)
             for key, value in _filtered_response_headers(response.headers, True):
                 self.send_header(key, value)
@@ -12748,6 +12782,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             headers_sent_downstream = True
             if mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
+
+        if not defer_stream_errors:
+            send_downstream_headers_once()
 
         usage_context = {
             "request_id": request_id,
@@ -12768,7 +12805,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 failure_side = "upstream_read"
                 line = response.readline()
                 if not line:
+                    if defer_stream_errors and not headers_sent_downstream:
+                        raise UpstreamStreamIncompleteError("Official stream ended before its first SSE byte")
                     break
+                send_downstream_headers_once()
                 last_upstream_byte_at = time.monotonic()
                 failure_side = "downstream_write"
                 self.wfile.write(line)
@@ -12783,6 +12823,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         shorten_terminal_drain_timeout(OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS)
                     terminal_drain_timeout_shortened = True
         except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+            if defer_stream_errors and not headers_sent_downstream:
+                raise UpstreamStreamInterruptedError(exc) from exc
             self.close_connection = True
             if failure_side == "upstream_read" and sse_stats.terminal_event_seen:
                 sse_stats.finalize_pending()
@@ -13140,6 +13182,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 headers_already_sent=headers_already_sent,
                 mark_downstream_sse_started=mark_downstream_sse_started,
                 event_context=event_context,
+                defer_stream_errors=defer_stream_errors,
             )
         defer_stream_headers = (
             is_event_stream

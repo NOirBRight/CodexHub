@@ -92,6 +92,9 @@ def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():
     assert '"thread/start"' in source
     assert '"turn/start"' in source
     assert 'message.get("method") == "turn/completed"' in source
+    assert 'message["params"]["turn"].get("id") == turn_id' in source
+    assert 'returned no turn id' in source
+    assert '"--pause-between-turns"' in source
     assert 'completed_status != "completed"' in source
     assert 'thread_params["dynamicTools"] = dynamic_tools' in source
 
