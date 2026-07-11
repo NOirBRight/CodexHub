@@ -39,6 +39,7 @@ class ConfigOverlayTests(unittest.TestCase):
         cleaned = strip_top_level_keys(text)
 
         self.assertNotIn('model_provider = "openai"', cleaned)
+        self.assertIn('model = "gpt-5.5"', cleaned)
         self.assertIn('model = "nested-should-stay"', cleaned)
 
     def test_strip_codex_proxy_section_only(self):
@@ -92,7 +93,7 @@ class ConfigOverlayTests(unittest.TestCase):
     def test_apply_and_restore_overlay(self):
         original = "\n".join(
             [
-                'model = "gpt-5.5"',
+                'model = "gpt-5.6-sol"',
                 'model_provider = "openai"',
                 'model_reasoning_effort = "xhigh"',
                 "",
@@ -120,7 +121,7 @@ class ConfigOverlayTests(unittest.TestCase):
             updated = config_path.read_text(encoding="utf-8")
 
             self.assertIn(MARKER_BEGIN, updated)
-            self.assertIn('model = "gpt-5.5"', updated)
+            self.assertIn('model = "gpt-5.6-sol"', updated)
             self.assertIn('model_provider = "custom"', updated)
             self.assertIn(f"model_catalog_json = '{catalog_path.resolve()}'", updated)
             self.assertIn("[model_providers.custom]", updated)
@@ -168,6 +169,7 @@ class ConfigOverlayTests(unittest.TestCase):
 
             generated = config_path.read_text(encoding="utf-8")
             self.assertEqual(exit_code, 0)
+            self.assertNotRegex(generated, r"(?m)^model\s*=")
             self.assertIn("requires_openai_auth = true", generated)
             self.assertIn('experimental_bearer_token = "local-test-key"', generated)
             self.assertNotIn("requires_openai_auth = false", generated)

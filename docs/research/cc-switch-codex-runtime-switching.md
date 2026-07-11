@@ -114,4 +114,43 @@ cargo test --locked route_switch_restarts_running_codex_even_when_history_is_cle
 6. Gateway 内第三方 Provider 切换保持 localhost 不变，只更新内存上游，实现热切换。官方直连切换仍只原子写配置，并提示用户手动重新打开 Codex 才能保证 catalog/config 生效。
 7. 先增加真实运行中 Codex 的 Windows E2E，再允许在线迁移成为正式功能。
 
+## 0.1.4-beta.5 内测回归复核
+
+日期：2026-07-11
+
+### Task 列表为空不是 Provider 热切换造成的分桶回归
+
+使用 App 管理版 CLI `0.144.0-alpha.4` 对真实 `state_5.sqlite` 运行同一条
+`thread/list` 请求，只改变 live `model_provider`，结果为：
+
+- 默认 `openai`：返回 3 个 Task；
+- 统一 `custom`：返回 0 个 Task。
+
+进一步只读核对索引与 rollout 文件后发现：
+
+- `custom` 有 3914 行，但 3914 个 `rollout_path` 对应文件均不存在；
+- `openai` 有 3 行，3 个 rollout 文件均存在。
+
+这与此前误删用户目录的事故完全吻合。把这 3 个会话在隔离副本中同时将
+SQLite 与 JSONL 的 `model_provider` 迁为 `custom` 后，同一 App CLI 立即能在
+`custom` 下列出 Task。由此确认稳定 `custom` 桶机制正常，日常 Provider
+切换不应增加历史迁移；当前机器的空列表是索引残留与物理会话文件缺失叠加
+新建会话仍在 `openai` 桶造成的环境状态。
+
+### Reset to default 的根因是强制 `gpt-5.5`
+
+Codex App `26.707.3748.0` 的前端会在当前 `(model, reasoningEffort)` 不属于
+紧凑 Power 滑块的内建组合时显示 `Reset to default`。该版本的紧凑组合只包含
+Sol/Terra；`gpt-5.5 + high` 不在其中。CodexHub overlay 此前无条件写入
+`model = "gpt-5.5"`，因此接管后稳定触发 Reset；点击 Reset 后 App 改回
+Sol/Terra，滑块才出现。
+
+修复边界：
+
+- overlay 只接管 `model_provider`、`model_catalog_json` 和 localhost Provider，
+  不再删除或强制用户的顶层 `model`；
+- 第三方模型在 Advanced 模式统一暴露 Light、Medium、High、Extra High、Max；
+- Ultra 仍只属于 Sol/Terra；第三方和 Luna 不暴露 Ultra；
+- 路由切换继续不查询、不迁移、不重启 Codex 历史。
+
 这组修复完成后，才继续模型显示、排序、额度名称、Beta UI、子代理和发布工作。

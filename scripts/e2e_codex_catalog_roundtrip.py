@@ -318,7 +318,13 @@ def run(repo_root: Path, codex_command: Path) -> dict[str, Any]:
             repo_root,
             env,
         )
+        overlay_text = config_path.read_text(encoding="utf-8")
+        if any(line.strip().startswith("model =") for line in overlay_text.splitlines()):
+            raise AssertionError("CodexHub overlay must not force a model preference")
         roundtrip_models = request_model_list(codex_command, codex_home)
+        roundtrip_all_by_id = {
+            str(item.get("model") or item.get("id")): item for item in roundtrip_models
+        }
         roundtrip_by_id = {
             canonical_official_id(item.get("model") or item.get("id")): item
             for item in roundtrip_models
@@ -346,6 +352,7 @@ def run(repo_root: Path, codex_command: Path) -> dict[str, Any]:
         terra = roundtrip_by_id.get("gpt-5.6-terra")
         luna = roundtrip_by_id.get("gpt-5.6-luna")
         standard_efforts = {"low", "medium", "high", "xhigh", "max"}
+        third_party = roundtrip_all_by_id.get("minimax-m3")
         if (
             not sol
             or not terra
@@ -356,9 +363,11 @@ def run(repo_root: Path, codex_command: Path) -> dict[str, Any]:
             or "ultra" not in effort_ids(sol)
             or "ultra" not in effort_ids(terra)
             or "ultra" in effort_ids(luna)
+            or not third_party
+            or effort_ids(third_party) != standard_efforts
         ):
             raise AssertionError(
-                "reasoning contract must preserve Light through Max for Sol/Terra/Luna and Ultra only for Sol/Terra"
+                "reasoning contract must preserve Light through Max for every model and Ultra only for Sol/Terra"
             )
 
         return {
@@ -369,6 +378,7 @@ def run(repo_root: Path, codex_command: Path) -> dict[str, Any]:
             "sol_efforts": sorted(effort_ids(sol)),
             "terra_efforts": sorted(effort_ids(terra)),
             "luna_efforts": sorted(effort_ids(luna)),
+            "third_party_efforts": sorted(effort_ids(third_party)),
             "duplicates": False,
             "prefixed_ids": False,
             "isolated_codex_home": True,

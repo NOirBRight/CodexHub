@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 MARKER_BEGIN = "# BEGIN CODEX PROXY SESSION CONFIG"
 MARKER_END = "# END CODEX PROXY SESSION CONFIG"
-TOP_LEVEL_KEYS = {"model", "model_provider", "model_catalog_json", "openai_base_url"}
+TOP_LEVEL_KEYS = {"model_provider", "model_catalog_json", "openai_base_url"}
 PROXY_FEATURE_FLAGS = {
     "responses_websockets": "false",
     "responses_websockets_v2": "false",
@@ -284,7 +284,6 @@ def build_overlay(catalog_value: str, owner: str) -> str:
         [
             MARKER_BEGIN,
             f"# owner = {owner}",
-            'model = "gpt-5.5"',
             f'model_provider = "{PROXY_PROVIDER_ID}"',
             f"model_catalog_json = {toml_literal(catalog_value)}",
             MARKER_END,

@@ -211,6 +211,7 @@ DEFAULT_OLLAMA_MODEL: dict[str, Any] = {
         {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+        {"effort": "max", "description": "Maximum upstream reasoning depth"},
     ],
     "shell_type": "shell_command",
     "visibility": "list",
@@ -246,7 +247,8 @@ REASONING_LEVEL_DESCRIPTIONS = {
     "xhigh": "Extra high reasoning depth for complex problems",
     "max": "Maximum upstream reasoning depth",
 }
-THIRD_PARTY_REASONING_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+THIRD_PARTY_REASONING_LEVEL_ORDER = ("low", "medium", "high", "xhigh", "max")
+THIRD_PARTY_REASONING_LEVELS = set(THIRD_PARTY_REASONING_LEVEL_ORDER)
 
 
 def sanitize_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
@@ -272,6 +274,17 @@ def sanitize_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
             }
         )
     return sanitized
+
+
+def complete_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
+    configured = {
+        item["effort"]: item for item in sanitize_third_party_reasoning_levels(value)
+    }
+    return [
+        configured.get(effort)
+        or {"effort": effort, "description": REASONING_LEVEL_DESCRIPTIONS[effort]}
+        for effort in THIRD_PARTY_REASONING_LEVEL_ORDER
+    ]
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -795,11 +808,7 @@ def build_external_provider_model(
         if has_explicit_reasoning_levels
         else model.get("supported_reasoning_levels")
     )
-    sanitized_reasoning_levels = sanitize_third_party_reasoning_levels(reasoning_levels_source)
-    if not sanitized_reasoning_levels:
-        sanitized_reasoning_levels = sanitize_third_party_reasoning_levels(
-            DEFAULT_OLLAMA_MODEL["supported_reasoning_levels"]
-        )
+    sanitized_reasoning_levels = complete_third_party_reasoning_levels(reasoning_levels_source)
     model["supported_reasoning_levels"] = sanitized_reasoning_levels
 
     configured_default = external_model.get("default_reasoning_level")

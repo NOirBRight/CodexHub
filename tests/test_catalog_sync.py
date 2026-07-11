@@ -553,7 +553,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["volc/glm-5.2"]["default_reasoning_level"], "high")
         self.assertEqual(
             [item["effort"] for item in by_slug["volc/glm-5.2"]["supported_reasoning_levels"]],
-            ["high", "low", "max", "xhigh"],
+            ["low", "medium", "high", "xhigh", "max"],
         )
         self.assertEqual(by_slug["volc/minimax-m3"]["priority"], 201)
         self.assertEqual(by_slug["volc/minimax-m3"]["input_modalities"], ["text", "image"])
@@ -600,7 +600,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertNotIn("context_source", metadata)
         self.assertNotIn("max_output_source", metadata)
 
-    def test_external_reasoning_levels_normalize_dedupe_and_preserve_order(self):
+    def test_external_reasoning_levels_normalize_and_complete_light_through_max(self):
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -614,7 +614,7 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(
             [item["effort"] for item in model["supported_reasoning_levels"]],
-            ["high", "low", "max", "xhigh"],
+            ["low", "medium", "high", "xhigh", "max"],
         )
         self.assertEqual(model["default_reasoning_level"], "max")
 
@@ -651,8 +651,11 @@ class CatalogSyncTests(unittest.TestCase):
 
         model = catalog_sync.build_external_provider_model(external_model, self.policy, fallback_template)
 
-        self.assertEqual([item["effort"] for item in model["supported_reasoning_levels"]], ["high"])
-        self.assertEqual(model["default_reasoning_level"], "high")
+        self.assertEqual(
+            [item["effort"] for item in model["supported_reasoning_levels"]],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
         self.assertNotIn("ultra", json.dumps(model).lower())
 
     def test_external_reasoning_uses_safe_defaults_when_fallback_has_no_valid_levels(self):
@@ -671,7 +674,7 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(
             [item["effort"] for item in model["supported_reasoning_levels"]],
-            ["low", "medium", "high", "xhigh"],
+            ["low", "medium", "high", "xhigh", "max"],
         )
         self.assertEqual(model["default_reasoning_level"], "xhigh")
 
