@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_beta_candidate_version_is_consistent_across_manifests():
-    expected = "0.1.4-beta.2"
+    expected = "0.1.4-beta.3"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
@@ -335,7 +335,7 @@ def _validate_manifest(
 
 
 def test_beta_manifest_validator_requires_immutable_asset_url_and_pair(tmp_path):
-    version = "0.1.4-beta.2"
+    version = "0.1.4-beta.3"
     installer = tmp_path / f"CodexHubBeta_{version}_x64-setup.exe"
     signature = Path(f"{installer}.sig")
     manifest = tmp_path / "latest-beta.json"

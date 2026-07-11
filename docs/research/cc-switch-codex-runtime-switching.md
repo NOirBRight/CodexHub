@@ -92,9 +92,9 @@ cd D:\Workstation\CodexHub\.worktrees\v0.1.4-codex-compat\src-tauri
 cargo test --locked route_switch_restarts_running_codex_even_when_history_is_clean -- --nocapture
 ```
 
-该旧测试曾以 `1 passed` 固化“历史 clean 仍关闭并重新启动 Codex”的错误行为。`0.1.4-beta.2` 已将契约反转为：路由切换不调用任何 Codex 进程控制接口。
+该旧测试曾以 `1 passed` 固化“历史 clean 仍关闭并重新启动 Codex”的错误行为。`0.1.4-beta.3` 已将契约反转为：路由切换不调用任何 Codex 进程控制接口。
 
-### 0.1.4-beta.2 的安全恢复边界
+### 0.1.4-beta.3 的安全恢复边界
 
 - 连接、断开和托盘切换只修改路由配置，不再检查或迁移历史，也不关闭、启动 Codex。
 - 启动时检查历史漂移；确认存在漂移后才运行一次可延期的在线迁移，不控制 Codex 进程。

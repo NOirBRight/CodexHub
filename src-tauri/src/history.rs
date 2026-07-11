@@ -464,9 +464,10 @@ fn preflight_unified_history_with_budget(
         ));
     }
 
-    // Online history writes remain disabled until the running-Codex Windows E2E
-    // proves JSONL and SQLite concurrency behavior. Route switching must stay usable
-    // without risking partial migration of a user's history.
+    // History synchronization is independent from routing and never controls the
+    // Codex process. The helper snapshots JSONL files before atomic replacement and
+    // uses a bounded SQLite transaction; concurrent writes are returned as Deferred
+    // so startup can retry without recording a completed receipt.
     if !online_repairs_enabled {
         return Ok(UnifiedHistoryResult::pending(
             UnifiedHistoryStatus::Deferred,
@@ -726,10 +727,10 @@ fn legacy_reconcile_message(
 ) -> Result<String, String> {
     match result.status {
         UnifiedHistoryStatus::Clean => {
-            Ok(format!("History bucket is already clean for {target_provider}"))
+            Ok(format!("Conversation history is already synchronized for {target_provider}"))
         }
         UnifiedHistoryStatus::Repaired => Ok(format!(
-            "History bucket repair completed for {target_provider}; changed rows: {}; changed files: {}; backup root: {}",
+            "Conversation history sync completed for {target_provider}; changed rows: {}; changed files: {}; backup root: {}",
             result.changed_rows,
             result.changed_files,
             result.backup_path.as_deref().unwrap_or("not required")
@@ -770,7 +771,7 @@ fn sync_history_with_paths(
 
     let backup_root = history_manual_backup_root(paths);
     let outcome = config::run_python_script(
-        "history bucket repair",
+        "conversation history sync",
         python,
         paths.history_overlay_script(),
         vec![
@@ -789,7 +790,7 @@ fn sync_history_with_paths(
 
     let stdout = outcome.stdout.trim();
     let mut message = format!(
-        "History bucket repair completed for {target_provider}; backup root: {}",
+        "Conversation history sync completed for {target_provider}; backup root: {}",
         backup_root.display()
     );
     if !stdout.is_empty() {
@@ -1426,7 +1427,7 @@ mod tests {
         let result = sync_history_with_paths(None, &paths, Path::new("python-test"), &runner)
             .expect("history sync");
 
-        assert!(result.contains("History bucket repair completed for custom"));
+        assert!(result.contains("Conversation history sync completed for custom"));
         assert!(result.contains("state_rows=2"));
         assert!(result.contains("jsonl_applied=3"));
 
@@ -1469,7 +1470,7 @@ mod tests {
             sync_history_with_paths(Some("openai"), &paths, Path::new("python-test"), &runner)
                 .expect("history sync");
 
-        assert!(result.contains("History bucket repair completed for openai"));
+        assert!(result.contains("Conversation history sync completed for openai"));
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 1);
         assert_contains_sequence(&commands[0].args, &["repair-history"]);
@@ -1567,7 +1568,7 @@ mod tests {
         let error = sync_history_with_paths(None, &paths, Path::new("python-test"), &runner)
             .expect_err("history sync should fail");
 
-        assert!(error.contains("history bucket repair failed"));
+        assert!(error.contains("conversation history sync failed"));
         assert!(error.contains("exit code 42"));
         assert!(error.contains("command: python-test"));
         assert!(error.contains("history_overlay.py"));
