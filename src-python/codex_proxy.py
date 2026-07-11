@@ -397,12 +397,14 @@ PROXY_FEATURES = [
     "official-upstream-connection-pool",
     "official-upstream-idle-connection-expiry",
     "official-terminal-sse-authoritative",
+    "official-title-responses-lite-header-strip",
     "zstd-request-body-runtime",
     "raw-provider-probe-opt-out",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
 OFFICIAL_ULTRA_REASONING_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}
+OFFICIAL_RESPONSES_LITE_UNSUPPORTED_MODELS = {"gpt-5.4-mini"}
 OFFICIAL_FAST_VARIANT_SERVICE_TIER = "priority"
 OFFICIAL_FAST_VARIANT_BASE_MODELS = {
     "gpt-5.5-fast": "gpt-5.5",
@@ -9394,13 +9396,24 @@ def upstream_headers(
     upstream: Mapping[str, Any],
     drop_content_encoding: bool = False,
     behavior_profile: str | None = None,
+    model_id: str | None = None,
 ) -> dict[str, str]:
     auth_mode = upstream.get("auth")
     outgoing: dict[str, str] = {}
+    upstream_model_id = canonical_model_id(
+        str(upstream.get("upstream_model") or model_id or "")
+    ).lower()
+    if upstream_model_id.startswith(OFFICIAL_ALIAS_PREFIX):
+        upstream_model_id = upstream_model_id[len(OFFICIAL_ALIAS_PREFIX) :]
+    drop_responses_lite_header = (
+        auth_mode == "codex_auth" and upstream_model_id in OFFICIAL_RESPONSES_LITE_UNSUPPORTED_MODELS
+    )
 
     for key, value in _header_items(incoming_headers):
         lowered = key.lower()
         if lowered in HOP_BY_HOP_REQUEST_HEADERS or lowered == "authorization":
+            continue
+        if drop_responses_lite_header and lowered == "x-openai-internal-codex-responses-lite":
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
@@ -11610,6 +11623,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream,
                 drop_content_encoding=content_decoded,
                 behavior_profile=behavior_profile,
+                model_id=model,
             )
 
             def upstream_body_for_format(selected_format: str) -> bytes:

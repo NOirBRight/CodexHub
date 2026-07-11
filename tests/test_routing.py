@@ -1470,15 +1470,17 @@ class RoutingTests(unittest.TestCase):
             "Thread-id": "thread-from-app",
             "X-codex-window-id": "window-from-app",
             "X-client-request-id": "request-from-app",
+            "X-OpenAI-Internal-Codex-Responses-Lite": "true",
             "Connection": "keep-alive",
         }
-        upstream = {"name": "official", "auth": "codex_auth"}
+        upstream = {"name": "official", "auth": "codex_auth", "upstream_model": "gpt-5.6-sol"}
 
         with patch("codex_proxy.codex_access_token", return_value="new-token"):
             headers = upstream_headers(
                 incoming,
                 upstream,
                 behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                model_id="openai/gpt-5.6-sol",
             )
 
         self.assertEqual(headers["Authorization"], "Bearer new-token")
@@ -1490,7 +1492,55 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(headers["Thread-id"], "thread-from-app")
         self.assertEqual(headers["X-codex-window-id"], "window-from-app")
         self.assertEqual(headers["X-client-request-id"], "request-from-app")
+        self.assertEqual(headers["X-OpenAI-Internal-Codex-Responses-Lite"], "true")
         self.assertNotIn("Connection", headers)
+
+    def test_official_title_request_drops_unsupported_responses_lite_header(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.4-mini",
+                "input": [{"type": "message", "role": "user", "content": "generate a short task title"}],
+                "stream": True,
+                "store": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "Codex Desktop/0.142.4",
+            "Session-id": "title-session",
+            "Thread-id": "title-thread",
+            "X-codex-window-id": "title-window:0",
+            "X-client-request-id": "title-request",
+            "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        handler._relay_upstream_response = lambda response, upstream_name, **kwargs: 200
+        captured_requests = []
+
+        def open_upstream(request, **_kwargs):
+            captured_requests.append(request)
+            return FakeContextResponse(b'{"id":"resp_title","output":[]}')
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", side_effect=open_upstream),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(len(captured_requests), 1)
+        forwarded_header_names = {key.lower() for key, _value in captured_requests[0].header_items()}
+        self.assertNotIn("x-openai-internal-codex-responses-lite", forwarded_header_names)
 
     def test_official_http_passthrough_does_not_generate_missing_identity_headers(self):
         incoming = {
