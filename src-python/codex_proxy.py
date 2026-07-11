@@ -96,6 +96,8 @@ except ImportError:  # pragma: no cover - optional dependency on older Python in
 DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is not None else ())
 
 OFFICIAL_POOL_MAX_CONNECTIONS = 16
+OFFICIAL_POOL_MAX_IDLE_SECONDS = 30.0
+OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS = 1.0
 OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
 OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
@@ -137,6 +139,18 @@ class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
 class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     ConnectionCls = _OfficialHTTPSConnection
 
+    def _get_conn(self, timeout: float | None = None) -> Any:
+        connection = super()._get_conn(timeout)
+        released_at = getattr(connection, "_codexhub_released_at", None)
+        if isinstance(released_at, (int, float)) and time.monotonic() - released_at >= OFFICIAL_POOL_MAX_IDLE_SECONDS:
+            connection.close()
+        return connection
+
+    def _put_conn(self, connection: Any) -> None:
+        if connection is not None:
+            connection._codexhub_released_at = time.monotonic()
+        super()._put_conn(connection)
+
 
 class _OfficialPooledResponse:
     def __init__(self, response: Any):
@@ -146,6 +160,8 @@ class _OfficialPooledResponse:
         self.status = response.status
         self.reason = response.reason
         self.headers = response.headers
+        self._terminal_drain_socket: Any = None
+        self._terminal_drain_original_timeout: float | None = None
 
     def read(self, amount: int | None = None) -> bytes:
         try:
@@ -170,11 +186,35 @@ class _OfficialPooledResponse:
     def getcode(self) -> int:
         return self.status
 
+    def shorten_terminal_drain_timeout(self, timeout_seconds: float) -> None:
+        connection = getattr(self._response, "connection", None)
+        sock = getattr(connection, "sock", None)
+        if sock is None or self._terminal_drain_socket is not None:
+            return
+        try:
+            original_timeout = sock.gettimeout()
+            sock.settimeout(timeout_seconds)
+        except OSError:
+            return
+        self._terminal_drain_socket = sock
+        self._terminal_drain_original_timeout = original_timeout
+
+    def _restore_terminal_drain_timeout(self) -> None:
+        if self._terminal_drain_socket is None:
+            return
+        try:
+            self._terminal_drain_socket.settimeout(self._terminal_drain_original_timeout)
+        except OSError:
+            pass
+        self._terminal_drain_socket = None
+        self._terminal_drain_original_timeout = None
+
     def close(self) -> None:
         if self._released:
             return
         self._released = True
         if self._exhausted:
+            self._restore_terminal_drain_timeout()
             self._response.release_conn()
         else:
             self._response.close()
@@ -332,6 +372,9 @@ PROXY_FEATURES = [
     "third-party-required-subagent-action-repair",
     "third-party-chat-output-repair-parity",
     "official-upstream-connection-pool",
+    "official-upstream-idle-connection-expiry",
+    "official-terminal-sse-authoritative",
+    "zstd-request-body-runtime",
     "raw-provider-probe-opt-out",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
@@ -12719,6 +12762,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         last_upstream_byte_at: float | None = None
         failure_side = "upstream_read"
         sse_stats = PassthroughSseSemanticStats()
+        terminal_drain_timeout_shortened = False
         try:
             while True:
                 failure_side = "upstream_read"
@@ -12733,8 +12777,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 bytes_streamed += len(line)
                 sse_stats.observe_line(line)
                 _offer_official_passthrough_usage_line(usage_context, line)
+                if sse_stats.terminal_event_seen and not terminal_drain_timeout_shortened:
+                    shorten_terminal_drain_timeout = getattr(response, "shorten_terminal_drain_timeout", None)
+                    if callable(shorten_terminal_drain_timeout):
+                        shorten_terminal_drain_timeout(OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS)
+                    terminal_drain_timeout_shortened = True
         except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
             self.close_connection = True
+            if failure_side == "upstream_read" and sse_stats.terminal_event_seen:
+                sse_stats.finalize_pending()
+                if usage_capture is not None:
+                    usage_capture.update(sse_stats.fields())
+                return status
             now = time.monotonic()
             last_upstream_byte_age_ms = (
                 None

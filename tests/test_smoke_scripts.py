@@ -75,6 +75,27 @@ def test_online_history_e2e_uses_app_cli_and_isolated_codex_home():
     assert "app-server exited during online history migration" in source
 
 
+def test_embedded_python_runtime_bundles_zstandard_for_app_request_bodies():
+    source = (ROOT / "scripts" / "Prepare-PythonRuntime.ps1").read_text(encoding="utf-8-sig")
+
+    assert '[string]$ZstandardVersion = "0.25.0"' in source
+    assert '[string]$ZstandardWheelSha256' in source
+    assert "zstandard-$ZstandardVersion-cp313-cp313-win_amd64.whl" in source
+    assert "& $python -m zipfile -e $zstandardWheelPath $runtimeDir" in source
+    assert "import http.server, pathlib, sqlite3, tomllib, urllib.request, zstandard" in source
+
+
+def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():
+    source = (ROOT / "scripts" / "e2e_codex_app_transport.py").read_text(encoding="utf-8")
+
+    assert '"app-server"' in source
+    assert '"thread/start"' in source
+    assert '"turn/start"' in source
+    assert 'message.get("method") == "turn/completed"' in source
+    assert 'completed_status != "completed"' in source
+    assert 'thread_params["dynamicTools"] = dynamic_tools' in source
+
+
 def test_codex_catalog_roundtrip_e2e_uses_live_app_catalog_and_isolated_custom_provider():
     source = (ROOT / "scripts" / "e2e_codex_catalog_roundtrip.py").read_text(encoding="utf-8")
 

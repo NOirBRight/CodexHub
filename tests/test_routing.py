@@ -10,7 +10,7 @@ import unittest
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
 import codex_proxy
@@ -1687,6 +1687,68 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b'"upstream":"official"', body)
         self.assertTrue(fake.close_connection)
 
+    def test_official_passthrough_ignores_stream_error_after_completed_event(self):
+        fake = FakeHandler()
+        usage_capture = {}
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                FakeSseResponse(
+                    [
+                        b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                        b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                        codex_proxy.IncompleteRead(b""),
+                    ]
+                ),
+                "official",
+                request_id="req-terminal-before-eof",
+                model="gpt-5.6-sol",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture=usage_capture,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(usage_capture["sse_completed_event_seen"])
+        self.assertNotIn(b"response.failed", b"".join(fake.wfile.writes))
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "official_passthrough_stream_closed"
+                for call in write_event.call_args_list
+            )
+        )
+
+    def test_official_passthrough_shortens_post_terminal_drain_timeout(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+        response.shorten_terminal_drain_timeout = Mock()
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "official",
+            request_id="req-terminal-drain-timeout",
+            model="gpt-5.6-sol",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        self.assertEqual(status, 200)
+        response.shorten_terminal_drain_timeout.assert_called_once_with(
+            codex_proxy.OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS
+        )
+
     def test_official_passthrough_stream_close_records_upstream_read_counters(self):
         fake = FakeHandler()
 
@@ -2191,6 +2253,40 @@ class RoutingTests(unittest.TestCase):
             codex_proxy._OfficialHTTPSConnectionPool,
         )
 
+    def test_official_pool_discards_connection_after_idle_reuse_limit(self):
+        connection = Mock()
+        connection._codexhub_released_at = 100.0
+        pool = codex_proxy._OfficialHTTPSConnectionPool("chatgpt.com")
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_get_conn",
+                return_value=connection,
+            ),
+            patch("codex_proxy.time.monotonic", return_value=100.0 + codex_proxy.OFFICIAL_POOL_MAX_IDLE_SECONDS + 1),
+        ):
+            returned = pool._get_conn()
+
+        self.assertIs(returned, connection)
+        connection.close.assert_called_once()
+
+    def test_official_pool_records_release_time_for_idle_reuse_limit(self):
+        connection = Mock()
+        pool = codex_proxy._OfficialHTTPSConnectionPool("chatgpt.com")
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_put_conn",
+            ) as put_conn,
+            patch("codex_proxy.time.monotonic", return_value=123.0),
+        ):
+            pool._put_conn(connection)
+
+        self.assertEqual(connection._codexhub_released_at, 123.0)
+        put_conn.assert_called_once_with(connection)
+
     def test_official_pool_retains_five_second_tcp_keepalive_tuning(self):
         with patch("codex_proxy.sys.platform", "linux"):
             options = codex_proxy._official_socket_options()
@@ -2229,6 +2325,25 @@ class RoutingTests(unittest.TestCase):
 
         raw_response.close.assert_called_once()
         raw_response.release_conn.assert_not_called()
+
+    def test_official_pooled_stream_restores_timeout_before_reuse(self):
+        raw_response = Mock()
+        raw_response.status = 200
+        raw_response.reason = "OK"
+        raw_response.headers = {"Content-Type": "text/event-stream"}
+        raw_response.readline.return_value = b""
+        raw_response.connection.sock.gettimeout.return_value = 300.0
+
+        with codex_proxy._OfficialPooledResponse(raw_response) as response:
+            response.shorten_terminal_drain_timeout(1.0)
+            self.assertEqual(response.readline(), b"")
+
+        self.assertEqual(
+            raw_response.connection.sock.settimeout.call_args_list,
+            [call(1.0), call(300.0)],
+        )
+        raw_response.release_conn.assert_called_once()
+        raw_response.close.assert_not_called()
 
     def test_transparent_retry_retries_open_failure_without_downstream_notice(self):
         request = codex_proxy.Request("https://example.test/v1/chat/completions", data=b"{}", method="POST")
