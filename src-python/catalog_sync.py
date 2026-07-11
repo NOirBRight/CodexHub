@@ -126,6 +126,7 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
             "description": "Extra high reasoning depth for complex problems",
         },
     ],
+    "default_reasoning_level": "medium",
     "base_instructions": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
     "model_messages": {
         "instructions_template": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
@@ -630,6 +631,9 @@ def official_short_display_name(slug: str, model: dict[str, Any], policy: Catalo
 def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
     source_model = official_by_slug.get(slug)
     model = deepcopy(source_model or build_minimal_official_model(slug, policy))
+    if source_model is not None:
+        for key, value in MINIMAL_OFFICIAL_MODEL.items():
+            model.setdefault(key, deepcopy(value))
     model["slug"] = slug
     model["display_name"] = official_short_display_name(slug, model, policy)
     if source_model is None:

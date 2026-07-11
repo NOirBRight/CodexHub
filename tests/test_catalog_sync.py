@@ -219,7 +219,8 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["gpt-5.5"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
         self.assertEqual(by_slug["gpt-5.4"]["service_tiers"][0]["id"], "priority")
         self.assertNotIn("context_window", by_slug["gpt-5.4-mini"])
-        self.assertNotIn("additional_speed_tiers", by_slug["gpt-5.4-mini"])
+        self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
+        self.assertEqual(by_slug["gpt-5.4-mini"]["service_tiers"], [])
 
     def test_shared_model_identity_vectors_reject_only_unknown_official_aliases(self):
         fixture_path = Path(__file__).parent / "fixtures" / "model_identity_vectors.json"
@@ -292,9 +293,11 @@ class CatalogSyncTests(unittest.TestCase):
         for key, value in official[0].items():
             if key not in {"slug", "display_name"}:
                 self.assertEqual(model[key], value, key)
-        self.assertNotIn("shell_type", model)
-        self.assertNotIn("base_instructions", model)
-        self.assertNotIn("supported_in_api", model)
+        self.assertEqual(model["shell_type"], "shell_command")
+        self.assertEqual(model["supports_parallel_tool_calls"], True)
+        self.assertEqual(model["default_reasoning_level"], "medium")
+        self.assertIn("base_instructions", model)
+        self.assertEqual(model["supported_in_api"], True)
         self.assertEqual(
             model["codex_proxy_metadata"],
             {
