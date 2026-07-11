@@ -38,6 +38,7 @@ export function RuntimeBar({
     <header
       className="flex min-h-[56px] items-center gap-3 overflow-hidden bg-surface pl-4 shadow-hairline"
       data-tauri-drag-region
+      onDoubleClickCapture={toggleWindowMaximizeFromTitlebar}
       onMouseDownCapture={startWindowDrag}
     >
       <div
@@ -134,7 +135,7 @@ function formatRuntimeHint(message?: string | null) {
 }
 
 function startWindowDrag(event: MouseEvent<HTMLElement>) {
-  if (event.button !== 0 || isInteractiveWindowControl(event.target)) {
+  if (event.button !== 0 || event.detail > 1 || isInteractiveWindowControl(event.target)) {
     return;
   }
 
@@ -144,6 +145,16 @@ function startWindowDrag(event: MouseEvent<HTMLElement>) {
   } catch {
     // Browser preview has no Tauri window to drag.
   }
+}
+
+function toggleWindowMaximizeFromTitlebar(event: MouseEvent<HTMLElement>) {
+  if (event.button !== 0 || isInteractiveWindowControl(event.target)) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  void api.windowToggleMaximize().catch(() => undefined);
 }
 
 function isInteractiveWindowControl(target: EventTarget | null) {

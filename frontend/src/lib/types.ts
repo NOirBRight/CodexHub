@@ -7,6 +7,11 @@ export interface Model {
   codex_enabled?: boolean;
   gateway_exported?: boolean;
   context_window?: number | null;
+  max_context_window?: number | null;
+  effective_source?: string | null;
+  max_source?: string | null;
+  confidence?: string | null;
+  verified_at?: string | null;
   max_output_tokens?: number | null;
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
@@ -87,6 +92,17 @@ export interface AppStatus {
   history_sync_message?: string | null;
 }
 
+export interface UnifiedHistoryResult {
+  status: "clean" | "repaired" | "deferred" | "restart_required" | "conflict";
+  changed_rows: number;
+  changed_files: number;
+  backup_path?: string | null;
+  receipt_path?: string | null;
+  reason?: string | null;
+  error?: string | null;
+  codex_restarted: boolean;
+}
+
 export interface AppVersionInfo {
   current_version: string;
 }
@@ -101,6 +117,10 @@ export interface AppFlavorInfo {
   bridge_port: number;
   gateway_port: number;
   default_codex_home_suffix: string;
+  runtime_home_suffix: string;
+  codex_target_home_suffix: string;
+  codex_target_owner: RoutingOwner | null;
+  codex_takeover_required: boolean;
 }
 
 export interface AppUpdateStatus {

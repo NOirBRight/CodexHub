@@ -1,8 +1,12 @@
-use crate::{runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, UpstreamFormat};
+use crate::{
+    config, runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, Settings,
+    UpstreamFormat,
+};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +20,7 @@ const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const RESOLVED_MODEL_LIMITS_JSON: &str = include_str!("../../config/resolved_model_limits.json");
 const RESPONSE_ENDPOINT_SUFFIXES: &[&str] = &["/responses", "/response"];
 const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/chat/completions",
@@ -40,7 +45,7 @@ pub fn probe_upstream_format(
     api_key: &str,
     model: Option<&str>,
 ) -> Result<Value, String> {
-    let api_key = resolve_api_key(api_key)?.unwrap_or_default();
+    let api_key = resolve_gateway_api_key(base_url, api_key)?.unwrap_or_default();
     let paths = ModelPaths::runtime()?;
     let python = find_python();
     let script = paths.upstream_format_probe_script();
@@ -106,7 +111,7 @@ fn test_model_endpoint_with_timeout(
         return Err("model is required for endpoint connectivity test".to_string());
     }
 
-    let api_key = resolve_api_key(api_key)?;
+    let api_key = resolve_gateway_api_key(base_url, api_key)?;
     let (format_id, label, path, payload) = model_test_payload(model, upstream_format);
     let endpoint = provider_api_endpoint(base_url, path)?;
     let client = Client::builder()
@@ -214,10 +219,20 @@ pub fn list_models() -> Result<Vec<Model>, String> {
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
+    let config_paths = config::ConfigPaths::runtime()?;
+    let known_official_models = config::known_official_model_ids(&config_paths);
     let cached = read_metadata_cache(&paths).unwrap_or_default();
-    let cached = merge_metadata_with_overrides(builtin_model_metadata(), cached);
+    let cached = merge_metadata_with_overrides(
+        builtin_model_metadata(),
+        cached,
+        &known_official_models,
+    );
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    Ok(merge_metadata_with_overrides(cached, overrides))
+    Ok(merge_metadata_with_overrides(
+        cached,
+        overrides,
+        &known_official_models,
+    ))
 }
 
 pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, String> {
@@ -481,7 +496,9 @@ fn write_app_server_json_line(stdin: &mut impl Write, value: &Value) -> Result<(
 
 #[derive(Debug, Clone)]
 struct OfficialSubscriptionModel {
+    raw: Value,
     slug: String,
+    legacy_prefixed: bool,
     display_name: String,
     description: Option<String>,
     context_window: Option<u32>,
@@ -492,6 +509,8 @@ struct OfficialSubscriptionModel {
     additional_speed_tiers: Vec<String>,
     service_tiers: Vec<Value>,
     is_default: bool,
+    enabled: bool,
+    enabled_present: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -521,13 +540,31 @@ fn subscription_models_from_payload(
         .ok_or_else(|| {
             "Codex subscription model list response did not contain a model array".to_string()
         })?;
-    let mut seen = HashSet::new();
+    let mut positions = HashMap::new();
     let mut output = Vec::new();
     for item in items {
-        let Some(model) = subscription_model_from_item(item) else {
+        let Some(mut model) = subscription_model_from_item(item) else {
             continue;
         };
-        if seen.insert(model.slug.clone()) {
+        if let Some(&position) = positions.get(&model.slug) {
+            let existing: &OfficialSubscriptionModel = &output[position];
+            let enabled = existing.enabled || model.enabled;
+            let enabled_present = existing.enabled_present || model.enabled_present;
+            if existing.legacy_prefixed && !model.legacy_prefixed {
+                // A bare App CLI record is the authoritative metadata shape.
+            } else if !existing.legacy_prefixed && model.legacy_prefixed {
+                model = existing.clone();
+            }
+            model.enabled = enabled;
+            model.enabled_present = enabled_present;
+            if enabled_present {
+                if let Some(raw) = model.raw.as_object_mut() {
+                    raw.insert("enabled".to_string(), json!(enabled));
+                }
+            }
+            output[position] = model;
+        } else {
+            positions.insert(model.slug.clone(), output.len());
             output.push(model);
         }
     }
@@ -558,7 +595,9 @@ fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionMode
     .unwrap_or_else(|| slug.clone());
 
     Some(OfficialSubscriptionModel {
+        raw: item.clone(),
         slug,
+        legacy_prefixed: raw_slug.starts_with("openai/"),
         display_name,
         description: first_string(object, &["description"]),
         context_window: numeric_limit(item, &["context_window", "max_context_window"], "context"),
@@ -596,6 +635,11 @@ fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionMode
             .or_else(|| object.get("is_default"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        enabled: object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        enabled_present: object.contains_key("enabled"),
     })
 }
 
@@ -605,8 +649,11 @@ fn subscription_models_to_metadata_models(
     let builtin = builtin_model_metadata();
     let mut output = Vec::new();
     for subscription_model in subscription_models {
-        let id = format!("openai/{}", subscription_model.slug);
-        let defaults = builtin.iter().find(|model| model.id == id);
+        let id = subscription_model.slug.clone();
+        let legacy_prefixed_id = format!("openai/{}", subscription_model.slug);
+        let defaults = builtin
+            .iter()
+            .find(|model| model.id == id || model.id == legacy_prefixed_id);
         output.push(Model {
             id,
             display_name: Some(subscription_model_display_name(
@@ -622,6 +669,14 @@ fn subscription_models_to_metadata_models(
             context_window: subscription_model
                 .context_window
                 .or_else(|| defaults.and_then(|model| model.context_window)),
+            max_context_window: defaults.and_then(|model| model.max_context_window),
+            effective_source: subscription_model
+                .context_window
+                .map(|_| "codex_app_model_list".to_string())
+                .or_else(|| defaults.and_then(|model| model.effective_source.clone())),
+            max_source: defaults.and_then(|model| model.max_source.clone()),
+            confidence: defaults.and_then(|model| model.confidence.clone()),
+            verified_at: defaults.and_then(|model| model.verified_at.clone()),
             max_output_tokens: subscription_model
                 .max_output_tokens
                 .or_else(|| defaults.and_then(|model| model.max_output_tokens)),
@@ -645,7 +700,7 @@ fn subscription_models_to_metadata_models(
                 confidence: "high".to_string(),
             }),
             sort_order: defaults.and_then(|model| model.sort_order),
-            enabled: true,
+            enabled: subscription_model.enabled,
         });
     }
     output
@@ -660,10 +715,10 @@ fn subscription_model_display_name(
         if raw.eq_ignore_ascii_case(&subscription_model.slug)
             || raw.eq_ignore_ascii_case(&format!("openai/{}", subscription_model.slug))
         {
-            return official_display_name(default_name);
+            return official_short_display_name(default_name);
         }
     }
-    official_display_name(raw)
+    official_short_display_name(raw)
 }
 
 fn write_official_subscription_caches(
@@ -717,24 +772,39 @@ fn write_official_subscription_seed(
 }
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
-    let mut payload = serde_json::Map::new();
+    let mut payload = model.raw.as_object().cloned().unwrap_or_default();
     payload.insert("slug".to_string(), json!(model.slug));
-    payload.insert("display_name".to_string(), json!(model.display_name));
+    payload
+        .entry("display_name".to_string())
+        .or_insert_with(|| json!(official_short_display_name(&model.display_name)));
     if let Some(description) = model.description.as_ref() {
-        payload.insert("description".to_string(), json!(description));
+        payload
+            .entry("description".to_string())
+            .or_insert_with(|| json!(description));
     }
     if let Some(context_window) = model.context_window {
-        payload.insert("context_window".to_string(), json!(context_window));
-        payload.insert("max_context_window".to_string(), json!(context_window));
+        payload
+            .entry("context_window".to_string())
+            .or_insert_with(|| json!(context_window));
+        payload
+            .entry("max_context_window".to_string())
+            .or_insert_with(|| json!(context_window));
     }
     if let Some(max_output_tokens) = model.max_output_tokens {
-        payload.insert("max_output_tokens".to_string(), json!(max_output_tokens));
+        payload
+            .entry("max_output_tokens".to_string())
+            .or_insert_with(|| json!(max_output_tokens));
     }
-    payload.insert(
-        "input_modalities".to_string(),
-        json!(model.input_modalities),
-    );
-    if !model.reasoning_levels.is_empty() {
+    if payload.contains_key("inputModalities") && !payload.contains_key("input_modalities") {
+        payload.insert(
+            "input_modalities".to_string(),
+            json!(model.input_modalities),
+        );
+    }
+    if payload.contains_key("supportedReasoningEfforts")
+        && !payload.contains_key("supported_reasoning_levels")
+        && !model.reasoning_levels.is_empty()
+    {
         payload.insert(
             "supported_reasoning_levels".to_string(),
             json!(model
@@ -751,18 +821,32 @@ fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value 
                 .collect::<Vec<_>>()),
         );
     }
-    if let Some(default_reasoning_level) = model.default_reasoning_level.as_ref() {
+    if let Some(default_reasoning_level) = model.default_reasoning_level.as_ref().filter(|_| {
+        payload.contains_key("defaultReasoningEffort")
+            && !payload.contains_key("default_reasoning_level")
+    }) {
         payload.insert(
             "default_reasoning_level".to_string(),
             json!(default_reasoning_level),
         );
     }
-    payload.insert(
-        "additional_speed_tiers".to_string(),
-        json!(model.additional_speed_tiers),
-    );
-    payload.insert("service_tiers".to_string(), json!(model.service_tiers));
-    payload.insert("is_default".to_string(), json!(model.is_default));
+    if payload.contains_key("additionalSpeedTiers")
+        && !payload.contains_key("additional_speed_tiers")
+    {
+        payload.insert(
+            "additional_speed_tiers".to_string(),
+            json!(model.additional_speed_tiers),
+        );
+    }
+    if payload.contains_key("serviceTiers") && !payload.contains_key("service_tiers") {
+        payload.insert("service_tiers".to_string(), json!(model.service_tiers));
+    }
+    if payload.contains_key("isDefault") && !payload.contains_key("is_default") {
+        payload.insert("is_default".to_string(), json!(model.is_default));
+    }
+    if model.enabled_present {
+        payload.insert("enabled".to_string(), json!(model.enabled));
+    }
     Value::Object(payload)
 }
 
@@ -810,13 +894,25 @@ fn reasoning_level_entries(value: Option<&Value>) -> Vec<ReasoningLevelEntry> {
         .collect()
 }
 
-fn official_display_name(display_name: &str) -> String {
-    let display_name = display_name.trim();
-    if display_name.starts_with("OpenAI ") {
-        display_name.to_string()
-    } else {
-        format!("OpenAI {display_name}")
+pub(crate) fn official_short_display_name(display_name: &str) -> String {
+    let mut display_name = display_name.trim();
+    if display_name
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("OpenAI "))
+    {
+        display_name = display_name.get(7..).unwrap_or_default().trim();
     }
+    if display_name
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPT-"))
+    {
+        display_name = display_name.get(4..).unwrap_or_default();
+    }
+    display_name
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn current_unix_timestamp() -> u64 {
@@ -995,6 +1091,54 @@ fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
         return Err(format!("{env_name} is empty"));
     }
     Ok(Some(value))
+}
+
+fn resolve_gateway_api_key(base_url: &str, api_key: &str) -> Result<Option<String>, String> {
+    resolve_gateway_api_key_for_settings(base_url, api_key, None)
+}
+
+fn resolve_gateway_api_key_for_settings(
+    base_url: &str,
+    api_key: &str,
+    gateway_settings: Option<&Settings>,
+) -> Result<Option<String>, String> {
+    if let Some(api_key) = resolve_api_key(api_key)? {
+        return Ok(Some(api_key));
+    }
+    if let Some(settings) = gateway_settings {
+        return Ok(local_gateway_api_key_for_settings(base_url, settings));
+    }
+    Ok(config::get_settings()
+        .ok()
+        .and_then(|settings| local_gateway_api_key_for_settings(base_url, &settings)))
+}
+
+fn local_gateway_api_key_for_settings(base_url: &str, settings: &Settings) -> Option<String> {
+    if !is_current_local_gateway_base_url(base_url, settings.proxy_port) {
+        return None;
+    }
+    let key = settings.gateway_client_key.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+fn is_current_local_gateway_base_url(base_url: &str, proxy_port: u16) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        return false;
+    }
+    if url.port_or_known_default() != Some(proxy_port) {
+        return false;
+    }
+    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
+    path.is_empty() || path == "/v1" || path.starts_with("/v1/")
 }
 
 fn env_placeholder_name(value: &str) -> Result<Option<String>, String> {
@@ -1526,8 +1670,25 @@ fn write_models_json(path: &Path, models: &[Model]) -> Result<(), String> {
         .map_err(|error| format!("failed to write model metadata {}: {error}", path.display()))
 }
 
-fn merge_metadata_with_overrides(mut base: Vec<Model>, overrides: Vec<Model>) -> Vec<Model> {
+fn merge_metadata_with_overrides(
+    base: Vec<Model>,
+    overrides: Vec<Model>,
+    known_official_models: &HashSet<String>,
+) -> Vec<Model> {
+    let mut base = base
+        .into_iter()
+        .filter_map(|mut model| {
+            model.id = config::normalize_official_model_id(&model.id, known_official_models)?;
+            Some(model)
+        })
+        .collect::<Vec<_>>();
     for mut override_model in overrides {
+        let Some(model_id) =
+            config::normalize_official_model_id(&override_model.id, known_official_models)
+        else {
+            continue;
+        };
+        override_model.id = model_id;
         override_model.metadata_provenance = Some(MetadataProvenance {
             source: "user_override".to_string(),
             source_url: None,
@@ -1559,6 +1720,11 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         codex_enabled: override_model.codex_enabled && original_codex_enabled,
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
         context_window: override_model.context_window.or(base.context_window),
+        max_context_window: override_model.max_context_window.or(base.max_context_window),
+        effective_source: override_model.effective_source.or(base.effective_source.take()),
+        max_source: override_model.max_source.or(base.max_source.take()),
+        confidence: override_model.confidence.or(base.confidence.take()),
+        verified_at: override_model.verified_at.or(base.verified_at.take()),
         max_output_tokens: override_model.max_output_tokens.or(base.max_output_tokens),
         input_modalities: override_model
             .input_modalities
@@ -1588,8 +1754,11 @@ fn merge_model_aliases(mut base: Vec<String>, overrides: Vec<String>) -> Vec<Str
 
 fn builtin_model_metadata() -> Vec<Model> {
     vec![
+        official_resolved_metadata("gpt-5.6-sol", "GPT-5.6 Sol"),
+        official_resolved_metadata("gpt-5.6-terra", "GPT-5.6 Terra"),
+        official_resolved_metadata("gpt-5.6-luna", "GPT-5.6 Luna"),
         official_priced_metadata(
-            "openai/gpt-5.5",
+            "gpt-5.5",
             "GPT-5.5",
             272_000,
             "https://developers.openai.com/api/docs/pricing",
@@ -1598,7 +1767,7 @@ fn builtin_model_metadata() -> Vec<Model> {
             22.50,
         ),
         official_priced_metadata(
-            "openai/gpt-5.4",
+            "gpt-5.4",
             "GPT-5.4",
             272_000,
             "https://developers.openai.com/api/docs/pricing",
@@ -1607,7 +1776,7 @@ fn builtin_model_metadata() -> Vec<Model> {
             11.25,
         ),
         official_priced_metadata(
-            "openai/gpt-5.4-mini",
+            "gpt-5.4-mini",
             "GPT-5.4 mini",
             272_000,
             "https://developers.openai.com/api/docs/pricing",
@@ -1615,7 +1784,7 @@ fn builtin_model_metadata() -> Vec<Model> {
             Some(0.0375),
             2.25,
         ),
-        official_metadata("openai/gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
+        official_metadata("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
         priced_metadata(
             "zai/glm-5.2",
             "GLM 5.2",
@@ -1663,6 +1832,47 @@ fn builtin_model_metadata() -> Vec<Model> {
             ..Model::default()
         },
     ]
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolvedLimitsDocument {
+    entries: Vec<ResolvedLimitsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolvedLimitsEntry {
+    provider_id: String,
+    model_id: String,
+    effective_context_window: Option<u32>,
+    max_context_window: Option<u32>,
+    effective_source: Option<String>,
+    max_source: Option<String>,
+    confidence: String,
+    verified_at: Option<String>,
+}
+
+fn official_resolved_metadata(id: &str, display_name: &str) -> Model {
+    let document: ResolvedLimitsDocument = serde_json::from_str(RESOLVED_MODEL_LIMITS_JSON)
+        .expect("bundled resolved model limits must be valid JSON");
+    let limits = document
+        .entries
+        .into_iter()
+        .find(|entry| entry.provider_id == "openai" && entry.model_id == id)
+        .expect("official resolved model limit must exist");
+    Model {
+        id: id.to_string(),
+        display_name: Some(display_name.to_string()),
+        source_kind: Some("official".to_string()),
+        locked: true,
+        context_window: limits.effective_context_window,
+        max_context_window: limits.max_context_window,
+        effective_source: limits.effective_source,
+        max_source: limits.max_source,
+        confidence: Some(limits.confidence),
+        verified_at: limits.verified_at,
+        input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+        ..Model::default()
+    }
 }
 
 fn official_priced_metadata(
@@ -1786,6 +1996,11 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             &["context_window", "max_context_window", "context_length"],
             "context",
         ),
+        max_context_window: object.get("max_context_window").and_then(optional_u32),
+        effective_source: object.get("effective_source").and_then(Value::as_str).and_then(nonblank),
+        max_source: object.get("max_source").and_then(Value::as_str).and_then(nonblank),
+        confidence: object.get("confidence").and_then(Value::as_str).and_then(nonblank),
+        verified_at: object.get("verified_at").and_then(Value::as_str).and_then(nonblank),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
         input_modalities: object.get("input_modalities").and_then(string_array),
         supported_reasoning_levels: object
@@ -1869,6 +2084,9 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     {
         return Ok(path);
     }
+    if let Some(path) = desktop_codex_exe() {
+        return Ok(path);
+    }
     if let Some(path) = npm_codex_vendor_exe() {
         return Ok(path);
     }
@@ -1881,6 +2099,27 @@ fn find_codex_executable() -> Result<PathBuf, String> {
         "Codex subscription model refresh requires the Codex CLI to be installed and on PATH."
             .to_string(),
     )
+}
+
+fn desktop_codex_exe() -> Option<PathBuf> {
+    let local_appdata = std::env::var_os("LOCALAPPDATA")?;
+    desktop_codex_exe_from_local_appdata(Path::new(&local_appdata))
+}
+
+fn desktop_codex_exe_from_local_appdata(local_appdata: &Path) -> Option<PathBuf> {
+    let bin_dir = local_appdata.join("OpenAI").join("Codex").join("bin");
+    let mut candidates = fs::read_dir(bin_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("codex.exe"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    candidates.pop()
 }
 
 fn npm_codex_vendor_exe() -> Option<PathBuf> {
@@ -1907,17 +2146,20 @@ fn codex_executable_candidates() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout, enrich_models_with_ollama_show,
-        generate_catalog_with_runner, list_model_metadata, list_models,
-        merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
+        enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
+        list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
-        refresh_official_models_with_runner, test_model_endpoint_with_timeout,
-        AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
+        refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
+        subscription_models_from_payload, subscription_models_to_metadata_models,
+        test_model_endpoint_with_timeout, AppServerModelListRunner, CatalogCommandOutcome,
+        CatalogSyncRunner, ModelPaths,
     };
-    use crate::{MetadataProvenance, Model, UpstreamFormat};
+    use crate::{MetadataProvenance, Model, Settings, UpstreamFormat};
     use reqwest::blocking::Client;
     use serde_json::{json, Value};
     use std::cell::RefCell;
+    use std::collections::HashSet;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1928,6 +2170,25 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn desktop_codex_exe_finds_the_app_managed_runtime() {
+        let root = temp_root("desktop-codex-runtime");
+        let executable = root
+            .join("OpenAI")
+            .join("Codex")
+            .join("bin")
+            .join("runtime-hash")
+            .join("codex.exe");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"desktop codex").unwrap();
+
+        assert_eq!(
+            desktop_codex_exe_from_local_appdata(&root),
+            Some(executable)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     struct StaticAppServerModelListRunner {
         result: Result<Value, String>,
@@ -1949,6 +2210,27 @@ mod tests {
         fn read_model_list(&self) -> Result<Value, String> {
             self.result.clone()
         }
+    }
+
+    #[test]
+    fn subscription_models_use_bare_official_ids_and_keep_builtin_defaults() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "openai/gpt-5.4",
+                    "displayName": "gpt-5.4",
+                    "hidden": false
+                }
+            ]
+        }))
+        .expect("subscription models");
+
+        let models = subscription_models_to_metadata_models(&subscription_models);
+
+        assert_eq!(model_ids(&models), ["gpt-5.4"]);
+        assert_eq!(models[0].display_name.as_deref(), Some("5.4"));
+        assert_eq!(models[0].upstream_model.as_deref(), Some("gpt-5.4"));
+        assert!(models[0].pricing.is_some());
     }
 
     #[test]
@@ -1997,13 +2279,10 @@ mod tests {
         let models =
             refresh_official_models_with_runner(&paths, &runner).expect("subscription refresh");
 
-        assert_eq!(
-            model_ids(&models),
-            ["openai/gpt-subscription-live", "openai/gpt-5.4"]
-        );
+        assert_eq!(model_ids(&models), ["gpt-subscription-live", "gpt-5.4"]);
         assert_eq!(
             models[0].display_name.as_deref(),
-            Some("OpenAI GPT Subscription Live")
+            Some("GPT Subscription Live")
         );
         assert_eq!(
             models[0].upstream_model.as_deref(),
@@ -2020,15 +2299,15 @@ mod tests {
         );
         let known_model = models
             .iter()
-            .find(|model| model.id == "openai/gpt-5.4")
+            .find(|model| model.id == "gpt-5.4")
             .expect("known subscription model");
-        assert_eq!(known_model.display_name.as_deref(), Some("OpenAI GPT-5.4"));
+        assert_eq!(known_model.display_name.as_deref(), Some("5.4"));
 
         let cached_metadata =
             read_models_json(&paths.metadata_cache_path()).expect("metadata cache");
         assert_eq!(
             model_ids(&cached_metadata),
-            ["openai/gpt-subscription-live", "openai/gpt-5.4"]
+            ["gpt-subscription-live", "gpt-5.4"]
         );
 
         let seed: Value = serde_json::from_str(
@@ -2041,6 +2320,201 @@ mod tests {
         assert_eq!(cached_model["additional_speed_tiers"], json!(["fast"]));
         assert_eq!(cached_model["service_tiers"][0]["id"], "priority");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subscription_seed_preserves_app_cli_metadata_and_simple_slider_presets() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
+                    "displayName": "GPT-5.6-Terra",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Light"},
+                        {"reasoningEffort": "medium", "description": "Medium"},
+                        {"reasoningEffort": "high", "description": "High"},
+                        {"reasoningEffort": "xhigh", "description": "Extra High"},
+                        {"reasoningEffort": "max", "description": "Max"},
+                        {"reasoningEffort": "ultra", "description": "Ultra"}
+                    ],
+                    "defaultReasoningEffort": "medium"
+                },
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "context_window": 400000,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Light"},
+                        {"reasoningEffort": "medium", "description": "Medium"},
+                        {"reasoningEffort": "high", "description": "High"},
+                        {"reasoningEffort": "xhigh", "description": "Extra High"},
+                        {"reasoningEffort": "max", "description": "Max"},
+                        {"reasoningEffort": "ultra", "description": "Ultra"}
+                    ],
+                    "defaultReasoningEffort": "low",
+                    "multi_agent_version": "v2",
+                    "tool_mode": "native",
+                    "model_messages": {"upgrade": "Use Sol"},
+                    "skills_instructions": "Official skills contract",
+                    "web_search_tool_type": "text",
+                    "use_responses_lite": true,
+                    "availability": {"plan": "plus"},
+                    "upgrade": "gpt-5.7-sol",
+                    "upgradeInfo": {"message": "Upgrade available"},
+                    "comp_hash": "sol-compat-hash"
+                }
+            ]
+        }))
+        .expect("subscription models");
+        let seeds = subscription_models
+            .iter()
+            .map(super::official_subscription_seed_model)
+            .collect::<Vec<_>>();
+        let terra = &seeds[0];
+        let sol = &seeds[1];
+
+        assert_eq!(terra["display_name"], "5.6 Terra");
+        assert_eq!(sol["display_name"], "5.6 Sol");
+        assert_eq!(sol["context_window"], 400000);
+        assert_eq!(sol["multi_agent_version"], "v2");
+        assert_eq!(sol["tool_mode"], "native");
+        assert_eq!(sol["model_messages"]["upgrade"], "Use Sol");
+        assert_eq!(sol["skills_instructions"], "Official skills contract");
+        assert_eq!(sol["web_search_tool_type"], "text");
+        assert_eq!(sol["use_responses_lite"], true);
+        assert_eq!(sol["availability"]["plan"], "plus");
+        assert_eq!(sol["upgrade"], "gpt-5.7-sol");
+        assert_eq!(sol["upgradeInfo"]["message"], "Upgrade available");
+        assert_eq!(sol["comp_hash"], "sol-compat-hash");
+        let terra_efforts = terra["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["effort"].as_str())
+            .collect::<Vec<_>>();
+        let sol_efforts = sol["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terra_efforts,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(
+            sol_efforts,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+    }
+
+    #[test]
+    fn subscription_seed_does_not_overwrite_or_default_raw_app_metadata() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "context_window": 400000,
+                    "max_context_window": 999999
+                }
+            ]
+        }))
+        .expect("subscription models");
+
+        let seed = super::official_subscription_seed_model(&subscription_models[0]);
+        let seed = seed.as_object().expect("seed object");
+
+        assert_eq!(seed.get("context_window"), Some(&json!(400000)));
+        assert_eq!(seed.get("max_context_window"), Some(&json!(999999)));
+        assert!(!seed.contains_key("input_modalities"));
+        assert!(!seed.contains_key("additional_speed_tiers"));
+        assert!(!seed.contains_key("service_tiers"));
+        assert!(!seed.contains_key("is_default"));
+    }
+
+    #[test]
+    fn subscription_seed_always_canonicalizes_legacy_only_slug() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "slug": "openai/gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol"
+                }
+            ]
+        }))
+        .expect("legacy-only subscription model");
+
+        let seed = super::official_subscription_seed_model(&subscription_models[0]);
+
+        assert_eq!(seed["slug"], "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn subscription_duplicate_app_records_prefer_bare_metadata_and_or_enabled() {
+        let legacy = json!({
+            "id": "openai/gpt-5.6-sol",
+            "model": "openai/gpt-5.6-sol",
+            "displayName": "Legacy Sol",
+            "context_window": 1,
+            "enabled": true
+        });
+        let bare = json!({
+            "id": "gpt-5.6-sol",
+            "model": "gpt-5.6-sol",
+            "displayName": "GPT-5.6-Sol",
+            "context_window": 400000,
+            "enabled": false
+        });
+        let other = json!({
+            "id": "gpt-5.5",
+            "model": "gpt-5.5",
+            "displayName": "GPT-5.5"
+        });
+
+        for items in [
+            vec![legacy.clone(), other.clone(), bare.clone()],
+            vec![bare.clone(), other.clone(), legacy.clone()],
+        ] {
+            let subscription_models = subscription_models_from_payload(&json!({ "data": items }))
+                .expect("subscription models");
+            assert_eq!(
+                subscription_models
+                    .iter()
+                    .map(|model| model.slug.as_str())
+                    .collect::<Vec<_>>(),
+                ["gpt-5.6-sol", "gpt-5.5"]
+            );
+            let seed = super::official_subscription_seed_model(&subscription_models[0]);
+            assert_eq!(seed["display_name"], "5.6 Sol");
+            assert_eq!(seed["context_window"], 400000);
+            assert_eq!(seed["enabled"], true);
+            let metadata = subscription_models_to_metadata_models(&subscription_models);
+            assert!(metadata[0].enabled);
+        }
+
+        let all_disabled = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "openai/gpt-5.6-sol",
+                    "model": "openai/gpt-5.6-sol",
+                    "enabled": false
+                },
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "enabled": false
+                }
+            ]
+        }))
+        .expect("all-disabled subscription models");
+        let seed = super::official_subscription_seed_model(&all_disabled[0]);
+        assert_eq!(seed["enabled"], false);
+        let metadata = subscription_models_to_metadata_models(&all_disabled);
+        assert!(!metadata[0].enabled);
     }
 
     #[test]
@@ -2071,10 +2545,10 @@ mod tests {
         let models = refresh_official_models_with_runner(&paths, &runner)
             .expect("cached subscription refresh");
 
-        assert_eq!(model_ids(&models), ["openai/gpt-cached-subscription"]);
+        assert_eq!(model_ids(&models), ["gpt-cached-subscription"]);
         assert_eq!(
             models[0].display_name.as_deref(),
-            Some("OpenAI GPT Cached Subscription")
+            Some("GPT Cached Subscription")
         );
         assert_eq!(
             models[0].upstream_model.as_deref(),
@@ -2221,6 +2695,86 @@ mod tests {
     }
 
     #[test]
+    fn model_endpoint_test_injects_current_loopback_gateway_key_when_key_is_blank() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_codex_home = std::env::var_os("CODEX_HOME");
+        let root = temp_root("local-gateway-model-test-key");
+        let codex_home = root.join("codex-home");
+        let settings_path = codex_home.join("proxy").join("settings.json");
+        let server = MockServer::json(r#"{"id":"resp-test"}"#, Duration::ZERO);
+        let base_url = format!("{}/v1", server.base_url());
+        let port = reqwest::Url::parse(&base_url).unwrap().port().unwrap();
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            settings_path,
+            serde_json::to_vec(&json!({
+                "proxy_port": port,
+                "gateway_client_key": "local-test-key"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let result = test_model_endpoint_with_timeout(
+            &base_url,
+            "  ",
+            "openai/gpt-5.5",
+            &UpstreamFormat::Responses,
+            Duration::from_secs(2),
+        );
+        restore_env("CODEX_HOME", original_codex_home);
+
+        assert_eq!(result.expect("model endpoint test")["ok"], true);
+        let request = server.request();
+        assert!(request.starts_with("POST /v1/responses "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer local-test-key"));
+        server.join();
+    }
+
+    #[test]
+    fn local_gateway_key_resolution_preserves_explicit_key() {
+        let settings = Settings {
+            proxy_port: 4555,
+            gateway_client_key: "local-test-key".to_string(),
+            ..Settings::default()
+        };
+
+        let resolved = resolve_gateway_api_key_for_settings(
+            "http://127.0.0.1:4555/v1",
+            " explicit-key ",
+            Some(&settings),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.as_deref(), Some("explicit-key"));
+    }
+
+    #[test]
+    fn local_gateway_key_resolution_rejects_nonmatching_or_remote_endpoints() {
+        let settings = Settings {
+            proxy_port: 4555,
+            gateway_client_key: "local-test-key".to_string(),
+            ..Settings::default()
+        };
+
+        for base_url in [
+            "http://127.0.0.1:4556/v1",
+            "http://example.com:4555/v1",
+            "https://127.0.0.1:4555/v1",
+            "http://127.0.0.1:4555/custom",
+        ] {
+            assert_eq!(
+                resolve_gateway_api_key_for_settings(base_url, "", Some(&settings)).unwrap(),
+                None,
+                "unexpected local Gateway key for {base_url}"
+            );
+        }
+    }
+
+    #[test]
     fn metadata_overrides_win_over_registry_values() {
         let base = vec![Model {
             id: "minimax/minimax-m3".to_string(),
@@ -2240,13 +2794,56 @@ mod tests {
             ..Model::default()
         }];
 
-        let merged = merge_metadata_with_overrides(base, overrides);
+        let merged = merge_metadata_with_overrides(base, overrides, &HashSet::new());
 
         assert_eq!(merged[0].context_window, Some(245_000));
         assert_eq!(merged[0].display_name.as_deref(), Some("MiniMax M3 Custom"));
         assert_eq!(
             merged[0].metadata_provenance.as_ref().unwrap().source,
             "user_override"
+        );
+    }
+
+    #[test]
+    fn metadata_merge_normalizes_only_known_official_aliases() {
+        let known_official_models = HashSet::from(["gpt-5.5".to_string()]);
+        let base = vec![Model {
+            id: "gpt-5.5".to_string(),
+            display_name: Some("5.5".to_string()),
+            ..Model::default()
+        }];
+        let overrides = vec![
+            Model {
+                id: "openai/gpt-5.5".to_string(),
+                display_name: Some("Known override".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "openai/gpt-9.9-unknown".to_string(),
+                display_name: Some("Unknown alias".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "acme/gpt-5.6-sol".to_string(),
+                display_name: Some("Third-party GPT".to_string()),
+                ..Model::default()
+            },
+        ];
+
+        let merged =
+            merge_metadata_with_overrides(base, overrides, &known_official_models);
+        let ids = merged
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, ["acme/gpt-5.6-sol", "gpt-5.5"]);
+        assert_eq!(
+            merged
+                .iter()
+                .find(|model| model.id == "gpt-5.5")
+                .and_then(|model| model.display_name.as_deref()),
+            Some("Known override")
         );
     }
 
@@ -2630,8 +3227,15 @@ mod tests {
         restore_env("CODEX_HOME", previous);
         let gpt55 = models
             .iter()
-            .find(|model| model.id == "openai/gpt-5.5")
+            .find(|model| model.id == "gpt-5.5")
             .expect("gpt-5.5 metadata");
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| { model.id == "gpt-5.5" || model.id == "openai/gpt-5.5" })
+                .count(),
+            1
+        );
         assert_eq!(gpt55.display_name.as_deref(), Some("Cached GPT-5.5"));
         assert_eq!(gpt55.context_window, Some(120_000));
         assert_eq!(

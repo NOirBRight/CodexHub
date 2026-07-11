@@ -11,16 +11,6 @@ type RouteAction = "official" | "current_owner" | "takeover";
 type DisplayRouteMode = RoutingOwner | "hub" | "stale" | "unknown";
 type ClientStatusKind = "checking" | "not_installed" | "installed" | "ready" | "pending_sync" | "unknown";
 
-const ROUTING_OWNER_STYLES: Record<RoutingOwner, string> = {
-  official: "border-slate-300 bg-slate-100 text-slate-700",
-  release: "border-sky-300 bg-sky-50 text-sky-800",
-  beta: "border-amber-300 bg-amber-50 text-amber-800",
-  unknown_external: "border-rose-300 bg-rose-50 text-rose-800",
-};
-
-const MANAGED_BY_RELEASE_FALLBACK = "Managed by Release";
-const MANAGED_BY_BETA_FALLBACK = "Managed by Beta";
-
 interface GatewayClientCardProps {
   busy?: boolean;
   busyMode?: RouteAction | null;
@@ -52,17 +42,17 @@ export function GatewayClientCard({
   const latestVersion = info?.latest_version?.trim() || null;
   const versionsChecked = Boolean(info?.versions_checked);
   const kindLabel = info?.kind ?? t(`gateway.clientKind.${client.id}`);
+  const takeoverRequired = routeOwner !== "official" && info?.managed_by_current_app === false;
+  const routeOwnerLabel = takeoverRequired ? ownerDisplayName(routeOwner, t) : ownerDisplayName(runtimeOwner, t);
   const routeOptions: Array<SegmentedOption<RouteAction>> = [
     { value: "official", label: t("common.official") },
     {
       value: "current_owner",
-      label: runtimeOwnerAvailable ? ownerDisplayName(runtimeOwner, t) : t("gateway.ownerUnavailable"),
+      label: runtimeOwnerAvailable
+        ? `${t("common.codexHub")} · ${routeOwnerLabel}`
+        : t("gateway.ownerUnavailable"),
     },
   ];
-  const takeoverRequired = info?.managed_by_current_app === false;
-  const managedLabel = takeoverRequired && (routeOwner === "release" || routeOwner === "beta")
-    ? managedByLabel(routeOwner, t)
-    : ownerLabel(routeOwner, info?.route_endpoint, t);
   const routeDisabledReason = !runtimeOwnerAvailable
     ? t("gateway.ownerUnavailable")
     : !installed
@@ -174,51 +164,6 @@ export function GatewayClientCard({
         )}
       </div>
 
-      <div className="grid gap-1" title={routeTitle}>
-        <span
-          className={cx(
-            "inline-flex w-fit max-w-full items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-control",
-            ROUTING_OWNER_STYLES[routeOwner],
-          )}
-        >
-          <span className="truncate">{managedLabel}</span>
-        </span>
-        {takeoverRequired ? (
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-            <button
-              type="button"
-              className={cx(
-                "min-h-7 rounded-control border px-3 py-1 text-left text-xs font-semibold shadow-control",
-                ROUTING_OWNER_STYLES[routeOwner],
-              )}
-              disabled
-              title={managedLabel}
-            >
-              <span className="block truncate">{ownerDisplayName(routeOwner, t)}</span>
-            </button>
-            <button
-              type="button"
-              className="focus-ring inline-flex min-h-7 items-center justify-center rounded-control bg-ink px-3 py-1 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
-              disabled={busy || Boolean(routeDisabledReason)}
-              aria-busy={busyMode === "takeover" || undefined}
-              onClick={() => onSwitchMode("takeover")}
-            >
-              {t("gateway.takeover")}
-            </button>
-          </div>
-        ) : (
-          <SegmentedSwitch
-            ariaLabel={t("gateway.routeMode", { name: client.name })}
-            className="grid-cols-2 [&_button]:min-h-7 [&_button]:py-1 [&_button]:text-xs"
-            disabled={busy || Boolean(routeDisabledReason)}
-            pendingValue={pendingRouteValue}
-            value={routeValue}
-            options={routeOptions}
-            onChange={onSwitchMode}
-          />
-        )}
-      </div>
-
       <div className="grid min-w-0 gap-1 text-xs text-slate-600">
         <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)] items-center gap-2">
           <span className="font-semibold text-slate-500">{t("common.config")}</span>
@@ -230,6 +175,19 @@ export function GatewayClientCard({
             {versionLabel}
           </span>
         </div>
+      </div>
+
+      <div title={routeTitle}>
+        <SegmentedSwitch
+          activeTone={takeoverRequired ? "foreign" : "default"}
+          ariaLabel={t("gateway.routeMode", { name: client.name })}
+          className="grid-cols-2 [&_button]:min-h-8 [&_button]:py-1 [&_button]:text-xs"
+          disabled={busy || Boolean(routeDisabledReason)}
+          pendingValue={pendingRouteValue}
+          value={routeValue}
+          options={routeOptions}
+          onChange={(mode) => onSwitchMode(takeoverRequired && mode === "current_owner" ? "takeover" : mode)}
+        />
       </div>
     </section>
   );
@@ -248,7 +206,7 @@ function routeModeFromInfo(info?: GatewayClientInfo): DisplayRouteMode {
   return "unknown";
 }
 
-function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {
+function ownerDisplayName(owner: RoutingOwner | null, t: (key: string) => string) {
   if (owner === "release") {
     return t("gateway.ownerRelease");
   }
@@ -258,41 +216,7 @@ function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {
   if (owner === "unknown_external") {
     return t("gateway.ownerExternal");
   }
-  return t("common.official");
-}
-
-function managedByLabel(owner: RoutingOwner, t: (key: string, options?: Record<string, unknown>) => string) {
-  if (owner === "release") {
-    return t("gateway.managedByRelease", { defaultValue: MANAGED_BY_RELEASE_FALLBACK });
-  }
-  if (owner === "beta") {
-    return t("gateway.managedByBeta", { defaultValue: MANAGED_BY_BETA_FALLBACK });
-  }
-  return ownerDisplayName(owner, t);
-}
-
-function ownerLabel(owner: RoutingOwner, endpoint: string | null | undefined, t: (key: string) => string) {
-  if (owner === "release") {
-    const endpointLabel = hostPort(endpoint);
-    return endpointLabel ? `${t("gateway.ownerRelease")} ${endpointLabel}` : t("gateway.ownerRelease");
-  }
-  if (owner === "beta") {
-    const endpointLabel = hostPort(endpoint);
-    return endpointLabel ? `${t("gateway.ownerBeta")} ${endpointLabel}` : t("gateway.ownerBeta");
-  }
-  if (owner === "unknown_external") {
-    return t("gateway.ownerExternal");
-  }
-  return t("common.official");
-}
-
-function hostPort(endpoint?: string | null) {
-  try {
-    const url = new URL(endpoint ?? "");
-    return url.host;
-  } catch {
-    return endpoint ?? "";
-  }
+  return owner === "official" ? t("common.official") : t("gateway.ownerUnavailable");
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {

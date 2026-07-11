@@ -19,6 +19,8 @@ enabled = true
   [[providers.models]]
   id = "glm-5.2"
   display_name = "Ollama GLM-5.2"
+  context_window = 1000000
+  max_output_tokens = 131072
   sort_order = 2
   enabled = true
 
@@ -50,6 +52,7 @@ enabled = true
   [[providers.models]]
   id = "minimax-m3"
   display_name = "Volc MiniMax-M3"
+  context_window = 1000000
   max_output_tokens = 8192
   sort_order = 2
   enabled = false

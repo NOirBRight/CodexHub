@@ -54,6 +54,7 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
             "event": "official_passthrough_stream_closed",
             "failure_phase": "stream_body",
             "failure_side": "upstream_read",
+            "failure_class": "unknown",
             "error": "ConnectionResetError",
             "size_bucket": "256KB-512KB",
             "window_id": "019f4247-8b5e-7f93-940b-765be510251b:turn",
@@ -64,6 +65,14 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
             "max_duration_ms": None,
             "total_lines_streamed": 27,
             "total_bytes_streamed": 4096,
+            "examples": [
+                {
+                    "request_id": "req-stream",
+                    "content_length": 388558,
+                    "error": "ConnectionResetError",
+                    "detail": "ConnectionResetError: [WinError 10054] remote host closed the connection",
+                }
+            ],
         }
     ]
 
@@ -246,6 +255,67 @@ def test_analyzer_excludes_provider_capacity_upstream_retry_without_transport_ph
 
     assert report["failure_count"] == 0
     assert report["groups"] == []
+
+
+def test_analyzer_groups_by_failure_class_and_keeps_diagnostic_examples():
+    events = [
+        {
+            "ts": "2026-07-09T02:24:50Z",
+            "event": "request_start",
+            "request_id": "req-class-a",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "window_id": "thread:turn",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:51Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "req-class-a",
+            "status": 502,
+            "duration_ms": 94689,
+            "error": "ConnectionResetError",
+            "detail": "WinError 10054",
+            "failure_class": "upstream_stream_interrupted",
+        },
+        {
+            "ts": "2026-07-09T02:24:52Z",
+            "event": "request_start",
+            "request_id": "req-class-b",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "window_id": "thread:turn",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:53Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "req-class-b",
+            "status": 499,
+            "duration_ms": 10060,
+            "error": "ConnectionAbortedError",
+            "detail": "WinError 10053",
+            "failure_class": "downstream_client_closed",
+        },
+    ]
+
+    report = analyze_events(events)
+
+    assert report["group_count"] == 2
+    groups = {group["failure_class"]: group for group in report["groups"]}
+    upstream_example = groups["upstream_stream_interrupted"]["examples"][0]
+    assert upstream_example == {
+        "request_id": "req-class-a",
+        "content_length": 388558,
+        "duration_ms": 94689,
+        "error": "ConnectionResetError",
+        "detail": "WinError 10054",
+    }
+    assert groups["downstream_client_closed"]["examples"][0]["duration_ms"] == 10060
 
 
 def test_analyzer_excludes_provider_http_retry_without_transport_signal():

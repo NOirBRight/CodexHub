@@ -1,9 +1,11 @@
 use crate::{runtime_paths, safe_file, AppStatus, Provider, Settings};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{error::Error, fmt};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     get_providers_with_paths(&ConfigPaths::runtime()?)
@@ -22,40 +24,92 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 pub fn switch_mode(mode: &str, auto_sync: bool) -> Result<AppStatus, String> {
+    switch_mode_with_takeover(mode, auto_sync, false)
+}
+
+pub fn switch_mode_with_takeover(
+    mode: &str,
+    auto_sync: bool,
+    force_takeover: bool,
+) -> Result<AppStatus, String> {
     let paths = ConfigPaths::runtime()?;
     let python = find_python();
     let runner = ProcessCommandRunner;
 
-    switch_mode_with_paths(mode, auto_sync, &paths, &python, &runner)
+    let mut status =
+        switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;
+    let settings = get_settings_with_paths(&paths).unwrap_or_default();
+    let target_provider = if mode == "custom" || settings.unified_codex_history {
+        "custom"
+    } else {
+        "openai"
+    };
+
+    match crate::history::reconcile_after_confirmed_route_switch(Some(target_provider)) {
+        Ok(result) => {
+            status.history_sync_status = Some(result.status.as_str().to_string());
+            status.history_sync_message = result.error.or(result.reason).or_else(|| {
+                (result.changed_rows > 0 || result.changed_files > 0).then(|| {
+                    format!(
+                        "changed {} history rows and {} files",
+                        result.changed_rows, result.changed_files
+                    )
+                })
+            });
+        }
+        Err(error) => {
+            status.history_sync_status = Some("conflict".to_string());
+            status.history_sync_message = Some(error);
+        }
+    }
+
+    Ok(status)
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigPaths {
-    codex_dir: PathBuf,
+    runtime_dir: PathBuf,
+    codex_target_dir: PathBuf,
     repo_root: PathBuf,
 }
 
 impl ConfigPaths {
     pub(crate) fn runtime() -> Result<Self, String> {
-        let codex_dir = runtime_paths::codex_home_dir()?;
+        let runtime_dir = runtime_paths::runtime_home_dir()?;
+        let codex_target_dir = runtime_paths::codex_target_home_dir()?;
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, repo_root))
+        Ok(Self::new_isolated(runtime_dir, codex_target_dir, repo_root))
     }
 
+    #[cfg(test)]
     pub(crate) fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+        let codex_dir = codex_dir.into();
         Self {
-            codex_dir: codex_dir.into(),
+            runtime_dir: codex_dir.clone(),
+            codex_target_dir: codex_dir,
+            repo_root: repo_root.into(),
+        }
+    }
+
+    pub(crate) fn new_isolated(
+        runtime_dir: impl Into<PathBuf>,
+        codex_target_dir: impl Into<PathBuf>,
+        repo_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            runtime_dir: runtime_dir.into(),
+            codex_target_dir: codex_target_dir.into(),
             repo_root: repo_root.into(),
         }
     }
 
     pub(crate) fn codex_dir(&self) -> &Path {
-        &self.codex_dir
+        &self.codex_target_dir
     }
 
     pub(crate) fn proxy_dir(&self) -> PathBuf {
-        self.codex_dir.join("proxy")
+        self.runtime_dir.join("proxy")
     }
 
     fn runtime_providers_path(&self) -> PathBuf {
@@ -70,25 +124,66 @@ impl ConfigPaths {
         self.proxy_dir().join("settings.json")
     }
 
-    fn codex_config_path(&self) -> PathBuf {
-        self.codex_dir.join("config.toml")
+    pub(crate) fn codex_config_path(&self) -> PathBuf {
+        self.codex_target_dir.join("config.toml")
     }
 
-    fn config_backup_path(&self) -> PathBuf {
-        let name = match crate::app_flavor::current().routing_owner() {
+    pub(crate) fn config_backup_path(&self) -> PathBuf {
+        self.config_backup_path_for_owner(crate::app_flavor::current().routing_owner())
+    }
+
+    pub(crate) fn config_backup_path_for_owner(
+        &self,
+        owner: crate::app_flavor::RoutingOwner,
+    ) -> PathBuf {
+        self.config_backup_path_for_runtime(&self.runtime_dir, owner)
+    }
+
+    fn config_backup_path_for_target_owner(
+        &self,
+        current_app_owner: crate::app_flavor::RoutingOwner,
+        target_owner: crate::app_flavor::RoutingOwner,
+    ) -> PathBuf {
+        if target_owner == current_app_owner {
+            return self.config_backup_path_for_owner(target_owner);
+        }
+        let flavor = match target_owner {
+            crate::app_flavor::RoutingOwner::Release => {
+                Some(crate::app_flavor::RuntimeFlavor::Stable)
+            }
+            crate::app_flavor::RoutingOwner::Beta => Some(crate::app_flavor::RuntimeFlavor::Beta),
+            crate::app_flavor::RoutingOwner::Official
+            | crate::app_flavor::RoutingOwner::UnknownExternal => None,
+        };
+        let runtime_dir = self
+            .codex_target_dir
+            .parent()
+            .and_then(|home| {
+                flavor.map(|flavor| runtime_paths::homes_for_flavor(home, flavor).runtime)
+            })
+            .unwrap_or_else(|| self.runtime_dir.clone());
+        self.config_backup_path_for_runtime(&runtime_dir, target_owner)
+    }
+
+    fn config_backup_path_for_runtime(
+        &self,
+        runtime_dir: &Path,
+        owner: crate::app_flavor::RoutingOwner,
+    ) -> PathBuf {
+        let name = match owner {
             crate::app_flavor::RoutingOwner::Beta => "config.toml.beta.backup",
             _ => "config.toml.release.backup",
         };
-        self.proxy_dir().join(name)
+        runtime_dir.join("proxy").join(name)
     }
 
     fn generated_catalog_path(&self) -> PathBuf {
-        self.codex_dir
+        self.runtime_dir
             .join("model-catalogs")
             .join("codexhub-model-catalog.json")
     }
 
-    fn config_overlay_script(&self) -> PathBuf {
+    pub(crate) fn config_overlay_script(&self) -> PathBuf {
         self.repo_root.join("src-python").join("config_overlay.py")
     }
 
@@ -176,7 +271,7 @@ struct SettingsDocument {
 }
 
 impl SettingsDocument {
-    fn into_settings(self) -> Settings {
+    fn into_settings(self, known_official_models: &HashSet<String>) -> Settings {
         let defaults = Settings::default();
         Settings {
             locale: self.locale.unwrap_or_default(),
@@ -245,10 +340,11 @@ impl SettingsDocument {
                 .unwrap_or(defaults.gateway_fast_model_variants),
             official_disabled_models: self
                 .official_disabled_models
-                .map(sanitize_model_ids)
+                .map(|values| sanitize_model_ids_with_known(values, known_official_models))
                 .unwrap_or(defaults.official_disabled_models),
             official_model_sort_order: self
                 .official_model_sort_order
+                .map(|values| sanitize_model_ids_with_known(values, known_official_models))
                 .unwrap_or(defaults.official_model_sort_order),
             official_provider_sort_order: self
                 .official_provider_sort_order
@@ -263,25 +359,102 @@ fn sanitize_gateway_auto_retry_max_attempts(value: u32) -> u8 {
 }
 
 fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
-    const ALLOWED: &[&str] = &["openai/gpt-5.5", "openai/gpt-5.4"];
+    const ALLOWED: &[&str] = &["gpt-5.5", "gpt-5.4"];
+    sanitize_model_ids(values)
+        .into_iter()
+        .filter(|value| ALLOWED.contains(&value.as_str()))
+        .collect()
+}
+
+fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
+    sanitize_model_ids_with_known(values, &static_official_model_ids())
+}
+
+fn sanitize_model_ids_with_known(
+    values: Vec<String>,
+    known_official_models: &HashSet<String>,
+) -> Vec<String> {
     let mut output = Vec::new();
     for value in values {
-        if ALLOWED.contains(&value.as_str()) && !output.contains(&value) {
+        let Some(value) = normalize_official_model_id(&value, known_official_models) else {
+            continue;
+        };
+        if !value.is_empty() && !output.contains(&value) {
             output.push(value);
         }
     }
     output
 }
 
-fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {
-    let mut output = Vec::new();
-    for value in values {
-        let value = value.trim().to_string();
-        if !value.is_empty() && !output.contains(&value) {
-            output.push(value);
+pub(crate) fn normalize_official_model_id(
+    value: &str,
+    known_official_models: &HashSet<String>,
+) -> Option<String> {
+    let value = value.trim();
+    if let Some(bare) = value
+        .strip_prefix("openai/")
+        .filter(|bare| bare.starts_with("gpt-"))
+    {
+        return known_official_models
+            .contains(bare)
+            .then(|| bare.to_string());
+    }
+    Some(value.to_string())
+}
+
+fn static_official_model_ids() -> HashSet<String> {
+    ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
+    let mut known = static_official_model_ids();
+    let policy_path = paths.repo_root.join("config").join("catalog_policy.toml");
+    if let Ok(text) = fs::read_to_string(policy_path) {
+        if let Ok(policy) = toml::from_str::<toml::Value>(&text) {
+            if let Some(models) = policy
+                .get("visibility")
+                .and_then(|visibility| visibility.get("official_models"))
+                .and_then(toml::Value::as_array)
+            {
+                for model in models.iter().filter_map(toml::Value::as_str) {
+                    insert_known_official_model(&mut known, model);
+                }
+            }
         }
     }
-    output
+
+    for path in [paths
+        .runtime_dir
+        .join("model-catalogs")
+        .join("openai-plus-ollama-cloud.json")]
+    {
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(catalog) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(models) = catalog.get("models").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for model in models {
+            if let Some(slug) = model.get("slug").and_then(serde_json::Value::as_str) {
+                insert_known_official_model(&mut known, slug);
+            }
+        }
+    }
+    known
+}
+
+fn insert_known_official_model(known: &mut HashSet<String>, value: &str) {
+    let value = value.trim();
+    let bare = value.strip_prefix("openai/").unwrap_or(value);
+    if bare.starts_with("gpt-") {
+        known.insert(bare.to_string());
+    }
 }
 
 fn sanitize_locale(value: String) -> String {
@@ -292,8 +465,17 @@ fn sanitize_locale(value: String) -> String {
     }
 }
 
-fn sanitize_settings_for_save(mut settings: Settings) -> Settings {
+fn sanitize_settings_for_save(
+    mut settings: Settings,
+    known_official_models: &HashSet<String>,
+) -> Settings {
     settings.locale = sanitize_locale(settings.locale);
+    settings.gateway_fast_model_variants =
+        sanitize_fast_model_variants(settings.gateway_fast_model_variants);
+    settings.official_disabled_models =
+        sanitize_model_ids_with_known(settings.official_disabled_models, known_official_models);
+    settings.official_model_sort_order =
+        sanitize_model_ids_with_known(settings.official_model_sort_order, known_official_models);
     settings
 }
 
@@ -348,11 +530,11 @@ fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, String> {
     let document: SettingsDocument = serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse settings JSON {}: {error}", path.display()))?;
 
-    Ok(document.into_settings())
+    Ok(document.into_settings(&known_official_model_ids(paths)))
 }
 
 fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<Settings, String> {
-    let settings = sanitize_settings_for_save(settings);
+    let settings = sanitize_settings_for_save(settings, &known_official_model_ids(paths));
     let path = paths.settings_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -371,9 +553,39 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
     Ok(settings)
 }
 
+#[cfg(test)]
 pub(crate) fn switch_mode_with_paths(
     mode: &str,
     _auto_sync: bool,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AppStatus, String> {
+    switch_mode_with_paths_takeover(mode, _auto_sync, false, paths, python, runner)
+}
+
+pub(crate) fn switch_mode_with_paths_takeover(
+    mode: &str,
+    _auto_sync: bool,
+    force_takeover: bool,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AppStatus, String> {
+    switch_mode_with_paths_takeover_as_owner(
+        crate::app_flavor::current().routing_owner(),
+        mode,
+        force_takeover,
+        paths,
+        python,
+        runner,
+    )
+}
+
+fn switch_mode_with_paths_takeover_as_owner(
+    current_app_owner: crate::app_flavor::RoutingOwner,
+    mode: &str,
+    force_takeover: bool,
     paths: &ConfigPaths,
     python: &Path,
     runner: &dyn CommandRunner,
@@ -383,6 +595,18 @@ pub(crate) fn switch_mode_with_paths(
             "unsupported mode: {mode}; expected official or custom"
         ));
     }
+
+    let target_owner = fs::read_to_string(paths.codex_config_path())
+        .ok()
+        .as_deref()
+        .and_then(codex_overlay_owner);
+    ensure_codex_owner_mutation_allowed(
+        current_app_owner,
+        target_owner,
+        mode,
+        force_takeover,
+    )
+    .map_err(|error| error.to_string())?;
 
     let settings = match get_settings_with_paths(paths) {
         Ok(settings) => settings,
@@ -395,12 +619,16 @@ pub(crate) fn switch_mode_with_paths(
     ensure_mode_switch_directories(paths)?;
 
     let overlay_result = if mode == "official" {
+        let backup_owner = target_owner.unwrap_or(current_app_owner);
         let mut args = vec![
             "restore".to_string(),
             "--config".to_string(),
             paths.codex_config_path().to_string_lossy().into_owned(),
             "--backup".to_string(),
-            paths.config_backup_path().to_string_lossy().into_owned(),
+            paths
+                .config_backup_path_for_target_owner(current_app_owner, backup_owner)
+                .to_string_lossy()
+                .into_owned(),
         ];
         if settings.unified_codex_history {
             args.push("--unified-history".to_string());
@@ -413,29 +641,35 @@ pub(crate) fn switch_mode_with_paths(
             runner,
         )
     } else {
+        let mut args = vec![
+            "apply".to_string(),
+            "--config".to_string(),
+            paths.codex_config_path().to_string_lossy().into_owned(),
+            "--backup".to_string(),
+            paths
+                .config_backup_path_for_owner(current_app_owner)
+                .to_string_lossy()
+                .into_owned(),
+            "--catalog".to_string(),
+            paths.generated_catalog_path().to_string_lossy().into_owned(),
+            "--base-url".to_string(),
+            format!("http://127.0.0.1:{}", settings.proxy_port),
+            "--gateway-key".to_string(),
+            settings.gateway_client_key.clone(),
+            "--owner".to_string(),
+            match current_app_owner {
+                crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
+                _ => "release".to_string(),
+            },
+        ];
+        if force_takeover && target_owner != Some(current_app_owner) {
+            args.push("--takeover".to_string());
+        }
         run_python_script(
             "config overlay apply",
             python,
             paths.config_overlay_script(),
-            vec![
-                "apply".to_string(),
-                "--config".to_string(),
-                paths.codex_config_path().to_string_lossy().into_owned(),
-                "--backup".to_string(),
-                paths.config_backup_path().to_string_lossy().into_owned(),
-                "--catalog".to_string(),
-                paths
-                    .generated_catalog_path()
-                    .to_string_lossy()
-                    .into_owned(),
-                "--base-url".to_string(),
-                format!("http://127.0.0.1:{}", settings.proxy_port),
-                "--owner".to_string(),
-                match crate::app_flavor::current().routing_owner() {
-                    crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
-                    _ => "release".to_string(),
-                },
-            ],
+            args,
             runner,
         )
     };
@@ -449,6 +683,106 @@ pub(crate) fn switch_mode_with_paths(
         message: format!("Switched to {mode} mode; proxy lifecycle is handled separately"),
         history_sync_status: None,
         history_sync_message: None,
+    })
+}
+
+pub(crate) fn codex_overlay_owner(text: &str) -> Option<crate::app_flavor::RoutingOwner> {
+    text.lines().find_map(|line| {
+        let owner = line.trim().strip_prefix("# owner = ")?.trim();
+        match owner {
+            "release" => Some(crate::app_flavor::RoutingOwner::Release),
+            "beta" => Some(crate::app_flavor::RoutingOwner::Beta),
+            _ => None,
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexOwnerMutationError {
+    TakeoverRequired {
+        current_app_owner: crate::app_flavor::RoutingOwner,
+        current_target_owner: Option<crate::app_flavor::RoutingOwner>,
+    },
+    OwnerMismatch {
+        current_app_owner: crate::app_flavor::RoutingOwner,
+        current_target_owner: Option<crate::app_flavor::RoutingOwner>,
+    },
+}
+
+impl CodexOwnerMutationError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::TakeoverRequired { .. } => "route.takeover_required",
+            Self::OwnerMismatch { .. } => "route.owner_mismatch",
+        }
+    }
+}
+
+impl fmt::Display for CodexOwnerMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (current_app_owner, current_target_owner) = match self {
+            Self::TakeoverRequired {
+                current_app_owner,
+                current_target_owner,
+            }
+            | Self::OwnerMismatch {
+                current_app_owner,
+                current_target_owner,
+            } => (current_app_owner, current_target_owner),
+        };
+        write!(
+            formatter,
+            "{}: Codex target owner is {:?}; current channel owner is {:?}",
+            self.code(),
+            current_target_owner,
+            current_app_owner
+        )
+    }
+}
+
+impl Error for CodexOwnerMutationError {}
+
+fn ensure_codex_owner_mutation_allowed(
+    current_app_owner: crate::app_flavor::RoutingOwner,
+    current_target_owner: Option<crate::app_flavor::RoutingOwner>,
+    mode: &str,
+    force_takeover: bool,
+) -> Result<(), CodexOwnerMutationError> {
+    if current_target_owner == Some(current_app_owner) {
+        return Ok(());
+    }
+    if force_takeover {
+        return Ok(());
+    }
+
+    if mode == "custom" {
+        let stable_backward_compatible_target = current_app_owner
+            == crate::app_flavor::RoutingOwner::Release
+            && matches!(
+                current_target_owner,
+                None | Some(crate::app_flavor::RoutingOwner::Official)
+            );
+        if stable_backward_compatible_target {
+            return Ok(());
+        }
+        return Err(CodexOwnerMutationError::TakeoverRequired {
+            current_app_owner,
+            current_target_owner,
+        });
+    }
+
+    let stable_backward_compatible_disconnect = current_app_owner
+        == crate::app_flavor::RoutingOwner::Release
+        && matches!(
+            current_target_owner,
+            None | Some(crate::app_flavor::RoutingOwner::Official)
+        );
+    if stable_backward_compatible_disconnect {
+        return Ok(());
+    }
+    Err(CodexOwnerMutationError::OwnerMismatch {
+        current_app_owner,
+        current_target_owner,
     })
 }
 
@@ -541,8 +875,9 @@ pub(crate) fn find_python() -> PathBuf {
 mod tests {
     use super::{
         get_providers_with_paths, get_settings_with_paths, save_providers_with_paths,
-        save_settings_with_paths, switch_mode_with_paths, CommandOutcome, CommandRunner,
-        ConfigPaths,
+        save_settings_with_paths, switch_mode_with_paths, codex_overlay_owner,
+        ensure_codex_owner_mutation_allowed, switch_mode_with_paths_takeover_as_owner,
+        CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
     };
     use crate::{Model, Provider, Settings, ToolProtocol, UpstreamFormat};
     use std::cell::RefCell;
@@ -736,12 +1071,9 @@ sort_order = 7
             gateway_auto_retry_max_attempts: 7,
             gateway_image_proxy_enabled: true,
             gateway_image_proxy_model: "minimax-cn/MiniMax-M3".to_string(),
-            gateway_fast_model_variants: vec!["openai/gpt-5.5".to_string()],
-            official_disabled_models: vec!["openai/gpt-5.4-mini".to_string()],
-            official_model_sort_order: vec![
-                "openai/gpt-5.4".to_string(),
-                "openai/gpt-5.5".to_string(),
-            ],
+            gateway_fast_model_variants: vec!["gpt-5.5".to_string()],
+            official_disabled_models: vec!["gpt-5.4-mini".to_string()],
+            official_model_sort_order: vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
             official_provider_sort_order: 3,
             proxy_port: 4555,
         };
@@ -766,6 +1098,191 @@ sort_order = 7
         assert!(written.contains("\"auto_start_gateway\": false"));
         assert!(written.contains("\"unified_codex_history\": false"));
         assert!(written.contains("\"locale\": \"zh-CN\""));
+    }
+
+    #[test]
+    fn legacy_official_model_ids_are_normalized_on_load_and_save() {
+        let root = temp_root("legacy-official-model-ids");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "gateway_fast_model_variants": [
+                " openai/gpt-5.5 ",
+                "gpt-5.5",
+                "openai/gpt-5.4",
+                "ollama-cloud/glm-5.2"
+              ],
+              "official_disabled_models": [
+                " openai/gpt-5.4-mini ",
+                "gpt-5.4-mini",
+                "ollama-cloud/glm-5.2"
+              ],
+              "official_model_sort_order": [
+                "openai/gpt-5.5",
+                " gpt-5.5 ",
+                "ollama-cloud/glm-5.2"
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("legacy settings load");
+
+        assert_eq!(
+            loaded.gateway_fast_model_variants,
+            vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+        );
+        assert_eq!(
+            loaded.official_disabled_models,
+            vec![
+                "gpt-5.4-mini".to_string(),
+                "ollama-cloud/glm-5.2".to_string()
+            ]
+        );
+        assert_eq!(
+            loaded.official_model_sort_order,
+            vec!["gpt-5.5".to_string(), "ollama-cloud/glm-5.2".to_string()]
+        );
+
+        let saved = save_settings_with_paths(
+            Settings {
+                gateway_fast_model_variants: vec![
+                    "openai/gpt-5.5".to_string(),
+                    " gpt-5.4 ".to_string(),
+                ],
+                official_disabled_models: vec![
+                    "openai/gpt-5.4".to_string(),
+                    " gpt-5.4 ".to_string(),
+                ],
+                official_model_sort_order: vec![
+                    "openai/gpt-5.5".to_string(),
+                    " gpt-5.5 ".to_string(),
+                ],
+                ..Settings::default()
+            },
+            &paths,
+        )
+        .expect("legacy settings save");
+
+        assert_eq!(
+            saved.gateway_fast_model_variants,
+            vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+        );
+        assert_eq!(saved.official_disabled_models, vec!["gpt-5.4".to_string()]);
+        assert_eq!(saved.official_model_sort_order, vec!["gpt-5.5".to_string()]);
+        let written = fs::read_to_string(paths.settings_path()).expect("normalized settings text");
+        assert!(!written.contains("openai/gpt-"));
+    }
+
+    #[test]
+    fn shared_model_identity_vectors_reject_only_unknown_official_aliases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/model_identity_vectors.json"
+        ))
+        .expect("identity fixture");
+        let inputs = fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|vector| vector["input"].as_str().unwrap().to_string())
+            .collect();
+        let mut expected = Vec::<String>::new();
+        for value in fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|vector| vector["expected"].as_str())
+        {
+            if !expected.iter().any(|existing| existing == value) {
+                expected.push(value.to_string());
+            }
+        }
+
+        assert_eq!(super::sanitize_model_ids(inputs), expected);
+    }
+
+    #[test]
+    fn settings_accept_current_catalog_alias_and_reject_unknown_official_alias() {
+        let root = temp_root("current-official-alias");
+        let paths = test_paths(&root);
+        let catalog_path = root
+            .join("codex-home")
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            r#"{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol"}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "official_disabled_models": [
+                "openai/gpt-5.6-sol",
+                "openai/gpt-9.9-unknown",
+                "acme/gpt-5.6-sol"
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert_eq!(
+            loaded.official_disabled_models,
+            vec!["gpt-5.6-sol".to_string(), "acme/gpt-5.6-sol".to_string()]
+        );
+        let saved = save_settings_with_paths(loaded, &paths).expect("settings save");
+        assert_eq!(
+            saved.official_disabled_models,
+            vec!["gpt-5.6-sol".to_string(), "acme/gpt-5.6-sol".to_string()]
+        );
+        let written = fs::read_to_string(paths.settings_path()).unwrap();
+        assert!(!written.contains("openai/gpt-"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_and_bundled_catalogs_do_not_authorize_legacy_aliases() {
+        let root = temp_root("untrusted-official-alias-catalogs");
+        let paths = test_paths(&root);
+        let generated_path = paths.generated_catalog_path();
+        fs::create_dir_all(generated_path.parent().unwrap()).unwrap();
+        fs::write(
+            generated_path,
+            r#"{"models":[{"slug":"gpt-forged-generated"}]}"#,
+        )
+        .unwrap();
+        let bundled_path = root
+            .join("repo-root")
+            .join("model-catalogs")
+            .join("openai-plus-ollama-cloud.json");
+        fs::create_dir_all(bundled_path.parent().unwrap()).unwrap();
+        fs::write(
+            bundled_path,
+            r#"{"models":[{"slug":"gpt-forged-bundled"}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.settings_path(),
+            r#"{
+              "official_disabled_models": [
+                "openai/gpt-forged-generated",
+                "openai/gpt-forged-bundled"
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = get_settings_with_paths(&paths).expect("settings load");
+
+        assert!(loaded.official_disabled_models.is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -968,14 +1485,367 @@ sort_order = 7
             &paths.generated_catalog_path(),
         );
         assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:4555");
+        assert_arg_literal(&commands[0].args, "--gateway-key", "codexhub-proxy");
         assert_arg_literal(&commands[0].args, "--owner", "release");
         assert_eq!(
-            paths.config_backup_path().file_name().and_then(|name| name.to_str()),
+            paths
+                .config_backup_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
             Some("config.toml.release.backup")
         );
         assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
         assert_eq!(status.history_sync_status, None);
         assert_eq!(status.history_sync_message, None);
+    }
+
+    #[test]
+    fn isolated_paths_keep_beta_runtime_artifacts_out_of_codex_target() {
+        let root = temp_root("isolated-beta-paths");
+        let runtime = root.join(".codexhub-beta");
+        let target = root.join(".codex");
+        let paths = ConfigPaths::new_isolated(&runtime, &target, root.join("repo"));
+
+        assert_eq!(paths.settings_path(), runtime.join("proxy/settings.json"));
+        assert_eq!(paths.config_backup_path(), runtime.join("proxy/config.toml.release.backup"));
+        assert_eq!(paths.codex_config_path(), target.join("config.toml"));
+        assert_eq!(paths.generated_catalog_path(), runtime.join("model-catalogs/codexhub-model-catalog.json"));
+    }
+
+    #[test]
+    fn codex_cross_channel_change_requires_explicit_takeover() {
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "custom",
+            false,
+        )
+        .is_err());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "custom",
+            true,
+        )
+        .is_ok());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "official",
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn beta_can_explicitly_switch_stable_owned_codex_to_unified_official() {
+        let root = temp_root("beta-force-stable-to-official");
+        let target = root.join(".codex");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let stable_paths = ConfigPaths::new_isolated(&target, &target, &repo);
+        let beta_paths = ConfigPaths::new_isolated(root.join(".codexhub-beta"), &target, repo);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            stable_paths.codex_config_path(),
+            b"model = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        save_settings_with_paths(Settings::default(), &stable_paths).unwrap();
+        save_settings_with_paths(Settings::default(), &beta_paths).unwrap();
+        let python = super::find_python();
+        let runner = ProcessCommandRunner;
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            false,
+            &stable_paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Beta,
+            "official",
+            true,
+            &beta_paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(beta_paths.codex_config_path()).unwrap();
+        assert!(restored.contains("model_provider = \"custom\""));
+        assert!(restored.contains("name = \"OpenAI\""));
+        assert!(restored.contains("model = \"gpt-5.4\""));
+        assert!(restored.contains("model_reasoning_effort = \"high\""));
+        assert!(!restored.contains("# owner = release"));
+        assert!(!restored.contains("base_url"));
+    }
+
+    #[test]
+    fn beta_requires_explicit_takeover_for_unowned_and_official_codex() {
+        for owner in [None, Some(crate::app_flavor::RoutingOwner::Official)] {
+            let error = ensure_codex_owner_mutation_allowed(
+                crate::app_flavor::RoutingOwner::Beta,
+                owner,
+                "custom",
+                false,
+            )
+            .expect_err("Beta must never silently claim real Codex");
+            assert_eq!(error.code(), "route.takeover_required");
+
+            assert!(ensure_codex_owner_mutation_allowed(
+                crate::app_flavor::RoutingOwner::Beta,
+                owner,
+                "custom",
+                true,
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn stable_keeps_backward_compatible_unowned_and_official_connect() {
+        for owner in [None, Some(crate::app_flavor::RoutingOwner::Official)] {
+            assert!(ensure_codex_owner_mutation_allowed(
+                crate::app_flavor::RoutingOwner::Release,
+                owner,
+                "custom",
+                false,
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn beta_backend_takeover_chain_with_default_unified_history_preserves_the_custom_bucket() {
+        for (name, original) in [
+            ("unowned", b"model_reasoning_effort = \"high\"\r\n".as_slice()),
+            (
+                "official",
+                b"model_provider = \"openai\"\nmodel_reasoning_effort = \"medium\"\n".as_slice(),
+            ),
+            (
+                "stable",
+                b"# BEGIN CODEX PROXY SESSION CONFIG\n# owner = release\n# END CODEX PROXY SESSION CONFIG\nmodel_reasoning_effort = \"high\"\n".as_slice(),
+            ),
+        ] {
+            let root = temp_root(name);
+            let runtime = root.join(".codexhub-beta");
+            let target = root.join(".codex");
+            let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+            fs::create_dir_all(&target).unwrap();
+            fs::write(paths.codex_config_path(), original).unwrap();
+            save_settings_with_paths(
+                Settings {
+                    proxy_port: 9109,
+                    ..Settings::default()
+                },
+                &paths,
+            )
+            .unwrap();
+            let python = super::find_python();
+            let runner = ProcessCommandRunner;
+
+            let rejected = switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "custom",
+                false,
+                &paths,
+                &python,
+                &runner,
+            )
+            .expect_err("normal Beta connect must be rejected");
+            assert!(rejected.contains("route.takeover_required"));
+            assert_eq!(fs::read(paths.codex_config_path()).unwrap(), original);
+            assert!(!paths.config_backup_path_for_owner(crate::app_flavor::RoutingOwner::Beta).exists());
+
+            switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "custom",
+                true,
+                &paths,
+                &python,
+                &runner,
+            )
+            .unwrap();
+            switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "custom",
+                false,
+                &paths,
+                &python,
+                &runner,
+            )
+            .unwrap();
+            switch_mode_with_paths_takeover_as_owner(
+                crate::app_flavor::RoutingOwner::Beta,
+                "official",
+                false,
+                &paths,
+                &python,
+                &runner,
+            )
+            .unwrap();
+
+            let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+            if name == "stable" {
+                assert_eq!(restored.as_bytes(), original);
+            } else {
+                assert!(restored.contains("model_provider = \"custom\""));
+                assert!(restored.contains("[model_providers.custom]"));
+                assert!(restored.contains("name = \"OpenAI\""));
+                assert!(!restored.contains("base_url"));
+                assert!(restored.contains("model_reasoning_effort"));
+            }
+            assert!(!paths.config_backup_path_for_owner(crate::app_flavor::RoutingOwner::Beta).exists());
+        }
+    }
+
+    #[test]
+    fn stable_normal_connect_then_official_reconciles_unified_history() {
+        let root = temp_root("stable-normal-unified-restore");
+        let runtime = root.join(".codexhub");
+        let target = root.join(".codex");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            paths.codex_config_path(),
+            b"model_reasoning_effort = \"high\"\r\n",
+        )
+        .unwrap();
+        save_settings_with_paths(Settings::default(), &paths).unwrap();
+        let python = super::find_python();
+        let runner = ProcessCommandRunner;
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "official",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+        assert!(restored.contains("model_provider = \"custom\""));
+        assert!(restored.contains("[model_providers.custom]"));
+        assert!(restored.contains("name = \"OpenAI\""));
+        assert!(restored.contains("requires_openai_auth = true"));
+        assert!(!paths.config_backup_path().exists());
+    }
+
+    #[test]
+    fn stable_same_owner_force_with_missing_backup_disconnects_to_unified_official() {
+        let root = temp_root("stable-same-owner-force");
+        let runtime = root.join(".codexhub");
+        let target = root.join(".codex");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+        fs::create_dir_all(&target).unwrap();
+        save_settings_with_paths(Settings::default(), &paths).unwrap();
+        let python = super::find_python();
+        let runner = ProcessCommandRunner;
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+        fs::remove_file(paths.config_backup_path()).unwrap();
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "custom",
+            true,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let metadata = paths
+            .config_backup_path()
+            .with_file_name("config.toml.release.backup.takeover.json");
+        assert!(!metadata.exists());
+
+        switch_mode_with_paths_takeover_as_owner(
+            crate::app_flavor::RoutingOwner::Release,
+            "official",
+            false,
+            &paths,
+            &python,
+            &runner,
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+        assert!(restored.contains("name = \"OpenAI\""));
+        assert!(!restored.contains("name = \"Codex Proxy\""));
+        assert!(!restored.contains("base_url"));
+    }
+
+    #[test]
+    fn codex_foreign_disconnect_requires_explicit_takeover() {
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "official",
+            false,
+        )
+        .is_err());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Release),
+            "official",
+            true,
+        )
+        .is_ok());
+        assert!(ensure_codex_owner_mutation_allowed(
+            crate::app_flavor::RoutingOwner::Beta,
+            Some(crate::app_flavor::RoutingOwner::Beta),
+            "official",
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn codex_overlay_owner_is_detected_from_managed_marker() {
+        let text = "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = beta\n# END CODEX PROXY SESSION CONFIG\n";
+        assert_eq!(
+            codex_overlay_owner(text),
+            Some(crate::app_flavor::RoutingOwner::Beta)
+        );
     }
 
     #[test]
@@ -1001,7 +1871,10 @@ sort_order = 7
         assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
         assert_eq!(
-            paths.config_backup_path().file_name().and_then(|name| name.to_str()),
+            paths
+                .config_backup_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
             Some("config.toml.release.backup")
         );
         assert!(commands[0]

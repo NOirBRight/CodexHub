@@ -312,7 +312,7 @@ function Wait-ProxyHealth {
 }
 
 function Test-OfficialUpstreamConnectivity {
-    $body = '{"model":"openai/gpt-5.5","input":"proxy upstream preflight"}'
+    $body = '{"model":"gpt-5.5","input":"proxy upstream preflight"}'
     try {
         Invoke-WebRequest -Uri "$ProxyBaseUrl/v1/responses" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 20 | Out-Null
         return $true

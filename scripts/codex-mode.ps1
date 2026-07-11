@@ -274,7 +274,7 @@ function Set-ConfigForMode {
     $baseUrlValue = Convert-ToTomlLiteral -Value 'http://127.0.0.1:9099/v1'
     $prefix = @(
         '# BEGIN CODEX PROXY CONFIG',
-        'model = "openai/gpt-5.5"',
+        'model = "gpt-5.5"',
         'model_provider = "custom"',
         "model_catalog_json = $catalogValue",
         '# END CODEX PROXY CONFIG',

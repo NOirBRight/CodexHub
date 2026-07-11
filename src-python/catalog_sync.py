@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -28,6 +29,7 @@ from providers_config import (
     load_providers,
     runtime_providers_path,
 )
+from model_limits import apply_resolved_model_limits, load_resolved_model_limits
 
 
 PROXY_DIR = Path(__file__).resolve().parent
@@ -57,6 +59,8 @@ GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / GENERATED_CATALOG_FILENAME
 LEGACY_GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / LEGACY_GENERATED_CATALOG_FILENAME
 GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
 SETTINGS_PATH = RUNTIME_CODEX_DIR / "proxy" / "settings.json"
+RESOLVED_MODEL_LIMITS_PATH = REPO_ROOT / "config" / "resolved_model_limits.json"
+RESOLVED_MODEL_LIMITS = load_resolved_model_limits(RESOLVED_MODEL_LIMITS_PATH)
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -107,8 +111,50 @@ OLLAMA_MODEL_LIMIT_OVERRIDES: dict[str, dict[str, Any]] = {
 
 MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
     "description": "Official OpenAI model.",
+    "shell_type": "shell_command",
     "visibility": "list",
     "supported_in_api": True,
+    "priority": 10,
+    "additional_speed_tiers": [],
+    "service_tiers": [],
+    "supported_reasoning_levels": [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {
+            "effort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks",
+        },
+        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+        {
+            "effort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems",
+        },
+        {
+            "effort": "max",
+            "description": "Maximum reasoning depth for the hardest problems",
+        },
+    ],
+    "default_reasoning_level": "medium",
+    "base_instructions": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
+    "model_messages": {
+        "instructions_template": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
+        "instructions_variables": {},
+        "approvals": None,
+    },
+    "include_skills_usage_instructions": False,
+    "supports_reasoning_summaries": True,
+    "default_reasoning_summary": "none",
+    "support_verbosity": True,
+    "default_verbosity": "low",
+    "apply_patch_tool_type": "freeform",
+    "web_search_tool_type": "text_and_image",
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "supports_parallel_tool_calls": True,
+    "supports_image_detail_original": True,
+    "effective_context_window_percent": 95,
+    "experimental_supported_tools": [],
+    "input_modalities": ["text"],
+    "supports_search_tool": True,
+    "use_responses_lite": True,
 }
 
 OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
@@ -144,11 +190,15 @@ OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.4-mini": {
         "context_window": 272000,
         "max_context_window": 272000,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
         "default_reasoning_level": "medium",
     },
     "gpt-5.3-codex-spark": {
         "context_window": 128000,
         "max_context_window": 128000,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
         "default_reasoning_level": "high",
     },
 }
@@ -161,6 +211,7 @@ DEFAULT_OLLAMA_MODEL: dict[str, Any] = {
         {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
         {"effort": "high", "description": "Greater reasoning depth for complex problems"},
         {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+        {"effort": "max", "description": "Maximum upstream reasoning depth"},
     ],
     "shell_type": "shell_command",
     "visibility": "list",
@@ -196,6 +247,44 @@ REASONING_LEVEL_DESCRIPTIONS = {
     "xhigh": "Extra high reasoning depth for complex problems",
     "max": "Maximum upstream reasoning depth",
 }
+THIRD_PARTY_REASONING_LEVEL_ORDER = ("low", "medium", "high", "xhigh", "max")
+THIRD_PARTY_REASONING_LEVELS = set(THIRD_PARTY_REASONING_LEVEL_ORDER)
+
+
+def sanitize_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    sanitized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        raw_effort = item.get("effort") if isinstance(item, dict) else item
+        effort = str(raw_effort).strip().lower()
+        if effort not in THIRD_PARTY_REASONING_LEVELS or effort in seen:
+            continue
+        seen.add(effort)
+        description = item.get("description") if isinstance(item, dict) else None
+        sanitized.append(
+            {
+                "effort": effort,
+                "description": (
+                    description
+                    if isinstance(description, str) and description.strip()
+                    else REASONING_LEVEL_DESCRIPTIONS.get(effort, f"{effort} reasoning effort")
+                ),
+            }
+        )
+    return sanitized
+
+
+def complete_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
+    configured = {
+        item["effort"]: item for item in sanitize_third_party_reasoning_levels(value)
+    }
+    return [
+        configured.get(effort)
+        or {"effort": effort, "description": REASONING_LEVEL_DESCRIPTIONS[effort]}
+        for effort in THIRD_PARTY_REASONING_LEVEL_ORDER
+    ]
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -508,7 +597,7 @@ def apply_official_model_defaults(model: dict[str, Any], slug: str) -> None:
     if not defaults:
         return
     for key, value in defaults.items():
-        model.setdefault(key, deepcopy(value))
+        model[key] = deepcopy(value)
 
 
 def official_proxy_alias(slug: str) -> str:
@@ -546,29 +635,35 @@ def sort_official_slugs(slugs: Iterable[str], sort_order: Iterable[str]) -> list
     return [slug for _, slug in sorted(enumerate(ordered_slugs), key=sort_key)]
 
 
-def official_proxy_display_name(slug: str, model: dict[str, Any], policy: CatalogPolicy) -> str:
-    policy_name = display_name_for(slug, policy)
+def official_short_display_name(slug: str, model: dict[str, Any], policy: CatalogPolicy) -> str:
     raw_name = model.get("display_name")
-    if canonical_model_id(slug) in policy.display_names:
-        display_name = policy_name
-    elif isinstance(raw_name, str) and raw_name.strip():
+    if isinstance(raw_name, str) and raw_name.strip():
         display_name = raw_name.strip()
     else:
-        display_name = policy_name
-    return display_name if display_name.startswith("OpenAI ") else f"OpenAI {display_name}"
+        display_name = display_name_for(slug, policy)
+    if display_name.lower().startswith("openai "):
+        display_name = display_name[7:].strip()
+    if display_name.lower().startswith("gpt-"):
+        display_name = display_name[4:]
+    return re.sub(r"[-_]+", " ", display_name).strip()
 
 
 def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
-    model = deepcopy(official_by_slug.get(slug) or build_minimal_official_model(slug, policy))
-    alias = official_proxy_alias(slug)
-    model["slug"] = alias
-    model["display_name"] = official_proxy_display_name(slug, model, policy)
-    model.setdefault("description", MINIMAL_OFFICIAL_MODEL["description"])
-    model.setdefault("visibility", "list")
-    model.setdefault("supported_in_api", True)
-    apply_official_model_defaults(model, slug)
-    for key, value in DEFAULT_OLLAMA_MODEL.items():
-        model.setdefault(key, deepcopy(value))
+    source_model = official_by_slug.get(slug)
+    model = deepcopy(source_model or build_minimal_official_model(slug, policy))
+    if source_model is not None:
+        for key, value in MINIMAL_OFFICIAL_MODEL.items():
+            model.setdefault(key, deepcopy(value))
+    model["slug"] = slug
+    model["display_name"] = official_short_display_name(slug, model, policy)
+    if source_model is None:
+        apply_official_model_defaults(model, slug)
+    limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
+    live_context = model.get("context_window")
+    apply_resolved_model_limits(model, limits)
+    if isinstance(live_context, int) and live_context > 0:
+        model["context_window"] = live_context
+        model["effective_source"] = "codex_app_model_list"
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     proxy_metadata.update(
         {
@@ -584,9 +679,20 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
 def official_model_index(official_models: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for model in official_models:
-        slug = canonical_model_id(str(model.get("slug", "")))
-        if slug:
+        raw_slug = canonical_model_id(str(model.get("slug", "")))
+        if not raw_slug:
+            continue
+        slug = raw_slug.removeprefix("openai/") if raw_slug.startswith("openai/gpt-") else raw_slug
+        existing = index.get(slug)
+        if existing is None:
             index[slug] = model
+            continue
+
+        existing_slug = canonical_model_id(str(existing.get("slug", "")))
+        fresh = model if not raw_slug.startswith("openai/") or existing_slug.startswith("openai/") else existing
+        merged = deepcopy(fresh)
+        merged["enabled"] = bool(existing.get("enabled", True) or model.get("enabled", True))
+        index[slug] = merged
     return index
 
 
@@ -616,6 +722,7 @@ def build_ollama_model(
 
 
 def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: dict[str, dict[str, Any]]) -> None:
+    apply_resolved_model_limits(model, RESOLVED_MODEL_LIMITS.get(("ollama-cloud", slug)))
     static_limits = OLLAMA_MODEL_LIMIT_OVERRIDES.get(slug, {})
     context_window = static_limits.get("context_window")
     context_source = "static_official_fallback" if context_window else None
@@ -692,19 +799,29 @@ def build_external_provider_model(
     model.setdefault("supported_in_api", True)
     model["input_modalities"] = list(external_model.get("input_modalities") or ("text",))
 
-    reasoning_levels = external_model.get("supported_reasoning_levels")
-    if isinstance(reasoning_levels, (list, tuple)) and reasoning_levels:
-        model["supported_reasoning_levels"] = [
-            {
-                "effort": str(level),
-                "description": REASONING_LEVEL_DESCRIPTIONS.get(str(level), f"{level} reasoning effort"),
-            }
-            for level in reasoning_levels
-            if str(level).strip()
-        ]
-    default_reasoning_level = external_model.get("default_reasoning_level")
-    if isinstance(default_reasoning_level, str) and default_reasoning_level.strip():
-        model["default_reasoning_level"] = default_reasoning_level.strip()
+    explicit_reasoning_levels = external_model.get("supported_reasoning_levels")
+    has_explicit_reasoning_levels = (
+        isinstance(explicit_reasoning_levels, (list, tuple)) and bool(explicit_reasoning_levels)
+    )
+    reasoning_levels_source = (
+        explicit_reasoning_levels
+        if has_explicit_reasoning_levels
+        else model.get("supported_reasoning_levels")
+    )
+    sanitized_reasoning_levels = complete_third_party_reasoning_levels(reasoning_levels_source)
+    model["supported_reasoning_levels"] = sanitized_reasoning_levels
+
+    configured_default = external_model.get("default_reasoning_level")
+    default_source = (
+        configured_default
+        if isinstance(configured_default, str) and configured_default.strip()
+        else model.get("default_reasoning_level")
+    )
+    normalized_default = str(default_source).strip().lower()
+    supported_efforts = [item["effort"] for item in sanitized_reasoning_levels]
+    if normalized_default not in supported_efforts:
+        normalized_default = "xhigh" if "xhigh" in supported_efforts else supported_efforts[0]
+    model["default_reasoning_level"] = normalized_default
 
     context_window = external_model.get("context_window")
     if isinstance(context_window, int) and context_window > 0:
@@ -731,6 +848,12 @@ def build_external_provider_model(
     if max_output_source is not None:
         proxy_metadata["max_output_source"] = max_output_source
     model["codex_proxy_metadata"] = proxy_metadata
+    apply_resolved_model_limits(
+        model,
+        RESOLVED_MODEL_LIMITS.get(
+            (str(external_model["provider_alias"]), str(external_model["upstream_model"]))
+        ),
+    )
     return model
 
 
@@ -764,12 +887,11 @@ def build_codex_catalog(
     )
 
     for slug in official_slugs:
-        alias = official_proxy_alias(slug)
-        if not slug or alias in seen_slugs:
+        if not slug or slug in seen_slugs:
             continue
         model = build_official_proxy_model(slug, official_by_slug, policy)
         models.append(model)
-        seen_slugs.add(alias)
+        seen_slugs.add(slug)
 
     fallback_list = list(fallback_models or [])
     fallback_by_slug = fallback_model_index(fallback_list)
@@ -876,7 +998,14 @@ def load_official_model_sort_order() -> list[str]:
     value = data.get("official_model_sort_order")
     if not isinstance(value, list):
         return []
-    return [model_id for model_id in value if isinstance(model_id, str) and model_id.strip()]
+    output: list[str] = []
+    for model_id in value:
+        if not isinstance(model_id, str):
+            continue
+        normalized = normalize_official_model_id(model_id)
+        if normalized and normalized not in output:
+            output.append(normalized)
+    return output
 
 
 def load_official_disabled_models() -> list[str]:
@@ -884,12 +1013,37 @@ def load_official_disabled_models() -> list[str]:
     value = data.get("official_disabled_models")
     if not isinstance(value, list):
         return []
-    return [official_model_disable_key(model_id) for model_id in value if isinstance(model_id, str) and model_id.strip()]
+    output: list[str] = []
+    for model_id in value:
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        normalized = official_model_disable_key(model_id)
+        if normalized and normalized not in output:
+            output.append(normalized)
+    return output
 
 
-def official_model_disable_key(model_id: str) -> str:
+def official_model_disable_key(model_id: str) -> str | None:
+    return normalize_official_model_id(model_id)
+
+
+def known_official_model_ids() -> set[str]:
+    known = set(load_policy(POLICY_PATH).official_models)
+    for model in load_catalog_models(RUNTIME_OFFICIAL_SEED_PATH):
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if slug.startswith("openai/gpt-"):
+            slug = slug.removeprefix("openai/")
+        if slug.startswith("gpt-"):
+            known.add(slug)
+    return known
+
+
+def normalize_official_model_id(model_id: str) -> str | None:
     value = canonical_model_id(model_id)
-    return value.removeprefix("openai/")
+    if value.startswith("openai/gpt-"):
+        bare = value.removeprefix("openai/")
+        return bare if bare in known_official_model_ids() else None
+    return value
 
 
 def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:

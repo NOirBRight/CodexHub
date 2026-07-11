@@ -129,8 +129,10 @@ Generic clients can use:
 ```text
 Base URL: http://127.0.0.1:9099/v1
 API key:  Local client key from CodexHub settings
-Model:    openai/gpt-5.5 or provider/model
+Model:    gpt-5.5 or provider/model
 ```
+
+Official OpenAI models use bare IDs. Legacy `openai/gpt-*` aliases remain accepted for compatibility.
 
 Provider-scoped clients can use:
 

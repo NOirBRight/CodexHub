@@ -30,6 +30,7 @@ import type {
   SubagentMatrixStatus,
   UpstreamFormat,
   UpstreamFormatProbeResult,
+  UnifiedHistoryResult,
   UsageQueryWindow,
 } from "./types";
 import { normalizeSettings } from "./settings";
@@ -58,6 +59,10 @@ export class CodexHubBridgeError extends Error {
 }
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:1421/api/invoke";
+const KNOWN_BRIDGE_URLS = [
+  DEFAULT_BRIDGE_URL,
+  "http://127.0.0.1:1431/api/invoke",
+];
 const LOCAL_DEV_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -81,22 +86,28 @@ async function desktopCall<T>(command: string, args?: Record<string, unknown>): 
 }
 
 async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(bridgeUrl(), {
-    method: "POST",
-    body: JSON.stringify({ command, args: args ?? {} }),
-  }).catch((error: unknown) => {
-    console.debug("CodexHub web bridge unavailable", error);
-    throw new Error("Backend is not connected");
-  });
+  for (const url of bridgeUrls()) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({ command, args: args ?? {} }),
+      });
+    } catch (error) {
+      console.debug(`CodexHub web bridge unavailable at ${url}`, error);
+      continue;
+    }
 
-  const payload = (await response.json().catch(() => null)) as BridgeResponse<T> | null;
-  if (!response.ok || !payload?.ok) {
-    throw new CodexHubBridgeError(
-      payload?.codexhub_error?.message || payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`,
-      payload?.codexhub_error ?? null,
-    );
+    const payload = (await response.json().catch(() => null)) as BridgeResponse<T> | null;
+    if (!response.ok || !payload?.ok) {
+      throw new CodexHubBridgeError(
+        payload?.codexhub_error?.message || payload?.error || `CodexHub web bridge request failed: HTTP ${response.status}`,
+        payload?.codexhub_error ?? null,
+      );
+    }
+    return payload.value as T;
   }
-  return payload.value as T;
+  throw new Error("Backend is not connected");
 }
 
 function shouldFallbackToBridge(error: unknown) {
@@ -119,6 +130,14 @@ function bridgeUrl() {
     localBridgeUrlFromLocation(window.location) ||
     DEFAULT_BRIDGE_URL
   );
+}
+
+function bridgeUrls() {
+  const explicit = import.meta.env.VITE_CODEXHUB_BRIDGE_URL;
+  if (explicit) {
+    return [explicit];
+  }
+  return Array.from(new Set([bridgeUrl(), ...KNOWN_BRIDGE_URLS]));
 }
 
 function localBridgeUrlFromLocation(location: Location) {
@@ -165,8 +184,8 @@ export const api = {
     call<AppUpdateCompletionStatus | null>("consume_app_update_completion"),
   installAppUpdate: () => call<AppUpdateInstallResult>("install_app_update"),
   getStatus: () => call<AppStatus>("get_status"),
-  switchMode: (mode: string, autoSync: boolean) =>
-    call<AppStatus>("switch_mode", { mode, autoSync }),
+  switchMode: (mode: string, autoSync: boolean, forceTakeover = false) =>
+    call<AppStatus>("switch_mode", { mode, autoSync, forceTakeover, force_takeover: forceTakeover }),
   startProxy: () => call<AppStatus>("start_proxy"),
   stopProxy: () => call<AppStatus>("stop_proxy"),
   restartProxy: () => call<AppStatus>("restart_proxy"),
@@ -272,8 +291,20 @@ export const api = {
     call<Model>("save_model_metadata_override", { model }),
   syncHistory: (targetProvider?: string) =>
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
+  reconcileAfterRouteSwitch: (targetProvider?: string) =>
+    call<UnifiedHistoryResult>("reconcile_after_route_switch", {
+      targetProvider: targetProvider ?? null,
+    }),
   migrateOfficialHistoryToUnified: () => call<string>("migrate_official_history_to_unified"),
   restoreOfficialHistoryFromUnified: () => call<string>("restore_official_history_from_unified"),
+  preflightUnifiedHistory: (applyRepairs = false, targetUnified?: boolean) =>
+    call<UnifiedHistoryResult>("preflight_unified_history", { applyRepairs, targetUnified }),
+  getConversationSyncStatus: () =>
+    call<UnifiedHistoryResult>("get_conversation_sync_status"),
+  syncConversationHistory: (targetProvider?: string) =>
+    call<UnifiedHistoryResult>("sync_conversation_history", { targetProvider: targetProvider ?? null }),
+  diagnoseConversationHistory: (fullScan = true) =>
+    call<UnifiedHistoryResult>("diagnose_conversation_history", { fullScan }),
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),

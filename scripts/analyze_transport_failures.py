@@ -256,6 +256,7 @@ def analyze_events(
         event_name = _string(event.get("event")) or "unknown"
         failure_phase = _infer_failure_phase(event)
         failure_side = _infer_failure_side(event)
+        failure_class = _string(event.get("failure_class")) or "unknown"
         error = _string(event.get("error")) or "unknown"
         size_value = event.get("content_length")
         if size_value in (None, ""):
@@ -270,6 +271,7 @@ def analyze_events(
             event_name,
             failure_phase,
             failure_side,
+            failure_class,
             error,
             size_bucket,
             window_id,
@@ -284,6 +286,7 @@ def analyze_events(
                 "event": event_name,
                 "failure_phase": failure_phase,
                 "failure_side": failure_side,
+                "failure_class": failure_class,
                 "error": error,
                 "size_bucket": size_bucket,
                 "window_id": window_id,
@@ -294,6 +297,7 @@ def analyze_events(
                 "max_duration_ms": None,
                 "total_lines_streamed": 0,
                 "total_bytes_streamed": 0,
+                "examples": [],
             }
             groups[key] = group
         group["count"] += 1
@@ -310,6 +314,15 @@ def analyze_events(
             current_max = group["max_duration_ms"]
             group["min_duration_ms"] = duration_ms if current_min is None else min(current_min, duration_ms)
             group["max_duration_ms"] = duration_ms if current_max is None else max(current_max, duration_ms)
+        if len(group["examples"]) < 3:
+            example = {
+                "request_id": request_id,
+                "content_length": _as_int(size_value),
+                "duration_ms": duration_ms,
+                "error": _string(event.get("error")),
+                "detail": _string(event.get("detail")),
+            }
+            group["examples"].append({key: value for key, value in example.items() if value is not None})
         group["total_lines_streamed"] += _as_int(event.get("lines_streamed")) or 0
         group["total_bytes_streamed"] += _as_int(event.get("bytes_streamed")) or 0
 
@@ -324,6 +337,7 @@ def analyze_events(
             item["event"],
             item["failure_phase"],
             item["failure_side"],
+            item["failure_class"],
             item["error"],
             item["size_bucket"],
             item["window_id"],

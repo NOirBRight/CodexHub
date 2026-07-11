@@ -100,7 +100,7 @@ export function SettingsDrawer({
     if (!draft) {
       return;
     }
-    const toastId = showToast(t("settings.repairingHistoryBucket"), "loading");
+    const toastId = showToast(t("settings.syncingConversationHistory"), "loading");
     const targetProvider = draft.unified_codex_history ? "custom" : "openai";
     try {
       const message = await onSyncHistory(targetProvider);

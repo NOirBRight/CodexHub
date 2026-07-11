@@ -22,14 +22,6 @@ $flavorConfig = $flavorManifest.$Flavor
 if ($null -eq $flavorConfig) {
     throw "Unknown build flavor: $Flavor"
 }
-if ([string]::IsNullOrWhiteSpace($ReleaseBaseUrl)) {
-    if ($Flavor -eq "beta") {
-        $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/download/beta"
-    }
-    else {
-        $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/latest/download"
-    }
-}
 $generatedTauriConfigPath = (& (Join-Path $PSScriptRoot "Build-TauriConfig.ps1") -Flavor $Flavor -RepoRoot $repoRoot).Trim()
 $tauriConfigPath = $generatedTauriConfigPath
 
@@ -40,6 +32,9 @@ if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
 $tauriConfig = Get-Content -Raw -LiteralPath $tauriConfigPath | ConvertFrom-Json
 $productName = [string]$tauriConfig.productName
 $version = [string]$tauriConfig.version
+if ([string]::IsNullOrWhiteSpace($ReleaseBaseUrl)) {
+    $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/download/v$version"
+}
 $bundleDir = Join-Path $tauriDir "target\release\bundle\nsis"
 $assetPrefix = [string]$flavorConfig.releaseAssetPrefix
 $canonicalInstallerName = "{0}_{1}_x64-setup.exe" -f $assetPrefix, $version
@@ -237,6 +232,13 @@ $platform = $roundTrip.platforms."windows-x86_64"
 if ($roundTrip.version -ne $version -or $platform.signature -ne $signature -or [string]::IsNullOrWhiteSpace($platform.url)) {
     throw "Generated $manifestName failed validation: $manifestPath"
 }
+
+& (Join-Path $PSScriptRoot "Test-ReleaseManifest.ps1") `
+    -Flavor $Flavor `
+    -Version $version `
+    -ManifestPath $manifestPath `
+    -InstallerPath $installerPath `
+    -SignaturePath $signaturePath
 
 $installerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath).Hash.ToLowerInvariant()
 

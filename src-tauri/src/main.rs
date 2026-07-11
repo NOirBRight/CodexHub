@@ -31,7 +31,6 @@ const TRAY_CONNECT_HUB: &str = "connect_hub";
 const TRAY_START_GATEWAY: &str = "start_gateway";
 const TRAY_STOP_GATEWAY: &str = "stop_gateway";
 const TRAY_RESTART_GATEWAY: &str = "restart_gateway";
-const TRAY_RESTART_CODEX_APP: &str = "restart_codex_app";
 const TRAY_EXIT: &str = "exit";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +48,16 @@ pub struct Model {
     #[serde(default = "default_enabled")]
     pub gateway_exported: bool,
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
     pub max_output_tokens: Option<u32>,
     pub input_modalities: Option<Vec<String>>,
     pub supported_reasoning_levels: Option<Vec<String>>,
@@ -72,6 +81,11 @@ impl Default for Model {
             codex_enabled: true,
             gateway_exported: true,
             context_window: None,
+            max_context_window: None,
+            effective_source: None,
+            max_source: None,
+            confidence: None,
+            verified_at: None,
             max_output_tokens: None,
             input_modalities: None,
             supported_reasoning_levels: None,
@@ -210,7 +224,7 @@ pub struct Settings {
 }
 
 fn default_fast_model_variants() -> Vec<String> {
-    vec!["openai/gpt-5.5".to_string(), "openai/gpt-5.4".to_string()]
+    vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
 }
 
 impl Default for Settings {
@@ -268,8 +282,8 @@ async fn get_status() -> Result<AppStatus, String> {
 }
 
 #[tauri::command]
-fn switch_mode(mode: String, auto_sync: bool) -> Result<AppStatus, String> {
-    config::switch_mode(&mode, auto_sync)
+fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> Result<AppStatus, String> {
+    config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -512,18 +526,78 @@ fn save_model_metadata_override(model: Model) -> Result<Model, String> {
 }
 
 #[tauri::command]
-fn sync_history(target_provider: Option<String>) -> Result<String, String> {
-    history::sync_history(target_provider.as_deref())
+async fn sync_history(target_provider: Option<String>) -> Result<String, String> {
+    run_blocking("sync_history", move || {
+        history::sync_history(target_provider.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
-fn migrate_official_history_to_unified() -> Result<String, String> {
-    history::migrate_official_history_to_unified()
+async fn reconcile_after_route_switch(
+    target_provider: Option<String>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    run_blocking("reconcile_after_route_switch", move || {
+        history::reconcile_after_route_switch(target_provider.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
-fn restore_official_history_from_unified() -> Result<String, String> {
-    history::restore_official_history_from_unified()
+async fn migrate_official_history_to_unified() -> Result<String, String> {
+    run_blocking("migrate_official_history_to_unified", || {
+        history::migrate_official_history_to_unified()
+    })
+    .await
+}
+
+#[tauri::command]
+async fn restore_official_history_from_unified() -> Result<String, String> {
+    run_blocking("restore_official_history_from_unified", || {
+        history::restore_official_history_from_unified()
+    })
+    .await
+}
+
+#[tauri::command]
+async fn preflight_unified_history(
+    apply_repairs: bool,
+    target_unified: Option<bool>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    run_blocking("preflight_unified_history", move || {
+        history::preflight_unified_history(apply_repairs, target_unified)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_conversation_sync_status() -> Result<history::UnifiedHistoryResult, String> {
+    run_blocking("get_conversation_sync_status", || {
+        history::preflight_unified_history(false, None)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn sync_conversation_history(
+    target_provider: Option<String>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    let target_unified = target_provider.as_deref().map(|value| value != "openai");
+    run_blocking("sync_conversation_history", move || {
+        history::preflight_unified_history(true, target_unified)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn diagnose_conversation_history(
+    full_scan: Option<bool>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    let _full_scan = full_scan.unwrap_or(true);
+    run_blocking("diagnose_conversation_history", || {
+        history::preflight_unified_history(false, None)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -602,9 +676,6 @@ fn run_tray_action(app: &AppHandle, id: &str) {
         TRAY_RESTART_GATEWAY => {
             let _ = proxy::restart();
         }
-        TRAY_RESTART_CODEX_APP => {
-            let _ = restart_codex_app();
-        }
         TRAY_EXIT => app.exit(0),
         _ => {}
     }
@@ -671,30 +742,6 @@ fn launch_codex_app() -> Result<String, String> {
     Err("Open Codex App is currently implemented on Windows only. Run `codex login` from a terminal to sign in.".to_string())
 }
 
-#[cfg(target_os = "windows")]
-fn restart_codex_app() -> Result<String, String> {
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$app = Get-StartApps |
-  Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } |
-  Select-Object -First 1
-if (-not $app) {
-  throw 'Codex App is not installed or does not expose a Start menu AppID.'
-}
-Get-Process -Name Codex -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 800
-Start-Process ('shell:AppsFolder\' + $app.AppID)
-Write-Output ('Restarted Codex App via ' + $app.AppID)
-"#;
-
-    run_codex_app_script("restart", script)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn restart_codex_app() -> Result<String, String> {
-    Err("Restart Codex App is currently implemented on Windows only.".to_string())
-}
-
 #[cfg(desktop)]
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
@@ -707,7 +754,6 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .text(TRAY_STOP_GATEWAY, "Stop Gateway")
         .text(TRAY_RESTART_GATEWAY, "Restart Gateway")
         .separator()
-        .text(TRAY_RESTART_CODEX_APP, "Restart Codex App")
         .text(TRAY_EXIT, "Exit")
         .build()?;
 
@@ -804,8 +850,13 @@ fn run_gui() {
             list_model_metadata,
             save_model_metadata_override,
             sync_history,
+            reconcile_after_route_switch,
             migrate_official_history_to_unified,
             restore_official_history_from_unified,
+            preflight_unified_history,
+            get_conversation_sync_status,
+            sync_conversation_history,
+            diagnose_conversation_history,
             sync_catalog,
             set_autostart,
             remove_autostart,

@@ -4,6 +4,9 @@ param(
     [string]$PythonVersion = "3.13.14",
     [string]$PythonZipUrl = "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
     [string]$PythonZipSha256 = "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
+    [string]$ZstandardVersion = "0.25.0",
+    [string]$ZstandardWheelUrl = "https://files.pythonhosted.org/packages/d9/82/b9c06c870f3bd8767c201f1edbdf9e8dc34be5b0fbc5682c4f80fe948475/zstandard-0.25.0-cp313-cp313-win_amd64.whl",
+    [string]$ZstandardWheelSha256 = "1f830a0dac88719af0ae43b8b2d6aef487d437036468ef3c2ea59c51f9d55fd5",
     [switch]$Force
 )
 
@@ -17,6 +20,8 @@ $runtimeDir = Join-Path $resourcesDir "python"
 $downloadDir = Join-Path $resourcesDir "downloads"
 $zipName = "python-$PythonVersion-embed-amd64.zip"
 $zipPath = Join-Path $downloadDir $zipName
+$zstandardWheelName = "zstandard-$ZstandardVersion-cp313-cp313-win_amd64.whl"
+$zstandardWheelPath = Join-Path $downloadDir $zstandardWheelName
 $runtimeManifestPath = Join-Path $runtimeDir "codexhub-python-runtime.json"
 
 function Assert-UnderPath([string]$Path, [string]$Root) {
@@ -54,7 +59,7 @@ function Test-PythonRuntimeReady {
         return $false
     }
 
-    & $python -c "import http.server, pathlib, sqlite3, tomllib, urllib.request; print('ok')" *> $null
+    & $python -c "import http.server, pathlib, sqlite3, tomllib, urllib.request, zstandard; print('ok')" *> $null
     if ($LASTEXITCODE -ne 0) {
         return $false
     }
@@ -105,6 +110,19 @@ if (-not (Test-Hash $zipPath $PythonZipSha256)) {
     Invoke-Download $PythonZipUrl $zipPath
 }
 
+if (-not (Test-Hash $zstandardWheelPath $ZstandardWheelSha256)) {
+    if (Test-Path -LiteralPath $zstandardWheelPath -PathType Leaf) {
+        Remove-Item -LiteralPath $zstandardWheelPath -Force
+    }
+    Write-Host "Downloading zstandard $ZstandardVersion wheel..."
+    Invoke-Download $ZstandardWheelUrl $zstandardWheelPath
+}
+
+if (-not (Test-Hash $zstandardWheelPath $ZstandardWheelSha256)) {
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zstandardWheelPath).Hash.ToLowerInvariant()
+    throw "zstandard wheel hash mismatch. Expected $ZstandardWheelSha256, got $actual."
+}
+
 if (-not (Test-Hash $zipPath $PythonZipSha256)) {
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
     throw "Python runtime hash mismatch. Expected $PythonZipSha256, got $actual."
@@ -124,11 +142,19 @@ if (Test-Path -LiteralPath $runtimeDir) {
 }
 Move-Item -LiteralPath $tempDir -Destination $runtimeDir
 Update-PythonPathFile
+$python = Join-Path $runtimeDir "python.exe"
+& $python -m zipfile -e $zstandardWheelPath $runtimeDir
+if ($LASTEXITCODE -ne 0) {
+    throw "zstandard wheel extraction failed with exit code $LASTEXITCODE."
+}
 
 $manifest = [ordered]@{
     python_version = $PythonVersion
     source_url = $PythonZipUrl
     sha256 = $PythonZipSha256.ToLowerInvariant()
+    zstandard_version = $ZstandardVersion
+    zstandard_source_url = $ZstandardWheelUrl
+    zstandard_sha256 = $ZstandardWheelSha256.ToLowerInvariant()
     prepared_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 4
@@ -142,3 +168,4 @@ Write-Host "Python runtime prepared:"
 Write-Host "  Runtime: $runtimeDir"
 Write-Host "  ZIP:     $zipPath"
 Write-Host "  SHA256:  $PythonZipSha256"
+Write-Host "  zstandard: $ZstandardVersion ($ZstandardWheelSha256)"

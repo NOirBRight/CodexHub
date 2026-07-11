@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_URL = "http://127.0.0.1:9099/v1/responses"
-DEFAULT_MODEL = "openai/gpt-5.5-fast"
+DEFAULT_MODEL = "gpt-5.5-fast"
 
 
 def _now() -> str:

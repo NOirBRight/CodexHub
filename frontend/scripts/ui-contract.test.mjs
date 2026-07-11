@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile, stat } from "node:fs/promises";
 import { test } from "node:test";
+import ts from "typescript";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
 const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta.url);
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
+const buildWindowsPortablePath = new URL("../../scripts/build-windows-portable.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
@@ -30,6 +32,7 @@ const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.u
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
 const tauriAppUpdatesPath = new URL("../../src-tauri/src/app_updates.rs", import.meta.url);
 const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
+const tauriConfigSourcePath = new URL("../../src-tauri/src/config.rs", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
 const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
@@ -74,6 +77,91 @@ test("i18n locales are registered and keep matching translation keys", async () 
 
   assert.match(indexSource, /SUPPORTED_LOCALES\s*=\s*\["zh-CN",\s*"en-US"\]\s*as const/);
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
+});
+
+test("history sync is explicit and never participates in startup or settings save", async () => {
+  const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(new URL("../../src-tauri/src/history.rs", import.meta.url), "utf8"),
+    readFile(tauriWebBridgePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface UnifiedHistoryResult/);
+  assert.match(tauriSource, /preflightUnifiedHistory: \(applyRepairs = false, targetUnified\?: boolean\)/);
+  assert.match(tauriSource, /getConversationSyncStatus/);
+  assert.match(tauriSource, /syncConversationHistory/);
+  assert.match(tauriSource, /diagnoseConversationHistory/);
+  assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
+  assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
+  assert.match(webBridgeSource, /"preflight_unified_history"/);
+  assert.doesNotMatch(appSource, /historyPreflightStarted/);
+  assert.doesNotMatch(appSource, /api\.preflightUnifiedHistory\(false\)/);
+  assert.match(appSource, /api\.syncConversationHistory\(\)/);
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.doesNotMatch(saveAction, /preflightUnifiedHistory|syncHistory|repairConversationHistory/);
+  assert.match(appSource, /result\.status === "restart_required"/);
+  assert.match(appSource, /result\.status === "deferred"/);
+  assert.match(historySource, /preflight_unified_history_with_budget\([\s\S]*&budget,\s*true,\s*\)/);
+  assert.doesNotMatch(historySource, /CloseMainWindow\(\)/);
+  assert.doesNotMatch(historySource, /Start-Process/);
+  assert.doesNotMatch(historySource, /Stop-Process\s+-Force/);
+});
+
+test("history repair action waits for the bounded backend and always unlocks", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const action = appSource.match(/const repairConversationHistory = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.equal((action.match(/api\.syncConversationHistory\(\)/g) ?? []).length, 1);
+  assert.match(action, /await api\.syncConversationHistory\(\)/);
+  assert.doesNotMatch(appSource, /HISTORY_OPERATION_TIMEOUT_MS|settleWithin|Promise\.race/);
+  assert.match(action, /t\(historyIssueKey\(result\)\)/);
+  assert.doesNotMatch(action, /result\.error|result\.reason/);
+  assert.match(action, /setBusy\("history"\)/);
+  assert.match(action, /finally \{[\s\S]*setBusy\(null\)/);
+});
+
+test("changing the history preference only persists the preference", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.doesNotMatch(saveAction, /preflightUnifiedHistory|historyReconciled|historyMessage/);
+  assert.match(saveAction, /api\.saveSettings\(next\)/);
+});
+
+test("history sync uses user-facing terminology and hides internal timeout details", async () => {
+  const [appSource, historyUiSource, enSource, zhSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(new URL("../src/lib/history.ts", import.meta.url), "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(appSource, /historyIssueKey\(result\)/);
+  assert.match(historyUiSource, /case "helper_timeout":[\s\S]*case "process_timeout":[\s\S]*historyOperationTimedOut/);
+  assert.doesNotMatch(appSource, /text: result\.error|message: result\.error|text: result\.reason/);
+  assert.match(enSource, /unifiedCodexHistory: "Conversation history sync"/);
+  assert.match(zhSource, /unifiedCodexHistory: "历史对话同步"/);
+  assert.doesNotMatch(enSource, /"[^"]*[Hh]istory bucket[^"]*"/);
+  assert.doesNotMatch(zhSource, /"[^"]*(统一桶|历史桶)[^"]*"/);
+});
+
+test("one Gateway Apply delegates its single restart to App settings save", async () => {
+  const [appSource, gatewaySource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(gatewayPagePath, "utf8"),
+  ]);
+  const applyAction = gatewaySource.match(/async function applyGatewaySettings\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.equal((applyAction.match(/onApplySettings\(next\)/g) ?? []).length, 1);
+  assert.equal((applyAction.match(/onRestartProxy\(/g) ?? []).length, 0);
+  assert.equal((saveAction.match(/api\.restartProxy\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(gatewaySource, /onRestartProxy:/);
+  assert.match(gatewaySource, /const message = await onApplySettings\(next\)/);
+  assert.doesNotMatch(applyAction, /gatewaySettingsSavedRestarted|restartRequired/);
 });
 
 test("default locale resolution treats Chinese system variants as Chinese and otherwise falls back to English", async () => {
@@ -262,7 +350,8 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(tauriSource, /WindowEvent::CloseRequested/);
   assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
   assert.match(tauriSource, /Connect Codex to CodexHub/);
-  assert.match(tauriSource, /Restart Codex App/);
+  assert.doesNotMatch(tauriSource, /Restart Codex App/);
+  assert.doesNotMatch(tauriSource, /Stop-Process/);
   assert.match(tauriSource, /Get-StartApps/);
   assert.doesNotMatch(tauriSource, /Restart CodexHub/);
   assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
@@ -278,13 +367,26 @@ test("runtime header treats SVG icon clicks inside controls as interactive", asy
   assert.match(settingsButton, /aria-label=\{t\("common\.settings"\)\}/);
 });
 
-test("main desktop window opens tall enough for the primary dashboard", async () => {
+test("runtime title area double-click toggles maximize without activating controls or drag", async () => {
+  const runtimeSource = await readFile(runtimeBarPath, "utf8");
+  const dragHandler = runtimeSource.match(/function startWindowDrag[\s\S]*?^}/m)?.[0] ?? "";
+  const maximizeHandler = runtimeSource.match(/function toggleWindowMaximizeFromTitlebar[\s\S]*?^}/m)?.[0] ?? "";
+
+  assert.match(runtimeSource, /onDoubleClickCapture=\{toggleWindowMaximizeFromTitlebar\}/);
+  assert.match(dragHandler, /event\.detail > 1/);
+  assert.match(maximizeHandler, /isInteractiveWindowControl\(event\.target\)/);
+  assert.match(maximizeHandler, /event\.preventDefault\(\)/);
+  assert.match(maximizeHandler, /event\.stopPropagation\(\)/);
+  assert.match(maximizeHandler, /api\.windowToggleMaximize\(\)/);
+});
+
+test("main desktop window opens at the release candidate height", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
   const mainWindow = tauriConfig.app.windows[0];
 
   assert.equal(mainWindow.width, 1280);
-  assert.ok(mainWindow.height >= 900);
-  assert.ok(mainWindow.minHeight >= 800);
+  assert.equal(mainWindow.height, 930);
+  assert.equal(mainWindow.minHeight, 800);
 });
 
 test("tauri config enables Windows updater packaging", async () => {
@@ -548,6 +650,18 @@ test("gateway empty states are localized outside the static contract", async () 
   assert.match(usageSource, /t\("usage\.pendingData"\)/);
 });
 
+test("Beta empty usage state explains isolated Gateway telemetry", async () => {
+  const [gatewaySource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /appFlavor\?\.flavor === "beta"[\s\S]*t\("gateway\.betaUsageIsolated"\)/);
+  assert.match(enSource, /betaUsageIsolated: "Beta uses isolated Gateway usage data/);
+  assert.match(zhSource, /betaUsageIsolated: "Beta 使用独立的 Gateway 用量数据/);
+});
+
 test("gateway page is wired to real usage and client backend APIs", async () => {
   const [appSource, gatewaySource] = await Promise.all([
     readFile(appPath, "utf8"),
@@ -594,6 +708,20 @@ test("web preview infers the bridge port from alternate local dev ports", async 
   assert.match(tauriSource, /const bridgePort = frontendPort \+ 1/);
   assert.match(tauriSource, /formatHostnameForUrl\(location\.hostname\)/);
   assert.match(tauriSource, /import\.meta\.env\.VITE_CODEXHUB_BRIDGE_URL \|\|/);
+});
+
+test("web preview falls back between stable and Beta bridge ports", async () => {
+  const tauriSource = await readFile(tauriSourcePath, "utf8");
+  const bridgeInvoke =
+    tauriSource.match(/async function bridgeInvoke[\s\S]*?function shouldFallbackToBridge/)?.[0] ?? "";
+
+  assert.match(tauriSource, /const KNOWN_BRIDGE_URLS = \[/);
+  assert.match(tauriSource, /http:\/\/127\.0\.0\.1:1421\/api\/invoke/);
+  assert.match(tauriSource, /http:\/\/127\.0\.0\.1:1431\/api\/invoke/);
+  assert.match(tauriSource, /function bridgeUrls\(\)/);
+  assert.match(bridgeInvoke, /for \(const url of bridgeUrls\(\)\)/);
+  assert.match(bridgeInvoke, /continue;/);
+  assert.match(bridgeInvoke, /throw new Error\("Backend is not connected"\)/);
 });
 
 test("web bridge calls use simple POST requests that avoid CORS preflight", async () => {
@@ -915,6 +1043,17 @@ test("Codex app-server probes time out and avoid visible Windows consoles", asyn
   assert.match(modelsSource, /CODEX_APP_SERVER_MODEL_LIST_TIMEOUT/);
 });
 
+test("OpenAI primary and secondary quota names render as 5 hours and weekly", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const fiveHour = providersSource.match(/function isFiveHourUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
+  const weekly = providersSource.match(/function isWeeklyUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
+
+  assert.match(fiveHour, /\\bprimary\\b/);
+  assert.match(weekly, /\\bsecondary\\b/);
+  assert.match(providersSource, /fiveHourLimit:|"providers\.fiveHourLimit"/);
+  assert.match(providersSource, /weeklyLimit:|"providers\.weeklyLimit"/);
+});
+
 test("manual OpenAI usage refresh uses a persistent toast", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
@@ -1056,7 +1195,8 @@ test("gateway client route switching reports completion", async () => {
 
   assert.match(gatewaySource, /t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
   assert.match(gatewaySource, /showToast\(t\("gateway\.switchClient", \{ clientName, routeName \}\), "loading"\)/);
-  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, forceTakeover\)/);
+  assert.match(gatewaySource, /const shouldForceTakeover = forceTakeover \|\| takeoverRequired;/);
+  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, shouldForceTakeover\)/);
   assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDone", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
   assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
   assert.match(cardSource, /const pendingRouteValue = busy && busyMode !== "takeover" \? busyMode \?\? null : null;/);
@@ -1201,6 +1341,28 @@ test("settings normalization restores default-on fields when persisted settings 
   assert.match(settingsSource, /source\.auto_sync_clients\s*\?\?\s*source\.auto_sync_catalog\s*\?\?\s*DEFAULT_SETTINGS\.auto_sync_clients/s);
   assert.match(tauriSource, /getSettings: async \(\) => normalizeSettings\(await call<Partial<Settings>>\("get_settings"\)\)/);
   assert.match(tauriSource, /settings: normalizeSettings\(settings\)/);
+});
+
+test("official model settings normalize legacy OpenAI prefixes to bare ids", async () => {
+  const [settingsSource, providersSource] = await Promise.all([
+    readFile(settingsLibPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+  ]);
+
+  assert.match(settingsSource, /DEFAULT_FAST_MODEL_VARIANTS\s*=\s*\["gpt-5\.5",\s*"gpt-5\.4"\]/);
+  assert.match(settingsSource, /function normalizeOfficialModelId\(/);
+  assert.match(settingsSource, /value\.startsWith\("openai\/gpt-"\)/);
+  assert.match(settingsSource, /gateway_fast_model_variants:\s*normalizeFastModelVariants\(/);
+  assert.match(settingsSource, /official_disabled_models:\s*normalizeModelIds\(/);
+  assert.match(settingsSource, /official_model_sort_order:\s*normalizeModelIds\(/);
+  assert.match(
+    providersSource,
+    /import \{ normalizeOfficialModelId, normalizeSettings \} from "\.\.\/lib\/settings"/,
+  );
+  assert.match(providersSource, /return normalizeOfficialModelId\(left\) === normalizeOfficialModelId\(right\)/);
+  assert.match(providersSource, /function withDefaultFastVariants\(settings: Settings\): Settings \{\s*return normalizeSettings\(settings\);\s*\}/);
+  assert.doesNotMatch(providersSource, /const DEFAULT_FAST_MODEL_VARIANTS = \["openai\//);
+  assert.doesNotMatch(providersSource, /const DEFAULT_OFFICIAL_MODEL_ORDER = \[\s*"openai\//);
 });
 
 test("settings drawer omits duplicated local endpoint controls", async () => {
@@ -1362,13 +1524,18 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
 
 test("settings save restarts running gateway when retry or image proxy runtime settings change", async () => {
   const appSource = await readFile(appPath, "utf8");
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
   assert.match(appSource, /function gatewayRuntimeSettingsChanged/);
   assert.match(appSource, /gateway_auto_retry_enabled/);
   assert.match(appSource, /gateway_auto_retry_max_attempts/);
   assert.match(appSource, /gateway_image_proxy_enabled/);
   assert.match(appSource, /gateway_image_proxy_model/);
-  assert.match(appSource, /appStatus\?\.proxy_running/);
+  assert.match(appSource, /previous\.proxy_port !== next\.proxy_port/);
+  assert.match(appSource, /previous\.gateway_request_timeout_seconds !== next\.gateway_request_timeout_seconds/);
+  assert.match(appSource, /status\?\.proxy_running/);
+  assert.match(saveAction, /shouldRestartGateway\(settings, next, gatewayStatus\)/);
+  assert.doesNotMatch(saveAction, /appStatus\?\.proxy_running/);
   assert.match(appSource, /api\.restartProxy\(\)/);
   assert.match(appSource, /t\("gateway\.gatewaySettingsSavedRestarted"\)/);
   assert.match(appSource, /setBanner\(null\)/);
@@ -1605,17 +1772,154 @@ test("canceling a newly added model removes the temporary draft before navigatio
   assert.match(addProviderPanel, /onCancelNewModel=\{\(modelId\) =>[\s\S]*models: renumberModels\(form\.models\.filter\(\(model\) => model\.id !== modelId\)\)/);
 });
 
-test("official model rows remain pointer-interactive while editing is disabled", async () => {
+test("official model rows only toggle from the switch while provider rows can still open editing", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
-  assert.match(modelSection, /const rowInteractable = !interactionDisabled && \(!disabled \|\| Boolean\(onToggleOfficialModel\)\);/);
+  assert.match(modelSection, /const rowInteractable = !interactionDisabled && !disabled;/);
   assert.match(modelSection, /if \(interactionDisabled\) \{[\s\S]*return;[\s\S]*\}/);
-  assert.match(modelSection, /function activateModelRow\(\)[\s\S]*onToggleOfficialModel\(model\.id, !modelEnabled\)/);
+  assert.match(modelSection, /function activateModelRow\(\)[\s\S]*setEditingModelId\(model\.id\)/);
+  assert.doesNotMatch(modelSection, /onToggleOfficialModel\(model\.id, !modelEnabled\)/);
+  assert.match(modelSection, /onChange=\{\(checked\) => onToggleOfficialModel\(model\.id, checked\)\}/);
   assert.match(modelSection, /rowInteractable && "cursor-pointer"/);
   assert.match(modelSection, /role=\{rowInteractable \? "button" : undefined\}/);
   assert.match(modelSection, /tabIndex=\{rowInteractable \? 0 : undefined\}/);
   assert.match(modelSection, /onClick=\{rowInteractable \? activateModelRow : undefined\}/);
+});
+
+test("Gateway restart planning uses only the current Gateway running snapshot", async () => {
+  const appSource = await readFile(appPath, "utf8");
+  const functionSource = appSource.match(/function gatewayRuntimeSettingsChanged[\s\S]*?function shouldRestartGateway[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    functionSource.replace("function shouldRestartGateway", "export function shouldRestartGateway"),
+    {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+    },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { shouldRestartGateway } = await import(moduleUrl);
+  const previous = { proxy_port: 9099, gateway_request_timeout_seconds: 300 };
+  const changed = { ...previous, proxy_port: 9100 };
+
+  assert.equal(shouldRestartGateway(previous, changed, { proxy_running: true }), true);
+  assert.equal(shouldRestartGateway(previous, changed, { proxy_running: false }), false);
+  assert.equal(shouldRestartGateway(previous, changed, null), false);
+  assert.doesNotMatch(functionSource, /appStatus/);
+});
+
+test("official OpenAI model edits are draft-only until the footer Save action", async () => {
+  const [providersSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
+  const toggleOfficialModel = providersSource.match(/function toggleOfficialModel[\s\S]*?async function toggleCodexHubConnection/)?.[0] ?? "";
+  const reorderOfficialModels = providersSource.match(/function reorderOfficialModels[\s\S]*?async function saveOfficialModels/)?.[0] ?? "";
+  const saveOfficialModels = providersSource.match(/async function saveOfficialModels[\s\S]*?async function refreshProviderModels/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
+
+  assert.match(pageSource, /const \[officialDisabledModelsDraft, setOfficialDisabledModelsDraft\]/);
+  assert.match(pageSource, /const \[officialModelOrderDraft, setOfficialModelOrderDraft\]/);
+  assert.match(pageSource, /const officialModelDraftDirty = Boolean/);
+  assert.match(toggleOfficialModel, /setOfficialDisabledModelsDraft\(nextDisabled\)/);
+  assert.doesNotMatch(toggleOfficialModel, /saveSettings|generateCatalog|syncGatewayClients|showToast/);
+  assert.match(reorderOfficialModels, /setOfficialModelOrderDraft\(nextModels\.map\(\(model\) => model\.id\)\)/);
+  assert.doesNotMatch(reorderOfficialModels, /saveSettings|generateCatalog|syncGatewayClients|showToast/);
+  assert.match(saveOfficialModels, /await saveSettings\([\s\S]*official_disabled_models: officialDisabledModelsDraft[\s\S]*official_model_sort_order: officialModelOrderDraft[\s\S]*true[\s\S]*t\("providers\.officialModelsSaved"\)/);
+  assert.match(officialDetail, /dirty: boolean;/);
+  assert.match(officialDetail, /onSave: \(\) => void;/);
+  assert.match(officialDetail, /<Save size=\{16\} \/>/);
+  assert.match(officialDetail, /disabled=\{!dirty \|\| saveBusy\}/);
+  assert.match(enSource, /officialModelsSaved: "Official model settings saved"/);
+  assert.match(zhSource, /officialModelsSaved: "官方模型设置已保存"/);
+});
+
+test("shared identity vectors drive TypeScript canonicalization", async () => {
+  const fixture = JSON.parse(
+    await readFile(new URL("../../tests/fixtures/model_identity_vectors.json", import.meta.url), "utf8"),
+  );
+  const settingsSource = await readFile(settingsLibPath, "utf8");
+  const functionSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(functionSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { normalizeOfficialModelId } = await import(moduleUrl);
+  const knownOfficialIds = new Set(fixture.known_official_ids);
+
+  for (const vector of fixture.vectors) {
+    assert.equal(normalizeOfficialModelId(vector.input, knownOfficialIds), vector.expected, vector.name);
+  }
+});
+
+test("frontend official merge canonicalizes aliases with fresh metadata winning", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const merge = providersSource.match(/function mergeOfficialModelSources[\s\S]*?function isOfficialModel/)?.[0] ?? "";
+
+  assert.match(merge, /const knownOfficialIds = officialModelIdSet\(catalog, metadata\);/);
+  assert.match(merge, /for \(const model of catalog\.filter\(isOfficialModel\)\)/);
+  assert.match(merge, /for \(const model of metadata\.filter\(isOfficialModel\)\)/);
+  assert.match(merge, /const canonicalId = normalizeOfficialModelId\(model\.id, knownOfficialIds\);/);
+  assert.match(merge, /\.\.\.existing,[\s\S]*\.\.\.model,[\s\S]*id: canonicalId/);
+  assert.match(
+    merge,
+    /enabled: existing[\s\S]*\? \(existing\.enabled \?\? true\) \|\| \(model\.enabled \?\? true\)[\s\S]*: model\.enabled \?\? true/,
+  );
+});
+
+test("unrelated settings snapshots preserve unsaved official model drafts", async () => {
+  const providersSource = await readFile(providersPagePath, "utf8");
+  const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
+  const settingsSync = pageSource.match(/useEffect\(\(\) => \{[\s\S]*?setSettings\(normalizedSettings\);[\s\S]*?\}, \[settingsSnapshot\]\);/)?.[0] ?? "";
+
+  assert.match(pageSource, /const persistedOfficialSettingsRef = useRef/);
+  assert.match(settingsSync, /const officialSettingsChanged =/);
+  assert.match(
+    settingsSync,
+    /if \(officialSettingsChanged\) \{[\s\S]*setOfficialDisabledModelsDraft[\s\S]*setOfficialModelOrderDraft/,
+  );
+  assert.doesNotMatch(settingsSync, /setSettingsDraft\(normalizedSettings\);\s*setOfficialDisabledModelsDraft/);
+});
+
+test("official alias merge keeps all-false disabled and ORs any true", async () => {
+  const [providersSource, settingsSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(settingsLibPath, "utf8"),
+  ]);
+  const functionNames = [
+    "mergeOfficialModelSources",
+    "officialModelIdSet",
+    "isOfficialModel",
+    "filterCodexVisibleOfficialModels",
+    "isOfficialGatewayFastVariant",
+  ];
+  const blocks = functionNames.map((name) => {
+    const block = providersSource.match(new RegExp(`function ${name}\\([\\s\\S]*?^}`, "m"))?.[0];
+    assert.ok(block, `${name} source`);
+    return block;
+  });
+  const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    `${normalizeSource}\n${blocks.join("\n")}\nexport { mergeOfficialModelSources };`,
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { mergeOfficialModelSources } = await import(moduleUrl);
+
+  const cases = [
+    { catalog: false, metadata: false, expected: false, name: "all false" },
+    { catalog: false, metadata: true, expected: true, name: "metadata true" },
+    { catalog: true, metadata: false, expected: true, name: "catalog true" },
+  ];
+  for (const item of cases) {
+    const merged = mergeOfficialModelSources(
+      [{ id: "openai/gpt-5.5", enabled: item.catalog }],
+      [{ id: "gpt-5.5", enabled: item.metadata }],
+    );
+    assert.equal(merged.length, 1, item.name);
+    assert.equal(merged[0].enabled, item.expected, item.name);
+  }
 });
 
 test("official OpenAI controls are locked while Codex auth is missing", async () => {
@@ -1792,16 +2096,63 @@ test("official refresh action is placed in the Models toolbar", async () => {
   assert.match(modelSection, /t\("common\.refresh"\)/);
 });
 
-test("official model list does not expose unsupported drag sorting", async () => {
+test("startup refresh follows Codex catalog order until the user customizes it", async () => {
+  const [providersSource, settingsSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(settingsLibPath, "utf8"),
+  ]);
+  const refresh = providersSource.match(/async function refreshOfficialModels[\s\S]*?async function deleteProvider/)?.[0] ?? "";
+  const automaticOrder = providersSource.match(/function shouldFollowOfficialCatalogOrder[\s\S]*?^}/m)?.[0] ?? "";
+  const orderHelper = providersSource.match(/function refreshedOfficialModelOrder[\s\S]*?^}/m)?.[0] ?? "";
+  const sortKeys = providersSource.match(/function officialModelSortKeys[\s\S]*?^}/m)?.[0] ?? "";
+  const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const legacyOrder = providersSource.match(/const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = \[[\s\S]*?\];/)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    `${normalizeSource}\n${legacyOrder}\n${automaticOrder}\n${sortKeys}\n${orderHelper}\nexport { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder };`,
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder } = await import(moduleUrl);
+
+  assert.match(providersSource, /void primeOfficialModels\(\);[\s\S]*void primeOfficialOpenAIUsage\(\);/);
+  assert.match(refresh, /const followsAutomaticOrder = shouldFollowOfficialCatalogOrder\(officialModelOrderDraft\)/);
+  assert.match(refresh, /refreshedOfficialModelOrder\(officialModelOrderDraft, refreshed\)/);
+  assert.match(refresh, /if \(!followsAutomaticOrder\) \{\s*setOfficialModelOrderDraft\(nextOrder\);\s*\}/);
+  assert.doesNotMatch(refresh, /refreshed\.map\(\(model\) => model\.id\)/);
+  assert.match(refresh, /sortOfficialModels\(refreshed, nextOrder\)/);
+  assert.equal(
+    shouldFollowOfficialCatalogOrder([
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+      "gpt-5.6-sol",
+    ]),
+    true,
+  );
+  assert.equal(
+    shouldFollowOfficialCatalogOrder(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]),
+    false,
+  );
+  assert.deepEqual(
+    refreshedOfficialModelOrder(
+      ["gpt-b", "gpt-removed", "gpt-a"],
+      [{ id: "gpt-a" }, { id: "gpt-new-y" }, { id: "gpt-b" }, { id: "gpt-new-x" }],
+    ),
+    ["gpt-b", "gpt-a", "gpt-new-y", "gpt-new-x"],
+  );
+});
+
+test("official model list exposes the same drag sorting as provider model lists", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
   const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
-  assert.match(officialDetail, /reorderable=\{false\}/);
+  assert.match(officialDetail, /onReorder=\{onReorder\}/);
+  assert.doesNotMatch(officialDetail, /reorderable=\{false\}/);
   assert.match(modelSection, /reorderable = true/);
   assert.match(modelSection, /reorderable \? \(/);
   assert.match(modelSection, /<SortableList/);
-  assert.match(modelSection, /models\.map\(\(model\)[\s\S]*renderModelRow\(model\)/);
 });
 
 test("Codex Hub connection CTA is prominent and has a connecting state", async () => {
@@ -1895,7 +2246,9 @@ test("Codex Hub connection action reports progress immediately", async () => {
 
   assert.match(providersSource, /const \[connectionPendingMode, setConnectionPendingMode\] = useState<ConnectionMode \| null>\(null\);/);
   assert.match(providersSource, /const realCodexConnected = codexStatus\?\.mode === "custom" && codexStatus\.proxy_running === true;/);
-  assert.match(providersSource, /const codexConnected = realCodexConnected;/);
+  assert.match(providersSource, /const codexOwnedByOtherApp = Boolean\(/);
+  assert.match(providersSource, /!realCodexConnected &&[\s\S]*effectiveCodexTargetOwner !== appFlavor\?\.routing_owner/);
+  assert.match(providersSource, /const codexConnected = realCodexConnected \|\| codexOwnedByOtherApp;/);
   assert.doesNotMatch(providersSource, /connectionPreview/);
   assert.doesNotMatch(action, /if \(!settingsDraft\) \{\s*return;\s*\}/);
   assert.match(action, /const actionLabel = nextMode === "custom" \? t\("providers\.connectingToHub"\) : t\("providers\.disconnectingFromHub"\);/);
@@ -1911,23 +2264,26 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPendingMode\(null\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /function updateToastWithError\(toastId: string, err: unknown\)[\s\S]*label: t\("gateway\.startBackend"\)[\s\S]*startBackendFromToast\(toastId\)/);
   assert.doesNotMatch(action, /historyHint/);
-  assert.match(action, /repairUnifiedHistoryInBackground\(targetProvider, toastId, codexHubConnectionSuccessMessage\(nextMode, tr\)\)/);
-  assert.doesNotMatch(action, /updateToast\(toastId,[\s\S]*text: codexHubConnectionSuccessMessage\(nextMode\),[\s\S]*tone: "success"/);
+  assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
+  assert.doesNotMatch(action, /reconcileAfterRouteSwitch/);
+  assert.match(action, /updateToast\(toastId,[\s\S]*reopenCodexForRoute[\s\S]*codexHubConnectionSuccessMessage\(nextMode, tr\)[\s\S]*tone: "success"/);
   assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
 
-test("background history repair can reuse the connection toast", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
-  const repair = providersSource.match(/async function repairUnifiedHistoryInBackground[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
+test("connection switching delegates idempotent history reconciliation to the backend", async () => {
+  const [providersSource, configSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriConfigSourcePath, "utf8"),
+  ]);
+  const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(repair, /toastId\?: string/);
-  assert.match(repair, /prefix\?: string/);
-  assert.match(repair, /const activeToastId = toastId \?\? showToast\(t\("settings\.repairingHistoryBucket"\), "loading"\)/);
-  assert.match(repair, /await api\.syncHistory\(targetProvider\)/);
-  assert.match(repair, /updateToast\(activeToastId,[\s\S]*text: prefix \? `\$\{prefix\}; \$\{message\}` : message,[\s\S]*tone: "success"/);
-  assert.match(repair, /t\("providers\.historyRepairFailed", \{ message: messageFromError\(err\) \}\)/);
-  assert.match(repair, /updateToast\(activeToastId,[\s\S]*t\("providers\.historyRepairFailed", \{ message: messageFromError\(err\) \}\)[\s\S]*tone: "error"/);
-  assert.doesNotMatch(repair, /historyRepairSuccessMessage/);
+  assert.match(configSource, /switch_mode_with_paths_takeover\([\s\S]*crate::history::reconcile_after_confirmed_route_switch\(Some\(target_provider\)\)/);
+  assert.match(configSource, /mode == "custom" \|\| settings\.unified_codex_history/);
+  assert.match(configSource, /status\.history_sync_status = Some\(result\.status\.as_str\(\)\.to_string\(\)\)/);
+  // The route command owns reconciliation; the UI must not launch a duplicate repair.
+  assert.doesNotMatch(action, /targetProvider/);
+  assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
+  assert.doesNotMatch(action, /reconcileAfterRouteSwitch/);
 });
 
 test("Codex Hub connection failures no longer mention history sync", async () => {
@@ -1974,7 +2330,9 @@ test("Codex Hub connection does not retry after history sync failures", async ()
 test("unknown provider model metadata is not displayed as a 200K default", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
 
-  assert.match(providersSource, /function formatContextWindow\(value\?: number \| null\)[\s\S]*return i18n\.t\("common\.unknown"\);/);
+  assert.match(providersSource, /function formatContextWindow\(value\?: number \| null\)[\s\S]*return i18n\.t\("providers\.contextDynamic"\);/);
+  assert.match(providersSource, /model\.max_context_window/);
+  assert.match(providersSource, /model\.effective_source \?\? model\.max_source/);
   assert.match(providersSource, /context_window: model\.context_window \?\? null/);
   assert.doesNotMatch(providersSource, /context_window: model\.context_window \?\? 200_000/);
 });
@@ -2049,19 +2407,22 @@ test("provider catalog writes trigger best-effort bound client sync", async () =
   assert.match(providersSource, /auto_sync_clients/);
 });
 
-test("settings drawer reports the backend sync result", async () => {
+test("settings drawer reports a localized structured sync result", async () => {
   const [appSource, drawerSource, tauriSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(settingsDrawerPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
   ]);
 
-  assert.match(appSource, /const message = await api\.syncHistory\(targetProvider\)/);
-  assert.match(appSource, /api\.migrateOfficialHistoryToUnified\(\)/);
-  assert.match(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
+  assert.match(appSource, /api\.syncConversationHistory\(targetProvider\)/);
+  assert.doesNotMatch(appSource, /const message = await api\.syncHistory\(targetProvider\)/);
+  assert.doesNotMatch(appSource, /api\.migrateOfficialHistoryToUnified\(\)/);
+  assert.doesNotMatch(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.doesNotMatch(saveAction, /preflightUnifiedHistory|syncHistory/);
   assert.match(appSource, /return message/);
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
-  assert.match(drawerSource, /showToast\(t\("settings\.repairingHistoryBucket"\), "loading"\)/);
+  assert.match(drawerSource, /showToast\(t\("settings\.syncingConversationHistory"\), "loading"\)/);
   assert.match(drawerSource, /const message = await onSyncHistory\(targetProvider\)/);
   assert.match(drawerSource, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "success"/);
   assert.doesNotMatch(drawerSource, /onMigrateOfficialHistory/);
@@ -2069,6 +2430,27 @@ test("settings drawer reports the backend sync result", async () => {
   assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);
   assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) => call<string>\("restore_official_history_from_unified"\)/);
   assert.doesNotMatch(drawerSource, /History sync requested/);
+});
+
+test("Windows portable build uses the Tauri custom protocol pipeline", async () => {
+  const portableScript = await readFile(buildWindowsPortablePath, "utf8");
+
+  assert.match(portableScript, /Prepare-PythonRuntime\.ps1/);
+  assert.match(portableScript, /cargo tauri build --config \$generatedTauriConfigPath --no-bundle --ci/);
+  assert.doesNotMatch(portableScript, /cargo build --release/);
+});
+
+test("CodexHub route switches never control Codex processes", async () => {
+  const [providersSource, tauriSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+  ]);
+
+  assert.match(tauriSource, /reconcileAfterRouteSwitch/);
+  assert.match(tauriSource, /"reconcile_after_route_switch"/);
+  assert.doesNotMatch(providersSource, /api\.reconcileAfterRouteSwitch/);
+  assert.doesNotMatch(providersSource, /codexRestartedForRoute/);
+  assert.match(providersSource, /reopenCodexForRoute/);
 });
 
 test("settings drawer keeps language immediate and protects unsaved drafts", async () => {
@@ -2283,7 +2665,7 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.match(zhSource, /installUpdate: "安装更新"/);
 });
 
-test("gateway client cards render tri-state routing owner colors", async () => {
+test("gateway client takeover stays inside the original two-option control", async () => {
   const [cardSource, typesSource, tauriSource, gatewaySource, enSource, zhSource] = await Promise.all([
     readFile(gatewayClientCardPath, "utf8"),
     readFile(typesPath, "utf8"),
@@ -2297,28 +2679,58 @@ test("gateway client cards render tri-state routing owner colors", async () => {
   assert.match(typesSource, /route_owner: RoutingOwner/);
   assert.match(tauriSource, /getAppFlavor/);
   assert.match(tauriSource, /forceTakeover/);
-  assert.match(cardSource, /ROUTING_OWNER_STYLES/);
-  assert.match(cardSource, /release:[\s\S]*border-sky-300[\s\S]*bg-sky-50[\s\S]*text-sky-800/);
-  assert.match(cardSource, /beta:[\s\S]*border-amber-300[\s\S]*bg-amber-50[\s\S]*text-amber-800/);
-  assert.match(cardSource, /Managed by/);
+  assert.doesNotMatch(cardSource, /ROUTING_OWNER_STYLES|hostPort\(|route_endpoint/);
+  assert.doesNotMatch(cardSource, /\{t\("gateway\.takeover"\)\}/);
+  assert.match(cardSource, /const takeoverRequired = routeOwner !== "official" && info\?\.managed_by_current_app === false/);
+  assert.match(cardSource, /<SegmentedSwitch/);
+  assert.match(cardSource, /activeTone=\{takeoverRequired \? "foreign" : "default"\}/);
+  assert.match(cardSource, /takeoverRequired && mode === "current_owner" \? "takeover" : mode/);
+  assert.match(cardSource, /`\$\{t\("common\.codexHub"\)\} · \$\{routeOwnerLabel\}`/);
   assert.match(cardSource, /runtimeOwner: RoutingOwner \| null/);
   assert.match(cardSource, /ownerUnavailable/);
   assert.match(gatewaySource, /takeover/i);
-  assert.match(gatewaySource, /newEndpoint:/);
-  assert.match(gatewaySource, /oldEndpoint:/);
-  assert.match(gatewaySource, /const port = settings\?\.proxy_port \?\? status\?\.port \?\? appFlavor\?\.gateway_port;/);
-  assert.match(gatewaySource, /http:\/\/127\.0\.0\.1:\$\{port\}\/v1/);
+  assert.match(gatewaySource, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
+  assert.doesNotMatch(gatewaySource, /TakeoverSummaryDialog/);
   assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
   assert.match(enSource, /managedByRelease/);
-  assert.match(enSource, /managedByBeta/);
-  assert.match(enSource, /ownerUnavailable/);
-  assert.match(enSource, /oldEndpoint/);
-  assert.match(enSource, /newEndpoint/);
   assert.match(zhSource, /managedByRelease/);
-  assert.match(zhSource, /managedByBeta/);
-  assert.match(zhSource, /ownerUnavailable/);
-  assert.match(zhSource, /oldEndpoint/);
-  assert.match(zhSource, /newEndpoint/);
+});
+
+test("Codex takeover uses the existing connected control and exposes ownership state", async () => {
+  const [typesSource, tauriSource, providersSource, enSource, zhSource] = await Promise.all([
+    readFile(typesPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /runtime_home_suffix: string/);
+  assert.match(typesSource, /codex_target_home_suffix: string/);
+  assert.match(typesSource, /codex_target_owner: RoutingOwner \| null/);
+  assert.match(typesSource, /codex_takeover_required: boolean/);
+  assert.match(tauriSource, /switchMode: \(mode: string, autoSync: boolean, forceTakeover = false\)/);
+  assert.match(tauriSource, /forceTakeover/);
+  assert.match(providersSource, /appFlavor\?\.codex_takeover_required/);
+  assert.doesNotMatch(providersSource, /window\.confirm\(t\("providers\.betaTakeoverConfirm"/);
+  assert.doesNotMatch(providersSource, /TakeoverSummaryDialog/);
+  assert.match(providersSource, /forceTakeover[\s\S]*api\.switchMode\(nextMode, false, true\)/);
+  assert.match(providersSource, /await applyCodexHubConnection\(nextMode, Boolean\(appFlavor\?\.codex_takeover_required\)\)/);
+  assert.match(providersSource, /setCodexTargetOwnerOverride\(nextMode === "custom" \? appFlavor\?\.routing_owner \?\? null : "official"\)/);
+  assert.match(providersSource, /codexForeignOwner=\{codexOwnedByOtherApp\}/);
+  assert.match(providersSource, /bg-emerald-100 text-emerald-700/);
+  assert.doesNotMatch(providersSource, /Codex is managed by/);
+  assert.match(enSource, /connectedToHubChannel:/);
+  assert.match(zhSource, /connectedToHubChannel:/);
+  assert.match(zhSource, /connectedToHubChannel: "已连接到 CodexHub · \{\{channel\}\}"/);
+});
+
+test("gateway takeover is direct and does not add a confirmation surface", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+
+  assert.doesNotMatch(gatewaySource, /window\.confirm/);
+  assert.doesNotMatch(gatewaySource, /TakeoverSummaryDialog/);
+  assert.match(gatewaySource, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {
