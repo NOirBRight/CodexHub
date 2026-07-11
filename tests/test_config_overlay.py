@@ -276,7 +276,7 @@ class ConfigOverlayTests(unittest.TestCase):
 
             self.assertEqual(config.read_text(encoding="utf-8"), previous)
 
-    def test_beta_takeover_reapply_disconnect_restores_unowned_bytes_exactly(self):
+    def test_beta_takeover_reapply_disconnect_unifies_unowned_history(self):
         original = b'model = "original"\r\n[features]\r\nfoo = true\r\n'
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -289,7 +289,12 @@ class ConfigOverlayTests(unittest.TestCase):
             apply_overlay(config, backup, catalog, "http://127.0.0.1:9109", owner="beta")
             restore_overlay(config, backup, unified_history=True)
 
-            self.assertEqual(config.read_bytes(), original)
+            restored = config.read_text(encoding="utf-8")
+            self.assertIn('model = "original"', restored)
+            self.assertIn('model_provider = "custom"', restored)
+            self.assertIn('[model_providers.custom]', restored)
+            self.assertIn('name = "OpenAI"', restored)
+            self.assertNotIn("base_url", restored)
             self.assertFalse(backup.exists())
 
     def test_beta_takeover_reapply_disconnect_restores_stable_owner_bytes_exactly(self):

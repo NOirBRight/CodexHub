@@ -1501,7 +1501,7 @@ sort_order = 7
     }
 
     #[test]
-    fn beta_backend_takeover_chain_with_default_unified_history_restores_original_bytes() {
+    fn beta_backend_takeover_chain_with_default_unified_history_preserves_the_custom_bucket() {
         for (name, original) in [
             ("unowned", b"model_reasoning_effort = \"high\"\r\n".as_slice()),
             (
@@ -1575,7 +1575,16 @@ sort_order = 7
             )
             .unwrap();
 
-            assert_eq!(fs::read(paths.codex_config_path()).unwrap(), original);
+            let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+            if name == "stable" {
+                assert_eq!(restored.as_bytes(), original);
+            } else {
+                assert!(restored.contains("model_provider = \"custom\""));
+                assert!(restored.contains("[model_providers.custom]"));
+                assert!(restored.contains("name = \"OpenAI\""));
+                assert!(!restored.contains("base_url"));
+                assert!(restored.contains("model_reasoning_effort"));
+            }
             assert!(!paths.config_backup_path_for_owner(crate::app_flavor::RoutingOwner::Beta).exists());
         }
     }

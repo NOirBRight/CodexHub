@@ -406,10 +406,12 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
         current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
         restore_from_backup = True
         if is_active_takeover_backup(current, restored, backup_path):
-            atomic_write_text(config_path, restored, encoding="utf-8")
-            backup_path.unlink()
-            takeover_metadata_path(backup_path).unlink()
-            return "restored_takeover_backup"
+            restored_owner = overlay_owner(restored)
+            if not unified_history or restored_owner is not None:
+                atomic_write_text(config_path, restored, encoding="utf-8")
+                backup_path.unlink()
+                takeover_metadata_path(backup_path).unlink()
+                return "restored_takeover_backup"
     elif config_path.exists():
         restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
         restore_from_backup = False

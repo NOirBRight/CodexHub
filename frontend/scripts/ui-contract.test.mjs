@@ -2113,9 +2113,10 @@ test("startup refresh follows Codex catalog order until the user customizes it",
   const { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder } = await import(moduleUrl);
 
   assert.match(providersSource, /void primeOfficialModels\(\);[\s\S]*void primeOfficialOpenAIUsage\(\);/);
-  assert.match(refresh, /shouldFollowOfficialCatalogOrder\(officialModelOrderDraft\)[\s\S]*refreshed\.map\(\(model\) => model\.id\)/);
+  assert.match(refresh, /const followsAutomaticOrder = shouldFollowOfficialCatalogOrder\(officialModelOrderDraft\)/);
   assert.match(refresh, /refreshedOfficialModelOrder\(officialModelOrderDraft, refreshed\)/);
-  assert.match(refresh, /setOfficialModelOrderDraft\(nextOrder\)/);
+  assert.match(refresh, /if \(!followsAutomaticOrder\) \{\s*setOfficialModelOrderDraft\(nextOrder\);\s*\}/);
+  assert.doesNotMatch(refresh, /refreshed\.map\(\(model\) => model\.id\)/);
   assert.match(refresh, /sortOfficialModels\(refreshed, nextOrder\)/);
   assert.equal(
     shouldFollowOfficialCatalogOrder([

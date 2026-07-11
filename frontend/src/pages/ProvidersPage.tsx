@@ -1138,10 +1138,13 @@ function ProvidersPageImpl({
       : showToast(t("providers.refreshingOfficialModels"), "loading");
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
-      const nextOrder = shouldFollowOfficialCatalogOrder(officialModelOrderDraft)
-        ? refreshed.map((model) => model.id)
+      const followsAutomaticOrder = shouldFollowOfficialCatalogOrder(officialModelOrderDraft);
+      const nextOrder = followsAutomaticOrder
+        ? officialModelOrderDraft
         : refreshedOfficialModelOrder(officialModelOrderDraft, refreshed);
-      setOfficialModelOrderDraft(nextOrder);
+      if (!followsAutomaticOrder) {
+        setOfficialModelOrderDraft(nextOrder);
+      }
       setOfficialModels(sortOfficialModels(refreshed, nextOrder));
       if (quiet) {
         await api.generateCatalog();
