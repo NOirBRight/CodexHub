@@ -109,11 +109,45 @@ impl ConfigPaths {
         &self,
         owner: crate::app_flavor::RoutingOwner,
     ) -> PathBuf {
+        self.config_backup_path_for_runtime(&self.runtime_dir, owner)
+    }
+
+    fn config_backup_path_for_target_owner(
+        &self,
+        current_app_owner: crate::app_flavor::RoutingOwner,
+        target_owner: crate::app_flavor::RoutingOwner,
+    ) -> PathBuf {
+        if target_owner == current_app_owner {
+            return self.config_backup_path_for_owner(target_owner);
+        }
+        let flavor = match target_owner {
+            crate::app_flavor::RoutingOwner::Release => {
+                Some(crate::app_flavor::RuntimeFlavor::Stable)
+            }
+            crate::app_flavor::RoutingOwner::Beta => Some(crate::app_flavor::RuntimeFlavor::Beta),
+            crate::app_flavor::RoutingOwner::Official
+            | crate::app_flavor::RoutingOwner::UnknownExternal => None,
+        };
+        let runtime_dir = self
+            .codex_target_dir
+            .parent()
+            .and_then(|home| {
+                flavor.map(|flavor| runtime_paths::homes_for_flavor(home, flavor).runtime)
+            })
+            .unwrap_or_else(|| self.runtime_dir.clone());
+        self.config_backup_path_for_runtime(&runtime_dir, target_owner)
+    }
+
+    fn config_backup_path_for_runtime(
+        &self,
+        runtime_dir: &Path,
+        owner: crate::app_flavor::RoutingOwner,
+    ) -> PathBuf {
         let name = match owner {
             crate::app_flavor::RoutingOwner::Beta => "config.toml.beta.backup",
             _ => "config.toml.release.backup",
         };
-        self.proxy_dir().join(name)
+        runtime_dir.join("proxy").join(name)
     }
 
     fn generated_catalog_path(&self) -> PathBuf {
@@ -558,13 +592,14 @@ fn switch_mode_with_paths_takeover_as_owner(
     ensure_mode_switch_directories(paths)?;
 
     let overlay_result = if mode == "official" {
+        let backup_owner = target_owner.unwrap_or(current_app_owner);
         let mut args = vec![
             "restore".to_string(),
             "--config".to_string(),
             paths.codex_config_path().to_string_lossy().into_owned(),
             "--backup".to_string(),
             paths
-                .config_backup_path_for_owner(current_app_owner)
+                .config_backup_path_for_target_owner(current_app_owner, backup_owner)
                 .to_string_lossy()
                 .into_owned(),
         ];
@@ -1478,20 +1513,21 @@ sort_order = 7
     #[test]
     fn beta_can_explicitly_switch_stable_owned_codex_to_unified_official() {
         let root = temp_root("beta-force-stable-to-official");
-        let runtime = root.join(".codexhub-beta");
         let target = root.join(".codex");
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .to_path_buf();
-        let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+        let stable_paths = ConfigPaths::new_isolated(&target, &target, &repo);
+        let beta_paths = ConfigPaths::new_isolated(root.join(".codexhub-beta"), &target, repo);
         fs::create_dir_all(&target).unwrap();
         fs::write(
-            paths.codex_config_path(),
-            b"model_reasoning_effort = \"high\"\n",
+            stable_paths.codex_config_path(),
+            b"model = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\n",
         )
         .unwrap();
-        save_settings_with_paths(Settings::default(), &paths).unwrap();
+        save_settings_with_paths(Settings::default(), &stable_paths).unwrap();
+        save_settings_with_paths(Settings::default(), &beta_paths).unwrap();
         let python = super::find_python();
         let runner = ProcessCommandRunner;
 
@@ -1499,7 +1535,7 @@ sort_order = 7
             crate::app_flavor::RoutingOwner::Release,
             "custom",
             false,
-            &paths,
+            &stable_paths,
             &python,
             &runner,
         )
@@ -1509,15 +1545,17 @@ sort_order = 7
             crate::app_flavor::RoutingOwner::Beta,
             "official",
             true,
-            &paths,
+            &beta_paths,
             &python,
             &runner,
         )
         .unwrap();
 
-        let restored = fs::read_to_string(paths.codex_config_path()).unwrap();
+        let restored = fs::read_to_string(beta_paths.codex_config_path()).unwrap();
         assert!(restored.contains("model_provider = \"custom\""));
         assert!(restored.contains("name = \"OpenAI\""));
+        assert!(restored.contains("model = \"gpt-5.4\""));
+        assert!(restored.contains("model_reasoning_effort = \"high\""));
         assert!(!restored.contains("# owner = release"));
         assert!(!restored.contains("base_url"));
     }
