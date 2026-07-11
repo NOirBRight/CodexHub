@@ -177,6 +177,18 @@ pub enum UnifiedHistoryStatus {
     Conflict,
 }
 
+impl UnifiedHistoryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Repaired => "repaired",
+            Self::Deferred => "deferred",
+            Self::RestartRequired => "restart_required",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnifiedHistoryResult {
     pub status: UnifiedHistoryStatus,
@@ -733,10 +745,34 @@ pub fn sync_history(target_provider: Option<&str>) -> Result<String, String> {
 pub fn reconcile_after_route_switch(
     target_provider: Option<&str>,
 ) -> Result<UnifiedHistoryResult, String> {
-    let _ = target_unified_from_provider(target_provider)?;
-    Ok(UnifiedHistoryResult::clean(Some(
-        "route_changed_history_unchanged",
-    )))
+    let target_unified = target_unified_from_provider(target_provider)?;
+    preflight_unified_history(true, Some(target_unified))
+}
+
+pub(crate) fn reconcile_after_confirmed_route_switch(
+    target_provider: Option<&str>,
+) -> Result<UnifiedHistoryResult, String> {
+    let target = HistoryBucketTarget::from_unified(target_unified_from_provider(target_provider)?);
+    let _repair_guard = match acquire_history_repair(true, &HISTORY_REPAIR_IN_PROGRESS) {
+        Ok(guard) => guard,
+        Err(result) => return Ok(result),
+    };
+    let paths = ConfigPaths::runtime()?;
+    let clock = SystemHistoryClock;
+    let budget = HistoryOperationBudget::new(&clock);
+    let python = config::find_python();
+    let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
+    preflight_unified_history_with_budget(
+        PreflightRequest {
+            target: PreflightTarget::Explicit(target),
+            apply_repairs: true,
+        },
+        &paths,
+        &python,
+        &runner,
+        &budget,
+        true,
+    )
 }
 
 fn target_unified_from_provider(target_provider: Option<&str>) -> Result<bool, String> {
@@ -752,14 +788,19 @@ fn target_unified_from_provider(target_provider: Option<&str>) -> Result<bool, S
 #[cfg(test)]
 fn reconcile_after_route_switch_with_paths(
     target: HistoryBucketTarget,
-    _paths: &ConfigPaths,
-    _python: &Path,
-    _runner: &dyn CommandRunner,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
 ) -> Result<UnifiedHistoryResult, String> {
-    let _ = target;
-    Ok(UnifiedHistoryResult::clean(Some(
-        "route_changed_history_unchanged",
-    )))
+    preflight_unified_history_with_paths(
+        PreflightRequest {
+            target: PreflightTarget::Explicit(target),
+            apply_repairs: true,
+        },
+        paths,
+        python,
+        runner,
+    )
 }
 
 fn legacy_reconcile_message(
@@ -1135,7 +1176,7 @@ mod tests {
 
         assert_eq!(result.status, UnifiedHistoryStatus::Clean);
         assert!(!result.codex_restarted);
-        assert_eq!(runner.commands.borrow().len(), 0);
+        assert_eq!(runner.commands.borrow().len(), 2);
     }
 
     #[test]
@@ -1155,11 +1196,37 @@ mod tests {
         .expect("route switch result");
 
         assert_eq!(result.status, UnifiedHistoryStatus::Clean);
-        assert_eq!(
-            result.reason.as_deref(),
-            Some("route_changed_history_unchanged")
-        );
-        assert_eq!(runner.commands.borrow().len(), 0);
+        assert_eq!(result.reason, None);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert!(commands
+            .iter()
+            .all(|command| command.args.iter().any(|arg| arg == "inspect-unified")));
+    }
+
+    #[test]
+    fn route_switch_repairs_new_openai_drift_back_into_the_unified_bucket() {
+        let root = temp_root("route-switch-repairs-new-openai-drift");
+        let paths = test_paths(&root);
+        let runner = SequenceRunner::successful([
+            r#"{"status":"clean"}"#,
+            r#"{"status":"needs_repair","dirty_state_rows":1,"dirty_state_files":1,"dirty_jsonl_files":1}"#,
+            "status=completed\nstate_rows=1\njsonl_applied=1\n",
+        ]);
+
+        let result = reconcile_after_route_switch_with_paths(
+            HistoryBucketTarget::Unified,
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("route switch reconciliation");
+
+        assert_eq!(result.status, UnifiedHistoryStatus::Repaired);
+        assert_eq!(result.changed_rows, 1);
+        assert_eq!(result.changed_files, 2);
+        assert!(!result.codex_restarted);
+        assert_eq!(runner.commands.borrow().len(), 3);
     }
 
     #[test]

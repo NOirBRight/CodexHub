@@ -5358,12 +5358,21 @@ def _rewrite_structured_tool_input_items(
     changed = False
     rewritten_items: list[Any] = []
     preserved_structured_call_ids: set[str] = set()
+    available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
-            if _multi_agent_function_call_name(item) is not None or _node_repl_function_call_name(item) is not None:
+            function_name = item.get("name")
+            preserve_available_function = (
+                isinstance(function_name, str) and function_name in available_function_names
+            )
+            if (
+                preserve_available_function
+                or _multi_agent_function_call_name(item) is not None
+                or _node_repl_function_call_name(item) is not None
+            ):
                 call_id = item.get("call_id")
                 if isinstance(call_id, str):
                     preserved_structured_call_ids.add(call_id)

@@ -4983,7 +4983,7 @@ class RoutingTests(unittest.TestCase):
         for forbidden in ('"type":"compaction"', '"type":"compaction_trigger"', '"type":"reasoning"', "gAAAA"):
             self.assertNotIn(forbidden, raw)
 
-    def test_external_responses_structured_body_transcripts_ordinary_tool_history(self):
+    def test_external_responses_structured_body_preserves_available_tool_history(self):
         upstream = {
             "name": "ollama_cloud",
             "upstream_model": "glm-5.2",
@@ -5024,15 +5024,16 @@ class RoutingTests(unittest.TestCase):
         raw = transformed.decode("utf-8")
 
         self.assertEqual(payload["model"], "glm-5.2")
-        self.assertEqual([item["type"] for item in payload["input"][:4]], ["message", "message", "message", "message"])
-        self.assertEqual(payload["input"][1]["role"], "developer")
-        self.assertIn("Read-only Codex function call transcript", payload["input"][1]["content"])
-        self.assertIn("shell_command", payload["input"][1]["content"])
-        self.assertEqual(payload["input"][2]["role"], "developer")
-        self.assertIn("Read-only Codex function result transcript", payload["input"][2]["content"])
-        self.assertIn("Output", payload["input"][2]["content"])
-        self.assertNotIn('"type":"function_call"', raw)
-        self.assertNotIn('"type":"function_call_output"', raw)
+        self.assertEqual(
+            [item["type"] for item in payload["input"][:4]],
+            ["message", "function_call", "function_call_output", "message"],
+        )
+        self.assertEqual(payload["input"][1]["name"], "shell_command")
+        self.assertEqual(payload["input"][1]["call_id"], "call_shell")
+        self.assertEqual(payload["input"][2]["call_id"], "call_shell")
+        self.assertIn("Output", payload["input"][2]["output"])
+        self.assertIn('"type":"function_call"', raw)
+        self.assertIn('"type":"function_call_output"', raw)
 
     def test_external_no_tool_protocol_body_sanitizes_internal_input_items(self):
         upstream = {

@@ -265,6 +265,68 @@ class ChatRequestToResponsesTests(unittest.TestCase):
         self.assertNotIn("tool_choice", payload)
 
 
+class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
+    def test_native_responses_preserves_completed_shell_call_as_structured_history(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "test"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_list_skills",
+                        "name": "shell_command",
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    'Get-ChildItem "$env:USERPROFILE\\.codex\\skills" '
+                                    "-Directory | Select-Object Name"
+                                )
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_list_skills",
+                        "output": "Exit code: 0\nOutput:\nask-matt\ncode-review\n",
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell_command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"],
+                        },
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+        }
+
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                body,
+                upstream,
+                model_id="glm-5.2",
+                behavior_profile=codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+            )
+        )
+
+        self.assertEqual(payload["input"][1]["type"], "function_call")
+        self.assertEqual(payload["input"][1]["name"], "shell_command")
+        self.assertEqual(payload["input"][2]["type"], "function_call_output")
+        self.assertEqual(payload["input"][2]["call_id"], "call_list_skills")
+        self.assertIn("ask-matt", payload["input"][2]["output"])
+
+
 class RequestKindDetectionTests(unittest.TestCase):
     def test_compact_header_marks_request_kind_without_prompt_heuristic(self):
         payload = {"model": "gpt-5.5", "input": "summarize"}

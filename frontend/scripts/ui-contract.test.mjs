@@ -32,6 +32,7 @@ const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.u
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
 const tauriAppUpdatesPath = new URL("../../src-tauri/src/app_updates.rs", import.meta.url);
 const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
+const tauriConfigSourcePath = new URL("../../src-tauri/src/config.rs", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
 const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
@@ -2269,10 +2270,17 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
 
-test("connection switching never mutates history", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+test("connection switching delegates idempotent history reconciliation to the backend", async () => {
+  const [providersSource, configSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriConfigSourcePath, "utf8"),
+  ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
+  assert.match(configSource, /switch_mode_with_paths_takeover\([\s\S]*crate::history::reconcile_after_confirmed_route_switch\(Some\(target_provider\)\)/);
+  assert.match(configSource, /mode == "custom" \|\| settings\.unified_codex_history/);
+  assert.match(configSource, /status\.history_sync_status = Some\(result\.status\.as_str\(\)\.to_string\(\)\)/);
+  // The route command owns reconciliation; the UI must not launch a duplicate repair.
   assert.doesNotMatch(action, /targetProvider/);
   assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
   assert.doesNotMatch(action, /reconcileAfterRouteSwitch/);

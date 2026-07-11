@@ -36,7 +36,34 @@ pub fn switch_mode_with_takeover(
     let python = find_python();
     let runner = ProcessCommandRunner;
 
-    switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)
+    let mut status =
+        switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;
+    let settings = get_settings_with_paths(&paths).unwrap_or_default();
+    let target_provider = if mode == "custom" || settings.unified_codex_history {
+        "custom"
+    } else {
+        "openai"
+    };
+
+    match crate::history::reconcile_after_confirmed_route_switch(Some(target_provider)) {
+        Ok(result) => {
+            status.history_sync_status = Some(result.status.as_str().to_string());
+            status.history_sync_message = result.error.or(result.reason).or_else(|| {
+                (result.changed_rows > 0 || result.changed_files > 0).then(|| {
+                    format!(
+                        "changed {} history rows and {} files",
+                        result.changed_rows, result.changed_files
+                    )
+                })
+            });
+        }
+        Err(error) => {
+            status.history_sync_status = Some("conflict".to_string());
+            status.history_sync_message = Some(error);
+        }
+    }
+
+    Ok(status)
 }
 
 #[derive(Debug, Clone)]
