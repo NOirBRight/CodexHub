@@ -29,6 +29,7 @@ from providers_config import (
     load_providers,
     runtime_providers_path,
 )
+from model_limits import apply_resolved_model_limits, load_resolved_model_limits
 
 
 PROXY_DIR = Path(__file__).resolve().parent
@@ -58,6 +59,8 @@ GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / GENERATED_CATALOG_FILENAME
 LEGACY_GENERATED_CATALOG_PATH = RUNTIME_MODEL_CATALOG_DIR / LEGACY_GENERATED_CATALOG_FILENAME
 GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
 SETTINGS_PATH = RUNTIME_CODEX_DIR / "proxy" / "settings.json"
+RESOLVED_MODEL_LIMITS_PATH = REPO_ROOT / "config" / "resolved_model_limits.json"
+RESOLVED_MODEL_LIMITS = load_resolved_model_limits(RESOLVED_MODEL_LIMITS_PATH)
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -638,6 +641,12 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
     model["display_name"] = official_short_display_name(slug, model, policy)
     if source_model is None:
         apply_official_model_defaults(model, slug)
+    limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
+    live_context = model.get("context_window")
+    apply_resolved_model_limits(model, limits)
+    if isinstance(live_context, int) and live_context > 0:
+        model["context_window"] = live_context
+        model["effective_source"] = "codex_app_model_list"
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     proxy_metadata.update(
         {
@@ -696,6 +705,7 @@ def build_ollama_model(
 
 
 def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: dict[str, dict[str, Any]]) -> None:
+    apply_resolved_model_limits(model, RESOLVED_MODEL_LIMITS.get(("ollama-cloud", slug)))
     static_limits = OLLAMA_MODEL_LIMIT_OVERRIDES.get(slug, {})
     context_window = static_limits.get("context_window")
     context_source = "static_official_fallback" if context_window else None
@@ -825,6 +835,12 @@ def build_external_provider_model(
     if max_output_source is not None:
         proxy_metadata["max_output_source"] = max_output_source
     model["codex_proxy_metadata"] = proxy_metadata
+    apply_resolved_model_limits(
+        model,
+        RESOLVED_MODEL_LIMITS.get(
+            (str(external_model["provider_alias"]), str(external_model["upstream_model"]))
+        ),
+    )
     return model
 
 

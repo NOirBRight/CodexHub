@@ -78,7 +78,7 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
-test("startup history preflight is read-only and explicit sync never controls Codex", async () => {
+test("history sync is explicit and never participates in startup or settings save", async () => {
   const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
@@ -90,14 +90,17 @@ test("startup history preflight is read-only and explicit sync never controls Co
 
   assert.match(typesSource, /export interface UnifiedHistoryResult/);
   assert.match(tauriSource, /preflightUnifiedHistory: \(applyRepairs = false, targetUnified\?: boolean\)/);
+  assert.match(tauriSource, /getConversationSyncStatus/);
+  assert.match(tauriSource, /syncConversationHistory/);
+  assert.match(tauriSource, /diagnoseConversationHistory/);
   assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
   assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
   assert.match(webBridgeSource, /"preflight_unified_history"/);
-  const startupEffect = appSource.match(/if \(historyPreflightStarted\.current[\s\S]*?return \(\) => window\.clearTimeout\(timer\);[\s\S]*?\}, \[[^\]]*\]\);/)?.[0] ?? "";
-  assert.match(startupEffect, /api\.preflightUnifiedHistory\(false\)/);
-  assert.doesNotMatch(startupEffect, /api\.preflightUnifiedHistory\(true\)/);
-  assert.match(appSource, /api\.preflightUnifiedHistory\(true\)/);
-  assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
+  assert.doesNotMatch(appSource, /historyPreflightStarted/);
+  assert.doesNotMatch(appSource, /api\.preflightUnifiedHistory\(false\)/);
+  assert.match(appSource, /api\.syncConversationHistory\(\)/);
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.doesNotMatch(saveAction, /preflightUnifiedHistory|syncHistory|repairConversationHistory/);
   assert.match(appSource, /result\.status === "restart_required"/);
   assert.match(appSource, /result\.status === "deferred"/);
   assert.match(historySource, /preflight_unified_history_with_budget\([\s\S]*&budget,\s*true,\s*\)/);
@@ -110,8 +113,8 @@ test("history repair action waits for the bounded backend and always unlocks", a
   const appSource = await readFile(appPath, "utf8");
   const action = appSource.match(/const repairConversationHistory = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
-  assert.equal((action.match(/api\.preflightUnifiedHistory\(true\)/g) ?? []).length, 1);
-  assert.match(action, /await api\.preflightUnifiedHistory\(true\)/);
+  assert.equal((action.match(/api\.syncConversationHistory\(\)/g) ?? []).length, 1);
+  assert.match(action, /await api\.syncConversationHistory\(\)/);
   assert.doesNotMatch(appSource, /HISTORY_OPERATION_TIMEOUT_MS|settleWithin|Promise\.race/);
   assert.match(action, /t\(historyIssueKey\(result\)\)/);
   assert.doesNotMatch(action, /result\.error|result\.reason/);
@@ -119,12 +122,12 @@ test("history repair action waits for the bounded backend and always unlocks", a
   assert.match(action, /finally \{[\s\S]*setBusy\(null\)/);
 });
 
-test("a deferred history migration keeps the requested setting for startup retry", async () => {
+test("changing the history preference only persists the preference", async () => {
   const appSource = await readFile(appPath, "utf8");
   const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
-  assert.match(saveAction, /result\.status === "deferred"[\s\S]*historyReconciled = true[\s\S]*historyMessage = t\("settings\.historySyncDeferred"\)/);
-  assert.doesNotMatch(saveAction, /result\.status === "deferred"[\s\S]{0,120}throw new Error/);
+  assert.doesNotMatch(saveAction, /preflightUnifiedHistory|historyReconciled|historyMessage/);
+  assert.match(saveAction, /api\.saveSettings\(next\)/);
 });
 
 test("history sync uses user-facing terminology and hides internal timeout details", async () => {
@@ -2315,7 +2318,9 @@ test("Codex Hub connection does not retry after history sync failures", async ()
 test("unknown provider model metadata is not displayed as a 200K default", async () => {
   const providersSource = await readFile(providersPagePath, "utf8");
 
-  assert.match(providersSource, /function formatContextWindow\(value\?: number \| null\)[\s\S]*return i18n\.t\("common\.unknown"\);/);
+  assert.match(providersSource, /function formatContextWindow\(value\?: number \| null\)[\s\S]*return i18n\.t\("providers\.contextDynamic"\);/);
+  assert.match(providersSource, /model\.max_context_window/);
+  assert.match(providersSource, /model\.effective_source \?\? model\.max_source/);
   assert.match(providersSource, /context_window: model\.context_window \?\? null/);
   assert.doesNotMatch(providersSource, /context_window: model\.context_window \?\? 200_000/);
 });
@@ -2397,12 +2402,12 @@ test("settings drawer reports a localized structured sync result", async () => {
     readFile(tauriSourcePath, "utf8"),
   ]);
 
-  assert.match(appSource, /api\.preflightUnifiedHistory\(true, targetProvider !== "openai"\)/);
+  assert.match(appSource, /api\.syncConversationHistory\(targetProvider\)/);
   assert.doesNotMatch(appSource, /const message = await api\.syncHistory\(targetProvider\)/);
   assert.doesNotMatch(appSource, /api\.migrateOfficialHistoryToUnified\(\)/);
   assert.doesNotMatch(appSource, /api\.restoreOfficialHistoryFromUnified\(\)/);
-  assert.match(appSource, /api\.preflightUnifiedHistory\(true, nextUnified\)/);
-  assert.match(appSource, /const restoredSettings = await api\.saveSettings\(settings\)/);
+  const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.doesNotMatch(saveAction, /preflightUnifiedHistory|syncHistory/);
   assert.match(appSource, /return message/);
   assert.match(drawerSource, /onSyncHistory: \(targetProvider: string\) => Promise<string>/);
   assert.match(drawerSource, /showToast\(t\("settings\.syncingConversationHistory"\), "loading"\)/);
@@ -2699,14 +2704,22 @@ test("Beta Codex takeover is explicit and exposes ownership conflict state", asy
   assert.match(tauriSource, /switchMode: \(mode: string, autoSync: boolean, forceTakeover = false\)/);
   assert.match(tauriSource, /forceTakeover/);
   assert.match(providersSource, /appFlavor\?\.codex_takeover_required/);
-  assert.match(providersSource, /window\.confirm/);
+  assert.doesNotMatch(providersSource, /window\.confirm\(t\("providers\.betaTakeoverConfirm"/);
+  assert.match(providersSource, /TakeoverSummaryDialog/);
   assert.match(providersSource, /forceTakeover[\s\S]*api\.switchMode\(nextMode, false, true\)/);
-  assert.match(providersSource, /t\("providers\.betaTakeoverConfirm"/);
+  assert.match(providersSource, /setPendingCodexTakeover/);
   assert.doesNotMatch(providersSource, /Codex is managed by/);
-  assert.match(enSource, /betaTakeoverConfirm:/);
-  assert.match(enSource, /betaTakeoverUnowned:/);
-  assert.match(zhSource, /betaTakeoverConfirm:/);
-  assert.match(zhSource, /betaTakeoverUnowned:/);
+  assert.match(enSource, /takeoverTitle:/);
+  assert.match(zhSource, /takeoverTitle:/);
+});
+
+test("gateway takeover uses an in-app summary dialog instead of browser confirm", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+
+  assert.doesNotMatch(gatewaySource, /window\.confirm/);
+  assert.match(gatewaySource, /TakeoverSummaryDialog/);
+  assert.match(gatewaySource, /oldEndpoint/);
+  assert.match(gatewaySource, /newEndpoint/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {

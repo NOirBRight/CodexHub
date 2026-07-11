@@ -3,6 +3,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
+import { TakeoverSummaryDialog, type TakeoverSummary } from "../components/TakeoverSummaryDialog";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
@@ -86,6 +87,11 @@ function GatewayPageImpl({
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [autoRetryBusy, setAutoRetryBusy] = useState(false);
+  const [pendingTakeover, setPendingTakeover] = useState<{
+    clientId: string;
+    owner: RoutingOwner;
+    summary: TakeoverSummary;
+  } | null>(null);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
   const running = status?.proxy_running ?? false;
@@ -291,20 +297,20 @@ function GatewayPageImpl({
         showToast(t("gateway.ownerUnavailable"), "error");
         return;
       }
-      const confirmText = t("gateway.takeoverConfirm", {
-        name: client.name,
-        path: client.config_path ?? t("common.unknown"),
-        current: ownerDisplayName(client.route_owner, t),
-        next: ownerDisplayName(runtimeOwner, t),
-        oldEndpoint: client.route_endpoint ?? t("common.unknown"),
-        newEndpoint: currentAppGatewayUrl ?? t("common.unknown"),
+      setPendingTakeover({
+        clientId,
+        owner: runtimeOwner,
+        summary: {
+          configPath: client.config_path ?? t("common.unknown"),
+          currentOwner: ownerDisplayName(client.route_owner, t),
+          name: client.name,
+          newEndpoint: currentAppGatewayUrl ?? t("common.unknown"),
+          nextOwner: ownerDisplayName(runtimeOwner, t),
+          oldEndpoint: client.route_endpoint ?? t("common.unknown"),
+        },
       });
-      if (!window.confirm(confirmText)) {
-        setClientBusy(null);
-        return;
-      }
-      forceTakeover = true;
-      owner = runtimeOwner;
+      setClientBusy(null);
+      return;
     }
     const routeName = ownerDisplayName(owner, t);
     const toastId = showToast(t("gateway.switchClient", { clientName, routeName }), "loading");
@@ -417,6 +423,16 @@ function GatewayPageImpl({
 
   return (
     <main className="relative grid h-full min-h-[704px] w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(300px,340px)] gap-4 overflow-hidden">
+      <TakeoverSummaryDialog
+        busy={Boolean(clientBusy)}
+        summary={pendingTakeover?.summary ?? null}
+        onCancel={() => setPendingTakeover(null)}
+        onConfirm={() => {
+          const pending = pendingTakeover;
+          setPendingTakeover(null);
+          if (pending) void switchClientMode(pending.clientId, pending.owner, true);
+        }}
+      />
       <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(320px,1fr)] gap-2.5">
         <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
           <div className="flex min-w-0 items-center justify-between gap-3">

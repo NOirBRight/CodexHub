@@ -7,6 +7,11 @@ export interface Model {
   codex_enabled?: boolean;
   gateway_exported?: boolean;
   context_window?: number | null;
+  max_context_window?: number | null;
+  effective_source?: string | null;
+  max_source?: string | null;
+  confidence?: string | null;
+  verified_at?: string | null;
   max_output_tokens?: number | null;
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;

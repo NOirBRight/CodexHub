@@ -299,6 +299,12 @@ export const api = {
   restoreOfficialHistoryFromUnified: () => call<string>("restore_official_history_from_unified"),
   preflightUnifiedHistory: (applyRepairs = false, targetUnified?: boolean) =>
     call<UnifiedHistoryResult>("preflight_unified_history", { applyRepairs, targetUnified }),
+  getConversationSyncStatus: () =>
+    call<UnifiedHistoryResult>("get_conversation_sync_status"),
+  syncConversationHistory: (targetProvider?: string) =>
+    call<UnifiedHistoryResult>("sync_conversation_history", { targetProvider: targetProvider ?? null }),
+  diagnoseConversationHistory: (fullScan = true) =>
+    call<UnifiedHistoryResult>("diagnose_conversation_history", { fullScan }),
   syncCatalog: () => call<string>("sync_catalog"),
   setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
   removeAutostart: () => call<string>("remove_autostart"),

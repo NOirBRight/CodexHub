@@ -48,6 +48,16 @@ pub struct Model {
     #[serde(default = "default_enabled")]
     pub gateway_exported: bool,
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
     pub max_output_tokens: Option<u32>,
     pub input_modalities: Option<Vec<String>>,
     pub supported_reasoning_levels: Option<Vec<String>>,
@@ -71,6 +81,11 @@ impl Default for Model {
             codex_enabled: true,
             gateway_exported: true,
             context_window: None,
+            max_context_window: None,
+            effective_source: None,
+            max_source: None,
+            confidence: None,
+            verified_at: None,
             max_output_tokens: None,
             input_modalities: None,
             supported_reasoning_levels: None,
@@ -556,6 +571,36 @@ async fn preflight_unified_history(
 }
 
 #[tauri::command]
+async fn get_conversation_sync_status() -> Result<history::UnifiedHistoryResult, String> {
+    run_blocking("get_conversation_sync_status", || {
+        history::preflight_unified_history(false, None)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn sync_conversation_history(
+    target_provider: Option<String>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    let target_unified = target_provider.as_deref().map(|value| value != "openai");
+    run_blocking("sync_conversation_history", move || {
+        history::preflight_unified_history(true, target_unified)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn diagnose_conversation_history(
+    full_scan: Option<bool>,
+) -> Result<history::UnifiedHistoryResult, String> {
+    let _full_scan = full_scan.unwrap_or(true);
+    run_blocking("diagnose_conversation_history", || {
+        history::preflight_unified_history(false, None)
+    })
+    .await
+}
+
+#[tauri::command]
 fn sync_catalog() -> Result<String, String> {
     catalog::sync_catalog()
 }
@@ -809,6 +854,9 @@ fn run_gui() {
             migrate_official_history_to_unified,
             restore_official_history_from_unified,
             preflight_unified_history,
+            get_conversation_sync_status,
+            sync_conversation_history,
+            diagnose_conversation_history,
             sync_catalog,
             set_autostart,
             remove_autostart,

@@ -4,6 +4,7 @@ use crate::{
 };
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -19,6 +20,7 @@ const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const RESOLVED_MODEL_LIMITS_JSON: &str = include_str!("../../config/resolved_model_limits.json");
 const RESPONSE_ENDPOINT_SUFFIXES: &[&str] = &["/responses", "/response"];
 const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/chat/completions",
@@ -667,6 +669,14 @@ fn subscription_models_to_metadata_models(
             context_window: subscription_model
                 .context_window
                 .or_else(|| defaults.and_then(|model| model.context_window)),
+            max_context_window: defaults.and_then(|model| model.max_context_window),
+            effective_source: subscription_model
+                .context_window
+                .map(|_| "codex_app_model_list".to_string())
+                .or_else(|| defaults.and_then(|model| model.effective_source.clone())),
+            max_source: defaults.and_then(|model| model.max_source.clone()),
+            confidence: defaults.and_then(|model| model.confidence.clone()),
+            verified_at: defaults.and_then(|model| model.verified_at.clone()),
             max_output_tokens: subscription_model
                 .max_output_tokens
                 .or_else(|| defaults.and_then(|model| model.max_output_tokens)),
@@ -1710,6 +1720,11 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         codex_enabled: override_model.codex_enabled && original_codex_enabled,
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
         context_window: override_model.context_window.or(base.context_window),
+        max_context_window: override_model.max_context_window.or(base.max_context_window),
+        effective_source: override_model.effective_source.or(base.effective_source.take()),
+        max_source: override_model.max_source.or(base.max_source.take()),
+        confidence: override_model.confidence.or(base.confidence.take()),
+        verified_at: override_model.verified_at.or(base.verified_at.take()),
         max_output_tokens: override_model.max_output_tokens.or(base.max_output_tokens),
         input_modalities: override_model
             .input_modalities
@@ -1739,6 +1754,9 @@ fn merge_model_aliases(mut base: Vec<String>, overrides: Vec<String>) -> Vec<Str
 
 fn builtin_model_metadata() -> Vec<Model> {
     vec![
+        official_resolved_metadata("gpt-5.6-sol", "GPT-5.6 Sol"),
+        official_resolved_metadata("gpt-5.6-terra", "GPT-5.6 Terra"),
+        official_resolved_metadata("gpt-5.6-luna", "GPT-5.6 Luna"),
         official_priced_metadata(
             "gpt-5.5",
             "GPT-5.5",
@@ -1814,6 +1832,47 @@ fn builtin_model_metadata() -> Vec<Model> {
             ..Model::default()
         },
     ]
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolvedLimitsDocument {
+    entries: Vec<ResolvedLimitsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolvedLimitsEntry {
+    provider_id: String,
+    model_id: String,
+    effective_context_window: Option<u32>,
+    max_context_window: Option<u32>,
+    effective_source: Option<String>,
+    max_source: Option<String>,
+    confidence: String,
+    verified_at: Option<String>,
+}
+
+fn official_resolved_metadata(id: &str, display_name: &str) -> Model {
+    let document: ResolvedLimitsDocument = serde_json::from_str(RESOLVED_MODEL_LIMITS_JSON)
+        .expect("bundled resolved model limits must be valid JSON");
+    let limits = document
+        .entries
+        .into_iter()
+        .find(|entry| entry.provider_id == "openai" && entry.model_id == id)
+        .expect("official resolved model limit must exist");
+    Model {
+        id: id.to_string(),
+        display_name: Some(display_name.to_string()),
+        source_kind: Some("official".to_string()),
+        locked: true,
+        context_window: limits.effective_context_window,
+        max_context_window: limits.max_context_window,
+        effective_source: limits.effective_source,
+        max_source: limits.max_source,
+        confidence: Some(limits.confidence),
+        verified_at: limits.verified_at,
+        input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+        ..Model::default()
+    }
 }
 
 fn official_priced_metadata(
@@ -1937,6 +1996,11 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             &["context_window", "max_context_window", "context_length"],
             "context",
         ),
+        max_context_window: object.get("max_context_window").and_then(optional_u32),
+        effective_source: object.get("effective_source").and_then(Value::as_str).and_then(nonblank),
+        max_source: object.get("max_source").and_then(Value::as_str).and_then(nonblank),
+        confidence: object.get("confidence").and_then(Value::as_str).and_then(nonblank),
+        verified_at: object.get("verified_at").and_then(Value::as_str).and_then(nonblank),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
         input_modalities: object.get("input_modalities").and_then(string_array),
         supported_reasoning_levels: object

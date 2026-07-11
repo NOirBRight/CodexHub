@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {"provider_id":"openai","model_id":"gpt-5.6-sol","effective_context_window":353400,"max_context_window":1050000,"max_output_tokens":null,"effective_source":"codex_app_task_started_probe","max_source":"https://developers.openai.com/api/docs/models/gpt-5.6-sol","confidence":"verified","verified_at":"2026-07-10T00:00:00Z","probe_cli_version":"0.144.0-alpha.4"},
+    {"provider_id":"openai","model_id":"gpt-5.6-terra","effective_context_window":null,"max_context_window":1050000,"max_output_tokens":null,"effective_source":null,"max_source":"https://developers.openai.com/api/docs/models/gpt-5.6-terra","confidence":"max_only","verified_at":null,"probe_cli_version":null},
+    {"provider_id":"openai","model_id":"gpt-5.6-luna","effective_context_window":null,"max_context_window":1050000,"max_output_tokens":null,"effective_source":null,"max_source":"https://developers.openai.com/api/docs/models/gpt-5.6-luna","confidence":"max_only","verified_at":null,"probe_cli_version":null},
+    {"provider_id":"ollama-cloud","model_id":"glm-5.2","effective_context_window":1000000,"max_context_window":1000000,"max_output_tokens":131072,"effective_source":"provider_spec","max_source":"https://ollama.com/library/glm-5.2","confidence":"high","verified_at":"2026-07-11T00:00:00Z","probe_cli_version":null},
+    {"provider_id":"ollama-cloud","model_id":"minimax-m3","effective_context_window":524288,"max_context_window":524288,"max_output_tokens":524288,"effective_source":"provider_spec","max_source":"https://ollama.com/library/minimax-m3","confidence":"high","verified_at":"2026-07-11T00:00:00Z","probe_cli_version":null},
+    {"provider_id":"volc","model_id":"glm-5.2","effective_context_window":1024000,"max_context_window":1024000,"max_output_tokens":8192,"effective_source":"provider_spec","max_source":"https://www.volcengine.com/docs/82379","confidence":"high","verified_at":"2026-07-11T00:00:00Z","probe_cli_version":null},
+    {"provider_id":"volc","model_id":"minimax-m3","effective_context_window":1000000,"max_context_window":1000000,"max_output_tokens":8192,"effective_source":"provider_spec","max_source":"https://www.volcengine.com/docs/82379","confidence":"high","verified_at":"2026-07-11T00:00:00Z","probe_cli_version":null}
+  ]
+}

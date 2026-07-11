@@ -21,6 +21,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useTranslation } from "react-i18next";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
+import { TakeoverSummaryDialog, type TakeoverSummary } from "../components/TakeoverSummaryDialog";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
@@ -337,6 +338,7 @@ function ProvidersPageImpl({
   });
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
+  const [pendingCodexTakeover, setPendingCodexTakeover] = useState<TakeoverSummary | null>(null);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>(() => {
@@ -996,17 +998,22 @@ function ProvidersPageImpl({
 
   async function toggleCodexHubConnection() {
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
-    let forceTakeover = false;
     if (nextMode === "custom" && appFlavor?.codex_takeover_required) {
       const currentOwner = codexTakeoverOwnerLabel(appFlavor.codex_target_owner, tr);
-      forceTakeover = window.confirm(t("providers.betaTakeoverConfirm", {
-        current: currentOwner,
-        product: appFlavor.product_name,
-      }));
-      if (!forceTakeover) {
-        return;
-      }
+      setPendingCodexTakeover({
+        configPath: `~/${appFlavor.codex_target_home_suffix}/config.toml`,
+        currentOwner,
+        name: "Codex",
+        newEndpoint: `http://127.0.0.1:${appFlavor.gateway_port}/v1`,
+        nextOwner: appFlavor.product_name,
+        oldEndpoint: t("gateway.officialRoute"),
+      });
+      return;
     }
+    await applyCodexHubConnection(nextMode, false);
+  }
+
+  async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
     const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
     setBusy("route");
@@ -1337,6 +1344,15 @@ function ProvidersPageImpl({
 
   return (
     <>
+    <TakeoverSummaryDialog
+      busy={busy === "route"}
+      summary={pendingCodexTakeover}
+      onCancel={() => setPendingCodexTakeover(null)}
+      onConfirm={() => {
+        setPendingCodexTakeover(null);
+        void applyCodexHubConnection("custom", true);
+      }}
+    />
     <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[430px_minmax(0,1fr)] gap-4 overflow-hidden">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
@@ -2843,7 +2859,10 @@ function ModelSection({
         {modelCapabilityTags(model).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
-        <CapabilityChip label={formatContextWindow(contextWindow)} />
+        <CapabilityChip
+          label={formatContextWindow(contextWindow)}
+          title={modelLimitDetails(model, contextWindow)}
+        />
         {disabled && onToggleOfficialModel && (
           <SwitchControl
             checked={modelEnabled}
@@ -3311,9 +3330,9 @@ function optionalPositiveNumber(value: string) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function CapabilityChip({ icon, label }: { icon?: React.ReactNode; label: string }) {
+function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label: string; title?: string }) {
   return (
-    <span className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
+    <span title={title} className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
       {icon}
       {label}
     </span>
@@ -3402,7 +3421,7 @@ function withDefaultFastVariants(settings: Settings): Settings {
 
 function formatContextWindow(value?: number | null) {
   if (!value) {
-    return i18n.t("common.unknown");
+    return i18n.t("providers.contextDynamic");
   }
   if (value >= 1_000_000) {
     return `${(value / 1_000_000).toFixed(1)}M`;
@@ -3412,6 +3431,20 @@ function formatContextWindow(value?: number | null) {
     return `${new Intl.NumberFormat(i18n.language || "en-US").format(rounded)}K`;
   }
   return new Intl.NumberFormat(i18n.language || "en-US").format(value);
+}
+
+function modelLimitDetails(model: Model, effective?: number | null) {
+  const effectiveLabel = formatContextWindow(effective);
+  const maxLabel = model.max_context_window
+    ? formatContextWindow(model.max_context_window)
+    : i18n.t("common.unknown");
+  const verified = model.verified_at ?? i18n.t("common.unknown");
+  return i18n.t("providers.contextDetails", {
+    effective: effectiveLabel,
+    max: maxLabel,
+    source: model.effective_source ?? model.max_source ?? i18n.t("common.unknown"),
+    verified,
+  });
 }
 
 function hasVision(model: Model) {

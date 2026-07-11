@@ -96,7 +96,8 @@ pub struct GatewayModel {
     pub source_kind: String,
     pub supports_responses: bool,
     pub supports_chat_completions: bool,
-    pub context_window: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +173,7 @@ impl GatewayClientEndpointSelection {
 struct GatewayClientProviderModel {
     id: String,
     display_name: String,
-    context_window: u32,
+    context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1676,7 +1677,7 @@ fn official_models_from_metadata(
                 source_kind: "official".to_string(),
                 supports_responses: true,
                 supports_chat_completions: true,
-                context_window: *context_window,
+                context_window: Some(*context_window),
             });
         }
     }
@@ -1703,9 +1704,7 @@ fn official_gateway_model_from_metadata(
         source_kind: "official".to_string(),
         supports_responses: true,
         supports_chat_completions: true,
-        context_window: model
-            .context_window
-            .unwrap_or_else(|| gateway_model_context_window(&id)),
+        context_window: model.context_window,
     })
 }
 
@@ -1720,7 +1719,7 @@ fn fallback_official_gateway_models(settings: &Settings) -> Vec<GatewayModel> {
             source_kind: "official".to_string(),
             supports_responses: true,
             supports_chat_completions: true,
-            context_window: *context_window,
+            context_window: Some(*context_window),
         })
         .collect()
 }
@@ -1785,9 +1784,7 @@ fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Ve
                     })
                     .unwrap_or(true),
                 supports_chat_completions: true,
-                context_window: model
-                    .context_window
-                    .unwrap_or_else(|| gateway_model_context_window(&model_id)),
+                context_window: model.context_window,
             });
         }
     }
@@ -1887,7 +1884,7 @@ fn gateway_client_models(
                 source_kind: "default".to_string(),
                 supports_responses: true,
                 supports_chat_completions: true,
-                context_window: gateway_model_context_window(&default_model),
+                context_window: known_gateway_model_context_window(&default_model),
             },
         );
     }
@@ -5679,7 +5676,7 @@ fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProvider
 }
 
 fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
-    json!({
+    let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
         "reasoning": true,
@@ -5687,7 +5684,6 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
         "headers": {
             "x-codex-client-id": "pi",
         },
-        "contextWindow": model.context_window,
         "maxTokens": 32768,
         "cost": {
             "input": 0,
@@ -5695,7 +5691,11 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
             "cacheRead": 0,
             "cacheWrite": 0,
         },
-    })
+    });
+    if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
+        object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    value
 }
 
 fn omp_config_text(current: Option<&str>, selector: &str) -> String {
@@ -5749,9 +5749,12 @@ fn omp_models_yml_text(
         for gateway_model in &group.models {
             let model_id = yaml_scalar(&gateway_model.id);
             let model_name = yaml_scalar(&gateway_model.display_name);
-            let context_window = gateway_model.context_window;
+            let context_window = gateway_model
+                .context_window
+                .map(|value| format!("        contextWindow: {value}\n"))
+                .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -5860,7 +5863,7 @@ fn zcode_provider_endpoint(
 }
 
 fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
-    json!({
+    let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
         "kinds": [kind],
@@ -5869,9 +5872,12 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
             "input": ["text", "image"],
             "output": ["text"],
         },
-        "contextWindow": model.context_window,
         "maxOutputTokens": 32768,
-    })
+    });
+    if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
+        object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    value
 }
 
 fn zcode_v2_config_text(
@@ -5917,17 +5923,25 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
         .map(|model| {
             (
                 model.id.clone(),
-                json!({
+                {
+                    let mut value = json!({
                     "name": model.display_name.clone(),
                     "limit": {
-                        "context": model.context_window,
                         "output": 32768,
                     },
                     "modalities": {
                         "input": ["text", "image"],
                         "output": ["text"],
                     },
-                }),
+                    });
+                    if let (Some(limit), Some(context_window)) = (
+                        value.get_mut("limit").and_then(Value::as_object_mut),
+                        model.context_window,
+                    ) {
+                        limit.insert("context".to_string(), json!(context_window));
+                    }
+                    value
+                },
             )
         })
         .collect::<Map<_, _>>();
@@ -6294,7 +6308,7 @@ fn combined_named_text(files: &[(&str, &str)]) -> String {
         .join("\n")
 }
 
-fn gateway_model_context_window(model: &str) -> u32 {
+fn known_gateway_model_context_window(model: &str) -> Option<u32> {
     OFFICIAL_MODELS
         .iter()
         .find_map(|(id, _, context)| (*id == model).then_some(*context))
@@ -6303,7 +6317,6 @@ fn gateway_model_context_window(model: &str) -> u32 {
                 .iter()
                 .find_map(|(_, id, _, context)| (*id == model).then_some(*context))
         })
-        .unwrap_or(200_000)
 }
 
 fn gateway_model_display_name(model: &str) -> String {
@@ -7083,7 +7096,7 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
-        assert_eq!(models[0].context_window, 400_000);
+        assert_eq!(models[0].context_window, Some(400_000));
     }
 
     #[test]
@@ -7109,7 +7122,7 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
-        assert_eq!(models[0].context_window, 400_000);
+        assert_eq!(models[0].context_window, Some(400_000));
     }
 
     #[test]
@@ -7645,7 +7658,7 @@ mod tests {
     }
 
     #[test]
-    fn omp_models_use_valid_context_window_for_external_models_without_metadata() {
+    fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
         let settings = Settings {
             include_official_models: false,
             ..Settings::default()
@@ -7676,8 +7689,7 @@ mod tests {
 
         assert!(text.contains("codexhub-ollama-cloud:"));
         assert!(text.contains("id: nemotron-3-nano:30b"));
-        assert!(text.contains("contextWindow: 200000"));
-        assert!(!text.contains("contextWindow: 0"));
+        assert!(!text.contains("contextWindow:"));
     }
 
     #[test]

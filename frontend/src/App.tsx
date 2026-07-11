@@ -23,7 +23,6 @@ import type {
   Provider,
   Settings,
   TabId,
-  UnifiedHistoryResult,
   UsageQueryWindow,
 } from "./lib/types";
 import { GatewayPage } from "./pages/GatewayPage";
@@ -335,7 +334,6 @@ export default function App() {
   const runtimeInflight = useRef<Partial<Record<RuntimeCacheKey, Promise<unknown>>>>({});
   const runtimeRef = useRef<RuntimeSnapshot | null>(null);
   const startupUpdateCheckStarted = useRef(false);
-  const historyPreflightStarted = useRef(false);
   const updateAvailableToastId = useRef<string | null>(null);
   const updateInstallToastId = useRef<string | null>(null);
   runtimeRef.current = runtime;
@@ -671,7 +669,7 @@ export default function App() {
       tone: "loading",
     });
     try {
-      const result = await api.preflightUnifiedHistory(true);
+      const result = await api.syncConversationHistory();
       if (result.status === "repaired") {
         updateToast(toastId, {
           action: null,
@@ -763,64 +761,6 @@ export default function App() {
       window.clearInterval(clientTimer);
     };
   }, [loadGatewayClients, refreshCoreRuntime, refreshRuntimeStatus]);
-
-  useEffect(() => {
-    if (historyPreflightStarted.current || !settingsLoaded) {
-      return;
-    }
-    historyPreflightStarted.current = true;
-    const timer = window.setTimeout(async () => {
-      try {
-        const result: UnifiedHistoryResult = await api.preflightUnifiedHistory(false);
-        if (result.status === "repaired") {
-          showToast(
-            t("settings.historyStartupRepaired", {
-              rows: result.changed_rows,
-              files: result.changed_files,
-            }),
-            "success",
-          );
-        } else if (result.status === "deferred") {
-          showToast({
-            action: {
-              label: t("settings.syncConversationHistory"),
-              onClick: () => void repairConversationHistory(),
-            },
-            dedupeKey: "unified-history-preflight",
-            text: t("settings.historySyncDeferred"),
-            timeoutMs: null,
-            tone: "info",
-          });
-        } else if (result.status === "restart_required") {
-          showToast({
-            action: {
-              label: t("settings.syncConversationHistory"),
-              onClick: () => void repairConversationHistory(),
-            },
-            dedupeKey: "unified-history-preflight",
-            text: t("settings.conversationHistorySyncRequired"),
-            timeoutMs: null,
-            tone: "info",
-          });
-        } else if (result.status === "conflict") {
-          showToast({
-            dedupeKey: "unified-history-preflight",
-            text: t(historyIssueKey(result)),
-            timeoutMs: null,
-            tone: "error",
-          });
-        }
-      } catch (err) {
-        showToast({
-          dedupeKey: "unified-history-preflight",
-          text: t("settings.historyUnexpectedFailure"),
-          timeoutMs: null,
-          tone: "error",
-        });
-      }
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [repairConversationHistory, settingsLoaded, showToast, t]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -992,10 +932,6 @@ export default function App() {
 
   const saveSettings = useCallback(async (next: Settings) => {
     setBusy("settings");
-    const previousUnified = settings?.unified_codex_history ?? true;
-    const nextUnified = next.unified_codex_history ?? true;
-    let savedSettingsApplied = false;
-    let historyReconciled = previousUnified === nextUnified;
     try {
       const restartGateway = shouldRestartGateway(settings, next, gatewayStatus);
       if (settings && next.auto_start_software !== settings.auto_start_software) {
@@ -1006,30 +942,8 @@ export default function App() {
         }
       }
       const savedSettings = await api.saveSettings(next);
-      savedSettingsApplied = true;
       setRuntimeCacheData("settings", savedSettings);
-      let historyMessage: string | null = null;
-      if (previousUnified !== nextUnified) {
-        const result = await api.preflightUnifiedHistory(true, nextUnified);
-        if (result.status === "deferred") {
-          historyReconciled = true;
-          historyMessage = t("settings.historySyncDeferred");
-        } else {
-          if (result.status === "restart_required" || result.status === "conflict") {
-            throw new Error(t(historyIssueKey(result)));
-          }
-          historyReconciled = true;
-          historyMessage = result.status === "repaired"
-            ? t("settings.historyStartupRepaired", {
-                rows: result.changed_rows,
-                files: result.changed_files,
-              })
-            : nextUnified
-              ? t("settings.unifiedHistoryEnabled")
-              : t("settings.officialHistoryRestored");
-        }
-      }
-      let saveMessage = historyMessage ?? t("settings.settingsSaved");
+      let saveMessage = t("settings.settingsSaved");
       if (restartGateway) {
         const status = await api.restartProxy();
         setRuntimeCacheData("status", status);
@@ -1039,14 +953,6 @@ export default function App() {
       await refreshRuntimeStatus({ force: true });
       return saveMessage;
     } catch (err) {
-      if (savedSettingsApplied && !historyReconciled && settings) {
-        try {
-          const restoredSettings = await api.saveSettings(settings);
-          setRuntimeCacheData("settings", restoredSettings);
-        } catch {
-          // Preserve the original reconciliation error; startup preflight will report settings drift.
-        }
-      }
       const message = messageFromError(err);
       setBanner(message);
       throw err;
@@ -1058,7 +964,7 @@ export default function App() {
   const syncHistory = useCallback(async (targetProvider: string) => {
     setBusy("history");
     try {
-      const result = await api.preflightUnifiedHistory(true, targetProvider !== "openai");
+      const result = await api.syncConversationHistory(targetProvider);
       if (result.status === "deferred" || result.status === "restart_required") {
         const message = t("settings.historySyncDeferred");
         setBanner(null);

@@ -523,6 +523,21 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 target_unified,
             ))
         }
+        "get_conversation_sync_status" => {
+            to_value(history::preflight_unified_history(false, None))
+        }
+        "sync_conversation_history" => {
+            let target_provider = request.args.get("targetProvider").and_then(Value::as_str);
+            to_value(history::preflight_unified_history(
+                true,
+                target_provider.map(|value| value != "openai"),
+            ))
+        }
+        "diagnose_conversation_history" => {
+            let _full_scan = optional_bool_arg(&request.args, &["fullScan", "full_scan"])
+                .unwrap_or(true);
+            to_value(history::preflight_unified_history(false, None))
+        }
         "sync_catalog" => to_value(catalog::sync_catalog()),
         "set_autostart" => to_value(autostart::set_autostart(bool_arg(
             &request.args,
