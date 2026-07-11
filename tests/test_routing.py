@@ -1495,52 +1495,57 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(headers["X-OpenAI-Internal-Codex-Responses-Lite"], "true")
         self.assertNotIn("Connection", headers)
 
-    def test_official_title_request_drops_unsupported_responses_lite_header(self):
-        body = json.dumps(
-            {
-                "model": "gpt-5.4-mini",
-                "input": [{"type": "message", "role": "user", "content": "generate a short task title"}],
-                "stream": True,
-                "store": False,
-            }
-        ).encode("utf-8")
-        handler = CodexProxyHandler.__new__(CodexProxyHandler)
-        handler.path = "/v1/responses"
-        handler.headers = {
-            "Content-Length": str(len(body)),
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "User-Agent": "Codex Desktop/0.142.4",
-            "Session-id": "title-session",
-            "Thread-id": "title-thread",
-            "X-codex-window-id": "title-window:0",
-            "X-client-request-id": "title-request",
-            "X-OpenAI-Internal-Codex-Responses-Lite": "true",
-        }
-        handler.rfile = io.BytesIO(body)
-        handler.close_connection = False
-        fake = FakeHandler()
-        handler.send_response = fake.send_response
-        handler.send_header = fake.send_header
-        handler.end_headers = fake.end_headers
-        handler.wfile = fake.wfile
-        handler._relay_upstream_response = lambda response, upstream_name, **kwargs: 200
-        captured_requests = []
-
-        def open_upstream(request, **_kwargs):
-            captured_requests.append(request)
-            return FakeContextResponse(b'{"id":"resp_title","output":[]}')
-
-        with (
-            patch("codex_proxy.codex_access_token", return_value="sub-token"),
-            patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy._open_upstream_response", side_effect=open_upstream),
+    def test_official_unsupported_model_requests_drop_responses_lite_header(self):
+        for model_id, prompt in (
+            ("gpt-5.4-mini", "generate a short task title"),
+            ("gpt-5.4", "generate personalized task suggestions"),
         ):
-            CodexProxyHandler.do_POST(handler)
+            with self.subTest(model_id=model_id):
+                body = json.dumps(
+                    {
+                        "model": model_id,
+                        "input": [{"type": "message", "role": "user", "content": prompt}],
+                        "stream": True,
+                        "store": False,
+                    }
+                ).encode("utf-8")
+                handler = CodexProxyHandler.__new__(CodexProxyHandler)
+                handler.path = "/v1/responses"
+                handler.headers = {
+                    "Content-Length": str(len(body)),
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "User-Agent": "Codex Desktop/0.142.4",
+                    "Session-id": "auxiliary-session",
+                    "Thread-id": "auxiliary-thread",
+                    "X-codex-window-id": "auxiliary-window:0",
+                    "X-client-request-id": "auxiliary-request",
+                    "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+                }
+                handler.rfile = io.BytesIO(body)
+                handler.close_connection = False
+                fake = FakeHandler()
+                handler.send_response = fake.send_response
+                handler.send_header = fake.send_header
+                handler.end_headers = fake.end_headers
+                handler.wfile = fake.wfile
+                handler._relay_upstream_response = lambda response, upstream_name, **kwargs: 200
+                captured_requests = []
 
-        self.assertEqual(len(captured_requests), 1)
-        forwarded_header_names = {key.lower() for key, _value in captured_requests[0].header_items()}
-        self.assertNotIn("x-openai-internal-codex-responses-lite", forwarded_header_names)
+                def open_upstream(request, **_kwargs):
+                    captured_requests.append(request)
+                    return FakeContextResponse(b'{"id":"resp_auxiliary","output":[]}')
+
+                with (
+                    patch("codex_proxy.codex_access_token", return_value="sub-token"),
+                    patch("codex_proxy.codex_account_id", return_value="acct-1"),
+                    patch("codex_proxy._open_upstream_response", side_effect=open_upstream),
+                ):
+                    CodexProxyHandler.do_POST(handler)
+
+                self.assertEqual(len(captured_requests), 1)
+                forwarded_header_names = {key.lower() for key, _value in captured_requests[0].header_items()}
+                self.assertNotIn("x-openai-internal-codex-responses-lite", forwarded_header_names)
 
     def test_official_http_passthrough_does_not_generate_missing_identity_headers(self):
         incoming = {
