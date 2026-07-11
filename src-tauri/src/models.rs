@@ -2331,9 +2331,14 @@ mod tests {
                     "model": "gpt-5.6-terra",
                     "displayName": "GPT-5.6-Terra",
                     "supportedReasoningEfforts": [
-                        {"reasoningEffort": "low", "description": "Light"}
+                        {"reasoningEffort": "low", "description": "Light"},
+                        {"reasoningEffort": "medium", "description": "Medium"},
+                        {"reasoningEffort": "high", "description": "High"},
+                        {"reasoningEffort": "xhigh", "description": "Extra High"},
+                        {"reasoningEffort": "max", "description": "Max"},
+                        {"reasoningEffort": "ultra", "description": "Ultra"}
                     ],
-                    "defaultReasoningEffort": "low"
+                    "defaultReasoningEffort": "medium"
                 },
                 {
                     "id": "gpt-5.6-sol",
@@ -2345,6 +2350,7 @@ mod tests {
                         {"reasoningEffort": "medium", "description": "Medium"},
                         {"reasoningEffort": "high", "description": "High"},
                         {"reasoningEffort": "xhigh", "description": "Extra High"},
+                        {"reasoningEffort": "max", "description": "Max"},
                         {"reasoningEffort": "ultra", "description": "Ultra"}
                     ],
                     "defaultReasoningEffort": "low",
@@ -2394,8 +2400,14 @@ mod tests {
             .iter()
             .filter_map(|entry| entry["effort"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(terra_efforts, ["low"]);
-        assert_eq!(sol_efforts, ["low", "medium", "high", "xhigh", "ultra"]);
+        assert_eq!(
+            terra_efforts,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(
+            sol_efforts,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
     }
 
     #[test]

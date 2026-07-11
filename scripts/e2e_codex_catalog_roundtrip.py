@@ -344,10 +344,21 @@ def run(repo_root: Path, codex_command: Path) -> dict[str, Any]:
 
         sol = roundtrip_by_id.get("gpt-5.6-sol")
         terra = roundtrip_by_id.get("gpt-5.6-terra")
-        required_sol = {"low", "medium", "high", "xhigh", "ultra"}
-        if not sol or not terra or not required_sol.issubset(effort_ids(sol)) or "low" not in effort_ids(terra):
+        luna = roundtrip_by_id.get("gpt-5.6-luna")
+        standard_efforts = {"low", "medium", "high", "xhigh", "max"}
+        if (
+            not sol
+            or not terra
+            or not luna
+            or not standard_efforts.issubset(effort_ids(sol))
+            or not standard_efforts.issubset(effort_ids(terra))
+            or not standard_efforts.issubset(effort_ids(luna))
+            or "ultra" not in effort_ids(sol)
+            or "ultra" not in effort_ids(terra)
+            or "ultra" in effort_ids(luna)
+        ):
             raise AssertionError(
-                "simple slider prerequisites were not preserved for Terra Light and Sol Light/Medium/High/Extra High/Ultra"
+                "reasoning contract must preserve Light through Max for Sol/Terra/Luna and Ultra only for Sol/Terra"
             )
 
         return {
@@ -357,6 +368,7 @@ def run(repo_root: Path, codex_command: Path) -> dict[str, Any]:
             "labels": [roundtrip_by_id[model_id].get("displayName") for model_id in source_ids],
             "sol_efforts": sorted(effort_ids(sol)),
             "terra_efforts": sorted(effort_ids(terra)),
+            "luna_efforts": sorted(effort_ids(luna)),
             "duplicates": False,
             "prefixed_ids": False,
             "isolated_codex_home": True,

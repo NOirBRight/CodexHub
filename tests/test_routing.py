@@ -580,7 +580,7 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -651,7 +651,7 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch(
-                "codex_proxy.urlopen",
+                "codex_proxy._official_urlopen",
                 return_value=FakeSseResponse([f"data: {json.dumps(completed)}\n\n".encode("utf-8"), b""]),
             ) as mock_urlopen,
         ):
@@ -711,7 +711,7 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1026,10 +1026,10 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fake.status, 200)
         open_upstream.assert_called_once()
 
-    def test_official_ultra_reasoning_effort_still_reaches_official_upstream(self):
+    def test_sol_ultra_reasoning_effort_reaches_official_upstream(self):
         body = json.dumps(
             {
-                "model": "openai/gpt-5.5",
+                "model": "openai/gpt-5.6-sol",
                 "input": [{"role": "user", "content": "hi"}],
                 "reasoning": {"effort": "ultra"},
                 "stream": False,
@@ -1038,6 +1038,7 @@ class RoutingTests(unittest.TestCase):
         handler, fake = post_handler("/v1/responses", body)
 
         with (
+            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch(
@@ -1052,10 +1053,10 @@ class RoutingTests(unittest.TestCase):
         forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
         self.assertEqual(forwarded["reasoning"]["effort"], "ultra")
 
-    def test_official_string_ultra_reasoning_effort_still_reaches_official_upstream(self):
+    def test_terra_string_ultra_reasoning_effort_reaches_official_upstream(self):
         body = json.dumps(
             {
-                "model": "openai/gpt-5.5",
+                "model": "openai/gpt-5.6-terra",
                 "input": [{"role": "user", "content": "hi"}],
                 "reasoning": "ultra",
                 "stream": False,
@@ -1064,6 +1065,7 @@ class RoutingTests(unittest.TestCase):
         handler, fake = post_handler("/v1/responses", body)
 
         with (
+            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch(
@@ -1076,6 +1078,30 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fake.status, 200)
         forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
         self.assertEqual(forwarded["reasoning"], "ultra")
+
+    def test_luna_ultra_reasoning_effort_is_rejected_before_official_upstream(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.6-luna",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": {"effort": "ultra"},
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response") as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertIn("supported only for gpt-5.6-sol and gpt-5.6-terra", payload["error"])
 
     def test_compressed_responses_request_extracts_model_after_decode(self):
         original = json.dumps(
@@ -1095,7 +1121,7 @@ class RoutingTests(unittest.TestCase):
         with (
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(b'{"id":"resp","output":[]}')) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(b'{"id":"resp","output":[]}')) as mock_urlopen,
         ):
             CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
 
@@ -1566,7 +1592,7 @@ class RoutingTests(unittest.TestCase):
                 "codex_proxy._normalize_third_party_tool_call",
                 side_effect=AssertionError("official passthrough HTTPError parsed SSE"),
             ),
-            patch("codex_proxy.urlopen", side_effect=error),
+            patch("codex_proxy._official_urlopen", side_effect=error),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1783,7 +1809,7 @@ class RoutingTests(unittest.TestCase):
             ),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", side_effect=[error, success]) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -1824,7 +1850,7 @@ class RoutingTests(unittest.TestCase):
             patch.dict(os.environ, {"CODEX_PROXY_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS": "3"}, clear=False),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", side_effect=[TimeoutError("connect timed out"), success]) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", side_effect=[TimeoutError("connect timed out"), success]) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2022,13 +2048,13 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 10000)
 
-    def test_official_open_installs_keepalive_transport_before_urlopen(self):
+    def test_official_open_uses_gateway_owned_keepalive_opener(self):
         request = codex_proxy.Request("https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST")
         success = FakeResponse(b'{"id":"resp_keepalive"}')
 
         with (
-            patch("codex_proxy._ensure_official_keepalive_opener_installed") as ensure_keepalive,
-            patch("codex_proxy.urlopen", return_value=success) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=success) as official_urlopen,
+            patch("codex_proxy.urlopen") as mock_urlopen,
         ):
             response = codex_proxy._open_upstream_response(
                 request,
@@ -2040,28 +2066,55 @@ class RoutingTests(unittest.TestCase):
             )
 
         self.assertIs(response, success)
-        ensure_keepalive.assert_called_once()
-        mock_urlopen.assert_called_once_with(request, timeout=1)
+        official_urlopen.assert_called_once_with(request, timeout=1)
+        mock_urlopen.assert_not_called()
 
-    def test_non_official_open_does_not_install_official_keepalive_transport(self):
-        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
-        success = FakeResponse(b'{"id":"resp_default_transport"}')
+    def test_official_then_third_party_does_not_leak_keepalive_transport(self):
+        official_request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST"
+        )
+        third_party_request = codex_proxy.Request(
+            "https://ark.example.test/v1/responses", data=b"{}", method="POST"
+        )
+        official_success = FakeResponse(b'{"id":"resp_official_transport"}')
+        third_party_success = FakeResponse(b'{"id":"resp_default_transport"}')
 
         with (
-            patch("codex_proxy._ensure_official_keepalive_opener_installed") as ensure_keepalive,
-            patch("codex_proxy.urlopen", return_value=success) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=official_success) as official_urlopen,
+            patch("codex_proxy.urlopen", return_value=third_party_success) as mock_urlopen,
         ):
-            response = codex_proxy._open_upstream_response(
-                request,
+            official_response = codex_proxy._open_upstream_response(
+                official_request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=1,
+                event_context={"request_id": "req-official-transport"},
+            )
+            third_party_response = codex_proxy._open_upstream_response(
+                third_party_request,
                 upstream_name="volcengine",
                 upstream_format="responses",
                 timeout=1,
                 event_context={"request_id": "req-non-official-transport"},
             )
 
-        self.assertIs(response, success)
-        ensure_keepalive.assert_not_called()
-        mock_urlopen.assert_called_once_with(request, timeout=1)
+        self.assertIs(official_response, official_success)
+        self.assertIs(third_party_response, third_party_success)
+        official_urlopen.assert_called_once_with(official_request, timeout=1)
+        mock_urlopen.assert_called_once_with(third_party_request, timeout=1)
+
+    def test_official_keepalive_opener_is_cached_without_global_install(self):
+        private_opener = Mock()
+        with (
+            patch.object(codex_proxy, "OFFICIAL_KEEPALIVE_OPENER", None),
+            patch("codex_proxy.build_opener", return_value=private_opener) as build,
+        ):
+            first = codex_proxy._official_keepalive_opener()
+            second = codex_proxy._official_keepalive_opener()
+
+        self.assertIs(first, private_opener)
+        self.assertIs(second, private_opener)
+        build.assert_called_once()
 
     def test_configure_tcp_keepalive_enables_windows_probe_intervals(self):
         fake_socket = Mock()
@@ -3345,7 +3398,7 @@ class RoutingTests(unittest.TestCase):
         with (
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(b'{"id":"resp_control"}')),
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(b'{"id":"resp_control"}')),
         ):
             CodexProxyHandler.do_GET(handler)
 
@@ -3385,7 +3438,7 @@ class RoutingTests(unittest.TestCase):
             patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", side_effect=error),
+            patch("codex_proxy._official_urlopen", side_effect=error),
         ):
             CodexProxyHandler.do_GET(handler)
 
@@ -12723,6 +12776,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         codex_proxy._validate_reasoning_effort_for_upstream(
             {"reasoning": {"effort": "high"}},
             {"name": "ollama_cloud", "auth": "api_key"},
+            "ollama-cloud/glm-5.2",
         )
         body = json.dumps(
             {

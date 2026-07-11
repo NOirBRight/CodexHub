@@ -128,6 +128,10 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
             "effort": "xhigh",
             "description": "Extra high reasoning depth for complex problems",
         },
+        {
+            "effort": "max",
+            "description": "Maximum reasoning depth for the hardest problems",
+        },
     ],
     "default_reasoning_level": "medium",
     "base_instructions": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",

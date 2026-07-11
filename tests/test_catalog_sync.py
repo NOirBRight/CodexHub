@@ -270,6 +270,7 @@ class CatalogSyncTests(unittest.TestCase):
                     {"effort": "medium", "description": "Medium"},
                     {"effort": "high", "description": "High"},
                     {"effort": "xhigh", "description": "Extra High"},
+                    {"effort": "max", "description": "Max"},
                     {"effort": "ultra", "description": "Ultra"},
                 ],
                 "multi_agent_version": "v2",
@@ -466,7 +467,7 @@ class CatalogSyncTests(unittest.TestCase):
         for model_id in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"):
             self.assertEqual(
                 [entry["effort"] for entry in by_slug[model_id]["supported_reasoning_levels"]],
-                ["low", "medium", "high", "xhigh"],
+                ["low", "medium", "high", "xhigh", "max"],
             )
             for required_key in (
                 "shell_type",

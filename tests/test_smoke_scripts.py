@@ -85,4 +85,4 @@ def test_codex_catalog_roundtrip_e2e_uses_live_app_catalog_and_isolated_custom_p
     assert '"config_overlay.py"' in source
     assert "official model order changed after custom catalog roundtrip" in source
     assert "custom catalog exposed a prefixed official model id" in source
-    assert "simple slider prerequisites were not preserved" in source
+    assert "reasoning contract must preserve Light through Max" in source

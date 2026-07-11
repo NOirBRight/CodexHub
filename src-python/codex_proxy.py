@@ -32,7 +32,7 @@ import uuid
 import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit
-from urllib.request import HTTPSHandler, Request, build_opener, install_opener, urlopen
+from urllib.request import HTTPSHandler, OpenerDirector, Request, build_opener, urlopen
 
 from codex_semantic_adapter import (
     coerce_number as _semantic_coerce_number,
@@ -90,7 +90,7 @@ DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is 
 
 OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
-OFFICIAL_KEEPALIVE_OPENER_INSTALLED = False
+OFFICIAL_KEEPALIVE_OPENER: OpenerDirector | None = None
 OFFICIAL_KEEPALIVE_OPENER_LOCK = threading.Lock()
 
 
@@ -128,15 +128,18 @@ class _OfficialKeepaliveHTTPSHandler(HTTPSHandler):
         return self.do_open(_OfficialKeepaliveHTTPSConnection, req, context=self._context)
 
 
-def _ensure_official_keepalive_opener_installed() -> None:
-    global OFFICIAL_KEEPALIVE_OPENER_INSTALLED
-    if OFFICIAL_KEEPALIVE_OPENER_INSTALLED:
-        return
+def _official_keepalive_opener() -> OpenerDirector:
+    global OFFICIAL_KEEPALIVE_OPENER
+    if OFFICIAL_KEEPALIVE_OPENER is not None:
+        return OFFICIAL_KEEPALIVE_OPENER
     with OFFICIAL_KEEPALIVE_OPENER_LOCK:
-        if OFFICIAL_KEEPALIVE_OPENER_INSTALLED:
-            return
-        install_opener(build_opener(_OfficialKeepaliveHTTPSHandler()))
-        OFFICIAL_KEEPALIVE_OPENER_INSTALLED = True
+        if OFFICIAL_KEEPALIVE_OPENER is None:
+            OFFICIAL_KEEPALIVE_OPENER = build_opener(_OfficialKeepaliveHTTPSHandler())
+        return OFFICIAL_KEEPALIVE_OPENER
+
+
+def _official_urlopen(request: Request, *, timeout: float) -> Any:
+    return _official_keepalive_opener().open(request, timeout=timeout)
 
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
@@ -190,6 +193,7 @@ PROXY_FEATURES = [
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
+OFFICIAL_ULTRA_REASONING_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}
 OFFICIAL_FAST_VARIANT_SERVICE_TIER = "priority"
 OFFICIAL_FAST_VARIANT_BASE_MODELS = {
     "gpt-5.5-fast": "gpt-5.5",
@@ -1779,9 +1783,9 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
 def _validate_reasoning_effort_for_upstream(
     payload: Any,
     upstream: Mapping[str, Any],
+    model: str | None,
 ) -> None:
-    is_official = upstream.get("name") == "official" and upstream.get("auth") == "codex_auth"
-    if is_official or not isinstance(payload, Mapping):
+    if not isinstance(payload, Mapping):
         return
     requested_efforts = [payload.get("reasoning_effort")]
     reasoning = payload.get("reasoning")
@@ -1792,8 +1796,19 @@ def _validate_reasoning_effort_for_upstream(
     is_ultra = any(
         isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
     )
-    if is_ultra:
-        raise ValueError("reasoning effort 'ultra' is not supported for third-party models")
+    if not is_ultra:
+        return
+    is_official = upstream.get("name") == "official" and upstream.get("auth") == "codex_auth"
+    model_id = canonical_model_id(model or "").lower()
+    if model_id.startswith(OFFICIAL_ALIAS_PREFIX):
+        model_id = model_id[len(OFFICIAL_ALIAS_PREFIX) :]
+    if is_official and model_id in OFFICIAL_ULTRA_REASONING_MODELS:
+        return
+    if is_official:
+        raise ValueError(
+            "reasoning effort 'ultra' is supported only for gpt-5.6-sol and gpt-5.6-terra"
+        )
+    raise ValueError("reasoning effort 'ultra' is not supported for third-party models")
 
 
 def decoded_request_body(body: bytes, content_encoding: str | None = None) -> tuple[bytes, bool, str | None]:
@@ -10855,7 +10870,7 @@ def _open_upstream_response(
     while True:
         try:
             if upstream_name == "official":
-                _ensure_official_keepalive_opener_installed()
+                return _official_urlopen(request, timeout=timeout)
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
             if isinstance(exc, HTTPError) and not retry_http_errors:
@@ -11074,7 +11089,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
-            _validate_reasoning_effort_for_upstream(inbound_payload, upstream)
+            _validate_reasoning_effort_for_upstream(inbound_payload, upstream, model)
             route_decision = route_decision_for_request(
                 upstream,
                 request_context,

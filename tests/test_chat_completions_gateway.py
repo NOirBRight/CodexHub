@@ -798,7 +798,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        with patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
             CodexProxyHandler.do_POST(handler)
 
         # Verify the upstream request was sent to the official Responses endpoint.
@@ -843,7 +843,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        with patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
@@ -875,7 +875,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }).encode("utf-8")
 
         with patch(
-            "codex_proxy.urlopen",
+            "codex_proxy._official_urlopen",
             side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body)],
         ) as mock_urlopen, patch("codex_proxy.time.sleep"):
             CodexProxyHandler.do_POST(handler)
@@ -2632,7 +2632,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.urlopen",
+                "codex_proxy._official_urlopen",
                 side_effect=[
                     _FakeJsonResponse(empty_body),
                     _FakeJsonResponse(empty_body),
@@ -3179,7 +3179,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             b'',
         ]
 
-        with patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)):
+        with patch("codex_proxy._official_urlopen", return_value=_FakeSseResponse(sse_lines)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -3219,7 +3219,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.urlopen",
+                "codex_proxy._official_urlopen",
                 side_effect=[URLError(TimeoutError("connect timed out")), _FakeSseResponse(sse_lines)],
             ) as mock_urlopen,
             patch("codex_proxy.time.sleep"),
@@ -3259,7 +3259,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.urlopen",
+                "codex_proxy._official_urlopen",
                 side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body, status=502)],
             ),
             patch("codex_proxy.time.sleep"),
@@ -3299,7 +3299,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
                 with (
                     patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-                    patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)),
+                    patch("codex_proxy._official_urlopen", return_value=_FakeSseResponse(sse_lines)),
                 ):
                     CodexProxyHandler.do_POST(handler)
 
@@ -3342,7 +3342,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]),
+            patch("codex_proxy._official_urlopen", side_effect=[failed_stream, successful_stream]),
             patch("codex_proxy.time.sleep"),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -3411,7 +3411,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy.urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
+            patch("codex_proxy._official_urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3443,7 +3443,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy.urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
+            patch("codex_proxy._official_urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3470,7 +3470,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             OSError("responses stream reset"),
         ]
 
-        with patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)):
+        with patch("codex_proxy._official_urlopen", return_value=_FakeSseResponse(sse_lines)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
