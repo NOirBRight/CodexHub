@@ -2,6 +2,7 @@ use crate::AppStatus;
 use crate::Settings;
 use crate::{runtime_paths, safe_file};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -239,6 +240,8 @@ struct ProxyPidMetadata {
     pid: u32,
     port: u16,
     script_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script_sha256: Option<String>,
     started_at_unix_ms: u64,
 }
 
@@ -249,6 +252,7 @@ impl ProxyPidMetadata {
             pid,
             port,
             script_path: comparable_path(script),
+            script_sha256: file_sha256(script),
             started_at_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -320,7 +324,39 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
 }
 
 fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
+    replace_managed_proxy_from_previous_bundle(paths)?;
     start_with_paths_and_timeout(paths, START_TIMEOUT)
+}
+
+fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), String> {
+    let Some(ProxyPidRecord::Managed(metadata)) = read_pid_record(paths)? else {
+        return Ok(());
+    };
+    let current_script = paths.proxy_script_path();
+    let path_matches = normalized_path_text(&metadata.script_path)
+        == normalized_path_text(&current_script.to_string_lossy());
+    let fingerprint_matches = metadata.script_sha256.is_some()
+        && metadata.script_sha256 == file_sha256(&current_script);
+    if path_matches && fingerprint_matches {
+        return Ok(());
+    }
+
+    let status = stop_with_paths(paths)?;
+    if status.proxy_running {
+        return Err(format!(
+            "previous Gateway bundle is still running on port {}; stop it before starting {}",
+            status.proxy_port,
+            current_script.display()
+        ));
+    }
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 fn start_with_paths_and_timeout(
@@ -1966,6 +2002,74 @@ time.sleep(10)
 
         let _ = stop_with_paths(&paths);
         result.expect("python proxy lifecycle");
+    }
+
+    #[test]
+    fn start_replaces_running_managed_proxy_from_previous_bundle() {
+        let root = temp_root("python-bundle-upgrade");
+        let old_repo_root = copy_python_sources_to_temp_repo(&root.join("old-bundle"));
+        let new_repo_root = copy_python_sources_to_temp_repo(&root.join("new-bundle"));
+        let runtime_home = root.join("codex-home");
+        let old_paths = ProxyPaths::new(runtime_home.clone(), old_repo_root);
+        let new_paths = ProxyPaths::new(runtime_home, new_repo_root);
+        let port = free_port();
+        write_settings(&old_paths, port);
+
+        let result = (|| {
+            let old_status = start_with_paths(&old_paths)?;
+            ensure(old_status.proxy_running, "old bundle should start")?;
+
+            let new_status = start_with_paths(&new_paths)?;
+            ensure(new_status.proxy_running, "new bundle should start")?;
+            let record = read_pid_record(&new_paths)?
+                .ok_or_else(|| "new bundle should own the proxy PID".to_string())?;
+            let ProxyPidRecord::Managed(metadata) = record else {
+                return Err("new bundle should write managed PID metadata".to_string());
+            };
+            ensure(
+                metadata.script_path == comparable_path(&new_paths.proxy_script_path()),
+                "new bundle should replace the previous bundle's Gateway process",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let _ = stop_with_paths(&new_paths);
+        result.expect("Gateway bundle upgrade lifecycle");
+    }
+
+    #[test]
+    fn start_replaces_running_managed_proxy_after_same_path_upgrade() {
+        let root = temp_root("python-in-place-upgrade");
+        let repo_root = copy_python_sources_to_temp_repo(&root);
+        let paths = ProxyPaths::new(root.join("codex-home"), repo_root);
+        let port = free_port();
+        write_settings(&paths, port);
+
+        let result = (|| {
+            let old_status = start_with_paths(&paths)?;
+            ensure(old_status.proxy_running, "old in-place bundle should start")?;
+            let old_pid = read_pid(&paths)?
+                .ok_or_else(|| "old in-place bundle should own the proxy PID".to_string())?;
+
+            let script_path = paths.proxy_script_path();
+            let script = fs::read_to_string(&script_path)
+                .map_err(|error| format!("read in-place script: {error}"))?;
+            fs::write(&script_path, format!("{script}\n# upgraded in place\n"))
+                .map_err(|error| format!("update in-place script: {error}"))?;
+
+            let new_status = start_with_paths(&paths)?;
+            ensure(new_status.proxy_running, "upgraded in-place bundle should start")?;
+            let new_pid = read_pid(&paths)?
+                .ok_or_else(|| "upgraded in-place bundle should own the proxy PID".to_string())?;
+            ensure(
+                new_pid != old_pid,
+                "same-path script changes should replace the previous Gateway process",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let _ = stop_with_paths(&paths);
+        result.expect("Gateway in-place upgrade lifecycle");
     }
 
     fn test_paths(root: &Path) -> ProxyPaths {
