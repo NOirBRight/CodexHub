@@ -3,11 +3,20 @@
   "capture_kind": "sanitized_task_creation_ab_evidence",
   "source": {
     "evidence_type": "observed A/B plus read-only repository inspection",
+    "provenance": {
+      "observation_basis": "orchestrator_observed_ab",
+      "repository_inspection": "read_only",
+      "live_task_creation": "not_authorized"
+    },
     "conclusion_limit": "This fixture verifies the retained structural facts. It is not a live Task-create replay and does not establish a repeated-run process-leak result."
   },
   "product_boundary": {
     "codexhub_manages_global_mcp": false,
     "codexhub_has_bounded_app_server_model_probes": true,
+    "bounded_app_server_probe_sources": [
+      "src-tauri/src/models.rs",
+      "src-tauri/src/openai_usage.rs"
+    ],
     "codexhub_exposes_native_task_lifecycle": false,
     "proven_link_from_model_probes_to_task_materialization": false,
     "product_behavior_changed": false

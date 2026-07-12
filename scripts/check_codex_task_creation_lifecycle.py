@@ -11,19 +11,36 @@ import argparse
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
 
+class NumberRange:
+    """A numeric schema leaf with an exclusive lower and inclusive upper bound."""
+
+    def __init__(self, minimum: float, maximum: float) -> None:
+        self.minimum = minimum
+        self.maximum = maximum
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EVIDENCE_PATH = REPO_ROOT / "docs" / "evidence" / "issue-106" / "task-creation-lifecycle.json"
+DEFAULT_EVIDENCE_PATH = (
+    REPO_ROOT / "docs" / "evidence" / "issue-106" / "task-creation-lifecycle.json"
+)
 OWNERSHIP_BOUNDARY_PATHS = (
     Path("src-python/config_overlay.py"),
     Path("src-python/catalog_sync.py"),
     Path("src-tauri/src/catalog.rs"),
     Path("src-tauri/src/config.rs"),
     Path("src-tauri/src/proxy.rs"),
+    Path("src-tauri/src/models.rs"),
+    Path("src-tauri/src/openai_usage.rs"),
 )
+APP_SERVER_PROBE_MARKERS = {
+    Path("src-tauri/src/models.rs"): 'args(["app-server", "--stdio"])',
+    Path("src-tauri/src/openai_usage.rs"): 'args(["app-server", "--stdio"])',
+}
 GLOBAL_MCP_CONFIGURATION_TOKENS = ("openaideveloperdocs", "mcp_servers")
 FORBIDDEN_KEYS = {
     "api_key",
@@ -35,233 +52,269 @@ FORBIDDEN_KEYS = {
     "thread_id",
     "worktree_path",
 }
-EXPECTED_SANITIZATION = {
-    "contains_credentials": False,
-    "contains_local_paths": False,
-    "contains_prompts_or_messages": False,
-    "contains_task_or_session_identifiers": False,
-}
 
-
-def _mapping(value: Any, label: str, mismatches: list[str]) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    mismatches.append(f"{label} must be an object")
-    return {}
-
-
-def _value(mapping: dict[str, Any], key: str, label: str, mismatches: list[str]) -> Any:
-    if key in mapping:
-        return mapping[key]
-    mismatches.append(f"{label}.{key} is missing")
-    return None
-
-
-def _expect_equal(actual: Any, expected: Any, label: str, mismatches: list[str]) -> None:
-    if actual != expected:
-        mismatches.append(f"{label} did not match the expected contract")
-
-
-def _forbidden_key_paths(value: Any, prefix: str = "$") -> list[str]:
-    if isinstance(value, dict):
-        found: list[str] = []
-        for key, child in value.items():
-            child_path = f"{prefix}.{key}"
-            if key in FORBIDDEN_KEYS:
-                found.append(child_path)
-            found.extend(_forbidden_key_paths(child, child_path))
-        return found
-    if isinstance(value, list):
-        return [
-            path
-            for index, child in enumerate(value)
-            for path in _forbidden_key_paths(child, f"{prefix}[{index}]")
-        ]
-    return []
-
-
-def validate_owned_boundary_sources(repo_root: Path = REPO_ROOT) -> list[str]:
-    """Check that the known CodexHub ownership boundary has not gained MCP config."""
-
-    mismatches: list[str] = []
-    for relative_path in OWNERSHIP_BOUNDARY_PATHS:
-        path = repo_root / relative_path
-        try:
-            source = path.read_text(encoding="utf-8").lower()
-        except OSError as error:
-            mismatches.append(f"ownership boundary source unavailable: {relative_path}: {error}")
-            continue
-        for token in GLOBAL_MCP_CONFIGURATION_TOKENS:
-            if token in source:
-                mismatches.append(f"ownership boundary source configures global MCP token {token!r}: {relative_path}")
-    return mismatches
-
-
-def validate_evidence(evidence: Any) -> list[str]:
-    """Return every replay-contract mismatch without exposing fixture values."""
-
-    mismatches: list[str] = []
-    root = _mapping(evidence, "evidence", mismatches)
-    _expect_equal(_value(root, "schema_version", "evidence", mismatches), 1, "schema_version", mismatches)
-    _expect_equal(
-        _value(root, "capture_kind", "evidence", mismatches),
-        "sanitized_task_creation_ab_evidence",
-        "capture_kind",
-        mismatches,
-    )
-
-    product_boundary = _mapping(_value(root, "product_boundary", "evidence", mismatches), "product_boundary", mismatches)
-    _expect_equal(
-        _value(product_boundary, "codexhub_manages_global_mcp", "product_boundary", mismatches),
-        False,
-        "product_boundary.codexhub_manages_global_mcp",
-        mismatches,
-    )
-    _expect_equal(
-        _value(product_boundary, "codexhub_has_bounded_app_server_model_probes", "product_boundary", mismatches),
-        True,
-        "product_boundary.codexhub_has_bounded_app_server_model_probes",
-        mismatches,
-    )
-    _expect_equal(
-        _value(product_boundary, "codexhub_exposes_native_task_lifecycle", "product_boundary", mismatches),
-        False,
-        "product_boundary.codexhub_exposes_native_task_lifecycle",
-        mismatches,
-    )
-    _expect_equal(
-        _value(product_boundary, "proven_link_from_model_probes_to_task_materialization", "product_boundary", mismatches),
-        False,
-        "product_boundary.proven_link_from_model_probes_to_task_materialization",
-        mismatches,
-    )
-    _expect_equal(
-        _value(product_boundary, "product_behavior_changed", "product_boundary", mismatches),
-        False,
-        "product_boundary.product_behavior_changed",
-        mismatches,
-    )
-
-    red = _mapping(_value(root, "red_case", "evidence", mismatches), "red_case", mismatches)
-    for key, expected in {
+EVIDENCE_SCHEMA: dict[str, Any] = {
+    "schema_version": 1,
+    "capture_kind": "sanitized_task_creation_ab_evidence",
+    "source": {
+        "evidence_type": "observed A/B plus read-only repository inspection",
+        "provenance": {
+            "observation_basis": "orchestrator_observed_ab",
+            "repository_inspection": "read_only",
+            "live_task_creation": "not_authorized",
+        },
+        "conclusion_limit": (
+            "This fixture verifies the retained structural facts. It is not a live Task-create replay "
+            "and does not establish a repeated-run process-leak result."
+        ),
+    },
+    "product_boundary": {
+        "codexhub_manages_global_mcp": False,
+        "codexhub_has_bounded_app_server_model_probes": True,
+        "bounded_app_server_probe_sources": [
+            "src-tauri/src/models.rs",
+            "src-tauri/src/openai_usage.rs",
+        ],
+        "codexhub_exposes_native_task_lifecycle": False,
+        "proven_link_from_model_probes_to_task_materialization": False,
+        "product_behavior_changed": False,
+    },
+    "red_case": {
         "classification": "half_created",
         "client_placeholder_created": True,
         "worktree_provisioned": True,
         "rollout_materialized": False,
         "native_task_listing_contains_placeholder": False,
         "client_timeout_exceeded": True,
-    }.items():
-        _expect_equal(_value(red, key, "red_case", mismatches), expected, f"red_case.{key}", mismatches)
-    red_operations = _mapping(
-        _value(red, "supported_task_operations", "red_case", mismatches),
-        "red_case.supported_task_operations",
-        mismatches,
-    )
-    for operation, expected in {
-        "read": "unavailable_no_session",
-        "message": "unavailable_no_session",
-        "rename": "unavailable_no_session",
-        "archive": "rejected_no_session",
-        "delete": "rejected_no_session",
-    }.items():
-        _expect_equal(
-            _value(red_operations, operation, "red_case.supported_task_operations", mismatches),
-            expected,
-            f"red_case.supported_task_operations.{operation}",
-            mismatches,
-        )
-
-    green = _mapping(_value(root, "green_case", "evidence", mismatches), "green_case", mismatches)
-    _expect_equal(_value(green, "materialized", "green_case", mismatches), True, "green_case.materialized", mismatches)
-    materialization_seconds = _value(green, "materialization_seconds", "green_case", mismatches)
-    if not isinstance(materialization_seconds, (int, float)) or isinstance(materialization_seconds, bool):
-        mismatches.append("green_case.materialization_seconds must be numeric")
-    elif not 0 < materialization_seconds <= 15:
-        mismatches.append("green_case.materialization_seconds must be within the bounded bootstrap window")
-    green_bootstrap = _mapping(_value(green, "bootstrap", "green_case", mismatches), "green_case.bootstrap", mismatches)
-    _expect_equal(
-        _value(green_bootstrap, "global_openai_developer_docs_mcp_enabled", "green_case.bootstrap", mismatches),
-        False,
-        "green_case.bootstrap.global_openai_developer_docs_mcp_enabled",
-        mismatches,
-    )
-    green_lifecycle = _mapping(_value(green, "lifecycle", "green_case", mismatches), "green_case.lifecycle", mismatches)
-    for operation in ("create", "read", "message"):
-        _expect_equal(
-            _value(green_lifecycle, operation, "green_case.lifecycle", mismatches),
-            "passed",
-            f"green_case.lifecycle.{operation}",
-            mismatches,
-        )
-    _expect_equal(
-        _value(green, "permission_preflight", "green_case", mismatches),
-        {"filesystem": "unrestricted", "network": "enabled", "approval": "never"},
-        "green_case.permission_preflight",
-        mismatches,
-    )
-    _expect_equal(
-        _value(green, "git_preflight", "green_case", mismatches),
-        "passed",
-        "green_case.git_preflight",
-        mismatches,
-    )
-
-    remote_control = _mapping(
-        _value(root, "official_remote_control", "evidence", mismatches),
-        "official_remote_control",
-        mismatches,
-    )
-    _expect_equal(
-        _value(remote_control, "read_existing_materialized_task", "official_remote_control", mismatches),
-        "available",
-        "official_remote_control.read_existing_materialized_task",
-        mismatches,
-    )
-    _expect_equal(
-        _value(remote_control, "create_replay", "official_remote_control", mismatches),
-        "not_run_without_orchestrator_approval",
-        "official_remote_control.create_replay",
-        mismatches,
-    )
-
-    cleanup = _mapping(
-        _value(root, "cleanup_observation", "evidence", mismatches), "cleanup_observation", mismatches
-    )
-    for key, expected in {
+        "supported_task_operations": {
+            "read": "unavailable_no_session",
+            "message": "unavailable_no_session",
+            "rename": "unavailable_no_session",
+            "archive": "rejected_no_session",
+            "delete": "rejected_no_session",
+        },
+    },
+    "green_case": {
+        "bootstrap": {
+            "global_openai_developer_docs_mcp_enabled": False,
+            "profile": "short_low_cost",
+        },
+        "materialized": True,
+        "materialization_seconds": NumberRange(0, 15),
+        "lifecycle": {
+            "create": "passed",
+            "read": "passed",
+            "message": "passed",
+        },
+        "permission_preflight": {
+            "filesystem": "unrestricted",
+            "network": "enabled",
+            "approval": "never",
+        },
+        "git_preflight": "passed",
+    },
+    "official_remote_control": {
+        "read_existing_materialized_task": "available",
+        "create_replay": "not_run_without_orchestrator_approval",
+    },
+    "cleanup_observation": {
         "clean_orphan_worktrees_removed": 2,
         "client_held_empty_directory": True,
         "official_client_handle_release_required": True,
         "internal_codex_database_edited": False,
-    }.items():
-        _expect_equal(_value(cleanup, key, "cleanup_observation", mismatches), expected, f"cleanup_observation.{key}", mismatches)
+    },
+    "leak_detection": {
+        "repeated_task_creation_runs": 0,
+        "app_server_processes": "not_run_without_orchestrator_approval",
+        "claim": "no_repeated_run_no_leak_claim",
+    },
+    "sanitization": {
+        "contains_credentials": False,
+        "contains_local_paths": False,
+        "contains_prompts_or_messages": False,
+        "contains_task_or_session_identifiers": False,
+    },
+}
 
-    leak_detection = _mapping(
-        _value(root, "leak_detection", "evidence", mismatches), "leak_detection", mismatches
-    )
-    _expect_equal(
-        _value(leak_detection, "repeated_task_creation_runs", "leak_detection", mismatches),
-        0,
-        "leak_detection.repeated_task_creation_runs",
-        mismatches,
-    )
-    _expect_equal(
-        _value(leak_detection, "app_server_processes", "leak_detection", mismatches),
-        "not_run_without_orchestrator_approval",
-        "leak_detection.app_server_processes",
-        mismatches,
-    )
-    _expect_equal(
-        _value(leak_detection, "claim", "leak_detection", mismatches),
-        "no_repeated_run_no_leak_claim",
-        "leak_detection.claim",
-        mismatches,
+
+def _schema_field_names(schema: Any) -> frozenset[str]:
+    if not isinstance(schema, dict):
+        return frozenset()
+    return frozenset(schema).union(
+        *(_schema_field_names(child) for child in schema.values())
     )
 
-    sanitization = _value(root, "sanitization", "evidence", mismatches)
-    _expect_equal(sanitization, EXPECTED_SANITIZATION, "sanitization", mismatches)
-    for path in _forbidden_key_paths(root):
-        mismatches.append(f"sanitization forbids identifier or secret key at {path}")
-    mismatches.extend(validate_owned_boundary_sources())
+
+ALLOWED_EVIDENCE_FIELD_NAMES = _schema_field_names(EVIDENCE_SCHEMA)
+WINDOWS_LOCAL_PATH_PATTERN = re.compile(
+    r"(?:\b[a-z]:[\\/]|\\\\[^\\/\r\n]+[\\/]|%(?:userprofile|appdata|localappdata|home)%)",
+    re.IGNORECASE,
+)
+POSIX_LOCAL_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:users|home|tmp|var|private|mnt)(?:/|$)",
+    re.IGNORECASE,
+)
+TASK_OR_SESSION_IDENTIFIER_PATTERN = re.compile(
+    r"(?:\b(?:client[_-]?thread|task|thread|session|rollout)(?:[_-]?id)?[-_:]?[0-9a-f]{8,}\b|"
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)",
+    re.IGNORECASE,
+)
+CREDENTIAL_SHAPE_PATTERN = re.compile(
+    r"(?:\b(?:sk|ghp|gho|github_pat)_[a-z0-9_-]+\b|\bbearer\s+\S+|"
+    r"\b(?:api[_ -]?key|authorization|credential|secret|password|token)\b)",
+    re.IGNORECASE,
+)
+
+
+def _require_object(
+    value: Any, label: str, mismatches: list[str]
+) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    mismatches.append(f"{label} must be an object")
+    return None
+
+
+def _require_exact_fields(
+    mapping: dict[str, Any],
+    expected_fields: frozenset[str],
+    label: str,
+    mismatches: list[str],
+) -> None:
+    missing_fields = sorted(expected_fields - mapping.keys())
+    if missing_fields:
+        mismatches.append(f"{label} has missing fields: {', '.join(missing_fields)}")
+    if set(mapping) - expected_fields:
+        mismatches.append(f"{label} has unexpected fields")
+
+
+def _expect_equal(
+    actual: Any, expected: Any, label: str, mismatches: list[str]
+) -> None:
+    if actual != expected:
+        mismatches.append(f"{label} did not match the expected contract")
+
+
+def _schema_child_label(label: str, key: str) -> str:
+    return key if label == "evidence" else f"{label}.{key}"
+
+
+def _validate_schema(
+    value: Any, schema: Any, label: str, mismatches: list[str]
+) -> None:
+    if isinstance(schema, dict):
+        mapping = _require_object(value, label, mismatches)
+        if mapping is None:
+            return
+        _require_exact_fields(mapping, frozenset(schema), label, mismatches)
+        for key, child_schema in schema.items():
+            if key in mapping:
+                _validate_schema(
+                    mapping[key],
+                    child_schema,
+                    _schema_child_label(label, key),
+                    mismatches,
+                )
+        return
+
+    if isinstance(schema, NumberRange):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            mismatches.append(f"{label} must be numeric")
+        elif not schema.minimum < value <= schema.maximum:
+            mismatches.append(f"{label} must be within the bounded bootstrap window")
+        return
+
+    _expect_equal(value, schema, label, mismatches)
+
+
+def _safe_child_path(prefix: str, key: object) -> str:
+    if isinstance(key, str) and key in ALLOWED_EVIDENCE_FIELD_NAMES:
+        return f"{prefix}.{key}"
+    return f"{prefix}.<unexpected>"
+
+
+def _forbidden_key_count(value: Any) -> int:
+    if isinstance(value, dict):
+        found = 0
+        for key, child in value.items():
+            if isinstance(key, str) and key.casefold() in FORBIDDEN_KEYS:
+                found += 1
+            found += _forbidden_key_count(child)
+        return found
+    if isinstance(value, list):
+        return sum(_forbidden_key_count(child) for child in value)
+    return 0
+
+
+def _unsafe_string_mismatches(value: Any, prefix: str = "$") -> list[str]:
+    if isinstance(value, dict):
+        return [
+            mismatch
+            for key, child in value.items()
+            for mismatch in _unsafe_string_mismatches(
+                child, _safe_child_path(prefix, key)
+            )
+        ]
+    if isinstance(value, list):
+        return [
+            mismatch
+            for index, child in enumerate(value)
+            for mismatch in _unsafe_string_mismatches(child, f"{prefix}[{index}]")
+        ]
+    if not isinstance(value, str):
+        return []
+
+    mismatches: list[str] = []
+    if WINDOWS_LOCAL_PATH_PATTERN.search(value) or POSIX_LOCAL_PATH_PATTERN.search(
+        value
+    ):
+        mismatches.append(f"unsafe local path string at {prefix}")
+    if TASK_OR_SESSION_IDENTIFIER_PATTERN.search(value):
+        mismatches.append(f"unsafe task or session identifier string at {prefix}")
+    if CREDENTIAL_SHAPE_PATTERN.search(value):
+        mismatches.append(f"unsafe credential-like string at {prefix}")
+    return mismatches
+
+
+def validate_owned_boundary_sources(repo_root: Path = REPO_ROOT) -> list[str]:
+    """Check the bounded CodexHub source boundary without exposing host paths."""
+
+    mismatches: list[str] = []
+    for relative_path in OWNERSHIP_BOUNDARY_PATHS:
+        path = repo_root / relative_path
+        try:
+            source = path.read_text(encoding="utf-8").lower()
+        except OSError:
+            mismatches.append(
+                f"ownership boundary source unavailable: {relative_path.as_posix()}"
+            )
+            continue
+        for token in GLOBAL_MCP_CONFIGURATION_TOKENS:
+            if token in source:
+                mismatches.append(
+                    "ownership boundary source configures global MCP token "
+                    f"{token!r}: {relative_path.as_posix()}"
+                )
+        marker = APP_SERVER_PROBE_MARKERS.get(relative_path)
+        if marker is not None and marker.lower() not in source:
+            mismatches.append(
+                "ownership boundary source missing bounded app-server probe: "
+                f"{relative_path.as_posix()}"
+            )
+    return mismatches
+
+
+def validate_evidence(
+    evidence: Any, repo_root: Path = REPO_ROOT
+) -> list[str]:
+    """Return every contract mismatch without exposing untrusted fixture values."""
+
+    mismatches: list[str] = []
+    _validate_schema(evidence, EVIDENCE_SCHEMA, "evidence", mismatches)
+    if _forbidden_key_count(evidence):
+        mismatches.append("sanitization forbids sensitive field names")
+    mismatches.extend(_unsafe_string_mismatches(evidence))
+    mismatches.extend(validate_owned_boundary_sources(repo_root))
     return mismatches
 
 
@@ -306,20 +359,32 @@ def main(argv: list[str] | None = None) -> int:
     try:
         evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        print("TASK_CREATION_LIFECYCLE_MISMATCH: unable to read sanitized evidence", file=sys.stderr)
+        print(
+            "TASK_CREATION_LIFECYCLE_MISMATCH: unable to read sanitized evidence",
+            file=sys.stderr,
+        )
         return 1
     if not isinstance(evidence, dict):
-        print("TASK_CREATION_LIFECYCLE_MISMATCH: evidence root must be an object", file=sys.stderr)
+        print(
+            "TASK_CREATION_LIFECYCLE_MISMATCH: evidence root must be an object",
+            file=sys.stderr,
+        )
         return 1
 
     replay = deepcopy(evidence)
     apply_replay_case(replay, args.replay_case)
     mismatches = validate_evidence(replay)
     if mismatches:
-        print("TASK_CREATION_LIFECYCLE_MISMATCH: " + " | ".join(mismatches), file=sys.stderr)
+        print(
+            "TASK_CREATION_LIFECYCLE_MISMATCH: " + " | ".join(mismatches),
+            file=sys.stderr,
+        )
         return 1
     if args.replay_case != "identity":
-        print(f"NEGATIVE_REPLAY_CONTROL_DID_NOT_FAIL: {args.replay_case}", file=sys.stderr)
+        print(
+            f"NEGATIVE_REPLAY_CONTROL_DID_NOT_FAIL: {args.replay_case}",
+            file=sys.stderr,
+        )
         return 2
 
     print("Task creation A/B: half_created -> materialized")

@@ -38,11 +38,17 @@ links those probes to post-worktree Task materialization. Accordingly, this
 change adds evidence coverage only and deliberately leaves CodexHub product
 behavior unchanged.
 
-The verifier reads the known CodexHub configuration/catalog/proxy boundary
-sources and fails if they gain either the named global MCP or a generic
-`mcp_servers` configuration surface. That source check is deliberately narrow:
-it supports the ownership boundary, not a claim about the official client's
-internal implementation.
+The verifier reads the known CodexHub configuration, catalog, Gateway, and
+app-server-probe boundary source modules. It fails if they gain either the
+named global MCP or a generic `mcp_servers` configuration surface, and it
+requires the bounded model and usage probe launch sites to remain present.
+That source check is deliberately narrow: it supports the ownership boundary,
+not a claim about the official client's internal implementation or a proven
+causal link to Task materialization.
+
+The retained JSON has a closed schema: it requires source provenance, rejects
+unknown fields, and checks strings for local paths, Task/session identifiers,
+and credential-shaped material without echoing their values in mismatches.
 
 The official Task read surface was available for an existing materialized Task.
 A new create replay and repeated process-leak run were intentionally not run:
