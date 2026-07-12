@@ -7159,6 +7159,9 @@ def compatible_request_body(
     if raw_provider_probe:
         pass
     else:
+        # ``additional_tools`` is a legacy Codex input carrier. Preserve it
+        # byte-for-byte for eager providers; deferred_core alone promotes it
+        # so the selected external surface policy can inspect namespaces.
         if tool_surface_strategy == "deferred_core" and _hoist_additional_tools_input_items(payload):
             changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:

@@ -42,6 +42,7 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     assert summary["failures"] == []
     assert summary["tracked_root_exited"] is True
     assert summary["tracked_child_exited"] is True
+    assert summary["tracked_child_exit_before_natural_timeout"] is True
 
 
 def test_issue_108_qualification_has_no_harness_history_bridge():
@@ -61,6 +62,8 @@ def test_issue_108_qualification_requires_history_adapter_evidence():
 
     assert "third_party_apply_patch_freeform_history_adapter" in source
     assert "apply_patch_history_adapter_outcomes" in source
+    assert "apply_patch_adapter_adapted_count" in source
+    assert "apply_patch_history_adapter_adapted_count" in source
     assert "history adapter never reported adapted" in source
 
 

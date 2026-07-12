@@ -206,6 +206,7 @@ function Invoke-LifecycleReplay {
     $childPidPath = Join-Path $runRoot 'tracked-child.pid'
     $tracked = $null
     $childProcessId = 0
+    $childProcess = $null
     $failures = [System.Collections.Generic.List[string]]::new()
     $summary = [ordered]@{
         mode = 'lifecycle_replay'
@@ -213,6 +214,7 @@ function Invoke-LifecycleReplay {
         failures = @()
         tracked_root_exited = $false
         tracked_child_exited = $false
+        tracked_child_exit_before_natural_timeout = $false
         run_root = $runRoot
     }
 
@@ -223,9 +225,9 @@ function Invoke-LifecycleReplay {
             throw 'lifecycle_powershell_not_found'
         }
         $lifecycleChildCommand = @'
-$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 5') -PassThru
+$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 10') -PassThru
 [System.IO.File]::WriteAllText($env:CODEXHUB_LIFECYCLE_CHILD_PID_PATH, [string]$child.Id)
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 10
 '@
         $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
             '-NoProfile', '-NonInteractive', '-Command', $lifecycleChildCommand
@@ -251,7 +253,7 @@ Start-Sleep -Seconds 5
     finally {
         try {
             if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
-                [void]$tracked.Process.WaitForExit(7000)
+                [void]$tracked.Process.WaitForExit(12000)
             }
             if ($null -eq $tracked -or -not $tracked.Process.HasExited) {
                 Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_root_remained'
@@ -270,16 +272,33 @@ Start-Sleep -Seconds 5
             else {
                 try {
                     $childProcess = [System.Diagnostics.Process]::GetProcessById($childProcessId)
-                    [void]$childProcess.WaitForExit(7000)
-                    if ($childProcess.HasExited) {
+                    # The child sleeps for ten seconds. A two-second bound makes a
+                    # green replay evidence of retained-tree cleanup, not natural exit.
+                    $childExitedWithinBound = $childProcess.WaitForExit(2000)
+                    if ($childExitedWithinBound -or $childProcess.HasExited) {
                         $summary.tracked_child_exited = $true
+                        $summary.tracked_child_exit_before_natural_timeout = $true
                     }
                     else {
                         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
+                        try {
+                            Stop-TrackedProcess ([pscustomobject]@{ Process = $childProcess })
+                            [void]$childProcess.WaitForExit(2000)
+                        }
+                        catch {
+                            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_cleanup_failed'
+                        }
+                        if ($childProcess.HasExited) {
+                            $summary.tracked_child_exited = $true
+                        }
+                        else {
+                            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_cleanup_remained'
+                        }
                     }
                 }
                 catch [System.ArgumentException] {
                     $summary.tracked_child_exited = $true
+                    $summary.tracked_child_exit_before_natural_timeout = $true
                 }
                 catch {
                     Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_state_unavailable'
@@ -332,6 +351,27 @@ function Read-JsonLines {
         }
     }
     return $entries.ToArray()
+}
+
+function Get-AdaptedTelemetryCount {
+    param([object[]]$Events)
+
+    $total = 0
+    foreach ($event in $Events) {
+        if ($event.outcome -ne 'adapted') {
+            continue
+        }
+        try {
+            $count = [int]$event.count
+        }
+        catch {
+            $count = 0
+        }
+        if ($count -gt 0) {
+            $total += $count
+        }
+    }
+    return $total
 }
 
 function Wait-ProxyHealth {
@@ -972,6 +1012,8 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $surfaceEvents = @($events | Where-Object { $_.event -eq 'external_tool_surface_prepared' })
     $adapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
     $historyAdapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_history_adapter' })
+    $applyPatchAdapterAdaptedCount = Get-AdaptedTelemetryCount -Events $adapterEvents
+    $applyPatchHistoryAdapterAdaptedCount = Get-AdaptedTelemetryCount -Events $historyAdapterEvents
     $requestErrors = @($events | Where-Object { $_.event -eq 'request_error' })
     $postSuccessStructuredHistoryPairCounts = [System.Collections.Generic.List[int]]::new()
     for ($index = 0; $index -lt $captureEvents.Count; $index++) {
@@ -1042,10 +1084,10 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     if ($surfaceEvents.Count -eq 0 -or @($surfaceEvents | Where-Object { $_.tool_surface_strategy -ne 'deferred_core' }).Count -gt 0) {
         [void]$failures.Add('deferred_core tool-surface telemetry was not recorded for every prepared request')
     }
-    if (@($adapterEvents | Where-Object { $_.outcome -eq 'adapted' }).Count -eq 0) {
+    if ($applyPatchAdapterAdaptedCount -le 0) {
         [void]$failures.Add('the third-party apply_patch freeform adapter never reported adapted')
     }
-    if (@($historyAdapterEvents | Where-Object { $_.outcome -eq 'adapted' }).Count -eq 0) {
+    if ($applyPatchHistoryAdapterAdaptedCount -le 0) {
         [void]$failures.Add('the third-party apply_patch freeform history adapter never reported adapted')
     }
     if ($postSuccessStructuredHistoryPairCounts.Count -eq 0 -or @(
@@ -1063,6 +1105,8 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $summary.deferred_surface_event_count = $surfaceEvents.Count
     $summary.apply_patch_adapter_outcomes = @($adapterEvents | ForEach-Object { [string]$_.outcome })
     $summary.apply_patch_history_adapter_outcomes = @($historyAdapterEvents | ForEach-Object { [string]$_.outcome })
+    $summary.apply_patch_adapter_adapted_count = $applyPatchAdapterAdaptedCount
+    $summary.apply_patch_history_adapter_adapted_count = $applyPatchHistoryAdapterAdaptedCount
     $summary.post_success_tool_choice = $postSuccessToolChoice
     $summary.post_success_structured_history_pair_counts = @($postSuccessStructuredHistoryPairCounts)
     $summary.git_status = @($statusLines)
