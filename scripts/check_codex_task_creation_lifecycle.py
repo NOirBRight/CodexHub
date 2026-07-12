@@ -371,26 +371,35 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    replay = deepcopy(evidence)
-    apply_replay_case(replay, args.replay_case)
-    mismatches = validate_evidence(replay)
-    if mismatches:
+    original_mismatches = validate_evidence(evidence)
+    if original_mismatches:
         print(
-            "TASK_CREATION_LIFECYCLE_MISMATCH: " + " | ".join(mismatches),
+            "TASK_CREATION_LIFECYCLE_MISMATCH: " + " | ".join(original_mismatches),
             file=sys.stderr,
         )
         return 1
-    if args.replay_case != "identity":
+
+    if args.replay_case == "identity":
+        print("Task creation A/B: half_created -> materialized")
+        print("Live remote create replay: not run without Orchestrator approval")
+        print("TASK_CREATION_LIFECYCLE_COMPLETE")
+        return 0
+
+    replay = deepcopy(evidence)
+    apply_replay_case(replay, args.replay_case)
+    replay_mismatches = validate_evidence(replay)
+    if replay_mismatches:
         print(
-            f"NEGATIVE_REPLAY_CONTROL_DID_NOT_FAIL: {args.replay_case}",
+            "TASK_CREATION_LIFECYCLE_MISMATCH: " + " | ".join(replay_mismatches),
             file=sys.stderr,
         )
-        return 2
+        return 1
 
-    print("Task creation A/B: half_created -> materialized")
-    print("Live remote create replay: not run without Orchestrator approval")
-    print("TASK_CREATION_LIFECYCLE_COMPLETE")
-    return 0
+    print(
+        f"NEGATIVE_REPLAY_CONTROL_DID_NOT_FAIL: {args.replay_case}",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":

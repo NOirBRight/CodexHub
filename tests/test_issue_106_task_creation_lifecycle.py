@@ -18,9 +18,14 @@ CHECKER = importlib.util.module_from_spec(CHECKER_SPEC)
 CHECKER_SPEC.loader.exec_module(CHECKER)
 
 
-def run_replay(case: str) -> subprocess.CompletedProcess[str]:
+def run_replay(
+    case: str, evidence_path: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, str(REPLAY_SCRIPT), "--replay-case", case]
+    if evidence_path is not None:
+        command.extend(("--evidence", str(evidence_path)))
     return subprocess.run(
-        [sys.executable, str(REPLAY_SCRIPT), "--replay-case", case],
+        command,
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -121,6 +126,24 @@ def test_task_creation_identity_replay_passes() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "TASK_CREATION_LIFECYCLE_COMPLETE" in result.stdout
+
+
+def test_task_creation_malformed_nested_fixture_fails_without_a_traceback(tmp_path: Path) -> None:
+    evidence = read_evidence()
+    evidence["red_case"] = []
+    malformed_evidence = tmp_path / "malformed-task-creation-evidence.json"
+    malformed_evidence.write_text(json.dumps(evidence), encoding="utf-8")
+
+    result = run_replay("materialize-red", malformed_evidence)
+    rendered = result.stdout + result.stderr
+
+    assert result.returncode == 1
+    assert "TASK_CREATION_LIFECYCLE_MISMATCH: red_case must be an object" in result.stderr
+    assert "Traceback" not in rendered
+    assert str(ROOT) not in rendered
+    assert str(malformed_evidence) not in rendered
+    assert not CHECKER.WINDOWS_LOCAL_PATH_PATTERN.search(rendered)
+    assert not CHECKER.POSIX_LOCAL_PATH_PATTERN.search(rendered)
 
 
 @pytest.mark.parametrize(
