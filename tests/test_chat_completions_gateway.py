@@ -447,6 +447,39 @@ class CodexHubErrorPayloadTests(unittest.TestCase):
                 self.assertEqual(payload["details"]["status"], kwargs["status"])
 
 
+class DownstreamErrorMapperTests(unittest.TestCase):
+    def test_chat_json_error_mapper_preserves_chat_error_object_shape(self):
+        error = codex_proxy.DownstreamErrorSpec(
+            inbound_format="chat_completions",
+            upstream_name="official",
+            status=502,
+            exc=URLError(ConnectionResetError("connection reset")),
+        )
+
+        payload = codex_proxy._downstream_json_error_payload(error)
+
+        self.assertEqual(payload["error"]["type"], "upstream_error")
+        self.assertEqual(payload["error"]["code"], "URLError")
+        self.assertEqual(payload["error"]["status"], 502)
+        self.assertEqual(payload["error"]["upstream"], "official")
+
+    def test_responses_sse_error_mapper_preserves_stream_error_payload_shape(self):
+        error = codex_proxy.DownstreamErrorSpec(
+            inbound_format="responses",
+            upstream_name="official",
+            status=429,
+            exc=URLError(TimeoutError("upstream timed out")),
+        )
+
+        payload = codex_proxy._downstream_sse_error_payload_for_inbound_format(error)
+
+        self.assertEqual(payload["type"], "upstream_stream_error")
+        self.assertEqual(payload["status"], 502)
+        self.assertEqual(payload["upstream"], "official")
+        self.assertEqual(payload["error"], "URLError")
+        self.assertEqual(payload["retry_owner"], "client")
+
+
 class ChatToolChoiceTests(unittest.TestCase):
     def test_string_tool_choice(self):
         self.assertEqual(_chat_tool_choice_to_responses_tool_choice("auto"), "auto")

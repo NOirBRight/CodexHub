@@ -11156,6 +11156,17 @@ def _parse_gateway_request_input(
     )
 
 
+def _open_upstream_once(
+    request: Request,
+    *,
+    upstream_name: str,
+    timeout: int,
+) -> Any:
+    if upstream_name == "official":
+        return _official_urlopen(request, timeout=timeout)
+    return urlopen(request, timeout=timeout)
+
+
 def _open_upstream_response(
     request: Request,
     *,
@@ -11175,9 +11186,11 @@ def _open_upstream_response(
     attempt = 1
     while True:
         try:
-            if upstream_name == "official":
-                return _official_urlopen(request, timeout=timeout)
-            return urlopen(request, timeout=timeout)
+            return _open_upstream_once(
+                request,
+                upstream_name=upstream_name,
+                timeout=timeout,
+            )
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
             if isinstance(exc, HTTPError) and not retry_http_errors:
                 raise
@@ -12734,7 +12747,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:
         self._write_sse_event(
             "error",
-            _downstream_stream_error_payload(upstream_name=upstream_name, exc=exc),
+            _downstream_sse_error_payload_for_inbound_format(
+                DownstreamErrorSpec(
+                    inbound_format="responses",
+                    upstream_name=upstream_name,
+                    exc=exc,
+                )
+            ),
         )
 
     def _write_downstream_sse_error(
@@ -12768,10 +12787,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
             self.close_connection = True
             return
-        if exc is not None:
-            self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
-            self.close_connection = True
-            return
         self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
         self.close_connection = True
 
@@ -12785,11 +12800,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     ) -> None:
         self._write_sse_event(
             "error",
-            _downstream_stream_error_payload(
-                upstream_name=upstream_name,
-                status=status,
-                error=error,
-                detail=detail,
+            _downstream_sse_error_payload_for_inbound_format(
+                DownstreamErrorSpec(
+                    inbound_format="responses",
+                    upstream_name=upstream_name,
+                    status=status,
+                    error=error,
+                    detail=detail,
+                )
             ),
         )
 
