@@ -5,7 +5,9 @@ param(
     [int]$TimeoutSeconds = 240,
     [int]$ProxyStartupSeconds = 20,
     [switch]$CaptureRequestShape,
-    [switch]$UseCliSandboxBypass
+    [switch]$UseCliSandboxBypass,
+    [switch]$StructuredApplyPatchHistoryBridge,
+    [bool]$FailFastAfterFirstPostSuccessToolChoice = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -219,6 +221,8 @@ $summary = [ordered]@{
     expected_upstream = 'ollama_cloud'
     expected_route_mode = 'codexhub'
     cli_sandbox = if ($UseCliSandboxBypass) { 'isolated_bypass' } else { 'workspace_write' }
+    structured_apply_patch_history_bridge = [bool]$StructuredApplyPatchHistoryBridge
+    fail_fast_after_first_post_success_tool_choice = $FailFastAfterFirstPostSuccessToolChoice
     run_root = $runRoot
     passed = $false
     failures = @()
@@ -261,7 +265,8 @@ try {
         CODEX_PROXY_PORT = "$proxyPort"
     }
     $proxyArguments = @('-u', 'codex_proxy.py', '--port', "$proxyPort")
-    if ($CaptureRequestShape) {
+    $captureProxyEnabled = $CaptureRequestShape -or $StructuredApplyPatchHistoryBridge -or $FailFastAfterFirstPostSuccessToolChoice
+    if ($captureProxyEnabled) {
         $captureProxyPath = Join-Path $runRoot 'capture-proxy.py'
         $captureProxy = @'
 import json
@@ -278,9 +283,14 @@ _capture_path = Path(os.environ["CODEXHUB_REQUEST_TOOL_SHAPE_PATH"])
 _capture_count = 0
 _sse_capture_count = 0
 _apply_patch_capture_count = 0
+_bridge_enabled = os.environ.get("CODEXHUB_ENABLE_APPLY_PATCH_HISTORY_BRIDGE") == "1"
+_bridge_request_active = False
+_post_success_apply_patch_pending = False
+_post_success_tool_choice_recorded = False
 _original_compatible_request_body = codex_proxy.compatible_request_body
 _original_compatible_sse_line = codex_proxy.compatible_sse_line
 _original_apply_patch_events_for_event = codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event
+_original_function_tool_names = codex_proxy._function_tool_names
 _apply_patch_item_ids = set()
 
 
@@ -323,6 +333,147 @@ def _tool_output_shape(value):
         "contains_expected_lines_error": "failed to find expected lines" in normalized,
         "contains_success_marker": "success" in normalized or "applied" in normalized,
     }
+
+
+def _append_capture_record(record):
+    with _capture_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+
+
+def _collect_text(value):
+    text_parts = []
+
+    def collect(candidate):
+        if isinstance(candidate, str):
+            text_parts.append(candidate)
+        elif isinstance(candidate, list):
+            for entry in candidate:
+                collect(entry)
+        elif isinstance(candidate, dict):
+            for entry in candidate.values():
+                collect(entry)
+
+    collect(value)
+    return "\n".join(text_parts).lower()
+
+
+def _is_successful_apply_patch_output(value):
+    normalized = _collect_text(value)
+    return (
+        "apply_patch verification failed" not in normalized
+        and "failed to find expected lines" not in normalized
+        and ("success" in normalized or "updated" in normalized or "applied" in normalized)
+    )
+
+
+def _is_exact_apply_patch_history_pair(call, result):
+    return (
+        isinstance(call, dict)
+        and set(call) == {"type", "status", "call_id", "name", "input"}
+        and call.get("type") == "custom_tool_call"
+        and call.get("status") == "completed"
+        and call.get("name") == "apply_patch"
+        and isinstance(call.get("call_id"), str)
+        and bool(call["call_id"])
+        and isinstance(call.get("input"), str)
+        and bool(call["input"].strip())
+        and isinstance(result, dict)
+        and set(result) == {"type", "call_id", "output"}
+        and result.get("type") == "custom_tool_call_output"
+        and result.get("call_id") == call["call_id"]
+    )
+
+
+def _bridge_apply_patch_history(payload):
+    input_items = payload.get("input") if isinstance(payload, dict) else None
+    if not isinstance(input_items, list):
+        return payload, 0
+    rewritten = []
+    adapted = 0
+    index = 0
+    while index < len(input_items):
+        call = input_items[index]
+        result = input_items[index + 1] if index + 1 < len(input_items) else None
+        if _is_exact_apply_patch_history_pair(call, result):
+            rewritten.append(
+                {
+                    "type": "function_call",
+                    "call_id": call["call_id"],
+                    "name": "apply_patch",
+                    "arguments": json.dumps({"patch": call["input"]}, ensure_ascii=True, separators=(",", ":")),
+                }
+            )
+            rewritten.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": result["call_id"],
+                    "output": result["output"],
+                }
+            )
+            adapted += 1
+            index += 2
+            continue
+        rewritten.append(call)
+        index += 1
+    if not adapted:
+        return payload, 0
+    rewritten_payload = dict(payload)
+    rewritten_payload["input"] = rewritten
+    return rewritten_payload, adapted
+
+
+def _function_tool_names_with_apply_patch_history_bridge(value):
+    names = _original_function_tool_names(value)
+    if _bridge_request_active and isinstance(value, list):
+        if any(
+            isinstance(tool, dict)
+            and tool.get("type") == "custom"
+            and tool.get("name") == "apply_patch"
+            for tool in value
+        ):
+            names.add("apply_patch")
+    return names
+
+
+def _note_post_success_apply_patch_history(payload):
+    global _post_success_apply_patch_pending
+    if _post_success_apply_patch_pending or not isinstance(payload, dict):
+        return
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return
+    for index, call in enumerate(input_items[:-1]):
+        result = input_items[index + 1]
+        if _is_exact_apply_patch_history_pair(call, result) and _is_successful_apply_patch_output(result["output"]):
+            _post_success_apply_patch_pending = True
+            _append_capture_record({"stage": "post_success_apply_patch_result"})
+            return
+
+
+def _record_post_success_tool_choice(line):
+    global _post_success_tool_choice_recorded
+    if not _post_success_apply_patch_pending or _post_success_tool_choice_recorded:
+        return
+    if not isinstance(line, bytes) or not line.startswith(b"data: "):
+        return
+    try:
+        payload = json.loads(line[6:].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    item = payload.get("item") if isinstance(payload, dict) else None
+    if not isinstance(item, dict) or item.get("type") not in {"function_call", "custom_tool_call"}:
+        return
+    name = item.get("name")
+    if not isinstance(name, str) or not name:
+        return
+    _post_success_tool_choice_recorded = True
+    _append_capture_record(
+        {
+            "stage": "post_success_tool_choice",
+            "choice": name,
+            "outcome": "expected" if name == "shell_command" else "wrong",
+        }
+    )
 
 
 def _patch_structure(arguments):
@@ -401,8 +552,31 @@ def _capture(stage, body):
 
 
 def _compatible_request_body_with_capture(body, *args, **kwargs):
+    global _bridge_request_active
     _capture("before", body)
-    rewritten = _original_compatible_request_body(body, *args, **kwargs)
+    payload = None
+    try:
+        candidate = json.loads(body.decode("utf-8-sig"))
+        if isinstance(candidate, dict):
+            payload = candidate
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    if payload is not None:
+        _note_post_success_apply_patch_history(payload)
+    forwarded_body = body
+    adapted = 0
+    if _bridge_enabled and payload is not None:
+        payload, adapted = _bridge_apply_patch_history(payload)
+        if adapted:
+            forwarded_body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            _append_capture_record(
+                {"stage": "apply_patch_history_bridge", "outcome": "adapted", "count": adapted}
+            )
+    _bridge_request_active = adapted > 0
+    try:
+        rewritten = _original_compatible_request_body(forwarded_body, *args, **kwargs)
+    finally:
+        _bridge_request_active = False
     _capture("after", rewritten)
     return rewritten
 
@@ -451,6 +625,7 @@ def _apply_patch_response_shape(line):
 
 def _compatible_sse_line_with_capture(line, *args, **kwargs):
     global _sse_capture_count
+    _record_post_success_tool_choice(line)
     shape = _apply_patch_response_shape(line)
     if shape is not None and _sse_capture_count < 8:
         _sse_capture_count += 1
@@ -508,10 +683,15 @@ def _apply_patch_events_for_event_with_capture(self, event):
 codex_proxy.compatible_request_body = _compatible_request_body_with_capture
 codex_proxy.compatible_sse_line = _compatible_sse_line_with_capture
 codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event = _apply_patch_events_for_event_with_capture
+if _bridge_enabled:
+    codex_proxy._function_tool_names = _function_tool_names_with_apply_patch_history_bridge
 raise SystemExit(codex_proxy.main())
 '@
         [System.IO.File]::WriteAllText($captureProxyPath, $captureProxy, [System.Text.UTF8Encoding]::new($false))
         $childEnvironment['CODEXHUB_REQUEST_TOOL_SHAPE_PATH'] = $requestShapePath
+        if ($StructuredApplyPatchHistoryBridge) {
+            $childEnvironment['CODEXHUB_ENABLE_APPLY_PATCH_HISTORY_BRIDGE'] = '1'
+        }
         $proxyArguments = @('-u', $captureProxyPath, '--port', "$proxyPort")
     }
     $cliConfig = @"
@@ -572,7 +752,31 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $cli = Start-TrackedCodex -CommandPath $CodexCommand -Arguments $cliArguments -WorkingDirectory $testWorkspace -Environment $childEnvironment
     $cli.Process.StandardInput.Write($prompt)
     $cli.Process.StandardInput.Close()
-    if (-not $cli.Process.WaitForExit($TimeoutSeconds * 1000)) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $postSuccessToolChoice = $null
+    $stoppedForWrongPostSuccessChoice = $false
+    while (-not $cli.Process.HasExited -and (Get-Date) -lt $deadline) {
+        [void]$cli.Process.WaitForExit(250)
+        $choiceRecord = @(
+            Read-JsonLines -Path $requestShapePath |
+                Where-Object { $_.stage -eq 'post_success_tool_choice' } |
+                Select-Object -First 1
+        )
+        if ($choiceRecord.Count -eq 0) {
+            continue
+        }
+        $postSuccessToolChoice = [string]$choiceRecord[0].choice
+        $summary.post_success_tool_choice = $postSuccessToolChoice
+        if ($FailFastAfterFirstPostSuccessToolChoice -and $postSuccessToolChoice -ne 'shell_command') {
+            $stoppedForWrongPostSuccessChoice = $true
+            Stop-TrackedProcess $cli
+            break
+        }
+    }
+    if ($stoppedForWrongPostSuccessChoice) {
+        throw "First tool after the successful apply_patch result was $postSuccessToolChoice, not shell_command."
+    }
+    if (-not $cli.Process.HasExited) {
         Stop-TrackedProcess $cli
         throw "Codex CLI timed out after $TimeoutSeconds seconds."
     }
@@ -584,6 +788,12 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     Start-Sleep -Milliseconds 750
 
     $events = Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')
+    $captureEvents = Read-JsonLines -Path $requestShapePath
+    $historyBridgeEvents = @($captureEvents | Where-Object { $_.stage -eq 'apply_patch_history_bridge' })
+    $postSuccessChoiceEvents = @($captureEvents | Where-Object { $_.stage -eq 'post_success_tool_choice' })
+    if ($null -eq $postSuccessToolChoice -and $postSuccessChoiceEvents.Count -gt 0) {
+        $postSuccessToolChoice = [string]$postSuccessChoiceEvents[0].choice
+    }
     $cliEvents = Read-JsonLines -Path $cliStdoutPath
     $toolSequence = [System.Collections.Generic.List[string]]::new()
     foreach ($event in $cliEvents) {
@@ -624,6 +834,21 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     if (($toolSequence -join ',') -ne 'shell_command,apply_patch,shell_command') {
         [void]$failures.Add("unexpected CLI tool sequence: $($toolSequence -join ',')")
     }
+    if ([string]::IsNullOrWhiteSpace($postSuccessToolChoice)) {
+        [void]$failures.Add('the harness did not observe the first post-success tool choice')
+    }
+    elseif ($postSuccessToolChoice -ne 'shell_command') {
+        [void]$failures.Add("first post-success tool choice was $postSuccessToolChoice, not shell_command")
+    }
+    $invalidHistoryBridge = $historyBridgeEvents.Count -eq 0 -or @(
+        $historyBridgeEvents | Where-Object { $_.outcome -ne 'adapted' -or $_.count -ne 1 }
+    ).Count -gt 0
+    if ($StructuredApplyPatchHistoryBridge -and $invalidHistoryBridge) {
+        [void]$failures.Add('harness-only structured apply_patch history bridge did not adapt one exact pair per continuation request')
+    }
+    elseif (-not $StructuredApplyPatchHistoryBridge -and $historyBridgeEvents.Count -ne 0) {
+        [void]$failures.Add('original qualification unexpectedly used the harness-only structured apply_patch history bridge')
+    }
     if ($requestStarts.Count -eq 0) {
         [void]$failures.Add('proxy did not record a request_start event')
     }
@@ -652,6 +877,8 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $summary.request_start_count = $requestStarts.Count
     $summary.deferred_surface_event_count = $surfaceEvents.Count
     $summary.apply_patch_adapter_outcomes = @($adapterEvents | ForEach-Object { [string]$_.outcome })
+    $summary.post_success_tool_choice = $postSuccessToolChoice
+    $summary.history_bridge_event_count = $historyBridgeEvents.Count
     $summary.git_status = @($statusLines)
     $summary.git_numstat = $numstat
     $summary.failures = @($failures)

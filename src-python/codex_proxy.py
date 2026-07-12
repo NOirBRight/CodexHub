@@ -4216,9 +4216,14 @@ def _rewrite_structured_tool_input_items(
     if not isinstance(input_items, list):
         return False
 
-    changed = False
+    input_items, adapted_apply_patch_call_ids, changed = _adapt_apply_patch_custom_tool_history(
+        input_items,
+        event_context=event_context,
+    )
+    if changed:
+        payload["input"] = input_items
     rewritten_items: list[Any] = []
-    preserved_structured_call_ids: set[str] = set()
+    preserved_structured_call_ids: set[str] = set(adapted_apply_patch_call_ids)
     available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
@@ -4226,15 +4231,21 @@ def _rewrite_structured_tool_input_items(
             continue
         if item.get("type") == "function_call":
             function_name = item.get("name")
+            call_id = item.get("call_id")
+            preserve_apply_patch_history = (
+                function_name == APPLY_PATCH_FUNCTION_NAME
+                and isinstance(call_id, str)
+                and call_id in adapted_apply_patch_call_ids
+            )
             preserve_available_function = (
                 isinstance(function_name, str) and function_name in available_function_names
             )
             if (
                 preserve_available_function
+                or preserve_apply_patch_history
                 or _multi_agent_function_call_name(item) is not None
                 or _node_repl_function_call_name(item) is not None
             ):
-                call_id = item.get("call_id")
                 if isinstance(call_id, str):
                     preserved_structured_call_ids.add(call_id)
                 rewritten = _structured_tool_function_call_item(item)
@@ -7608,6 +7619,13 @@ APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
 APPLY_PATCH_FUNCTION_CALL_FIELDS = frozenset(
     {"id", "type", "status", "call_id", "name", "arguments"}
 )
+APPLY_PATCH_HISTORY_ADAPTER_EVENT = "third_party_apply_patch_freeform_history_adapter"
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS = frozenset(
+    {"type", "status", "call_id", "name", "input"}
+)
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS = frozenset(
+    {"type", "call_id", "output"}
+)
 
 
 class _ApplyPatchAdapterFailure(ValueError):
@@ -7731,6 +7749,147 @@ def _custom_apply_patch_item(item: Mapping[str, Any], patch: str) -> dict[str, A
     rewritten["input"] = patch
     rewritten.pop("arguments", None)
     return rewritten
+
+
+def _write_apply_patch_history_adapter_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    outcome: str,
+    count: int = 1,
+) -> None:
+    """Emit count-only telemetry for the request-history inverse adapter."""
+    _write_adapter_event(
+        event_context,
+        APPLY_PATCH_HISTORY_ADAPTER_EVENT,
+        outcome=outcome,
+        count=count,
+    )
+
+
+def _raise_apply_patch_history_adapter_failure(
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    _write_apply_patch_history_adapter_event(event_context, outcome="rejected")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            APPLY_PATCH_ADAPTER_ERROR_CODE,
+            "Third-party apply_patch custom-tool history is not an exact completed pair.",
+        )
+    )
+
+
+def _adapt_apply_patch_custom_tool_history(
+    input_items: list[Any],
+    *,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[list[Any], set[str], bool]:
+    """Reconstruct exact structured apply_patch history for third-party tools.
+
+    The downstream Codex client represents freeform ``apply_patch`` calls as a
+    custom-tool call/result pair.  Structured third-party Responses providers
+    need that one completed pair in function-call form to retain the call/result
+    relationship.  All other custom-tool history stays on the pre-existing
+    compatibility path.
+    """
+    if not _apply_patch_adapter_enabled(event_context):
+        return input_items, set(), False
+
+    rewritten_items: list[Any] = []
+    pending_call_ids: set[str] = set()
+    adapted_call_ids: set[str] = set()
+    foreign_call_ids: set[str] = set()
+    unmatched_custom_output_ids: set[str] = set()
+    adapted = 0
+    untouched = 0
+
+    for raw_item in input_items:
+        if not isinstance(raw_item, Mapping):
+            rewritten_items.append(raw_item)
+            continue
+
+        item_type = raw_item.get("type")
+        call_id = raw_item.get("call_id")
+        if _is_apply_patch_custom_tool_call(raw_item):
+            if (
+                set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS
+                or raw_item.get("status") != "completed"
+                or not isinstance(call_id, str)
+                or not call_id
+                or not isinstance(raw_item.get("input"), str)
+                or not raw_item["input"].strip()
+                or call_id in pending_call_ids
+                or call_id in adapted_call_ids
+                or call_id in foreign_call_ids
+                or call_id in unmatched_custom_output_ids
+            ):
+                _raise_apply_patch_history_adapter_failure(event_context)
+
+            patch = raw_item["input"]
+            pending_call_ids.add(call_id)
+            adapted_call_ids.add(call_id)
+            rewritten_items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": APPLY_PATCH_FUNCTION_NAME,
+                    "arguments": json.dumps(
+                        {"patch": patch},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+            adapted += 1
+            continue
+
+        if item_type == "custom_tool_call_output":
+            if isinstance(call_id, str) and call_id in pending_call_ids:
+                if set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS:
+                    _raise_apply_patch_history_adapter_failure(event_context)
+                pending_call_ids.remove(call_id)
+                rewritten_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": raw_item["output"],
+                    }
+                )
+                continue
+            if isinstance(call_id, str):
+                if call_id in adapted_call_ids:
+                    _raise_apply_patch_history_adapter_failure(event_context)
+                unmatched_custom_output_ids.add(call_id)
+            rewritten_items.append(raw_item)
+            continue
+
+        if isinstance(call_id, str) and call_id in adapted_call_ids:
+            _raise_apply_patch_history_adapter_failure(event_context)
+
+        if item_type in {"function_call", "function_call_output"}:
+            if isinstance(call_id, str) and call_id:
+                foreign_call_ids.add(call_id)
+        elif item_type == "custom_tool_call":
+            if isinstance(call_id, str) and call_id:
+                foreign_call_ids.add(call_id)
+            untouched += 1
+        rewritten_items.append(raw_item)
+
+    if pending_call_ids:
+        _raise_apply_patch_history_adapter_failure(event_context)
+
+    if adapted:
+        _write_apply_patch_history_adapter_event(
+            event_context,
+            outcome="adapted",
+            count=adapted,
+        )
+    if untouched:
+        _write_apply_patch_history_adapter_event(
+            event_context,
+            outcome="untouched",
+            count=untouched,
+        )
+    return rewritten_items, adapted_call_ids, bool(adapted)
 
 
 def _adapt_third_party_apply_patch_response_body(

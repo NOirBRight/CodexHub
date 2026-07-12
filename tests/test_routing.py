@@ -8575,6 +8575,427 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("Read-only Codex function result transcript", payload["input"][3]["content"])
         self.assertIn("ok", payload["input"][3]["content"])
 
+    def test_responses_structured_provider_preserves_apply_patch_custom_history_as_paired_function_history(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        patch_result = "Success. Updated target.txt"
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use the requested tools in order."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_shell",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "Get-Content target.txt"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_shell",
+                        "output": "before",
+                    },
+                    {
+                        "type": "custom_tool_call",
+                        "status": "completed",
+                        "call_id": "call_apply_patch",
+                        "name": "apply_patch",
+                        "input": patch_text,
+                    },
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_apply_patch",
+                        "output": patch_result,
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell_command",
+                        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+                    },
+                    {"type": "custom", "name": "apply_patch", "description": "Apply a freeform patch."},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [item["type"] for item in payload["input"]],
+            ["message", "function_call", "function_call_output", "function_call", "function_call_output"],
+        )
+        self.assertEqual(payload["input"][1]["name"], "shell_command")
+        self.assertEqual(payload["input"][1]["call_id"], "call_shell")
+        self.assertEqual(payload["input"][2], {"type": "function_call_output", "call_id": "call_shell", "output": "before"})
+        self.assertEqual(
+            payload["input"][3],
+            {
+                "type": "function_call",
+                "call_id": "call_apply_patch",
+                "name": "apply_patch",
+                "arguments": json.dumps({"patch": patch_text}, ensure_ascii=True, separators=(",", ":")),
+            },
+        )
+        self.assertEqual(
+            payload["input"][4],
+            {"type": "function_call_output", "call_id": "call_apply_patch", "output": patch_result},
+        )
+
+    def test_responses_structured_provider_preserves_body_originated_apply_patch_continuation(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":")),
+        }
+        response_payload, changed = codex_proxy._adapt_third_party_apply_patch_response_body(
+            {"output": [function_item]},
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        self.assertTrue(changed)
+        custom_call = response_payload["output"][0]
+        request_call = {
+            key: custom_call[key]
+            for key in ("type", "status", "call_id", "name", "input")
+        }
+        self.write_proxy_event.reset_mock()
+
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [request_call, fixture["paired_custom_tool_output"]],
+                    "tools": [{"type": "custom", "name": "apply_patch"}],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "function_call")
+        self.assertEqual(payload["input"][0]["call_id"], function_item["call_id"])
+        self.assertEqual(payload["input"][0]["name"], "apply_patch")
+        self.assertEqual(payload["input"][0]["arguments"], function_item["arguments"])
+        self.assertEqual(
+            payload["input"][1],
+            {
+                "type": "function_call_output",
+                "call_id": function_item["call_id"],
+                "output": fixture["paired_custom_tool_output"]["output"],
+            },
+        )
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
+    def test_responses_structured_provider_preserves_stream_originated_apply_patch_continuation(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        stream_events = codex_proxy._chat_stream_chunks_to_response_events(fixture["stream_chunks"])
+        rewritten_events, changed = codex_proxy._adapt_third_party_apply_patch_stream_events(
+            stream_events,
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        self.assertTrue(changed)
+        custom_call = next(
+            event["item"]
+            for event in rewritten_events
+            if event["type"] == "response.output_item.done"
+        )
+        request_call = {
+            key: custom_call[key]
+            for key in ("type", "status", "call_id", "name", "input")
+        }
+        self.write_proxy_event.reset_mock()
+
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [request_call, fixture["paired_custom_tool_output"]],
+                    "tools": [{"type": "custom", "name": "apply_patch"}],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "function_call")
+        self.assertEqual(payload["input"][0]["call_id"], custom_call["call_id"])
+        self.assertEqual(payload["input"][0]["name"], "apply_patch")
+        self.assertEqual(payload["input"][0]["arguments"], json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":")))
+        self.assertEqual(
+            payload["input"][1],
+            {
+                "type": "function_call_output",
+                "call_id": custom_call["call_id"],
+                "output": fixture["paired_custom_tool_output"]["output"],
+            },
+        )
+
+    def test_responses_structured_provider_rejects_malformed_unpaired_and_duplicate_apply_patch_history(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        custom_call = {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "input": patch_text,
+        }
+        custom_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_apply_patch",
+            "output": "Success. Updated target.txt",
+        }
+        malformed_histories = (
+            ("unexpected_call_field", [{**custom_call, "id": "fc_call_patch"}, custom_output]),
+            ("missing_completed_status", [{key: value for key, value in custom_call.items() if key != "status"}, custom_output]),
+            ("empty_patch", [{**custom_call, "input": "  "}, custom_output]),
+            ("unexpected_output_field", [custom_call, {**custom_output, "status": "completed"}]),
+            ("unpaired_call", [custom_call]),
+            ("duplicate_call", [custom_call, dict(custom_call), custom_output]),
+            ("duplicate_output", [custom_call, custom_output, dict(custom_output)]),
+        )
+
+        for shape, input_items in malformed_histories:
+            with self.subTest(shape=shape):
+                self.write_proxy_event.reset_mock()
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    compatible_request_body(
+                        json.dumps(
+                            {
+                                "model": "glm-5.2",
+                                "input": input_items,
+                                "tools": [{"type": "custom", "name": "apply_patch"}],
+                            }
+                        ).encode("utf-8"),
+                        {
+                            "name": "ollama_cloud",
+                            "upstream_format": "responses",
+                            "tool_protocol": "responses_structured",
+                        },
+                        event_context={"request_id": "<sanitized-request-id>"},
+                        inject_codex_tools=False,
+                    )
+
+                self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+                history_events = [
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+                ]
+                self.assertEqual(len(history_events), 1)
+                self.assertEqual(history_events[0]["outcome"], "rejected")
+                self.assertEqual(history_events[0]["count"], 1)
+                for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+                    self.assertNotIn(forbidden, history_events[0])
+
+    def test_responses_structured_provider_pairs_apply_patch_history_by_call_id_without_reordering(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "custom_tool_call",
+                        "status": "completed",
+                        "call_id": "call_apply_patch",
+                        "name": "apply_patch",
+                        "input": patch_text,
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_shell",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "Get-Content target.txt"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_shell",
+                        "output": "before",
+                    },
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_apply_patch",
+                        "output": "Success. Updated target.txt",
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "shell_command", "parameters": {"type": "object"}},
+                    {"type": "custom", "name": "apply_patch"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [item["type"] for item in payload["input"]],
+            ["function_call", "function_call", "function_call_output", "function_call_output"],
+        )
+        self.assertEqual(
+            [item["call_id"] for item in payload["input"]],
+            ["call_apply_patch", "call_shell", "call_shell", "call_apply_patch"],
+        )
+        self.assertEqual(payload["input"][0]["arguments"], json.dumps({"patch": patch_text}, ensure_ascii=True, separators=(",", ":")))
+        self.assertEqual(payload["input"][3]["output"], "Success. Updated target.txt")
+
+    def test_apply_patch_history_adapter_leaves_unrelated_custom_tools_untouched(self):
+        unrelated_call = {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_unrelated",
+            "name": "workspace_note",
+            "input": "keep this custom tool unchanged",
+        }
+        unrelated_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_unrelated",
+            "output": "unchanged result",
+        }
+        apply_call = {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch",
+        }
+        apply_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_apply_patch",
+            "output": "Success. Updated target.txt",
+        }
+
+        rewritten, adapted_call_ids, changed = codex_proxy._adapt_apply_patch_custom_tool_history(
+            [unrelated_call, unrelated_output, apply_call, apply_output],
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(adapted_call_ids, {"call_apply_patch"})
+        self.assertEqual(rewritten[0], unrelated_call)
+        self.assertEqual(rewritten[1], unrelated_output)
+        self.assertEqual(rewritten[2]["type"], "function_call")
+        self.assertEqual(rewritten[3]["type"], "function_call_output")
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(
+            {(event["outcome"], event["count"]) for event in history_events},
+            {("adapted", 1), ("untouched", 1)},
+        )
+        for event in history_events:
+            for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+                self.assertNotIn(forbidden, event)
+
+    def test_apply_patch_history_adapter_keeps_official_and_text_compat_paths_unchanged(self):
+        custom_history = [
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_apply_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_apply_patch",
+                "output": "Success. Updated target.txt",
+            },
+        ]
+        body = json.dumps({"model": "gpt-5.5", "input": custom_history}).encode("utf-8")
+
+        official = compatible_request_body(
+            body,
+            {"name": "official", "upstream_model": "gpt-5.5"},
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        self.assertEqual(json.loads(official)["input"], custom_history)
+        official_history_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(official_history_events, [])
+
+        self.write_proxy_event.reset_mock()
+        text_compat = compatible_request_body(
+            json.dumps({"model": "compat-model", "input": custom_history}).encode("utf-8"),
+            {"name": "compat", "upstream_format": "responses", "tool_protocol": "text_compat"},
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        text_payload = json.loads(text_compat)
+        self.assertEqual([item["type"] for item in text_payload["input"]], ["message", "message"])
+        self.assertEqual(
+            [
+                call
+                for call in self.write_proxy_event.call_args_list
+                if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+            ],
+            [],
+        )
+
+        self.write_proxy_event.reset_mock()
+        implicit_text_compat = compatible_request_body(
+            json.dumps({"model": "compat-model", "input": custom_history}).encode("utf-8"),
+            {"name": "compat"},
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        implicit_text_payload = json.loads(implicit_text_compat)
+        self.assertEqual([item["type"] for item in implicit_text_payload["input"]], ["message", "message"])
+        self.assertEqual(
+            [
+                call
+                for call in self.write_proxy_event.call_args_list
+                if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+            ],
+            [],
+        )
+
     def test_responses_structured_provider_preserves_multi_agent_tool_history(self):
         body = json.dumps(
             {
