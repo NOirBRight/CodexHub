@@ -230,6 +230,7 @@ class _OfficialPooledResponse:
             self._response.release_conn()
         else:
             self._response.close()
+            self._response.release_conn()
 
     def __enter__(self) -> "_OfficialPooledResponse":
         return self

@@ -2555,7 +2555,29 @@ class RoutingTests(unittest.TestCase):
                 response.read(65536)
 
         raw_response.close.assert_called_once()
-        raw_response.release_conn.assert_not_called()
+        raw_response.release_conn.assert_called_once()
+
+    def test_official_pooled_stream_cancellation_returns_pool_capacity(self):
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "chatgpt.com",
+            maxsize=1,
+            block=True,
+        )
+        connection = pool._get_conn(timeout=0.01)
+        raw_response = codex_proxy.urllib3.response.HTTPResponse(
+            body=io.BytesIO(b"unfinished stream"),
+            status=200,
+            preload_content=False,
+            pool=pool,
+            connection=connection,
+        )
+
+        with codex_proxy._OfficialPooledResponse(raw_response):
+            pass
+
+        returned = pool._get_conn(timeout=0.01)
+        self.assertIs(returned, connection)
+        pool._put_conn(returned)
 
     def test_official_pooled_stream_restores_timeout_before_reuse(self):
         raw_response = Mock()
