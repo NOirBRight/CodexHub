@@ -214,6 +214,8 @@ pub struct Settings {
     pub gateway_image_proxy_enabled: bool,
     #[serde(default)]
     pub gateway_image_proxy_model: String,
+    #[serde(default)]
+    pub openai_context_guard_enabled: bool,
     #[serde(default = "default_fast_model_variants")]
     pub gateway_fast_model_variants: Vec<String>,
     #[serde(default)]
@@ -249,6 +251,7 @@ impl Default for Settings {
             gateway_auto_retry_max_attempts: default_gateway_auto_retry_max_attempts(),
             gateway_image_proxy_enabled: false,
             gateway_image_proxy_model: String::new(),
+            openai_context_guard_enabled: false,
             gateway_fast_model_variants: default_fast_model_variants(),
             official_disabled_models: Vec::new(),
             official_model_sort_order: Vec::new(),
@@ -324,6 +327,16 @@ fn get_app_flavor() -> app_flavor::AppFlavorInfo {
 #[tauri::command]
 fn save_settings(settings: Settings) -> Result<Settings, String> {
     config::save_settings(settings)
+}
+
+#[tauri::command]
+fn get_codex_context_guard_status() -> Result<config::CodexContextGuardStatus, String> {
+    config::get_codex_context_guard_status()
+}
+
+#[tauri::command]
+fn set_codex_context_guard(enabled: bool) -> Result<config::CodexContextGuardStatus, String> {
+    config::set_codex_context_guard(enabled)
 }
 
 #[tauri::command]
@@ -824,6 +837,8 @@ fn run_gui() {
             get_settings,
             get_app_flavor,
             save_settings,
+            get_codex_context_guard_status,
+            set_codex_context_guard,
             refresh_official_models,
             openai_usage_completions,
             discover_provider_models,

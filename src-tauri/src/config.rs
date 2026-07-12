@@ -23,6 +23,34 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
     save_settings_with_paths(settings, &ConfigPaths::runtime()?)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexContextGuardStatus {
+    pub enabled: bool,
+    pub codex_enabled: bool,
+    pub gateway_enabled: bool,
+    pub model_context_window: Option<u32>,
+    pub model_auto_compact_token_limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexConfigContextGuardStatus {
+    enabled: bool,
+    model_context_window: Option<u32>,
+    model_auto_compact_token_limit: Option<u32>,
+}
+
+pub fn get_codex_context_guard_status() -> Result<CodexContextGuardStatus, String> {
+    let paths = ConfigPaths::runtime()?;
+    let python = find_python();
+    get_codex_context_guard_status_with_paths(&paths, &python, &ProcessCommandRunner)
+}
+
+pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus, String> {
+    let paths = ConfigPaths::runtime()?;
+    let python = find_python();
+    set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
+}
+
 pub fn switch_mode(mode: &str, auto_sync: bool) -> Result<AppStatus, String> {
     switch_mode_with_takeover(mode, auto_sync, false)
 }
@@ -130,6 +158,10 @@ impl ConfigPaths {
 
     pub(crate) fn config_backup_path(&self) -> PathBuf {
         self.config_backup_path_for_owner(crate::app_flavor::current().routing_owner())
+    }
+
+    fn context_guard_state_path(&self) -> PathBuf {
+        self.proxy_dir().join("context-guard-state.json")
     }
 
     pub(crate) fn config_backup_path_for_owner(
@@ -263,6 +295,7 @@ struct SettingsDocument {
     gateway_auto_retry_max_attempts: Option<u32>,
     gateway_image_proxy_enabled: Option<bool>,
     gateway_image_proxy_model: Option<String>,
+    openai_context_guard_enabled: Option<bool>,
     gateway_fast_model_variants: Option<Vec<String>>,
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
@@ -334,6 +367,9 @@ impl SettingsDocument {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or(defaults.gateway_image_proxy_model),
+            openai_context_guard_enabled: self
+                .openai_context_guard_enabled
+                .unwrap_or(defaults.openai_context_guard_enabled),
             gateway_fast_model_variants: self
                 .gateway_fast_model_variants
                 .map(sanitize_fast_model_variants)
@@ -551,6 +587,122 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
         .map_err(|error| format!("failed to write settings JSON {}: {error}", path.display()))?;
 
     Ok(settings)
+}
+
+fn get_codex_context_guard_status_with_paths(
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<CodexContextGuardStatus, String> {
+    let outcome = run_python_script(
+        "context guard status",
+        python,
+        paths.config_overlay_script(),
+        vec![
+            "context-guard-status".to_string(),
+            "--config".to_string(),
+            paths.codex_config_path().to_string_lossy().into_owned(),
+        ],
+        runner,
+    )?;
+    let codex_status: CodexConfigContextGuardStatus =
+        serde_json::from_str(outcome.stdout.trim()).map_err(|error| {
+            format!(
+                "failed to parse context guard status JSON: {error}; stdout: {}",
+                outcome.stdout.trim()
+            )
+        })?;
+    let gateway_enabled = get_settings_with_paths(paths)?.openai_context_guard_enabled;
+    Ok(combined_context_guard_status(codex_status, gateway_enabled))
+}
+
+fn set_codex_context_guard_with_paths(
+    enabled: bool,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<CodexContextGuardStatus, String> {
+    ensure_mode_switch_directories(paths)?;
+    let mut settings = get_settings_with_paths(paths)?;
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    let target_owner = fs::read_to_string(paths.codex_config_path())
+        .ok()
+        .as_deref()
+        .and_then(codex_overlay_owner)
+        .unwrap_or(current_app_owner);
+    let backup_path =
+        paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+    let script_args = |value: bool| {
+        vec![
+            "context-guard-set".to_string(),
+            "--config".to_string(),
+            paths.codex_config_path().to_string_lossy().into_owned(),
+            "--backup".to_string(),
+            backup_path.to_string_lossy().into_owned(),
+            "--state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
+            "--enabled".to_string(),
+            value.to_string(),
+        ]
+    };
+    let rollback = || {
+        let _ = run_python_script(
+            "rollback context guard",
+            python,
+            paths.config_overlay_script(),
+            script_args(!enabled),
+            runner,
+        );
+    };
+    let outcome = run_python_script(
+        "set context guard",
+        python,
+        paths.config_overlay_script(),
+        script_args(enabled),
+        runner,
+    )?;
+    let codex_status: CodexConfigContextGuardStatus =
+        match serde_json::from_str(outcome.stdout.trim()) {
+            Ok(status) => status,
+            Err(error) => {
+                rollback();
+                return Err(format!(
+                    "failed to parse context guard status JSON: {error}; stdout: {}",
+                    outcome.stdout.trim()
+                ));
+            }
+        };
+    if codex_status.enabled != enabled {
+        rollback();
+        return Err(format!(
+            "context guard did not reach requested state; requested {enabled}, reported {}",
+            codex_status.enabled
+        ));
+    }
+
+    settings.openai_context_guard_enabled = enabled;
+    if let Err(error) = save_settings_with_paths(settings, paths) {
+        rollback();
+        return Err(error);
+    }
+
+    Ok(combined_context_guard_status(codex_status, enabled))
+}
+
+fn combined_context_guard_status(
+    codex_status: CodexConfigContextGuardStatus,
+    gateway_enabled: bool,
+) -> CodexContextGuardStatus {
+    CodexContextGuardStatus {
+        enabled: codex_status.enabled && gateway_enabled,
+        codex_enabled: codex_status.enabled,
+        gateway_enabled,
+        model_context_window: codex_status.model_context_window,
+        model_auto_compact_token_limit: codex_status.model_auto_compact_token_limit,
+    }
 }
 
 #[cfg(test)]
@@ -874,10 +1026,12 @@ pub(crate) fn find_python() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_providers_with_paths, get_settings_with_paths, save_providers_with_paths,
-        save_settings_with_paths, switch_mode_with_paths, codex_overlay_owner,
-        ensure_codex_owner_mutation_allowed, switch_mode_with_paths_takeover_as_owner,
-        CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
+        codex_overlay_owner, ensure_codex_owner_mutation_allowed,
+        get_codex_context_guard_status_with_paths, get_providers_with_paths,
+        get_settings_with_paths, save_providers_with_paths, save_settings_with_paths,
+        set_codex_context_guard_with_paths, switch_mode_with_paths,
+        switch_mode_with_paths_takeover_as_owner, CommandOutcome, CommandRunner,
+        ConfigPaths, ProcessCommandRunner,
     };
     use crate::{Model, Provider, Settings, ToolProtocol, UpstreamFormat};
     use std::cell::RefCell;
@@ -1071,6 +1225,7 @@ sort_order = 7
             gateway_auto_retry_max_attempts: 7,
             gateway_image_proxy_enabled: true,
             gateway_image_proxy_model: "minimax-cn/MiniMax-M3".to_string(),
+            openai_context_guard_enabled: true,
             gateway_fast_model_variants: vec!["gpt-5.5".to_string()],
             official_disabled_models: vec!["gpt-5.4-mini".to_string()],
             official_model_sort_order: vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
@@ -1089,6 +1244,7 @@ sort_order = 7
         assert!(written.contains("\"gateway_auto_retry_max_attempts\": 7"));
         assert!(written.contains("\"gateway_image_proxy_enabled\": true"));
         assert!(written.contains("\"gateway_image_proxy_model\": \"minimax-cn/MiniMax-M3\""));
+        assert!(written.contains("\"openai_context_guard_enabled\": true"));
         assert!(written.contains("\"gateway_fast_model_variants\""));
         assert!(written.contains("\"official_disabled_models\""));
         assert!(written.contains("\"official_model_sort_order\""));
@@ -1976,6 +2132,68 @@ sort_order = 7
         assert!(error.contains("printed stderr"));
     }
 
+    #[test]
+    fn context_guard_command_keeps_codex_and_gateway_state_in_sync() {
+        let root = temp_root("context-guard-command");
+        let paths = test_paths(&root);
+        let status_json = r#"{"enabled":true,"model_context_window":272000,"model_auto_compact_token_limit":240000}"#;
+        let set_runner = RecordingRunner::sequence(vec![CommandOutcome {
+            code: Some(0),
+            stdout: status_json.to_string(),
+            stderr: String::new(),
+        }]);
+
+        let status = set_codex_context_guard_with_paths(
+            true,
+            &paths,
+            Path::new("python-test"),
+            &set_runner,
+        )
+        .expect("context guard enabled");
+
+        assert!(status.enabled);
+        assert!(status.codex_enabled);
+        assert!(status.gateway_enabled);
+        assert_eq!(status.model_context_window, Some(272_000));
+        assert_eq!(status.model_auto_compact_token_limit, Some(240_000));
+        assert!(
+            get_settings_with_paths(&paths)
+                .expect("saved settings")
+                .openai_context_guard_enabled
+        );
+        let set_commands = set_runner.commands.borrow();
+        assert_eq!(set_commands.len(), 1);
+        assert_contains_sequence(
+            &set_commands[0].args,
+            &[
+                "context-guard-set",
+                "--config",
+                "--backup",
+                "--state",
+                "--enabled",
+                "true",
+            ],
+        );
+        drop(set_commands);
+
+        let get_runner = RecordingRunner::sequence(vec![CommandOutcome {
+            code: Some(0),
+            stdout: status_json.to_string(),
+            stderr: String::new(),
+        }]);
+        let refreshed = get_codex_context_guard_status_with_paths(
+            &paths,
+            Path::new("python-test"),
+            &get_runner,
+        )
+        .expect("context guard status");
+        assert!(refreshed.enabled);
+        assert_contains_sequence(
+            &get_runner.commands.borrow()[0].args,
+            &["context-guard-status", "--config"],
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct RecordedCommand {
         args: Vec<String>,
@@ -2094,6 +2312,10 @@ sort_order = 7
         assert_eq!(
             left.gateway_image_proxy_model,
             right.gateway_image_proxy_model
+        );
+        assert_eq!(
+            left.openai_context_guard_enabled,
+            right.openai_context_guard_enabled
         );
         assert_eq!(
             left.gateway_fast_model_variants,

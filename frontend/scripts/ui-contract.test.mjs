@@ -1470,6 +1470,7 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(typesSource, /gateway_auto_retry_max_attempts: number;/);
   assert.match(typesSource, /gateway_image_proxy_enabled: boolean;/);
   assert.match(typesSource, /gateway_image_proxy_model: string;/);
+  assert.match(typesSource, /openai_context_guard_enabled: boolean;/);
   assert.match(drawerSource, /<h3 className="text-sm font-semibold text-ink">\{t\("settings\.autoRetry"\)\}<\/h3>/);
   assert.match(drawerSource, /gateway_auto_retry_enabled/);
   assert.match(drawerSource, /label=\{t\("common\.enabled"\)\}/);
@@ -1522,6 +1523,32 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(appSource, /visionModels=\{visionModels\}/);
 });
 
+test("official model list exposes a Codex and Gateway context cost guard", async () => {
+  const [providersSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface CodexContextGuardStatus/);
+  assert.match(typesSource, /codex_enabled: boolean;/);
+  assert.match(typesSource, /gateway_enabled: boolean;/);
+  assert.match(tauriSource, /get_codex_context_guard_status/);
+  assert.match(tauriSource, /set_codex_context_guard/);
+  assert.match(providersSource, /api\.getCodexContextGuardStatus\(\)/);
+  assert.match(providersSource, /api\.setCodexContextGuard\(enabled\)/);
+  assert.match(providersSource, /label=\{t\("providers\.contextGuard"\)\}/);
+  assert.match(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
+  assert.match(providersSource, /openai_context_guard_enabled: enabled/);
+  assert.match(enSource, /contextGuard: "Long-context cost guard"/);
+  assert.match(zhSource, /contextGuard: "长上下文费用保护"/);
+  assert.match(zhSource, /Codex 与 Gateway/);
+  assert.match(zhSource, /272K/);
+  assert.match(zhSource, /240K/);
+});
+
 test("settings save restarts running gateway when retry or image proxy runtime settings change", async () => {
   const appSource = await readFile(appPath, "utf8");
   const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
@@ -1531,6 +1558,7 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.match(appSource, /gateway_auto_retry_max_attempts/);
   assert.match(appSource, /gateway_image_proxy_enabled/);
   assert.match(appSource, /gateway_image_proxy_model/);
+  assert.match(appSource, /openai_context_guard_enabled/);
   assert.match(appSource, /previous\.proxy_port !== next\.proxy_port/);
   assert.match(appSource, /previous\.gateway_request_timeout_seconds !== next\.gateway_request_timeout_seconds/);
   assert.match(appSource, /status\?\.proxy_running/);

@@ -633,6 +633,7 @@ DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEO
 DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
+OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
@@ -1298,6 +1299,14 @@ def gateway_image_proxy_model() -> str:
     if isinstance(settings_value, str) and settings_value.strip():
         return settings_value.strip()
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
+
+
+def openai_context_guard_enabled() -> bool:
+    return _env_or_settings_flag(
+        "CODEX_PROXY_OPENAI_CONTEXT_GUARD_ENABLED",
+        "openai_context_guard_enabled",
+        False,
+    )
 
 
 def gateway_transparent_vision_proxy_enabled() -> bool:
@@ -9481,9 +9490,67 @@ def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
-    return catalog_with_official_fast_variants(
-        json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+    return catalog_with_vision_proxy_capabilities(
+        catalog_with_openai_context_guard(
+            catalog_with_official_fast_variants(
+                json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+            )
+        )
     )
+
+
+def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]:
+    if not openai_context_guard_enabled():
+        return catalog
+
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return catalog
+
+    def guarded_model(model: Any) -> Any:
+        if not isinstance(model, Mapping):
+            return model
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if not slug.startswith("gpt-"):
+            return model
+        context_window = model.get("context_window")
+        guarded_window = (
+            min(context_window, OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW)
+            if isinstance(context_window, int) and context_window > 0
+            else OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW
+        )
+        return {
+            **model,
+            "context_window": guarded_window,
+            "max_context_window": guarded_window,
+        }
+
+    updated = dict(catalog)
+    updated["models"] = [guarded_model(model) for model in models]
+    return updated
+
+
+def catalog_with_vision_proxy_capabilities(catalog: dict[str, Any]) -> dict[str, Any]:
+    if not gateway_image_proxy_enabled():
+        return catalog
+
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return catalog
+
+    updated = dict(catalog)
+    updated["models"] = [
+        {
+            **model,
+            "input_modalities": list(
+                dict.fromkeys([*(model.get("input_modalities") or ["text"]), "image"])
+            ),
+        }
+        if isinstance(model, Mapping)
+        else model
+        for model in models
+    ]
+    return updated
 
 
 def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, Any]:

@@ -22,6 +22,7 @@ const TELEMETRY_INGEST_BATCH_LINES: usize = 1000;
 const TELEMETRY_INGEST_BATCH_BYTES: u64 = 1024 * 1024;
 const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_MODEL: &str = "gpt-5.5";
+const OPENAI_CONTEXT_GUARD_WINDOW: u32 = 272_000;
 
 const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
     ("gpt-5.5", "5.5", 258400),
@@ -1683,6 +1684,17 @@ fn official_models_from_metadata(
                 supports_chat_completions: true,
                 context_window: Some(*context_window),
             });
+        }
+    }
+
+    if settings.openai_context_guard_enabled {
+        for model in &mut models {
+            model.context_window = Some(
+                model
+                    .context_window
+                    .unwrap_or(OPENAI_CONTEXT_GUARD_WINDOW)
+                    .min(OPENAI_CONTEXT_GUARD_WINDOW),
+            );
         }
     }
 
@@ -7175,6 +7187,53 @@ mod tests {
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
         assert_eq!(models[0].context_window, Some(400_000));
+    }
+
+    #[test]
+    fn openai_context_guard_clamps_gateway_official_models_without_changing_external_models() {
+        let settings = Settings {
+            openai_context_guard_enabled: true,
+            ..Settings::default()
+        };
+        let official = official_models_from_metadata(
+            &settings,
+            Some(vec![
+                Model {
+                    id: "gpt-5.6-sol".to_string(),
+                    context_window: Some(353_000),
+                    ..Model::default()
+                },
+                Model {
+                    id: "gpt-5.3-codex-spark".to_string(),
+                    context_window: Some(128_000),
+                    ..Model::default()
+                },
+            ]),
+        );
+
+        assert_eq!(official[0].context_window, Some(272_000));
+        assert_eq!(official[1].context_window, Some(128_000));
+
+        let providers: Vec<Provider> = serde_json::from_value(json!([{
+            "id": "ollama-cloud",
+            "name": "Ollama Cloud",
+            "base_url": "https://ollama.com/v1",
+            "models": [{
+                "id": "glm-5.2",
+                "context_window": 1000000,
+                "gateway_exported": true
+            }]
+        }]))
+        .unwrap();
+        let exported = gateway_models_from_config(&settings, &providers);
+        assert_eq!(
+            exported
+                .iter()
+                .find(|model| model.id == "ollama-cloud/glm-5.2")
+                .expect("external model")
+                .context_window,
+            Some(1_000_000)
+        );
     }
 
     #[test]

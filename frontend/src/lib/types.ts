@@ -452,11 +452,20 @@ export interface Settings {
   gateway_auto_retry_max_attempts: number;
   gateway_image_proxy_enabled: boolean;
   gateway_image_proxy_model: string;
+  openai_context_guard_enabled: boolean;
   gateway_fast_model_variants: string[];
   official_disabled_models: string[];
   official_model_sort_order: string[];
   official_provider_sort_order: number;
   proxy_port: number;
+}
+
+export interface CodexContextGuardStatus {
+  enabled: boolean;
+  codex_enabled: boolean;
+  gateway_enabled: boolean;
+  model_context_window?: number | null;
+  model_auto_compact_token_limit?: number | null;
 }
 
 export type TabId = "codexhub" | "gateway";

@@ -28,6 +28,7 @@ import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/taur
 import type {
   AppFlavorInfo,
   AppStatus,
+  CodexContextGuardStatus,
   GatewayStatus,
   GatewayClientSyncSummary,
   Model,
@@ -941,6 +942,20 @@ function ProvidersPageImpl({
     }
   }
 
+  function reflectContextGuardSetting(enabled: boolean) {
+    setSettings((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = { ...current, openai_context_guard_enabled: enabled };
+      onSettingsChanged?.(next);
+      return next;
+    });
+    setSettingsDraft((current) => (
+      current ? { ...current, openai_context_guard_enabled: enabled } : current
+    ));
+  }
+
   async function updateProvider(next: Provider, successMessage?: string) {
     await saveProviders(
       providers.map((provider) => (provider.id === next.id ? next : provider)),
@@ -1403,6 +1418,7 @@ function ProvidersPageImpl({
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
+                onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={() => void refreshOfficialModels()}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
@@ -2342,6 +2358,7 @@ function OfficialDetail({
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
+  onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
   onRefreshAuth,
@@ -2364,6 +2381,7 @@ function OfficialDetail({
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
+  onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: () => void;
   onRefreshAuth: () => void;
@@ -2381,6 +2399,73 @@ function OfficialDetail({
   const { showToast, updateToast } = useToasts();
   const authorized = authState === "authorized";
   const authRefreshBusy = busy === "auth-refresh";
+  const [contextGuardStatus, setContextGuardStatus] = useState<CodexContextGuardStatus | null>(null);
+  const [contextGuardBusy, setContextGuardBusy] = useState(false);
+  const displayedGatewayContextById = useMemo(() => {
+    if (!contextGuardStatus?.gateway_enabled) {
+      return gatewayContextById;
+    }
+    return new Map(
+      Array.from(gatewayContextById, ([modelId, contextWindow]) => [
+        modelId,
+        Math.min(
+          contextWindow,
+          contextGuardStatus.model_context_window ?? contextWindow,
+        ),
+      ]),
+    );
+  }, [
+    contextGuardStatus?.gateway_enabled,
+    contextGuardStatus?.model_context_window,
+    gatewayContextById,
+  ]);
+
+  useEffect(() => {
+    let active = true;
+    void api.getCodexContextGuardStatus()
+      .then((status) => {
+        if (active) {
+          setContextGuardStatus(status);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          showToast(t("providers.contextGuardStatusFailed", { message: messageFromError(err) }), "error");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [showToast, t]);
+
+  async function toggleContextGuard(enabled: boolean) {
+    if (contextGuardBusy) {
+      return;
+    }
+    setContextGuardBusy(true);
+    const toastId = showToast(
+      enabled ? t("providers.enablingContextGuard") : t("providers.disablingContextGuard"),
+      "loading",
+    );
+    try {
+      const status = await api.setCodexContextGuard(enabled);
+      setContextGuardStatus(status);
+      onContextGuardChanged(status.gateway_enabled);
+      updateToast(toastId, {
+        action: null,
+        text: enabled ? t("providers.contextGuardEnabled") : t("providers.contextGuardDisabled"),
+        tone: "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.contextGuardUpdateFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+    } finally {
+      setContextGuardBusy(false);
+    }
+  }
 
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
@@ -2458,8 +2543,18 @@ function OfficialDetail({
         )}
       </div>
       <ModelSection
-        contextById={gatewayContextById}
+        contextById={displayedGatewayContextById}
         disabled
+        headerControl={
+          <span title={t("providers.contextGuardHint")}>
+            <SwitchControl
+              checked={contextGuardStatus?.enabled ?? false}
+              disabled={contextGuardBusy || !contextGuardStatus}
+              label={t("providers.contextGuard")}
+              onChange={(enabled) => void toggleContextGuard(enabled)}
+            />
+          </span>
+        }
         interactionDisabled={authState !== "authorized"}
         models={models}
         officialDisabledModels={officialDisabledModels}
@@ -2765,6 +2860,7 @@ function ModelSection({
   discoverBusy,
   discoverDisabled,
   discoverError,
+  headerControl,
   interactionDisabled = false,
   models,
   modelTestDisabled,
@@ -2788,6 +2884,7 @@ function ModelSection({
   discoverBusy?: boolean;
   discoverDisabled?: boolean;
   discoverError?: string | null;
+  headerControl?: React.ReactNode;
   interactionDisabled?: boolean;
   models: Model[];
   modelTestDisabled?: boolean;
@@ -2955,6 +3052,7 @@ function ModelSection({
           </p>
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+          {headerControl}
           {discoverError && (
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
               {discoverError}

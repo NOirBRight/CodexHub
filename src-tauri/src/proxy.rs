@@ -125,6 +125,7 @@ struct SettingsDocument {
     gateway_auto_retry_max_attempts: Option<u32>,
     gateway_image_proxy_enabled: Option<bool>,
     gateway_image_proxy_model: Option<String>,
+    openai_context_guard_enabled: Option<bool>,
     gateway_fast_model_variants: Option<Vec<String>>,
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
@@ -196,6 +197,9 @@ impl SettingsDocument {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or(defaults.gateway_image_proxy_model),
+            openai_context_guard_enabled: self
+                .openai_context_guard_enabled
+                .unwrap_or(defaults.openai_context_guard_enabled),
             gateway_fast_model_variants: self
                 .gateway_fast_model_variants
                 .unwrap_or(defaults.gateway_fast_model_variants),

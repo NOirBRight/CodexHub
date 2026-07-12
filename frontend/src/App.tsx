@@ -267,6 +267,7 @@ function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings
     previous.gateway_auto_retry_max_attempts !== next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
     previous.gateway_image_proxy_model !== next.gateway_image_proxy_model ||
+    previous.openai_context_guard_enabled !== next.openai_context_guard_enabled ||
     previous.proxy_port !== next.proxy_port ||
     previous.gateway_request_timeout_seconds !== next.gateway_request_timeout_seconds
   );
