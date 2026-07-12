@@ -310,7 +310,7 @@ const zhCN = {
     configured: "已配置 {{count}} 个",
     context: "上下文",
     contextGuard: "长上下文费用保护",
-    contextGuardClientSyncError: "{{restartMessage}}；外部客户端同步失败：{{message}}，请在 Gateway 页面重试",
+    contextGuardClientSyncError: "{{restartMessage}}；外部客户端同步结果无法确认，请重启外部客户端，并在 Gateway 中检查“未更新”状态后重试",
     contextGuardClientsAutoSyncDisabled: "{{restartMessage}}；外部客户端未自动同步，请在 Gateway 中手动同步",
     contextGuardClientsNotUpdated: "{{restartMessage}}；外部客户端未改动，请在 Gateway 中确认已由当前版本接管后重试",
     contextGuardClientsPartiallySyncedRestart: "{{restartMessage}}；外部客户端部分已同步，请重启外部客户端；部分同步失败，并已在 Gateway 中标记为“未更新”",

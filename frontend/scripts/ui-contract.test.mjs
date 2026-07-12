@@ -1572,6 +1572,7 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(toggleAction, /providers\.contextGuardClientsNotUpdated/);
   assert.match(toggleAction, /providers\.contextGuardClientsAutoSyncDisabled/);
   assert.doesNotMatch(toggleAction, /\.map\(\(result\) => result\.name\)/);
+  assert.doesNotMatch(toggleAction, /message:\s*syncError/);
   assert.doesNotMatch(toggleAction, /tone:[\s\S]*?"info"/);
   assert.match(providersSource, /label=\{t\("providers\.contextGuard"\)\}/);
   assert.match(providersSource, /ariaDescribedBy="context-guard-tooltip"/);
@@ -1592,6 +1593,8 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(zhSource, /外部客户端已同步，请重启外部客户端/);
   assert.match(zhSource, /外部客户端未改动，请在 Gateway 中确认已由当前版本接管后重试/);
   assert.match(zhSource, /外部客户端未自动同步，请在 Gateway 中手动同步/);
+  assert.match(zhSource, /外部客户端同步结果无法确认，请重启外部客户端，并在 Gateway 中检查“未更新”状态后重试/);
+  assert.doesNotMatch(zhSource, /contextGuardClientSyncError:[^\n]*\{\{message\}\}/);
   assert.doesNotMatch(zhSource, /contextGuardClients(?:PartiallySyncedRestart|SyncedRestart|SyncFailed):[^\n]*\{\{(?:clientNames|syncedClientNames|failedClientNames)\}\}/);
   assert.match(zhSource, /Gateway 中标记为“未更新”/);
   assert.match(zhSource, /Gateway 更改已实时生效/);

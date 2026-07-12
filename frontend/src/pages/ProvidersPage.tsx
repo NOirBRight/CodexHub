@@ -2460,7 +2460,7 @@ function OfficialDetail({
       setContextGuardStatus(status);
       onContextGuardChanged(status.gateway_enabled);
       let syncResult: GatewayClientSyncSummary | null = null;
-      let syncError: string | null = null;
+      let syncResultUncertain = false;
       if (syncBoundClients) {
         updateToast(toastId, {
           action: null,
@@ -2469,8 +2469,8 @@ function OfficialDetail({
         });
         try {
           syncResult = await api.syncGatewayClients();
-        } catch (err) {
-          syncError = messageFromError(err);
+        } catch {
+          syncResultUncertain = true;
         }
         await onRefreshClients?.().catch(() => undefined);
       }
@@ -2485,12 +2485,9 @@ function OfficialDetail({
           text: t("providers.contextGuardClientsAutoSyncDisabled", { restartMessage }),
           tone: "success",
         };
-      } else if (syncError) {
+      } else if (syncResultUncertain) {
         clientSyncFeedback = {
-          text: t("providers.contextGuardClientSyncError", {
-            message: syncError,
-            restartMessage,
-          }),
+          text: t("providers.contextGuardClientSyncError", { restartMessage }),
           tone: "error",
         };
       } else if (failedClientCount > 0 && appliedClientCount > 0) {

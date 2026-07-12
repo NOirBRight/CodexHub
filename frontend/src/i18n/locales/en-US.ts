@@ -310,7 +310,7 @@ const enUS = {
     configured: "{{count}} configured",
     context: "Context",
     contextGuard: "Long-context cost guard",
-    contextGuardClientSyncError: "{{restartMessage}}; external client sync failed: {{message}}—retry from Gateway",
+    contextGuardClientSyncError: "{{restartMessage}}; external client sync could not be confirmed—restart external clients, check Not updated status in Gateway, then retry",
     contextGuardClientsAutoSyncDisabled: "{{restartMessage}}; external clients were not synced automatically—sync them manually from Gateway",
     contextGuardClientsNotUpdated: "{{restartMessage}}; external clients were not changed—confirm that this version owns them in Gateway, then retry",
     contextGuardClientsPartiallySyncedRestart: "{{restartMessage}}; some external clients were synced—restart external clients; some failed and are marked Not updated in Gateway",
