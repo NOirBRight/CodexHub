@@ -254,6 +254,146 @@ class ProtocolTranslationTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
+    def test_structured_request_items_and_tools_reject_unknown_fields(self):
+        responses_payloads = (
+            {
+                "input": [
+                    {"type": "message", "role": "user", "content": "Hello", "future": {"id": "message"}}
+                ]
+            },
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_123",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "future": {"id": "call"},
+                    }
+                ]
+            },
+            {
+                "input": "Hello",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                        "future": {"id": "tool"},
+                    }
+                ],
+            },
+        )
+        for payload in responses_payloads:
+            with self.subTest(direction="responses_to_chat", payload=payload), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                protocol_translation.responses_request_to_chat_completion_body(
+                    json.dumps({"model": "example-model", **payload}).encode("utf-8")
+                )
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        chat_payloads = (
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "lookup", "parameters": {"type": "object"}},
+                        "future": {"id": "tool"},
+                    }
+                ],
+            },
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {"type": "object"},
+                            "future": {"id": "function"},
+                        },
+                    }
+                ],
+            },
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": {"query": "Codex"}},
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        for payload in chat_payloads:
+            with self.subTest(direction="chat_to_responses", payload=payload), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                protocol_translation.chat_completions_request_to_responses_body(
+                    json.dumps({"model": "example-model", **payload}).encode("utf-8")
+                )
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_non_string_function_arguments_fail_closed_in_body_converters(self):
+        chat_body = json.dumps(
+            {
+                "id": "chatcmpl_123",
+                "model": "example-model",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_123",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": {"query": "Codex"}},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        responses_body = json.dumps(
+            {
+                "id": "resp_123",
+                "status": "completed",
+                "model": "example-model",
+                "output": [
+                    {
+                        "id": "fc_123",
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "call_123",
+                        "name": "lookup",
+                        "arguments": {"query": "Codex"},
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        for convert, body in (
+            (protocol_translation.chat_completion_to_response_body, chat_body),
+            (protocol_translation.chat_completion_body_to_stream_chunks, chat_body),
+            (protocol_translation.response_body_to_chat_completion_body, responses_body),
+        ):
+            with self.subTest(convert=convert.__name__), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                convert(body)
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
     def test_responses_semantic_items_without_chat_equivalents_fail_closed(self):
         payloads = {
             "reasoning": {
@@ -833,6 +973,104 @@ class ProtocolTranslationTests(unittest.TestCase):
             converter.events_for_chunk(chunk)
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
+    def test_chat_stream_rejects_multiple_or_nonzero_choices_before_translation(self):
+        chunks = (
+            {
+                "choices": [
+                    {"index": 0, "delta": {"content": "A"}, "finish_reason": "stop"},
+                    {"index": 1, "delta": {"content": "B"}, "finish_reason": "stop"},
+                ]
+            },
+            {"choices": [{"index": 1, "delta": {"content": "B"}, "finish_reason": "stop"}]},
+            {"choices": [{"index": None, "delta": {"content": "B"}, "finish_reason": "stop"}]},
+            {"choices": {"index": 0, "delta": {"content": "A"}}},
+        )
+        for chunk in chunks:
+            with self.subTest(mode="batch", chunk=chunk), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                protocol_translation.chat_stream_chunks_to_response_events([chunk])
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+            converter = protocol_translation.ChatToResponsesStreamConverter()
+            with self.subTest(mode="incremental", chunk=chunk), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                converter.events_for_chunk(chunk)
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+            self.assertFalse(converter.created)
+            self.assertFalse(converter.completed)
+            self.assertEqual(converter.text_parts, [])
+
+    def test_chat_stream_rejects_unknown_tool_fields_and_non_string_arguments(self):
+        tool_calls = (
+            {
+                "index": 0,
+                "id": "call_123",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+                "future": {"id": "tool"},
+            },
+            {
+                "index": 0,
+                "id": "call_123",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": {"query": "Codex"}},
+            },
+        )
+        for tool_call in tool_calls:
+            chunk = {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": [tool_call]},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+            with self.subTest(mode="batch", tool_call=tool_call), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                protocol_translation.chat_stream_chunks_to_response_events([chunk])
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+            converter = protocol_translation.ChatToResponsesStreamConverter()
+            with self.subTest(mode="incremental", tool_call=tool_call), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                converter.events_for_chunk(chunk)
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_chat_stream_preserves_text_and_structured_tool_call(self):
+        chunks = [
+            {"choices": [{"index": 0, "delta": {"content": "I will check."}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_123",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+
+        events = protocol_translation.chat_stream_chunks_to_response_events(chunks)
+
+        completed = events[-1]["response"]
+        self.assertEqual([item["type"] for item in completed["output"]], ["message", "function_call"])
+        self.assertEqual(completed["output"][0]["content"][0]["text"], "I will check.")
+        self.assertEqual(completed["output"][1]["call_id"], "call_123")
+
     def test_responses_stream_translates_to_chat_chunks(self):
         events = [
             {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}},
@@ -894,6 +1132,101 @@ class ProtocolTranslationTests(unittest.TestCase):
         with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
             converter.chunks_for_event(events[1])
         self.assertEqual(raised.exception.code, "unpaired_tool_call")
+
+    def test_responses_stream_preserves_final_function_arguments_without_deltas(self):
+        item = {
+            "id": "fc_123",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_123",
+            "name": "lookup",
+            "arguments": '{"query":"Codex"}',
+        }
+        prefix = [
+            {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}},
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**item, "status": "in_progress", "arguments": ""},
+            },
+        ]
+        endings = (
+            [
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "fc_123",
+                    "output_index": 0,
+                    "arguments": item["arguments"],
+                },
+                {"type": "response.output_item.done", "output_index": 0, "item": item},
+            ],
+            [{"type": "response.output_item.done", "output_index": 0, "item": item}],
+        )
+        terminal = {
+            "type": "response.completed",
+            "response": {"id": "resp_123", "status": "completed", "output": [item]},
+        }
+
+        def streamed_arguments(chunks):
+            return "".join(
+                tool_call.get("function", {}).get("arguments", "")
+                for chunk in chunks
+                for choice in chunk.get("choices", [])
+                for tool_call in choice.get("delta", {}).get("tool_calls", [])
+            )
+
+        for ending in endings:
+            events = [*prefix, *ending, terminal]
+            with self.subTest(mode="batch", ending=ending):
+                chunks = protocol_translation.response_events_to_chat_stream_chunks(events)
+                self.assertEqual(streamed_arguments(chunks), item["arguments"])
+
+            converter = protocol_translation.ResponsesToChatStreamConverter()
+            chunks = []
+            for event in events:
+                chunks.extend(converter.chunks_for_event(event))
+            with self.subTest(mode="incremental", ending=ending):
+                self.assertEqual(streamed_arguments(chunks), item["arguments"])
+
+    def test_responses_stream_rejects_disagreeing_function_argument_final(self):
+        prefix = [
+            {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}},
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_123",
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": "call_123",
+                    "name": "lookup",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_123",
+                "output_index": 0,
+                "delta": '{"query":',
+            },
+        ]
+        done = {
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_123",
+            "output_index": 0,
+            "arguments": '{"other":"value"}',
+        }
+
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.response_events_to_chat_stream_chunks([*prefix, done])
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        converter = protocol_translation.ResponsesToChatStreamConverter()
+        for event in prefix:
+            converter.chunks_for_event(event)
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            converter.chunks_for_event(done)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
     def test_responses_failed_or_incomplete_stream_fails_closed_for_chat(self):
         for terminal_type in ("response.failed", "response.incomplete"):
@@ -990,6 +1323,39 @@ class ProtocolTranslationTests(unittest.TestCase):
         with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
             converter.chunks_for_event(events[1])
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_response_body_to_sse_preserves_incomplete_and_failed_terminals(self):
+        payloads = (
+            (
+                {
+                    "id": "resp_incomplete",
+                    "object": "response",
+                    "status": "incomplete",
+                    "output": [],
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+                "response.incomplete",
+            ),
+            (
+                {
+                    "id": "resp_failed",
+                    "object": "response",
+                    "status": "failed",
+                    "output": [],
+                    "error": {"code": "provider_error", "message": "provider failed"},
+                },
+                "response.failed",
+            ),
+        )
+
+        for payload, terminal_type in payloads:
+            with self.subTest(status=payload["status"]):
+                events = protocol_translation.response_body_to_response_sse_events(
+                    json.dumps(payload).encode("utf-8")
+                )
+                self.assertEqual(events[-1]["type"], terminal_type)
+                self.assertEqual(events[-1]["response"]["status"], payload["status"])
+                self.assertNotIn("response.completed", [event["type"] for event in events])
 
     def test_stateful_stream_converters_emit_terminal_protocol_events(self):
         chat_to_responses = protocol_translation.ChatToResponsesStreamConverter()

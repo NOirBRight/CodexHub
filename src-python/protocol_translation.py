@@ -113,6 +113,40 @@ def _require_supported_fields(value: Mapping[str, Any], allowed: set[str], label
         )
 
 
+def _function_arguments(value: Mapping[str, Any], label: str) -> str:
+    if "arguments" not in value:
+        return ""
+    arguments = value.get("arguments")
+    if not isinstance(arguments, str):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate non-string {label} arguments.",
+        )
+    return arguments
+
+
+def _validate_function_tool_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
+    _require_supported_fields(value, allowed, label)
+    description = value.get("description")
+    if description is not None and not isinstance(description, str):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate non-string {label} description.",
+        )
+    parameters = value.get("parameters")
+    if parameters is not None and not isinstance(parameters, dict):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate non-object {label} parameters.",
+        )
+    strict = value.get("strict")
+    if strict is not None and not isinstance(strict, bool):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate non-boolean {label} strict value.",
+        )
+
+
 def responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
     if isinstance(value, str):
         return value
@@ -185,6 +219,7 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
             )
         item_type = item.get("type")
         if item_type == "message" or (item_type is None and ("role" in item or "content" in item)):
+            _require_supported_fields(item, {"type", "role", "content"}, "Responses message input item")
             role = item.get("role")
             if role == "developer":
                 role = "system"
@@ -196,6 +231,11 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
             messages.append({"role": role, "content": responses_content_to_chat_content(item.get("content"))})
             continue
         if item_type == "function_call":
+            _require_supported_fields(
+                item,
+                {"type", "call_id", "name", "arguments"},
+                "Responses function-call input item",
+            )
             call_id = item.get("call_id")
             name = item.get("name")
             if not isinstance(call_id, str) or not call_id:
@@ -208,9 +248,7 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
                     "unsupported_protocol_semantics",
                     "Cannot translate a function call without a non-empty name.",
                 )
-            arguments = item.get("arguments")
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=True, separators=(",", ":"))
+            arguments = _function_arguments(item, "Responses function-call")
             messages.append(
                 {
                     "role": "assistant",
@@ -226,6 +264,11 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
             )
             continue
         if item_type == "function_call_output":
+            _require_supported_fields(
+                item,
+                {"type", "call_id", "output"},
+                "Responses function-call output item",
+            )
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not call_id:
                 raise UnsupportedProtocolTranslationError(
@@ -233,8 +276,12 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
                     "Cannot translate a function result without a non-empty call_id.",
                 )
             output = item.get("output")
-            content = output if isinstance(output, str) else json.dumps(output, ensure_ascii=True, separators=(",", ":"))
-            messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+            if not isinstance(output, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate a non-string Responses function-call output to Chat Completions.",
+                )
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
             continue
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -254,6 +301,11 @@ def responses_tools_to_chat_tools(value: Any) -> list[dict[str, Any]]:
                 "unsupported_protocol_semantics",
                 f"Cannot translate Responses tool type {tool_type!r} to Chat Completions.",
             )
+        _validate_function_tool_fields(
+            item,
+            {"type", "name", "description", "parameters", "strict"},
+            "Responses function tool",
+        )
         name = item.get("name")
         if not isinstance(name, str) or not name:
             raise UnsupportedProtocolTranslationError(
@@ -283,6 +335,7 @@ def responses_tool_choice_to_chat_tool_choice(value: Any) -> Any:
             "unsupported_protocol_semantics",
             f"Cannot translate Responses tool_choice type {choice_type!r} to Chat Completions.",
         )
+    _require_supported_fields(value, {"type", "name"}, "Responses function tool_choice")
     name = value.get("name")
     if not isinstance(name, str) or not name:
         raise UnsupportedProtocolTranslationError(
@@ -495,13 +548,13 @@ def chat_messages_to_responses_input(
                         "unpaired_tool_call",
                         "Cannot translate an assistant tool call without a non-empty id.",
                     )
-                arguments = function.get("arguments")
+                arguments = _function_arguments(function, "Chat Completions function-call")
                 input_items.append(
                     {
                         "type": "function_call",
                         "call_id": call_id,
                         "name": name,
-                        "arguments": arguments if isinstance(arguments, str) else "",
+                        "arguments": arguments,
                     }
                 )
             continue
@@ -568,12 +621,18 @@ def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
                 "unsupported_protocol_semantics",
                 f"Cannot translate Chat Completions tool type {tool_type!r} to Responses.",
             )
+        _require_supported_fields(item, {"type", "function"}, "Chat Completions function tool")
         function = item.get("function")
         if not isinstance(function, dict):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot translate a Chat Completions function tool without a function payload.",
             )
+        _validate_function_tool_fields(
+            function,
+            {"name", "description", "parameters", "strict"},
+            "Chat Completions function tool",
+        )
         name = function.get("name")
         if not isinstance(name, str) or not name:
             raise UnsupportedProtocolTranslationError(
@@ -605,7 +664,10 @@ def chat_tool_choice_to_responses_tool_choice(value: Any) -> Any:
             "unsupported_protocol_semantics",
             f"Cannot translate Chat Completions tool_choice type {choice_type!r} to Responses.",
         )
+    _require_supported_fields(value, {"type", "function"}, "Chat Completions function tool_choice")
     function = value.get("function")
+    if isinstance(function, Mapping):
+        _require_supported_fields(function, {"name"}, "Chat Completions function tool_choice")
     if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -737,6 +799,11 @@ def _chat_completion_tool_outputs(
                 "unsupported_protocol_semantics",
                 "Cannot translate a non-object assistant tool call.",
             )
+        _require_supported_fields(
+            tool_call,
+            {"id", "type", "function"},
+            "Chat Completions assistant tool call",
+        )
         tool_type = tool_call.get("type")
         if tool_type not in (None, "function"):
             raise UnsupportedProtocolTranslationError(
@@ -749,6 +816,11 @@ def _chat_completion_tool_outputs(
                 "unsupported_protocol_semantics",
                 "Cannot translate an assistant tool call without a function payload.",
             )
+        _require_supported_fields(
+            function,
+            {"name", "arguments"},
+            "Chat Completions assistant function call",
+        )
         name = function.get("name")
         if not isinstance(name, str) or not name:
             raise UnsupportedProtocolTranslationError(
@@ -761,7 +833,7 @@ def _chat_completion_tool_outputs(
                 "unpaired_tool_call",
                 "Cannot translate an assistant tool call without a non-empty id.",
             )
-        arguments = function.get("arguments")
+        arguments = _function_arguments(function, "Chat Completions function-call")
         output.append(
             {
                 "id": f"fc_{call_id}",
@@ -769,7 +841,7 @@ def _chat_completion_tool_outputs(
                 "status": "completed",
                 "call_id": call_id,
                 "name": name,
-                "arguments": arguments if isinstance(arguments, str) else "",
+                "arguments": arguments,
             }
         )
     return output
@@ -924,6 +996,11 @@ def response_body_to_chat_completion_body(
                     "Cannot translate a non-object Responses output item.",
                 )
             if item.get("type") == "message":
+                _require_supported_fields(
+                    item,
+                    {"id", "type", "status", "role", "content"},
+                    "Responses output message item",
+                )
                 content = item.get("content")
                 role = item.get("role")
                 if role not in (None, "assistant"):
@@ -946,6 +1023,11 @@ def response_body_to_chat_completion_body(
                         "Cannot translate a non-text Responses output message content value.",
                     )
             elif item.get("type") == "function_call":
+                _require_supported_fields(
+                    item,
+                    {"id", "type", "status", "call_id", "namespace", "name", "arguments"},
+                    "Responses output function-call item",
+                )
                 call_id = item.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
                     raise UnsupportedProtocolTranslationError(
@@ -953,7 +1035,7 @@ def response_body_to_chat_completion_body(
                         "Cannot translate a function call without a non-empty call_id.",
                     )
                 name = function_name_from_response_item(item)
-                arguments = item.get("arguments")
+                arguments = _function_arguments(item, "Responses function-call")
                 if not isinstance(name, str) or not name:
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
@@ -965,7 +1047,7 @@ def response_body_to_chat_completion_body(
                         "type": "function",
                         "function": {
                             "name": name,
-                            "arguments": arguments if isinstance(arguments, str) else "",
+                            "arguments": arguments,
                         },
                     }
                 )
@@ -1083,7 +1165,7 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
                         "unpaired_tool_call",
                         "Cannot translate an assistant tool call without a non-empty id into Chat Completions chunks.",
                     )
-                arguments = function.get("arguments") if isinstance(function.get("arguments"), str) else ""
+                arguments = _function_arguments(function, "Chat Completions function-call")
                 chunks.append(
                     {
                         "id": response_id,
@@ -1127,6 +1209,54 @@ def _identity_function_name(name: str) -> str:
     return name
 
 
+def _validate_chat_stream_choices(chunk: Mapping[str, Any]) -> None:
+    choices = chunk.get("choices")
+    if choices is None and "choices" not in chunk:
+        return
+    if not isinstance(choices, list):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate a non-list Chat Completions stream choices payload.",
+        )
+    if not choices:
+        return
+    if len(choices) != 1:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate multiple Chat Completions stream choices to one Responses stream.",
+        )
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate a non-object Chat Completions stream choice.",
+        )
+    choice_index = choice.get("index", 0)
+    if choice_index != 0:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate Chat Completions stream choice index {choice_index!r} to one Responses stream.",
+        )
+
+
+def _validate_chat_stream_source(source: Mapping[str, Any]) -> None:
+    _require_supported_fields(
+        source,
+        {
+            "role",
+            "content",
+            "tool_calls",
+            "refusal",
+            "audio",
+            "annotations",
+            "reasoning",
+            "reasoning_content",
+        },
+        "Chat Completions stream delta",
+    )
+    _raise_for_unsupported_chat_message_semantics(source)
+
+
 def chat_stream_chunks_to_response_events(
     chunks: list[Mapping[str, Any] | str],
     *,
@@ -1141,6 +1271,12 @@ def chat_stream_chunks_to_response_events(
     incomplete_details: dict[str, str] | None = None
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     model: str | None = None
+    next_output_index = 0
+    message_output_index: int | None = None
+
+    for chunk in chunks:
+        if isinstance(chunk, Mapping):
+            _validate_chat_stream_choices(chunk)
 
     for chunk in chunks:
         if not isinstance(chunk, Mapping):
@@ -1160,11 +1296,16 @@ def chat_stream_chunks_to_response_events(
         created_response["model"] = model
     events.append({"type": "response.created", "response": created_response})
 
+    def allocate_output_index() -> int:
+        nonlocal next_output_index
+        output_index = next_output_index
+        next_output_index += 1
+        return output_index
+
     def state_for(index: int) -> dict[str, Any]:
         if index not in states:
-            output_index = len(states)
             states[index] = {
-                "output_index": output_index,
+                "output_index": allocate_output_index(),
                 "item_id": "",
                 "call_id": "",
                 "name": "",
@@ -1220,9 +1361,11 @@ def chat_stream_chunks_to_response_events(
             source = delta if isinstance(delta, dict) else message if isinstance(message, dict) else None
             if not isinstance(source, dict):
                 continue
-            _raise_for_unsupported_chat_message_semantics(source)
+            _validate_chat_stream_source(source)
             content = source.get("content")
             if isinstance(content, str) and content:
+                if message_output_index is None:
+                    message_output_index = allocate_output_index()
                 text_parts.append(content)
             elif content is not None:
                 raise UnsupportedProtocolTranslationError(
@@ -1243,6 +1386,11 @@ def chat_stream_chunks_to_response_events(
                         "unsupported_protocol_semantics",
                         "Cannot translate a non-object assistant tool-call stream delta.",
                     )
+                _require_supported_fields(
+                    tool_call,
+                    {"index", "id", "type", "function"},
+                    "Chat Completions assistant tool-call stream delta",
+                )
                 tool_type = tool_call.get("type")
                 if tool_type not in (None, "function"):
                     raise UnsupportedProtocolTranslationError(
@@ -1250,25 +1398,62 @@ def chat_stream_chunks_to_response_events(
                         f"Cannot translate assistant tool type {tool_type!r} to Responses stream events.",
                     )
                 raw_index = tool_call.get("index", fallback_index)
-                index = raw_index if isinstance(raw_index, int) else fallback_index
+                if not isinstance(raw_index, int):
+                    raise UnsupportedProtocolTranslationError(
+                        "unsupported_protocol_semantics",
+                        "Cannot translate a non-integer assistant tool-call stream index.",
+                    )
+                index = raw_index
                 state = state_for(index)
                 call_id = tool_call.get("id")
-                if isinstance(call_id, str) and call_id and not state["call_id"]:
-                    state["call_id"] = call_id
+                if call_id is not None:
+                    if not isinstance(call_id, str):
+                        raise UnsupportedProtocolTranslationError(
+                            "unpaired_tool_call",
+                            "Cannot translate a tool-call stream delta with an invalid id.",
+                        )
+                    if call_id:
+                        if state["call_id"] and state["call_id"] != call_id:
+                            raise UnsupportedProtocolTranslationError(
+                                "unpaired_tool_call",
+                                "Cannot translate conflicting tool-call ids for one stream index.",
+                            )
+                        state["call_id"] = call_id
 
                 function = tool_call.get("function")
+                if function is not None and not isinstance(function, dict):
+                    raise UnsupportedProtocolTranslationError(
+                        "unsupported_protocol_semantics",
+                        "Cannot translate a non-object assistant function-call stream delta.",
+                    )
                 if isinstance(function, dict):
+                    _require_supported_fields(
+                        function,
+                        {"name", "arguments"},
+                        "Chat Completions assistant function-call stream delta",
+                    )
                     name = function.get("name")
-                    if isinstance(name, str) and name and not state["name"]:
-                        state["name"] = normalize_function_name(name)
-                    arguments = function.get("arguments")
-                    if isinstance(arguments, str) and arguments:
+                    if name is not None:
+                        if not isinstance(name, str) or not name:
+                            raise UnsupportedProtocolTranslationError(
+                                "unsupported_protocol_semantics",
+                                "Cannot translate an invalid assistant function name in a stream delta.",
+                            )
+                        normalized_name = normalize_function_name(name)
+                        if state["name"] and state["name"] != normalized_name:
+                            raise UnsupportedProtocolTranslationError(
+                                "unsupported_protocol_semantics",
+                                "Cannot translate conflicting function names for one stream index.",
+                            )
+                        state["name"] = normalized_name
+                    arguments = _function_arguments(function, "Chat Completions function-call stream")
+                    if arguments:
                         state["arguments"].append(arguments)
 
                 maybe_emit_added(state)
                 if state["added"] and isinstance(function, dict):
-                    arguments = function.get("arguments")
-                    if isinstance(arguments, str) and arguments:
+                    arguments = _function_arguments(function, "Chat Completions function-call stream")
+                    if arguments:
                         events.append(
                             {
                                 "type": "response.function_call_arguments.delta",
@@ -1281,7 +1466,7 @@ def chat_stream_chunks_to_response_events(
     if not finished:
         return events
 
-    output: list[dict[str, Any]] = []
+    output_by_index: dict[int, dict[str, Any]] = {}
     text = "".join(text_parts)
     extracted_xmlish_tool_outputs = xmlish_tool_outputs(text) if text and xmlish_tool_outputs is not None else []
     for state in sorted(states.values(), key=lambda item: item["output_index"]):
@@ -1314,11 +1499,10 @@ def chat_stream_chunks_to_response_events(
             }
         )
         events.append({"type": "response.output_item.done", "output_index": state["output_index"], "item": item})
-        output.append(item)
+        output_by_index[state["output_index"]] = item
 
-    if extracted_xmlish_tool_outputs and not output:
-        for item in extracted_xmlish_tool_outputs:
-            output_index = len(output)
+    if extracted_xmlish_tool_outputs and not output_by_index:
+        for output_index, item in enumerate(extracted_xmlish_tool_outputs):
             in_progress_item = dict(item)
             in_progress_item["status"] = "in_progress"
             in_progress_item["arguments"] = ""
@@ -1338,9 +1522,9 @@ def chat_stream_chunks_to_response_events(
                 }
             )
             events.append({"type": "response.output_item.done", "output_index": output_index, "item": item})
-            output.append(item)
-    elif text and not output:
-        output_index = len(output)
+            output_by_index[output_index] = item
+    elif text:
+        output_index = message_output_index if message_output_index is not None else allocate_output_index()
         item_id = f"msg_{uuid.uuid4().hex[:12]}"
         item = {
             "id": item_id,
@@ -1382,7 +1566,9 @@ def chat_stream_chunks_to_response_events(
             }
         )
         events.append({"type": "response.output_item.done", "output_index": output_index, "item": item})
-        output.append(item)
+        output_by_index[output_index] = item
+
+    output = [item for _, item in sorted(output_by_index.items(), key=lambda pair: pair[0])]
 
     completed_response: dict[str, Any] = {
         "id": response_id,
@@ -1411,7 +1597,7 @@ def _validated_responses_stream_output_item(
     item: Any,
     *,
     function_name_from_response_item: FunctionNameFromResponseItem = _default_function_name_from_response_item,
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None]:
     if not isinstance(item, Mapping):
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -1419,14 +1605,24 @@ def _validated_responses_stream_output_item(
         )
     item_type = item.get("type")
     if item_type == "message":
+        _require_supported_fields(
+            item,
+            {"id", "type", "status", "role", "content"},
+            "Responses stream message item",
+        )
         if item.get("content") is not None:
             responses_content_to_chat_content(item.get("content"))
-        return "message", None, None
+        return "message", None, None, None
     if item_type != "function_call":
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
             f"Cannot translate Responses stream output item type {item_type!r} to Chat Completions.",
         )
+    _require_supported_fields(
+        item,
+        {"id", "type", "status", "call_id", "namespace", "name", "arguments"},
+        "Responses stream function-call item",
+    )
     call_id = item.get("call_id")
     if not isinstance(call_id, str) or not call_id:
         raise UnsupportedProtocolTranslationError(
@@ -1439,7 +1635,19 @@ def _validated_responses_stream_output_item(
             "unsupported_protocol_semantics",
             "Cannot translate a function-call stream item without a non-empty name.",
         )
-    return "function_call", call_id, name
+    arguments = _function_arguments(item, "Responses function-call stream")
+    return "function_call", call_id, name, arguments
+
+
+def _function_argument_suffix(current: str, final: str, label: str) -> str:
+    if final == current:
+        return ""
+    if final.startswith(current):
+        return final[len(current) :]
+    raise UnsupportedProtocolTranslationError(
+        "unsupported_protocol_semantics",
+        f"Cannot translate disagreeing {label} argument deltas and final value.",
+    )
 
 
 def response_events_to_chat_stream_chunks(
@@ -1468,6 +1676,39 @@ def response_events_to_chat_stream_chunks(
                 "emitted_header": False,
             }
         return tool_states[item_id]
+
+    def append_final_arguments(state: dict[str, Any], final_arguments: str, label: str) -> None:
+        if not state["emitted_header"]:
+            raise UnsupportedProtocolTranslationError(
+                "unpaired_tool_call",
+                f"Cannot translate {label} arguments without a paired function-call stream item.",
+            )
+        suffix = _function_argument_suffix(state["arguments"], final_arguments, label)
+        if not suffix:
+            return
+        chunks.append(
+            {
+                "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": state["index"],
+                                    "function": {"arguments": suffix},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+        state["arguments"] += suffix
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -1517,33 +1758,23 @@ def response_events_to_chat_stream_chunks(
             continue
         if event_type == "response.output_item.added":
             item = event.get("item")
-            if not isinstance(item, Mapping):
-                raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    "Cannot translate a non-object Responses stream output item.",
-                )
-            if item.get("type") == "message":
-                if item.get("content") is not None:
-                    responses_content_to_chat_content(item.get("content"))
+            item_type, call_id, name, arguments = _validated_responses_stream_output_item(
+                item,
+                function_name_from_response_item=function_name_from_response_item,
+            )
+            if item_type == "message":
                 continue
-            if item.get("type") != "function_call":
-                raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    f"Cannot translate Responses stream output item type {item.get('type')!r} to Chat Completions.",
-                )
             item_id = item.get("id") or item.get("call_id") or ""
             state = tool_state(str(item_id))
-            call_id = item.get("call_id")
-            if not isinstance(call_id, str) or not call_id:
+            if state["id"] and state["id"] != call_id:
                 raise UnsupportedProtocolTranslationError(
                     "unpaired_tool_call",
-                    "Cannot translate a function-call stream item without a non-empty call_id.",
+                    "Cannot translate conflicting function-call ids for one Responses stream item.",
                 )
-            name = function_name_from_response_item(item)
-            if not isinstance(name, str) or not name:
+            if state["name"] and state["name"] != name:
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
-                    "Cannot translate a function-call stream item without a non-empty name.",
+                    "Cannot translate conflicting function names for one Responses stream item.",
                 )
             state["id"] = call_id
             state["name"] = name
@@ -1573,11 +1804,17 @@ def response_events_to_chat_stream_chunks(
                     }
                 )
                 state["emitted_header"] = True
+            append_final_arguments(state, arguments or "", "function-call item")
             continue
         if event_type == "response.function_call_arguments.delta":
             item_id = event.get("item_id") or ""
             state = tool_state(str(item_id))
             delta_args = event.get("delta")
+            if delta_args is not None and not isinstance(delta_args, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-string function-call argument delta.",
+                )
             if isinstance(delta_args, str) and delta_args:
                 if not state["emitted_header"]:
                     if not state["id"]:
@@ -1638,10 +1875,27 @@ def response_events_to_chat_stream_chunks(
                             ],
                         }
                     )
+                state["arguments"] += delta_args
+            continue
+        if event_type == "response.function_call_arguments.done":
+            item_id = str(event.get("item_id") or "")
+            state = tool_states.get(item_id)
+            arguments = event.get("arguments")
+            if not isinstance(arguments, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-string final function-call arguments.",
+                )
+            if state is None:
+                raise UnsupportedProtocolTranslationError(
+                    "unpaired_tool_call",
+                    "Cannot translate final function-call arguments without a paired stream item.",
+                )
+            append_final_arguments(state, arguments, "function-call done")
             continue
         if event_type == "response.output_item.done":
             item = event.get("item")
-            item_type, call_id, _ = _validated_responses_stream_output_item(
+            item_type, call_id, name, arguments = _validated_responses_stream_output_item(
                 item,
                 function_name_from_response_item=function_name_from_response_item,
             )
@@ -1653,6 +1907,12 @@ def response_events_to_chat_stream_chunks(
                         "unpaired_tool_call",
                         "Cannot translate a completed function call that was never paired with a stream item.",
                     )
+                if state["id"] != call_id or state["name"] != name:
+                    raise UnsupportedProtocolTranslationError(
+                        "unpaired_tool_call",
+                        "Cannot translate a completed function call with conflicting identity.",
+                    )
+                append_final_arguments(state, arguments or "", "completed function-call item")
             continue
         if event_type == "response.completed":
             response_obj = event.get("response")
@@ -1660,7 +1920,7 @@ def response_events_to_chat_stream_chunks(
                 output = response_obj.get("output")
                 if isinstance(output, list):
                     for item in output:
-                        item_type, call_id, _ = _validated_responses_stream_output_item(
+                        item_type, call_id, name, arguments = _validated_responses_stream_output_item(
                             item,
                             function_name_from_response_item=function_name_from_response_item,
                         )
@@ -1672,6 +1932,12 @@ def response_events_to_chat_stream_chunks(
                                     "unpaired_tool_call",
                                     "Cannot translate a completed function call that was never paired with a stream item.",
                                 )
+                            if state["id"] != call_id or state["name"] != name:
+                                raise UnsupportedProtocolTranslationError(
+                                    "unpaired_tool_call",
+                                    "Cannot translate terminal function-call output with conflicting identity.",
+                                )
+                            append_final_arguments(state, arguments or "", "terminal function-call output")
                     finish_reason = "tool_calls" if any(
                         isinstance(item, Mapping) and item.get("type") == "function_call"
                         for item in output
@@ -1723,6 +1989,34 @@ class ResponsesToChatStreamConverter:
             "choices": [{"index": 0, "delta": dict(delta), "finish_reason": finish_reason}],
         }
 
+    def _final_argument_chunks(
+        self,
+        state: dict[str, Any],
+        final_arguments: str,
+        label: str,
+    ) -> list[dict[str, Any]]:
+        if not state["emitted_header"]:
+            raise UnsupportedProtocolTranslationError(
+                "unpaired_tool_call",
+                f"Cannot translate {label} arguments without a paired function-call stream item.",
+            )
+        suffix = _function_argument_suffix(state["arguments"], final_arguments, label)
+        if not suffix:
+            return []
+        state["arguments"] += suffix
+        return [
+            self._chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": state["index"],
+                            "function": {"arguments": suffix},
+                        }
+                    ]
+                }
+            )
+        ]
+
     def chunks_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         event_type = event.get("type")
         if event_type in {"response.failed", "response.incomplete", "error"}:
@@ -1750,40 +2044,27 @@ class ResponsesToChatStreamConverter:
             return []
         if event_type == "response.output_item.added":
             item = event.get("item")
-            if not isinstance(item, Mapping):
-                raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    "Cannot translate a non-object Responses stream output item.",
-                )
-            if item.get("type") == "message":
-                if item.get("content") is not None:
-                    responses_content_to_chat_content(item.get("content"))
+            item_type, call_id, name, arguments = _validated_responses_stream_output_item(item)
+            if item_type == "message":
                 return []
-            if item.get("type") != "function_call":
-                raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    f"Cannot translate Responses stream output item type {item.get('type')!r} to Chat Completions.",
-                )
             item_id = item.get("id") or item.get("call_id") or ""
             state = self._tool_state(str(item_id))
-            call_id = item.get("call_id")
-            if not isinstance(call_id, str) or not call_id:
+            if state["id"] and state["id"] != call_id:
                 raise UnsupportedProtocolTranslationError(
                     "unpaired_tool_call",
-                    "Cannot translate a function-call stream item without a non-empty call_id.",
+                    "Cannot translate conflicting function-call ids for one Responses stream item.",
                 )
-            name = item.get("name")
-            if not isinstance(name, str) or not name:
+            if state["name"] and state["name"] != name:
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
-                    "Cannot translate a function-call stream item without a non-empty name.",
+                    "Cannot translate conflicting function names for one Responses stream item.",
                 )
             state["id"] = call_id
             state["name"] = name
             if not (state["id"] and state["name"] and not state["emitted_header"]):
-                return []
+                return self._final_argument_chunks(state, arguments or "", "function-call item")
             state["emitted_header"] = True
-            return [
+            chunks = [
                 self._chunk(
                     {
                         "tool_calls": [
@@ -1797,10 +2078,17 @@ class ResponsesToChatStreamConverter:
                     }
                 )
             ]
+            chunks.extend(self._final_argument_chunks(state, arguments or "", "function-call item"))
+            return chunks
         if event_type == "response.function_call_arguments.delta":
             item_id = str(event.get("item_id") or "")
             state = self._tool_state(item_id)
             delta_args = event.get("delta")
+            if delta_args is not None and not isinstance(delta_args, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-string function-call argument delta.",
+                )
             if not (isinstance(delta_args, str) and delta_args):
                 return []
             if not state["emitted_header"]:
@@ -1815,13 +2103,14 @@ class ResponsesToChatStreamConverter:
                         "Cannot translate function-call arguments without a paired function name.",
                     )
                 state["emitted_header"] = True
+                state["arguments"] += delta_args
                 return [
                     self._chunk(
                         {
                             "tool_calls": [
-                                    {
-                                        "index": state["index"],
-                                        "id": state["id"],
+                                {
+                                    "index": state["index"],
+                                    "id": state["id"],
                                     "type": "function",
                                     "function": {"name": state["name"], "arguments": delta_args},
                                 }
@@ -1829,6 +2118,7 @@ class ResponsesToChatStreamConverter:
                         }
                     )
                 ]
+            state["arguments"] += delta_args
             return [
                 self._chunk(
                     {
@@ -1841,9 +2131,24 @@ class ResponsesToChatStreamConverter:
                     }
                 )
             ]
+        if event_type == "response.function_call_arguments.done":
+            item_id = str(event.get("item_id") or "")
+            state = self.tool_states.get(item_id)
+            arguments = event.get("arguments")
+            if not isinstance(arguments, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-string final function-call arguments.",
+                )
+            if state is None:
+                raise UnsupportedProtocolTranslationError(
+                    "unpaired_tool_call",
+                    "Cannot translate final function-call arguments without a paired stream item.",
+                )
+            return self._final_argument_chunks(state, arguments, "function-call done")
         if event_type == "response.output_item.done":
             item = event.get("item")
-            item_type, call_id, _ = _validated_responses_stream_output_item(item)
+            item_type, call_id, name, arguments = _validated_responses_stream_output_item(item)
             if item_type == "function_call":
                 item_id = str(item.get("id") or call_id or "")
                 state = self.tool_states.get(item_id)
@@ -1852,16 +2157,22 @@ class ResponsesToChatStreamConverter:
                         "unpaired_tool_call",
                         "Cannot translate a completed function call that was never paired with a stream item.",
                     )
+                if state["id"] != call_id or state["name"] != name:
+                    raise UnsupportedProtocolTranslationError(
+                        "unpaired_tool_call",
+                        "Cannot translate a completed function call with conflicting identity.",
+                    )
+                return self._final_argument_chunks(state, arguments or "", "completed function-call item")
             return []
         if event_type == "response.completed":
-            self.completed = True
             finish_reason = "stop"
+            chunks: list[dict[str, Any]] = []
             response_obj = event.get("response")
             if isinstance(response_obj, Mapping):
                 output = response_obj.get("output")
                 if isinstance(output, list):
                     for item in output:
-                        item_type, call_id, _ = _validated_responses_stream_output_item(item)
+                        item_type, call_id, name, arguments = _validated_responses_stream_output_item(item)
                         if item_type == "function_call":
                             item_id = str(item.get("id") or call_id or "")
                             state = self.tool_states.get(item_id)
@@ -1870,9 +2181,23 @@ class ResponsesToChatStreamConverter:
                                     "unpaired_tool_call",
                                     "Cannot translate a completed function call that was never paired with a stream item.",
                                 )
+                            if state["id"] != call_id or state["name"] != name:
+                                raise UnsupportedProtocolTranslationError(
+                                    "unpaired_tool_call",
+                                    "Cannot translate terminal function-call output with conflicting identity.",
+                                )
+                            chunks.extend(
+                                self._final_argument_chunks(
+                                    state,
+                                    arguments or "",
+                                    "terminal function-call output",
+                                )
+                            )
                     if any(isinstance(item, Mapping) and item.get("type") == "function_call" for item in output):
                         finish_reason = "tool_calls"
-            return [self._chunk({}, finish_reason=finish_reason)]
+            self.completed = True
+            chunks.append(self._chunk({}, finish_reason=finish_reason))
+            return chunks
         return []
 
 
@@ -2060,6 +2385,7 @@ class ChatToResponsesStreamConverter:
         return self._complete_events()
 
     def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
+        _validate_chat_stream_choices(chunk)
         if isinstance(chunk.get("model"), str):
             self.model = chunk.get("model")
         events: list[dict[str, Any]] = []
@@ -2071,7 +2397,7 @@ class ChatToResponsesStreamConverter:
                 continue
             delta = choice.get("delta")
             if isinstance(delta, Mapping):
-                _raise_for_unsupported_chat_message_semantics(delta)
+                _validate_chat_stream_source(delta)
                 content = delta.get("content")
                 if isinstance(content, str) and content:
                     self.text_parts.append(content)
@@ -2103,6 +2429,11 @@ class ChatToResponsesStreamConverter:
                                 "unsupported_protocol_semantics",
                                 "Cannot translate a non-object assistant tool-call stream delta.",
                             )
+                        _require_supported_fields(
+                            tool_call,
+                            {"index", "id", "type", "function"},
+                            "Chat Completions assistant tool-call stream delta",
+                        )
                         tool_type = tool_call.get("type")
                         if tool_type not in (None, "function"):
                             raise UnsupportedProtocolTranslationError(
@@ -2110,19 +2441,55 @@ class ChatToResponsesStreamConverter:
                                 f"Cannot translate assistant tool type {tool_type!r} to Responses stream events.",
                             )
                         raw_index = tool_call.get("index", fallback_index)
-                        index = raw_index if isinstance(raw_index, int) else fallback_index
+                        if not isinstance(raw_index, int):
+                            raise UnsupportedProtocolTranslationError(
+                                "unsupported_protocol_semantics",
+                                "Cannot translate a non-integer assistant tool-call stream index.",
+                            )
+                        index = raw_index
                         state = self._tool_state(index)
                         call_id = tool_call.get("id")
-                        if isinstance(call_id, str) and call_id and not state["call_id"]:
-                            state["call_id"] = call_id
+                        if call_id is not None:
+                            if not isinstance(call_id, str):
+                                raise UnsupportedProtocolTranslationError(
+                                    "unpaired_tool_call",
+                                    "Cannot translate a tool-call stream delta with an invalid id.",
+                                )
+                            if call_id:
+                                if state["call_id"] and state["call_id"] != call_id:
+                                    raise UnsupportedProtocolTranslationError(
+                                        "unpaired_tool_call",
+                                        "Cannot translate conflicting tool-call ids for one stream index.",
+                                    )
+                                state["call_id"] = call_id
                         function = tool_call.get("function")
                         argument_delta: str | None = None
+                        if function is not None and not isinstance(function, Mapping):
+                            raise UnsupportedProtocolTranslationError(
+                                "unsupported_protocol_semantics",
+                                "Cannot translate a non-object assistant function-call stream delta.",
+                            )
                         if isinstance(function, Mapping):
+                            _require_supported_fields(
+                                function,
+                                {"name", "arguments"},
+                                "Chat Completions assistant function-call stream delta",
+                            )
                             name = function.get("name")
-                            if isinstance(name, str) and name and not state["name"]:
+                            if name is not None:
+                                if not isinstance(name, str) or not name:
+                                    raise UnsupportedProtocolTranslationError(
+                                        "unsupported_protocol_semantics",
+                                        "Cannot translate an invalid assistant function name in a stream delta.",
+                                    )
+                                if state["name"] and state["name"] != name:
+                                    raise UnsupportedProtocolTranslationError(
+                                        "unsupported_protocol_semantics",
+                                        "Cannot translate conflicting function names for one stream index.",
+                                    )
                                 state["name"] = name
-                            arguments = function.get("arguments")
-                            if isinstance(arguments, str) and arguments:
+                            arguments = _function_arguments(function, "Chat Completions function-call stream")
+                            if arguments:
                                 state["arguments"].append(arguments)
                                 argument_delta = arguments
                         events.extend(self._tool_added_events(state))
@@ -2232,14 +2599,22 @@ def response_body_to_response_sse_events(
     collect_text_fragments: CollectTextFragments = _default_collect_text_fragments,
 ) -> list[dict[str, Any]]:
     payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict) or isinstance(payload.get("error"), (str, Mapping)):
+    if not isinstance(payload, dict):
         return []
 
     response = dict(payload)
     response_id = response.get("id") if isinstance(response.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}"
     response["id"] = response_id
     response.setdefault("object", "response")
-    response.setdefault("status", "completed")
+    status = response.get("status")
+    if status is None:
+        status = "failed" if response.get("error") is not None else "completed"
+    if status not in {"completed", "incomplete", "failed"}:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot synthesize a terminal Responses stream from body status {status!r}.",
+        )
+    response["status"] = status
     output = response.get("output")
     output_items = output if isinstance(output, list) else []
     model_value = response.get("model")
@@ -2254,9 +2629,12 @@ def response_body_to_response_sse_events(
 
     for output_index, raw_item in enumerate(output_items):
         if not isinstance(raw_item, Mapping):
-            continue
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot synthesize Responses stream events for a non-object output item.",
+            )
         item = dict(raw_item)
-        item_type = item.get("type")
+        item_type, _, _, arguments = _validated_responses_stream_output_item(item)
         item_id = item.get("id") if isinstance(item.get("id"), str) else f"item_{output_index}"
         item["id"] = item_id
         if item_type == "message":
@@ -2321,8 +2699,7 @@ def response_body_to_response_sse_events(
                     "item": in_progress_item,
                 }
             )
-            arguments = item.get("arguments")
-            if isinstance(arguments, str) and arguments:
+            if arguments:
                 events.append(
                     {
                         "type": "response.function_call_arguments.delta",
@@ -2337,7 +2714,7 @@ def response_body_to_response_sse_events(
                         "type": "response.function_call_arguments.done",
                         "output_index": output_index,
                         "item_id": item_id,
-                        "arguments": arguments if isinstance(arguments, str) else "",
+                        "arguments": arguments or "",
                     },
                     {
                         "type": "response.output_item.done",
@@ -2347,10 +2724,14 @@ def response_body_to_response_sse_events(
                 ]
             )
 
-    response["status"] = "completed"
     if model_value is not None:
         response["model"] = model_value
-    events.append({"type": "response.completed", "response": response})
+    terminal_event_type = {
+        "completed": "response.completed",
+        "incomplete": "response.incomplete",
+        "failed": "response.failed",
+    }[status]
+    events.append({"type": terminal_event_type, "response": response})
     return events
 
 

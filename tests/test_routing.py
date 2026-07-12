@@ -6291,7 +6291,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.cause.code, "unpaired_tool_call")
 
-    def test_chat_tool_call_chunks_drop_text_message_when_tool_call_present(self):
+    def test_chat_tool_call_chunks_preserve_text_message_when_tool_call_present(self):
         chunks = [
             {
                 "choices": [
@@ -6347,10 +6347,13 @@ class RoutingTests(unittest.TestCase):
         completed = next(event for event in events if event["type"] == "response.completed")
 
         self.assertTrue(any(event["type"] == "response.output_item.done" for event in events))
-        self.assertFalse(any(event["type"] == "response.output_text.delta" for event in events))
-        self.assertEqual(len(completed["response"]["output"]), 1)
-        self.assertEqual(completed["response"]["output"][0]["type"], "function_call")
-        self.assertEqual(completed["response"]["output"][0]["name"], "mcp__node_repl__js")
+        self.assertTrue(any(event["type"] == "response.output_text.delta" for event in events))
+        self.assertEqual(
+            [item["type"] for item in completed["response"]["output"]],
+            ["message", "function_call"],
+        )
+        self.assertEqual(completed["response"]["output"][0]["content"][0]["text"], "I'll read the plan first.")
+        self.assertEqual(completed["response"]["output"][1]["name"], "mcp__node_repl__js")
 
     def test_chat_stream_pipeline_preserves_node_repl_dot_alias_tool_call(self):
         chunks = [
@@ -6414,10 +6417,16 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(done["item"]["namespace"], "mcp__node_repl")
         self.assertEqual(done["item"]["name"], "js")
         self.assertEqual(json.loads(done["item"]["arguments"]), {"code": "readPlan()"})
-        self.assertEqual(completed["response"]["output"][0]["type"], "function_call")
-        self.assertEqual(completed["response"]["output"][0]["namespace"], "mcp__node_repl")
-        self.assertEqual(completed["response"]["output"][0]["name"], "js")
-        self.assertFalse(any(event.get("item", {}).get("type") == "message" for event in events if isinstance(event.get("item"), dict)))
+        completed_call = next(item for item in completed["response"]["output"] if item["type"] == "function_call")
+        self.assertEqual(completed_call["namespace"], "mcp__node_repl")
+        self.assertEqual(completed_call["name"], "js")
+        self.assertTrue(
+            any(
+                event.get("item", {}).get("type") == "message"
+                for event in events
+                if isinstance(event.get("item"), dict)
+            )
+        )
 
     def test_chat_stream_pipeline_preserves_multi_agent_dot_alias_tool_call(self):
         chunks = [
