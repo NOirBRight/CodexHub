@@ -333,6 +333,15 @@ export interface GatewayClientConfig {
   curl_test: string;
 }
 
+export type GatewayClientRouteMode =
+  | "official"
+  | "release"
+  | "beta"
+  | "hub"
+  | "stale"
+  | "other_channel"
+  | "unknown";
+
 export interface GatewayClientInfo {
   id: string;
   name: string;
@@ -340,7 +349,7 @@ export interface GatewayClientInfo {
   installed: boolean;
   auto_apply_supported: boolean;
   config_path?: string | null;
-  route_mode: string;
+  route_mode: GatewayClientRouteMode;
   route_owner: RoutingOwner;
   route_endpoint?: string | null;
   managed_by_current_app: boolean;

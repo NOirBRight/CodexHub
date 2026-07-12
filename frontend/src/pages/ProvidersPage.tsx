@@ -1055,7 +1055,7 @@ function ProvidersPageImpl({
       setError(null);
       updateToast(toastId, {
         action: null,
-        text: t("providers.reopenCodexForRoute", {
+        text: t("providers.codexRouteChangedRestart", {
           status: codexHubConnectionSuccessMessage(nextMode, tr),
         }),
         tone: "success",
@@ -2453,7 +2453,9 @@ function OfficialDetail({
       onContextGuardChanged(status.gateway_enabled);
       updateToast(toastId, {
         action: null,
-        text: enabled ? t("providers.contextGuardEnabled") : t("providers.contextGuardDisabled"),
+        text: enabled
+          ? t("providers.contextGuardEnabledRestartCodex")
+          : t("providers.contextGuardDisabledRestartCodex"),
         tone: "success",
       });
     } catch (err) {

@@ -195,6 +195,12 @@ export function GatewayClientCard({
 
 function routeModeFromInfo(info?: GatewayClientInfo): DisplayRouteMode {
   if (
+    info?.route_mode === "other_channel" &&
+    (info.route_owner === "release" || info.route_owner === "beta")
+  ) {
+    return info.route_owner;
+  }
+  if (
     info?.route_mode === "official" ||
     info?.route_mode === "release" ||
     info?.route_mode === "beta" ||
