@@ -2460,7 +2460,7 @@ function OfficialDetail({
       setContextGuardStatus(status);
       onContextGuardChanged(status.gateway_enabled);
       let syncResult: GatewayClientSyncSummary | null = null;
-      let syncError: string | null = null;
+      let syncResultUncertain = false;
       if (syncBoundClients) {
         updateToast(toastId, {
           action: null,
@@ -2469,49 +2469,51 @@ function OfficialDetail({
         });
         try {
           syncResult = await api.syncGatewayClients();
-        } catch (err) {
-          syncError = messageFromError(err);
+        } catch {
+          syncResultUncertain = true;
         }
         await onRefreshClients?.().catch(() => undefined);
       }
       const restartMessage = enabled
         ? t("providers.contextGuardEnabledRestartCodex")
         : t("providers.contextGuardDisabledRestartCodex");
-      const syncedClientNames = syncResult?.results
-        .filter((result) => result.applied)
-        .map((result) => result.name)
-        .join(", ");
-      const failedClientNames = syncResult?.results
-        .filter((result) => result.status === "failed")
-        .map((result) => result.name)
-        .join(", ");
-      const syncedMessage = syncedClientNames
-        ? t("providers.contextGuardClientsSyncedRestart", {
-            clientNames: syncedClientNames,
-            restartMessage,
-          })
-        : restartMessage;
-      const failedMessage = syncError
-        ? t("providers.contextGuardClientSyncError", {
-            message: syncError,
-            restartMessage,
-          })
-        : failedClientNames && syncedClientNames
-          ? t("providers.contextGuardClientsPartiallySyncedRestart", {
-              failedClientNames,
-              restartMessage,
-              syncedClientNames,
-            })
-          : failedClientNames
-          ? t("providers.contextGuardClientsSyncFailed", {
-              clientNames: failedClientNames,
-              restartMessage,
-            })
-          : null;
+      const appliedClientCount = syncResult?.applied ?? 0;
+      const failedClientCount = syncResult?.failed ?? 0;
+      let clientSyncFeedback: { text: string; tone: "error" | "success" };
+      if (!syncBoundClients) {
+        clientSyncFeedback = {
+          text: t("providers.contextGuardClientsAutoSyncDisabled", { restartMessage }),
+          tone: "success",
+        };
+      } else if (syncResultUncertain) {
+        clientSyncFeedback = {
+          text: t("providers.contextGuardClientSyncError", { restartMessage }),
+          tone: "error",
+        };
+      } else if (failedClientCount > 0 && appliedClientCount > 0) {
+        clientSyncFeedback = {
+          text: t("providers.contextGuardClientsPartiallySyncedRestart", { restartMessage }),
+          tone: "error",
+        };
+      } else if (failedClientCount > 0) {
+        clientSyncFeedback = {
+          text: t("providers.contextGuardClientsSyncFailed", { restartMessage }),
+          tone: "error",
+        };
+      } else if (appliedClientCount > 0) {
+        clientSyncFeedback = {
+          text: t("providers.contextGuardClientsSyncedRestart", { restartMessage }),
+          tone: "success",
+        };
+      } else {
+        clientSyncFeedback = {
+          text: t("providers.contextGuardClientsNotUpdated", { restartMessage }),
+          tone: "success",
+        };
+      }
       updateToast(toastId, {
         action: null,
-        text: failedMessage ?? syncedMessage,
-        tone: failedMessage ? "error" : "success",
+        ...clientSyncFeedback,
       });
     } catch (err) {
       updateToast(toastId, {
