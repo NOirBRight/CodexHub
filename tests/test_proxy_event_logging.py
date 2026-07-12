@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
+from urllib.error import URLError
 
 import codex_proxy
 
@@ -33,6 +34,53 @@ class ProxyEventLoggingTests(TestCase):
                     payload = json.loads(codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip())
                     self.assertEqual(payload["event"], "request_complete")
                     self.assertEqual(payload["request_id"], "req-test")
+            finally:
+                importlib.reload(codex_proxy)
+
+    def test_upstream_open_retry_event_preserves_transport_failure_phase(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            try:
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                    importlib.reload(codex_proxy)
+                    request = codex_proxy.Request("https://example.test/v1/responses", data=b"{}", method="POST")
+                    success = object()
+
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                            },
+                            clear=False,
+                        ),
+                        patch(
+                            "codex_proxy._open_upstream_once",
+                            side_effect=[URLError(TimeoutError("upstream timed out")), success],
+                        ) as open_once,
+                        patch("codex_proxy.time.sleep"),
+                    ):
+                        response = codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="official",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req-open-seam", "model": "openai/gpt-5.5"},
+                        )
+
+                    self.assertIs(response, success)
+                    self.assertEqual(open_once.call_count, 2)
+                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
+                    payloads = [
+                        json.loads(line)
+                        for line in codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    retry = next(payload for payload in payloads if payload["event"] == "upstream_retry")
+                    self.assertEqual(retry["request_id"], "req-open-seam")
+                    self.assertEqual(retry["upstream"], "official")
+                    self.assertEqual(retry["failure_phase"], "tcp_connect")
             finally:
                 importlib.reload(codex_proxy)
 

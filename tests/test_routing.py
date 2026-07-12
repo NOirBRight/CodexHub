@@ -2331,7 +2331,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(len(client_ports), 1)
 
-    def test_official_then_third_party_does_not_leak_keepalive_transport(self):
+    def test_open_upstream_once_keeps_official_transport_isolated_from_third_party(self):
         official_request = codex_proxy.Request(
             "https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST"
         )
@@ -2345,19 +2345,15 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy._official_urlopen", return_value=official_success) as official_urlopen,
             patch("codex_proxy.urlopen", return_value=third_party_success) as mock_urlopen,
         ):
-            official_response = codex_proxy._open_upstream_response(
+            official_response = codex_proxy._open_upstream_once(
                 official_request,
                 upstream_name="official",
-                upstream_format="responses",
                 timeout=1,
-                event_context={"request_id": "req-official-transport"},
             )
-            third_party_response = codex_proxy._open_upstream_response(
+            third_party_response = codex_proxy._open_upstream_once(
                 third_party_request,
                 upstream_name="volcengine",
-                upstream_format="responses",
                 timeout=1,
-                event_context={"request_id": "req-non-official-transport"},
             )
 
         self.assertIs(official_response, official_success)
