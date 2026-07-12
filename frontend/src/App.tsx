@@ -1071,6 +1071,7 @@ export default function App() {
                 providers={providers}
                 settings={settings}
                 onGatewayChanged={refreshProviderRuntime}
+                onRefreshClients={loadGatewayClients}
                 onProvidersChanged={updateProvidersCache}
                 onSettingsChanged={updateSettingsCache}
                 onStatusChanged={updateStatusCache}

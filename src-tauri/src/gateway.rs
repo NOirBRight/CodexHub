@@ -1,5 +1,6 @@
 use crate::{
-    app_flavor::RoutingOwner, config, models, safe_file, Provider, Settings, UpstreamFormat,
+    app_flavor::RoutingOwner, config, models, runtime_paths, safe_file, Provider, Settings,
+    UpstreamFormat,
 };
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -42,6 +43,7 @@ const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
 ];
 
 static GATEWAY_CLIENT_CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static GATEWAY_CLIENT_SYNC_STATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static TELEMETRY_INGEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static TELEMETRY_INGESTER_STARTED: OnceLock<()> = OnceLock::new();
 
@@ -354,6 +356,11 @@ pub struct GatewayClientSyncSummary {
     pub message: String,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct GatewayClientSyncState {
+    pending_client_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PiConfigPaths {
     settings_path: PathBuf,
@@ -625,6 +632,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let current_owner = crate::app_flavor::current().routing_owner();
+    let pending_client_ids = read_pending_client_ids();
     let opencode_path = detect_opencode_config_path();
     let opencode_installed = opencode_path
         .as_ref()
@@ -662,7 +670,15 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             )
         })
         .unwrap_or((RoutingOwner::UnknownExternal, None));
-    let opencode_route_mode = route_mode_for_owner(opencode_owner_details.0, current_owner, false);
+    let opencode_route_mode = route_mode_for_owner(
+        opencode_owner_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("opencode"),
+            opencode_owner_details.0,
+            current_owner,
+        ),
+    );
     clients.push(GatewayClientInfo {
         id: "opencode".to_string(),
         name: "OpenCode".to_string(),
@@ -700,11 +716,17 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || zcode_store_path.exists()
         || zcode_executable.is_some()
         || command_exists(&["zcode", "ZCode", "ZCode.exe"]);
-    let zcode_stale =
+    let zcode_expected_stale =
         zcode_route_mode_with_expected(&zcode_targets, &settings, &providers, DEFAULT_MODEL)
             == "stale";
     let zcode_route_details =
         detect_zcode_route_details(&zcode_targets, current_owner, settings.proxy_port);
+    let zcode_stale = zcode_expected_stale
+        || pending_sync_is_stale(
+            pending_client_ids.contains("zcode"),
+            zcode_route_details.0,
+            current_owner,
+        );
     let zcode_route_mode = route_mode_for_owner(zcode_route_details.0, current_owner, zcode_stale);
     clients.push(GatewayClientInfo {
         id: "zcode".to_string(),
@@ -740,7 +762,15 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .unwrap_or(false)
         || command_exists(&["pi"]);
     let pi_route_details = detect_pi_route_details(&pi_paths, current_owner, settings.proxy_port);
-    let pi_route_mode = route_mode_for_owner(pi_route_details.0, current_owner, false);
+    let pi_route_mode = route_mode_for_owner(
+        pi_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("pi"),
+            pi_route_details.0,
+            current_owner,
+        ),
+    );
     clients.push(GatewayClientInfo {
         id: "pi".to_string(),
         name: "Pi".to_string(),
@@ -771,7 +801,15 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || command_exists(&["omp"]);
     let omp_route_details =
         detect_omp_route_details(&omp_paths, current_owner, settings.proxy_port);
-    let omp_route_mode = route_mode_for_owner(omp_route_details.0, current_owner, false);
+    let omp_route_mode = route_mode_for_owner(
+        omp_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("omp"),
+            omp_route_details.0,
+            current_owner,
+        ),
+    );
     clients.push(GatewayClientInfo {
         id: "omp".to_string(),
         name: "OMP".to_string(),
@@ -859,9 +897,10 @@ pub fn apply_gateway_client_config(
             message: "This client is copy-only; no native adapter is registered.".to_string(),
         });
     }
-    with_gateway_client_mutation_owner_gate(id, false, move |id, _| {
+    let result = with_gateway_client_mutation_owner_gate(id, false, move |id, _| {
         apply_gateway_client_config_locked(id, model)
-    })
+    })?;
+    clear_pending_sync_after_successful_apply(result)
 }
 
 fn apply_gateway_client_config_locked(
@@ -941,9 +980,10 @@ pub fn restore_gateway_client_config(
             message: "Restore is not available for this copy-only client.".to_string(),
         });
     }
-    with_gateway_client_mutation_owner_gate(id, false, |id, owner| {
+    let result = with_gateway_client_mutation_owner_gate(id, false, |id, owner| {
         restore_gateway_client_config_locked(id, owner)
-    })
+    })?;
+    clear_pending_sync_after_successful_apply(result)
 }
 
 fn restore_gateway_client_config_locked(
@@ -1014,7 +1054,7 @@ pub fn switch_gateway_client_route(
         "hub" => current_app_owner,
         other => return Err(format!("unsupported routing owner: {other}")),
     };
-    with_gateway_client_mutation_owner_gate(
+    let result = with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
         force_takeover.unwrap_or(false),
         move |id, current_target_owner| {
@@ -1030,7 +1070,8 @@ pub fn switch_gateway_client_route(
                 ))
             }
         },
-    )
+    )?;
+    clear_pending_sync_after_successful_apply(result)
 }
 
 pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSummary, String> {
@@ -1038,11 +1079,9 @@ pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSu
     let providers = config::get_providers()?;
     let model = Some(gateway_client_sync_model_arg(model, &settings, &providers)?);
     let clients = list_gateway_clients(false)?;
-    Ok(sync_gateway_clients_from_infos(
-        clients,
-        model,
-        apply_gateway_client_config,
-    ))
+    let summary = sync_gateway_clients_from_infos(clients, model, apply_gateway_client_config);
+    persist_pending_client_syncs(&summary)?;
+    Ok(summary)
 }
 
 fn sync_gateway_clients_from_infos<F>(
@@ -1134,6 +1173,93 @@ where
         results,
         message,
     }
+}
+
+fn gateway_client_sync_state_path() -> Result<PathBuf, String> {
+    Ok(runtime_paths::runtime_home_dir()?
+        .join("proxy")
+        .join("gateway-client-sync-state.json"))
+}
+
+fn read_pending_client_ids() -> HashSet<String> {
+    let Ok(path) = gateway_client_sync_state_path() else {
+        return HashSet::new();
+    };
+    read_pending_client_ids_from_path(&path)
+}
+
+fn read_pending_client_ids_from_path(path: &Path) -> HashSet<String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    serde_json::from_str::<GatewayClientSyncState>(&text)
+        .map(|state| state.pending_client_ids.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn write_pending_client_ids(pending: &HashSet<String>) -> Result<(), String> {
+    let path = gateway_client_sync_state_path()?;
+    write_pending_client_ids_to_path(&path, pending)
+}
+
+fn write_pending_client_ids_to_path(path: &Path, pending: &HashSet<String>) -> Result<(), String> {
+    if pending.is_empty() {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "failed to remove Gateway client sync state {}: {error}",
+                path.display()
+            )),
+        };
+    }
+    let mut pending_client_ids = pending.iter().cloned().collect::<Vec<_>>();
+    pending_client_ids.sort();
+    let text = serde_json::to_string_pretty(&GatewayClientSyncState { pending_client_ids })
+        .map_err(|error| format!("failed to serialize Gateway client sync state: {error}"))?;
+    safe_file::write_text_atomic(path, &format!("{text}\n"))
+}
+
+fn update_pending_client_ids_after_sync(
+    pending: &mut HashSet<String>,
+    summary: &GatewayClientSyncSummary,
+) {
+    for result in &summary.results {
+        if result.applied {
+            pending.remove(&result.client_id);
+        } else if result.status == "failed" {
+            pending.insert(result.client_id.clone());
+        }
+    }
+}
+
+fn persist_pending_client_syncs(summary: &GatewayClientSyncSummary) -> Result<(), String> {
+    let _guard = GATEWAY_CLIENT_SYNC_STATE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Gateway client sync state lock is poisoned".to_string())?;
+    let mut pending = read_pending_client_ids();
+    update_pending_client_ids_after_sync(&mut pending, summary);
+    write_pending_client_ids(&pending)
+}
+
+fn clear_pending_sync_after_successful_apply(
+    result: GatewayClientApplyResult,
+) -> Result<GatewayClientApplyResult, String> {
+    if result.applied {
+        clear_client_sync_pending(&result.client_id)?;
+    }
+    Ok(result)
+}
+
+fn clear_client_sync_pending(client_id: &str) -> Result<(), String> {
+    let _guard = GATEWAY_CLIENT_SYNC_STATE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Gateway client sync state lock is poisoned".to_string())?;
+    let mut pending_client_ids = read_pending_client_ids();
+    pending_client_ids.remove(client_id);
+    write_pending_client_ids(&pending_client_ids)
 }
 
 fn gateway_client_sync_model_arg(
@@ -1890,7 +2016,12 @@ fn gateway_client_models(
         }
     }
 
-    if !seen.contains(&default_model) {
+    if let Some(position) = output.iter().position(|model| model.id == default_model) {
+        if position > 0 {
+            let selected = output.remove(position);
+            output.insert(0, selected);
+        }
+    } else {
         output.insert(
             0,
             GatewayModel {
@@ -4009,6 +4140,18 @@ fn route_mode_for_owner(owner: RoutingOwner, current: RoutingOwner, stale: bool)
         RoutingOwner::Release | RoutingOwner::Beta => "other_channel",
         RoutingOwner::UnknownExternal => "unknown",
     }
+}
+
+fn pending_sync_is_stale(
+    pending: bool,
+    detected_owner: RoutingOwner,
+    current_owner: RoutingOwner,
+) -> bool {
+    pending
+        && !matches!(
+            detected_owner,
+            RoutingOwner::Release | RoutingOwner::Beta if detected_owner != current_owner
+        )
 }
 
 fn route_owner_from_endpoint(
@@ -6952,6 +7095,79 @@ mod tests {
         assert_eq!(summary.results[5].status, "skipped");
         assert_eq!(summary.results[6].status, "failed");
         assert!(summary.message.contains("1 failed"));
+    }
+
+    #[test]
+    fn failed_client_syncs_remain_pending_until_a_successful_retry() {
+        let root = unique_temp_dir("codexhub-client-sync-state");
+        let state_path = root.join("proxy").join("gateway-client-sync-state.json");
+        let mut pending = std::collections::HashSet::new();
+        let failed = super::GatewayClientSyncSummary {
+            applied: 0,
+            skipped: 0,
+            failed: 1,
+            results: vec![super::GatewayClientSyncItem {
+                client_id: "pi".to_string(),
+                name: "Pi".to_string(),
+                status: "failed".to_string(),
+                applied: false,
+                skipped: false,
+                message: "write failed".to_string(),
+                config_path: None,
+                backup_path: None,
+            }],
+            message: "sync failed".to_string(),
+        };
+
+        super::update_pending_client_ids_after_sync(&mut pending, &failed);
+        super::write_pending_client_ids_to_path(&state_path, &pending).unwrap();
+        let persisted = super::read_pending_client_ids_from_path(&state_path);
+        assert!(persisted.contains("pi"));
+        assert_eq!(
+            super::route_mode_for_owner(
+                crate::app_flavor::RoutingOwner::Release,
+                crate::app_flavor::RoutingOwner::Release,
+                persisted.contains("pi"),
+            ),
+            "stale"
+        );
+        assert!(super::pending_sync_is_stale(
+            true,
+            crate::app_flavor::RoutingOwner::UnknownExternal,
+            crate::app_flavor::RoutingOwner::Release,
+        ));
+        assert!(super::pending_sync_is_stale(
+            true,
+            crate::app_flavor::RoutingOwner::Official,
+            crate::app_flavor::RoutingOwner::Release,
+        ));
+        assert!(!super::pending_sync_is_stale(
+            true,
+            crate::app_flavor::RoutingOwner::Beta,
+            crate::app_flavor::RoutingOwner::Release,
+        ));
+
+        let succeeded = super::GatewayClientSyncSummary {
+            applied: 1,
+            skipped: 0,
+            failed: 0,
+            results: vec![super::GatewayClientSyncItem {
+                client_id: "pi".to_string(),
+                name: "Pi".to_string(),
+                status: "applied".to_string(),
+                applied: true,
+                skipped: false,
+                message: "applied".to_string(),
+                config_path: None,
+                backup_path: None,
+            }],
+            message: "synced".to_string(),
+        };
+
+        super::update_pending_client_ids_after_sync(&mut pending, &succeeded);
+        super::write_pending_client_ids_to_path(&state_path, &pending).unwrap();
+        assert!(!state_path.exists());
+        assert!(!super::read_pending_client_ids_from_path(&state_path).contains("pi"));
     }
 
     #[test]

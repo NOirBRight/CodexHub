@@ -1214,13 +1214,17 @@ test("gateway client route switching reports completion", async () => {
 });
 
 test("gateway client stale CodexHub route is shown as reapply state", async () => {
-  const cardSource = await readFile(gatewayClientCardPath, "utf8");
+  const [cardSource, zhSource] = await Promise.all([
+    readFile(gatewayClientCardPath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
 
   assert.match(cardSource, /type DisplayRouteMode = RoutingOwner \| "hub" \| "stale" \| "unknown";/);
   assert.match(cardSource, /type ClientStatusKind = "checking" \| "not_installed" \| "installed" \| "ready" \| "pending_sync" \| "unknown";/);
   assert.match(cardSource, /const routeValue = routeOwner === "official" \? "official" : "current_owner";/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*\? "pending_sync"/);
   assert.match(cardSource, /statusKind === "pending_sync"[\s\S]*t\("gateway\.routePendingSync"\)/);
+  assert.match(zhSource, /routePendingSync: "未更新"/);
   assert.match(cardSource, /statusKind === "ready"[\s\S]*t\("gateway\.routeReady"\)/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*t\("gateway\.routePendingSyncTitle"\)/);
   assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("current_owner"\)\}/);
@@ -1558,11 +1562,31 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(tauriSource, /set_codex_context_guard/);
   assert.match(providersSource, /api\.getCodexContextGuardStatus\(\)/);
   assert.match(providersSource, /api\.setCodexContextGuard\(enabled\)/);
+  const toggleAction = providersSource.match(
+    /async function toggleContextGuard\(enabled: boolean\) \{[\s\S]*?\n  \}/,
+  )?.[0] ?? "";
+  assert.match(toggleAction, /await api\.syncGatewayClients\(\)/);
+  assert.match(toggleAction, /await onRefreshClients\?\.\(\)\.catch\(\(\) => undefined\)/);
+  assert.match(toggleAction, /result\.applied[\s\S]*result\.name/);
+  assert.match(toggleAction, /result\.status === "failed"[\s\S]*result\.name/);
   assert.match(providersSource, /label=\{t\("providers\.contextGuard"\)\}/);
+  assert.match(providersSource, /ariaDescribedBy="context-guard-tooltip"/);
+  assert.match(providersSource, /aria-describedby=\{ariaDescribedBy\}/);
+  assert.match(providersSource, /id="context-guard-tooltip"/);
+  assert.match(providersSource, /h-7[\s\S]*rounded-full/);
+  assert.match(providersSource, /rounded-full[\s\S]*t\("common\.refresh"\)/);
   assert.match(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
   assert.match(providersSource, /openai_context_guard_enabled: enabled/);
   assert.match(enSource, /contextGuard: "Long-context cost guard"/);
   assert.match(zhSource, /contextGuard: "长上下文费用保护"/);
+  assert.match(zhSource, /contextGuardTooltip:/);
+  assert.match(zhSource, /Codex 与 Gateway/);
+  assert.match(zhSource, /272K/);
+  assert.match(zhSource, /240K/);
+  assert.match(zhSource, /高价/);
+  assert.match(zhSource, /开启客户端自动同步时/);
+  assert.match(zhSource, /请重启 \{\{clientNames\}\}/);
+  assert.match(zhSource, /Gateway 中标记为“未更新”/);
   assert.match(zhSource, /Gateway 更改已实时生效/);
   assert.match(zhSource, /重启 Codex App/);
   assert.match(zhSource, /272K/);
