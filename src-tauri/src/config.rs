@@ -527,7 +527,14 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
     let document: ProvidersDocument = toml::from_str(&text)
         .map_err(|error| format!("failed to parse providers TOML {}: {error}", path.display()))?;
 
-    Ok(document.providers)
+    let mut providers = document.providers;
+    for provider in &mut providers {
+        for model in &mut provider.models {
+            crate::models::apply_resolved_model_limits(&provider.id, model);
+        }
+    }
+
+    Ok(providers)
 }
 
 fn save_providers_with_paths(
@@ -1049,7 +1056,7 @@ mod tests {
         let root = temp_root("providers-roundtrip");
         let paths = test_paths(&root);
         let providers = vec![Provider {
-            id: "volc".to_string(),
+            id: "volc-roundtrip".to_string(),
             name: "Volcengine".to_string(),
             base_url: "https://ark.cn-beijing.volces.com/api/coding/v3".to_string(),
             api_key: Some("{env:VOLCENGINE_API_KEY}".to_string()),
@@ -1191,6 +1198,49 @@ sort_order = 7
         assert_eq!(loaded[0].models[0].id, "model-a");
         assert!(loaded[0].enabled);
         assert!(loaded[0].models[0].enabled);
+    }
+
+    #[test]
+    fn get_providers_applies_resolved_limits_used_by_the_gateway() {
+        let root = temp_root("providers-resolved-limits");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.bundled_providers_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.bundled_providers_path(),
+            r#"
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+
+  [[providers.models]]
+  id = "glm-5.2"
+
+[[providers]]
+id = "volc"
+name = "Volcengine"
+base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
+
+  [[providers.models]]
+  id = "minimax-m3"
+"#,
+        )
+        .unwrap();
+
+        let loaded = get_providers_with_paths(&paths).expect("providers with resolved limits");
+
+        assert_eq!(loaded[0].models[0].context_window, Some(1_000_000));
+        assert_eq!(loaded[0].models[0].max_context_window, Some(1_000_000));
+        assert_eq!(loaded[1].models[0].context_window, Some(1_000_000));
+        assert_eq!(loaded[1].models[0].max_context_window, Some(1_000_000));
+        assert_eq!(
+            loaded[0].models[0].effective_source.as_deref(),
+            Some("provider_spec")
+        );
+        assert_eq!(
+            loaded[1].models[0].max_source.as_deref(),
+            Some("https://www.volcengine.com/docs/82379")
+        );
     }
 
     #[test]
