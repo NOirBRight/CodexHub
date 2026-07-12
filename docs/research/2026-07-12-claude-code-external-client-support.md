@@ -211,7 +211,7 @@ These are conservative translator classifications, not claims that the Issue #74
 | Text request and stateless multi-turn history | Adapted | Preserve ordered history and content blocks; Responses/Chat role models differ. Live history equivalence remains to be tested. |
 | Anthropic-compatible Messages pass-through | Preserved | Forward required Anthropic headers and body fields unchanged; do not reshape the system array. |
 | Text SSE | Adapted | Emit the named Messages SSE lifecycle incrementally; no buffered terminal-only response. |
-| Usage | Adapted | Map only reported upstream usage; keep unknown cache details absent/explicit. |
+| Usage | Adapted for base input/output counts; cache/reasoning details explicitly unsupported | Map only reported base counts and validate a redundant total when supplied. Reject cache/reasoning/provider-detail usage until a tested semantic mapping exists; do not collapse it into input/output totals. |
 | Client tool call and tool-result follow-up | Adapted | Maintain opaque tool IDs and strict follow-up ordering; validate a real read-file lifecycle. |
 | Server tools and server-side result blocks | Unknown | The public Messages protocol has behaviors not demonstrated by the initial client-tool fixture. |
 | Images | Unknown | Messages accepts image blocks and several source types; map only when the selected upstream/provider advertises a verified equivalent, otherwise return a precise unsupported result. |

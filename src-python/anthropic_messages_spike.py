@@ -220,26 +220,6 @@ def _text_input(block: Mapping[str, Any], field: str) -> tuple[dict[str, Any] | 
     return {"type": "input_text", "text": text}, None
 
 
-def _image_input(block: Mapping[str, Any], field: str) -> tuple[dict[str, Any] | None, str | None]:
-    source = block.get("source")
-    if not isinstance(source, Mapping):
-        return None, field
-    source_type = source.get("type")
-    if source_type == "url" and isinstance(source.get("url"), str):
-        image_url = source["url"]
-    elif (
-        source_type == "base64"
-        and isinstance(source.get("media_type"), str)
-        and isinstance(source.get("data"), str)
-    ):
-        image_url = f"data:{source['media_type']};base64,{source['data']}"
-    else:
-        return None, field
-    if set(block).difference({"type", "source"}):
-        return None, field
-    return {"type": "input_image", "image_url": image_url}, None
-
-
 def _tool_result_output(value: Any, field: str) -> tuple[str | None, str | None]:
     if isinstance(value, str):
         return value, None
@@ -273,11 +253,9 @@ def _messages_to_responses_input(
                     text_and_image.append(item)
                 continue
             if block_type == "image":
-                item, failure = _image_input(block, field)
-                if failure is not None:
-                    unsupported.append(failure)
-                elif item is not None:
-                    text_and_image.append(item)
+                # A syntactically valid data URL is not evidence that the
+                # selected upstream/provider accepts the same image contract.
+                unsupported.append(field)
                 continue
             if block_type == "tool_use" and message.role == "assistant":
                 call_id = block.get("id")
@@ -351,6 +329,46 @@ def _messages_to_responses_input(
                 }
             )
     return input_items, unsupported
+
+
+def _tool_history_failures(messages: tuple[AnthropicMessage, ...]) -> list[str]:
+    """Reject incomplete, reordered, or unmatched tool-call history."""
+
+    pending_tool_ids: dict[str, str] = {}
+    unsupported: list[str] = []
+    for message_index, message in enumerate(messages):
+        if pending_tool_ids and message.role != "user":
+            unsupported.extend(f"{field}.unresolved" for field in pending_tool_ids.values())
+            pending_tool_ids.clear()
+        seen_non_tool_result = False
+        for block_index, block in enumerate(message.content):
+            field = f"messages[{message_index}].content[{block_index}]"
+            block_type = block.get("type")
+            if message.role == "assistant" and block_type == "tool_use":
+                call_id = block.get("id")
+                if isinstance(call_id, str) and call_id:
+                    if call_id in pending_tool_ids:
+                        unsupported.append(f"{field}.id")
+                    else:
+                        pending_tool_ids[call_id] = field
+                continue
+            if message.role == "user" and block_type == "tool_result":
+                call_id = block.get("tool_use_id")
+                if seen_non_tool_result:
+                    unsupported.append(f"{field}.tool_result_order")
+                if not isinstance(call_id, str) or call_id not in pending_tool_ids:
+                    unsupported.append(f"{field}.tool_use_id")
+                else:
+                    pending_tool_ids.pop(call_id)
+                continue
+            if message.role == "user":
+                seen_non_tool_result = True
+        if message.role == "user" and pending_tool_ids:
+            unsupported.extend(f"{field}.unresolved" for field in pending_tool_ids.values())
+            pending_tool_ids.clear()
+    if pending_tool_ids:
+        unsupported.extend(f"{field}.unresolved" for field in pending_tool_ids.values())
+    return unsupported
 
 
 def _system_to_instructions(value: Any) -> tuple[str | None, list[str], list[str]]:
@@ -445,6 +463,7 @@ def messages_to_responses(request: Mapping[str, Any]) -> TranslationResult:
 
     messages, message_failures = _parse_messages(request.get("messages"))
     unsupported.extend(message_failures)
+    unsupported.extend(_tool_history_failures(messages))
     input_items, input_failures = _messages_to_responses_input(messages)
     unsupported.extend(input_failures)
 
@@ -508,8 +527,6 @@ def _responses_request_to_chat_completions_body(body: bytes) -> bytes:
                     raise ValueError("Responses message content is incomplete")
                 if part.get("type") == "input_text" and isinstance(part.get("text"), str):
                     chat_content.append({"type": "text", "text": part["text"]})
-                elif part.get("type") == "input_image" and isinstance(part.get("image_url"), str):
-                    chat_content.append({"type": "image_url", "image_url": {"url": part["image_url"]}})
                 else:
                     raise ValueError("Responses message content has no Chat Completions equivalent")
             if len(chat_content) == 1 and chat_content[0]["type"] == "text":
@@ -633,15 +650,45 @@ def upstream_error_to_messages_sse(
     )
 
 
+def _usage_count(value: Mapping[str, Any], field: str, source: str) -> int | None:
+    if field not in value:
+        return None
+    count = value[field]
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        raise ValueError(f"{source} usage field {field} is not a non-negative integer")
+    return count
+
+
+def _validate_usage_total(
+    value: Mapping[str, Any],
+    input_tokens: int | None,
+    output_tokens: int | None,
+    source: str,
+) -> None:
+    total_tokens = _usage_count(value, "total_tokens", source)
+    if total_tokens is None:
+        return
+    if input_tokens is None or output_tokens is None or total_tokens != input_tokens + output_tokens:
+        raise ValueError(f"{source} total_tokens cannot be represented from input/output tokens")
+
+
 def _anthropic_usage(value: Any) -> dict[str, int]:
+    if value is None:
+        return {}
     if not isinstance(value, Mapping):
-        return {"input_tokens": 0, "output_tokens": 0}
-    input_tokens = value.get("input_tokens")
-    output_tokens = value.get("output_tokens")
-    return {
-        "input_tokens": input_tokens if isinstance(input_tokens, int) else 0,
-        "output_tokens": output_tokens if isinstance(output_tokens, int) else 0,
-    }
+        raise ValueError("Responses usage is not an object")
+    unknown_fields = sorted(str(field) for field in set(value).difference({"input_tokens", "output_tokens", "total_tokens"}))
+    if unknown_fields:
+        raise ValueError(f"Unsupported Responses usage field: {unknown_fields[0]}")
+    input_tokens = _usage_count(value, "input_tokens", "Responses")
+    output_tokens = _usage_count(value, "output_tokens", "Responses")
+    _validate_usage_total(value, input_tokens, output_tokens, "Responses")
+    usage: dict[str, int] = {}
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        usage["output_tokens"] = output_tokens
+    return usage
 
 
 def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[bytes, ...]:
@@ -657,7 +704,7 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
     model = "unknown"
     started = False
     next_block_index = 0
-    active_blocks: dict[int, tuple[int, str]] = {}
+    active_blocks: dict[int, dict[str, Any]] = {}
     active_item_ids: dict[str, int] = {}
     emitted_tool_use = False
     terminal = False
@@ -698,12 +745,62 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
                         "content": [],
                         "stop_reason": None,
                         "stop_sequence": None,
-                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                        "usage": _anthropic_usage(response.get("usage")),
                     },
                 },
             )
         )
         started = True
+
+    def emit_tool_argument_delta(active: Mapping[str, Any], value: str) -> None:
+        records.append(
+            _sse_record(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": active["index"],
+                    "delta": {"type": "input_json_delta", "partial_json": value},
+                },
+            )
+        )
+
+    def emit_text_delta(active: Mapping[str, Any], value: str) -> None:
+        records.append(
+            _sse_record(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": active["index"],
+                    "delta": {"type": "text_delta", "text": value},
+                },
+            )
+        )
+
+    def validate_text_snapshot(active: dict[str, Any], snapshot: Any) -> None:
+        if not isinstance(snapshot, str):
+            raise ValueError("Responses output text snapshot is missing")
+        streamed_text = "".join(active["text"])
+        if streamed_text and streamed_text != snapshot:
+            raise ValueError("Responses text deltas do not match final text")
+        if not streamed_text:
+            active["text"].append(snapshot)
+            emit_text_delta(active, snapshot)
+
+    def validate_tool_arguments(active: dict[str, Any], fallback: Any = None) -> None:
+        arguments = "".join(active["arguments"])
+        if isinstance(fallback, str):
+            if arguments and arguments != fallback:
+                raise ValueError("Responses tool argument deltas do not match final arguments")
+            if not arguments:
+                arguments = fallback
+                active["arguments"].append(fallback)
+                emit_tool_argument_delta(active, fallback)
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Responses tool arguments must be a JSON object") from exc
+        if not isinstance(parsed, Mapping):
+            raise ValueError("Responses tool arguments must be a JSON object")
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -720,8 +817,6 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
         if event_type in {
             "response.in_progress",
             "response.content_part.added",
-            "response.output_text.done",
-            "response.function_call_arguments.done",
         }:
             # These confirmed upstream transitions are represented by the
             # Messages start/delta/stop events emitted around their item.
@@ -750,7 +845,12 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
                 raise ValueError(f"Unsupported Responses output item type: {item_type}")
             block_index = next_block_index
             next_block_index += 1
-            active_blocks[output_index] = (block_index, block_kind)
+            active: dict[str, Any] = {"index": block_index, "kind": block_kind}
+            if block_kind == "text":
+                active["text"] = []
+            elif block_kind == "tool_use":
+                active["arguments"] = []
+            active_blocks[output_index] = active
             item_id = item.get("id")
             if isinstance(item_id, str) and item_id:
                 active_item_ids[item_id] = output_index
@@ -760,6 +860,10 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
                     {"type": "content_block_start", "index": block_index, "content_block": block},
                 )
             )
+            initial_arguments = item.get("arguments")
+            if block_kind == "tool_use" and isinstance(initial_arguments, str) and initial_arguments:
+                active["arguments"].append(initial_arguments)
+                emit_tool_argument_delta(active, initial_arguments)
             continue
         if event_type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
             output_index = event.get("output_index")
@@ -770,44 +874,80 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
             delta = event.get("delta")
             if active is None or not isinstance(delta, str):
                 raise ValueError("Responses delta has no active compatible content block")
-            block_index, block_kind = active
-            if event_type == "response.output_text.delta" and block_kind == "text":
+            if event_type == "response.output_text.delta" and active["kind"] == "text":
+                active["text"].append(delta)
                 downstream_delta = {"type": "text_delta", "text": delta}
-            elif event_type == "response.function_call_arguments.delta" and block_kind == "tool_use":
+            elif event_type == "response.function_call_arguments.delta" and active["kind"] == "tool_use":
+                active["arguments"].append(delta)
                 downstream_delta = {"type": "input_json_delta", "partial_json": delta}
             else:
                 raise ValueError("Responses delta does not match its active content block")
             records.append(
                 _sse_record(
                     "content_block_delta",
-                    {"type": "content_block_delta", "index": block_index, "delta": downstream_delta},
+                    {"type": "content_block_delta", "index": active["index"], "delta": downstream_delta},
                 )
             )
             continue
-        if event_type == "response.output_item.done":
+        if event_type == "response.output_text.done":
             output_index = event.get("output_index")
             if not isinstance(output_index, int):
-                item = event.get("item")
+                item_id = event.get("item_id")
+                output_index = active_item_ids.get(item_id) if isinstance(item_id, str) else None
+            active = active_blocks.get(output_index) if isinstance(output_index, int) else None
+            if active is None or active["kind"] != "text":
+                raise ValueError("Responses output text has no active text block")
+            validate_text_snapshot(active, event.get("text"))
+            continue
+        if event_type == "response.function_call_arguments.done":
+            output_index = event.get("output_index")
+            if not isinstance(output_index, int):
+                item_id = event.get("item_id")
+                output_index = active_item_ids.get(item_id) if isinstance(item_id, str) else None
+            active = active_blocks.get(output_index) if isinstance(output_index, int) else None
+            if active is None or active["kind"] != "tool_use":
+                raise ValueError("Responses function call arguments have no active tool block")
+            arguments = event.get("arguments")
+            if not isinstance(arguments, str):
+                raise ValueError("Responses function call arguments are missing")
+            streamed_arguments = "".join(active["arguments"])
+            if streamed_arguments and streamed_arguments != arguments:
+                raise ValueError("Responses tool argument deltas do not match final arguments")
+            if not streamed_arguments:
+                active["arguments"].append(arguments)
+                emit_tool_argument_delta(active, arguments)
+            validate_tool_arguments(active)
+            continue
+        if event_type == "response.output_item.done":
+            output_index = event.get("output_index")
+            item = event.get("item")
+            if not isinstance(output_index, int):
                 item_id = item.get("id") if isinstance(item, Mapping) else None
                 output_index = active_item_ids.get(item_id) if isinstance(item_id, str) else None
-            active = active_blocks.pop(output_index, None) if isinstance(output_index, int) else None
+            active = active_blocks.get(output_index) if isinstance(output_index, int) else None
             if active is None:
                 raise ValueError("Responses output item stop has no active content block")
+            if active["kind"] == "tool_use":
+                fallback = item.get("arguments") if isinstance(item, Mapping) else None
+                validate_tool_arguments(active, fallback)
+            active_blocks.pop(output_index)
             records.append(
                 _sse_record(
                     "content_block_stop",
-                    {"type": "content_block_stop", "index": active[0]},
+                    {"type": "content_block_stop", "index": active["index"]},
                 )
             )
             continue
         if event_type == "response.completed":
             response_payload = response if isinstance(response, Mapping) else {}
             start_message(response_payload)
-            for block_index, _block_kind in active_blocks.values():
+            for active in active_blocks.values():
+                if active["kind"] == "tool_use":
+                    validate_tool_arguments(active)
                 records.append(
                     _sse_record(
                         "content_block_stop",
-                        {"type": "content_block_stop", "index": block_index},
+                        {"type": "content_block_stop", "index": active["index"]},
                     )
                 )
             active_blocks.clear()
@@ -844,14 +984,35 @@ def responses_events_to_messages_sse(events: list[Mapping[str, Any]]) -> tuple[b
 
 
 def _chat_usage_to_responses_usage(value: Any) -> dict[str, int]:
+    if value is None:
+        return {}
     if not isinstance(value, Mapping):
-        return {"input_tokens": 0, "output_tokens": 0}
-    input_tokens = value.get("prompt_tokens", value.get("input_tokens", 0))
-    output_tokens = value.get("completion_tokens", value.get("output_tokens", 0))
-    return {
-        "input_tokens": input_tokens if isinstance(input_tokens, int) else 0,
-        "output_tokens": output_tokens if isinstance(output_tokens, int) else 0,
-    }
+        raise ValueError("Chat Completions usage is not an object")
+    unknown_fields = sorted(
+        str(field)
+        for field in set(value).difference(
+            {"prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens"}
+        )
+    )
+    if unknown_fields:
+        raise ValueError(f"Unsupported Chat Completions usage field: {unknown_fields[0]}")
+    prompt_tokens = _usage_count(value, "prompt_tokens", "Chat Completions")
+    input_alias = _usage_count(value, "input_tokens", "Chat Completions")
+    completion_tokens = _usage_count(value, "completion_tokens", "Chat Completions")
+    output_alias = _usage_count(value, "output_tokens", "Chat Completions")
+    if prompt_tokens is not None and input_alias is not None and prompt_tokens != input_alias:
+        raise ValueError("Chat Completions input token aliases disagree")
+    if completion_tokens is not None and output_alias is not None and completion_tokens != output_alias:
+        raise ValueError("Chat Completions output token aliases disagree")
+    input_tokens = prompt_tokens if prompt_tokens is not None else input_alias
+    output_tokens = completion_tokens if completion_tokens is not None else output_alias
+    _validate_usage_total(value, input_tokens, output_tokens, "Chat Completions")
+    usage: dict[str, int] = {}
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        usage["output_tokens"] = output_tokens
+    return usage
 
 
 def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -866,7 +1027,7 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
     text_output_index: int | None = None
     tool_states: dict[int, dict[str, Any]] = {}
     terminal = False
-    latest_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+    latest_usage: dict[str, int] | None = None
 
     for chunk in chunks:
         if not isinstance(chunk, Mapping):
@@ -993,12 +1154,14 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
                 },
             }
         )
-    events.append(
-        {
-            "type": "response.completed",
-            "response": {"id": response_id, "model": model, "status": "completed", "usage": latest_usage},
-        }
-    )
+    completed_response: dict[str, Any] = {
+        "id": response_id,
+        "model": model,
+        "status": "completed",
+    }
+    if latest_usage is not None:
+        completed_response["usage"] = latest_usage
+    events.append({"type": "response.completed", "response": completed_response})
     return events
 
 

@@ -71,6 +71,112 @@ class MessagesToResponsesTests(unittest.TestCase):
         self.assertFalse(result.forwardable)
         self.assertEqual(result.unsupported, ("request.thinking",))
 
+    def test_image_is_nonforwardable_until_the_upstream_capability_is_verified(self):
+        result = messages_to_responses(
+            {
+                "model": "gateway-vision-model",
+                "max_tokens": 64,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "SANITIZED_IMAGE_BYTES",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertIsNone(result.body)
+        self.assertEqual(result.unsupported, ("messages[0].content[0]",))
+
+    def test_tool_result_requires_a_prior_call_and_first_content_position(self):
+        unmatched = messages_to_responses(
+            {
+                "model": "gateway-tool-model",
+                "max_tokens": 64,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_missing",
+                                "content": "SANITIZED_TOOL_RESULT",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        out_of_order = messages_to_responses(
+            {
+                "model": "gateway-tool-model",
+                "max_tokens": 64,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_read_001",
+                                "name": "read_file",
+                                "input": {"path": "fixture.txt"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "SANITIZED_TEXT"},
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_read_001",
+                                "content": "SANITIZED_TOOL_RESULT",
+                            },
+                        ],
+                    },
+                ],
+            }
+        )
+
+        self.assertIsNone(unmatched.body)
+        self.assertEqual(unmatched.unsupported, ("messages[0].content[0].tool_use_id",))
+        self.assertIsNone(out_of_order.body)
+        self.assertEqual(out_of_order.unsupported, ("messages[1].content[1].tool_result_order",))
+
+    def test_unresolved_tool_call_history_is_nonforwardable(self):
+        result = messages_to_responses(
+            {
+                "model": "gateway-tool-model",
+                "max_tokens": 64,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_read_001",
+                                "name": "read_file",
+                                "input": {"path": "fixture.txt"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "SANITIZED_TEXT"},
+                ],
+            }
+        )
+
+        self.assertIsNone(result.body)
+        self.assertEqual(result.unsupported, ("messages[0].content[0].unresolved",))
+
 
 class ResponsesToMessagesSseTests(unittest.TestCase):
     def test_text_stream_has_anthropic_lifecycle_and_usage(self):
@@ -89,6 +195,11 @@ class ResponsesToMessagesSseTests(unittest.TestCase):
                     "type": "response.output_text.delta",
                     "output_index": 0,
                     "delta": "SANITIZED_REPLY",
+                },
+                {
+                    "type": "response.output_text.done",
+                    "output_index": 0,
+                    "text": "SANITIZED_REPLY",
                 },
                 {
                     "type": "response.output_item.done",
@@ -118,6 +229,37 @@ class ResponsesToMessagesSseTests(unittest.TestCase):
         self.assertEqual(events[0][1]["message"]["id"], "resp_text_001")
         self.assertEqual(events[2][1]["delta"], {"type": "text_delta", "text": "SANITIZED_REPLY"})
         self.assertEqual(events[4][1]["usage"], {"input_tokens": 7, "output_tokens": 3})
+
+    def test_text_stream_rejects_a_final_snapshot_that_conflicts_with_deltas(self):
+        with self.assertRaisesRegex(ValueError, "Responses text deltas do not match final text"):
+            responses_events_to_messages_sse(
+                [
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_text_mismatch_001", "model": "gpt-test"},
+                    },
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": "msg_text_mismatch_001",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    },
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": 0,
+                        "delta": "SANITIZED_REPLY",
+                    },
+                    {
+                        "type": "response.output_text.done",
+                        "output_index": 0,
+                        "text": "SANITIZED_DIFFERENT_REPLY",
+                    },
+                ]
+            )
 
     def test_tool_stream_uses_upstream_call_id_for_the_follow_up_turn(self):
         records = responses_events_to_messages_sse(
@@ -170,6 +312,76 @@ class ResponsesToMessagesSseTests(unittest.TestCase):
         })
         self.assertEqual(events[4][1]["delta"]["stop_reason"], "tool_use")
 
+    def test_tool_stream_accepts_a_matching_final_argument_snapshot(self):
+        records = responses_events_to_messages_sse(
+            [
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_tool_done_001", "model": "gpt-test"},
+                },
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "fc_done_001",
+                        "type": "function_call",
+                        "call_id": "toolu_done_001",
+                        "name": "read_file",
+                    },
+                },
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": 0,
+                    "delta": '{"path":"fixture.txt"}',
+                },
+                {
+                    "type": "response.function_call_arguments.done",
+                    "output_index": 0,
+                    "arguments": '{"path":"fixture.txt"}',
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": "fc_done_001", "type": "function_call"},
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_tool_done_001",
+                        "model": "gpt-test",
+                        "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+                    },
+                },
+            ]
+        )
+
+        events = _decode_sse(records)
+        deltas = [payload["delta"] for event, payload in events if event == "content_block_delta"]
+        self.assertEqual(deltas, [{"type": "input_json_delta", "partial_json": '{"path":"fixture.txt"}'}])
+
+    def test_cache_usage_details_are_explicitly_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Responses usage field: input_tokens_details"):
+            responses_events_to_messages_sse(
+                [
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_usage_detail_001", "model": "gpt-test"},
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_usage_detail_001",
+                            "model": "gpt-test",
+                            "usage": {
+                                "input_tokens": 7,
+                                "output_tokens": 3,
+                                "input_tokens_details": {"cached_tokens": 1},
+                            },
+                        },
+                    },
+                ]
+            )
+
     def test_unknown_responses_output_item_fails_explicitly(self):
         with self.assertRaisesRegex(ValueError, "Unsupported Responses output item type: reasoning"):
             responses_events_to_messages_sse(
@@ -185,6 +397,92 @@ class ResponsesToMessagesSseTests(unittest.TestCase):
                     },
                 ]
             )
+
+    def test_tool_stream_rejects_arguments_that_are_not_a_json_object(self):
+        with self.assertRaisesRegex(ValueError, "Responses tool arguments must be a JSON object"):
+            responses_events_to_messages_sse(
+                [
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_tool_bad_001", "model": "gpt-test"},
+                    },
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": "fc_bad_001",
+                            "type": "function_call",
+                            "call_id": "toolu_bad_001",
+                            "name": "read_file",
+                            "arguments": "",
+                        },
+                    },
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": 0,
+                        "delta": "not-json",
+                    },
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {"id": "fc_bad_001", "type": "function_call"},
+                    },
+                ]
+            )
+
+    def test_tool_stream_rejects_a_final_argument_snapshot_that_conflicts_with_deltas(self):
+        with self.assertRaisesRegex(ValueError, "Responses tool argument deltas do not match final arguments"):
+            responses_events_to_messages_sse(
+                [
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_tool_mismatch_001", "model": "gpt-test"},
+                    },
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": "fc_mismatch_001",
+                            "type": "function_call",
+                            "call_id": "toolu_mismatch_001",
+                            "name": "read_file",
+                        },
+                    },
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": 0,
+                        "delta": '{"path":"fixture.txt"}',
+                    },
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "output_index": 0,
+                        "arguments": '{"path":"other.txt"}',
+                    },
+                ]
+            )
+
+    def test_missing_upstream_usage_stays_absent_instead_of_zero_filled(self):
+        records = responses_events_to_messages_sse(
+            [
+                {"type": "response.created", "response": {"id": "resp_no_usage", "model": "gpt-test"}},
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"id": "msg_no_usage", "type": "message", "role": "assistant", "content": []},
+                },
+                {"type": "response.output_text.delta", "output_index": 0, "delta": "SANITIZED_REPLY"},
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": "msg_no_usage", "type": "message", "role": "assistant", "content": []},
+                },
+                {"type": "response.completed", "response": {"id": "resp_no_usage", "model": "gpt-test"}},
+            ]
+        )
+
+        events = _decode_sse(records)
+        self.assertEqual(events[0][1]["message"]["usage"], {})
+        self.assertEqual(events[-2][1]["usage"], {})
 
 
 class ChatCompletionsPrototypeTests(unittest.TestCase):
@@ -300,6 +598,23 @@ class ChatCompletionsPrototypeTests(unittest.TestCase):
                                 "finish_reason": "stop",
                             }
                         ],
+                    }
+                ]
+            )
+
+    def test_chat_cache_usage_details_are_explicitly_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Chat Completions usage field: prompt_tokens_details"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_usage_detail_001",
+                        "model": "chat-test",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 5,
+                            "completion_tokens": 2,
+                            "prompt_tokens_details": {"cached_tokens": 1},
+                        },
                     }
                 ]
             )

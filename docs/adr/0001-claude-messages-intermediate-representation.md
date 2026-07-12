@@ -43,6 +43,11 @@ An adapter may not emit a request after silently dropping a field. A tool call's
 ID must round-trip unchanged through the assistant tool-use response and the
 following user tool-result request.
 
+Usage mapping may omit only a validated redundant total. Cache, reasoning, or
+provider-detail usage fields require a named representation/mapping decision;
+until then the adapter must return an explicit non-forwardable result rather
+than collapse them into base token counts.
+
 ## Version and extension policy
 
 - The evidence pin is `anthropic-version: 2023-06-01`, revalidated against the
@@ -60,11 +65,12 @@ following user tool-result request.
 ## Compatibility level
 
 **Scoped PARTIAL.** The prototype demonstrates explicit adaptation for basic
-text/history, client-tool ID lifecycle, Messages SSE, reported usage, a generic
-error envelope, and deterministic Responses/Chat protocol shapes. It does not
-establish safe production behavior for thinking, prompt caching, context
-compaction/resume, server tools, beta fields, count tokens, cancellation, or
-Claude Code automatic retry semantics.
+text/history, client-tool ID lifecycle, Messages SSE, reported base usage (with
+validated totals), a generic error envelope, and deterministic Responses/Chat
+protocol shapes. It explicitly rejects unmapped cache/reasoning/provider usage
+detail. It does not establish safe production behavior for thinking, prompt
+caching, context compaction/resume, server tools, beta fields, count tokens,
+cancellation, or Claude Code automatic retry semantics.
 
 Therefore this decision explicitly prohibits, until a follow-up closes the
 named gaps:
