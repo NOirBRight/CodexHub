@@ -2,7 +2,19 @@ import { BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { PendingPanel } from "./PendingPanel";
+import {
+  addDays,
+  addMonths,
+  daysInMonth,
+  differenceInDays,
+  endOfDay,
+  isSameDay,
+  startOfDay,
+  startOfMonth,
+  startOfWeekMonday,
+} from "../lib/dateRange";
 import { cx } from "../lib/format";
+import { providerLabel, providerLabelMap, titleizeProviderId } from "../lib/providerLabels";
 import type { GatewayUsageEvent, GatewayUsageSummary, Provider, TelemetryStatus, UsageQueryWindow } from "../lib/types";
 
 interface StackedUsageChartShellProps {
@@ -1397,52 +1409,11 @@ function clientLabel(client: string, t: Translate) {
   return titleizeProviderId(client);
 }
 
-function providerLabelMap(providers: Provider[]) {
-  const labels = new Map<string, string>([
-    ["official", "OpenAI"],
-    ["official_openai", "OpenAI"],
-  ]);
-  for (const provider of providers) {
-    labels.set(provider.id.toLowerCase(), provider.name);
-  }
-  return labels;
-}
-
-function providerLabel(provider: string, providerLabels: Map<string, string>, t: Translate) {
-  const normalized = provider.toLowerCase();
-  const mapped = providerLabels.get(normalized);
-  if (mapped) {
-    return mapped;
-  }
-  if (normalized.startsWith("unknown")) {
-    return t("common.unknown");
-  }
-  return titleizeProviderId(provider);
-}
-
 function displayModelId(model: string) {
   const value = model.trim();
   const slashIndex = value.indexOf("/");
   return slashIndex >= 0 && slashIndex < value.length - 1 ? value.slice(slashIndex + 1) : value;
 }
-
-function titleizeProviderId(provider: string) {
-  return provider
-    .split(/[_\s-]+/)
-    .filter(Boolean)
-    .map((part) => {
-      const lower = part.toLowerCase();
-      if (lower === "openai") {
-        return "OpenAI";
-      }
-      if (lower === "cn") {
-        return "CN";
-      }
-      return `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`;
-    })
-    .join(" ");
-}
-
 function tokenTotal(event: GatewayUsageEvent) {
   if (event.total_tokens !== null && event.total_tokens !== undefined) {
     return event.total_tokens;
@@ -1552,43 +1523,4 @@ function weekDayLabels(locale: string) {
   const monday = new Date(2024, 0, 1);
   const formatter = new Intl.DateTimeFormat(locale, { weekday: "short" });
   return Array.from({ length: 7 }, (_, index) => formatter.format(addDays(monday, index)));
-}
-
-function startOfDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
-function endOfDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
-}
-
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
-function startOfWeekMonday(date: Date) {
-  const start = startOfDay(date);
-  const weekday = (start.getDay() + 6) % 7;
-  return addDays(start, -weekday);
-}
-
-function addDays(date: Date, days: number) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
-}
-
-function addMonths(date: Date, months: number) {
-  return new Date(date.getFullYear(), date.getMonth() + months, 1);
-}
-
-function daysInMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-}
-
-function differenceInDays(start: Date, end: Date) {
-  const dayMs = 24 * 60 * 60 * 1000;
-  return Math.round((startOfDay(end).getTime() - startOfDay(start).getTime()) / dayMs);
-}
-
-function isSameDay(left: Date, right: Date) {
-  return startOfDay(left).getTime() === startOfDay(right).getTime();
 }
