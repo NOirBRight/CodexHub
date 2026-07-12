@@ -21,20 +21,31 @@ def load_audit_module():
     return module
 
 
-def run_audit(module, codex_db: Path, gateway_db: Path):
+def run_audit(
+    module,
+    codex_db: Path,
+    gateway_db: Path,
+    *,
+    config_written_at: str = "1970-01-01T00:06:00Z",
+):
     return module.audit_artifacts(
         codex_log_db=codex_db,
         gateway_db=gateway_db,
         model="gpt-5.6-sol",
         gateway_started_at="1970-01-01T00:03:00Z",
         app_server_started_at="1970-01-01T00:05:00Z",
-        config_written_at="1970-01-01T00:06:00Z",
+        config_written_at=config_written_at,
         catalog_written_at="1970-01-01T00:02:00Z",
         snapshot_ended_at="1970-01-01T00:10:00Z",
     )
 
 
-def create_codex_log_db(path: Path, *, gateway_tool_choice: object = "auto") -> None:
+def create_codex_log_db(
+    path: Path,
+    *,
+    gateway_tool_choice: object = "auto",
+    post_start_gateway_request: bool = False,
+) -> None:
     connection = sqlite3.connect(path)
     connection.execute(
         """
@@ -101,25 +112,34 @@ def create_codex_log_db(path: Path, *, gateway_tool_choice: object = "auto") -> 
 
     gateway_body = json.dumps(gateway_payload, separators=(",", ":"))
     direct_body = json.dumps(direct_payload, separators=(",", ":"))
+    rows = [
+        (
+            200,
+            "codex_http_client::transport",
+            f"span: POST to http://127.0.0.1:9099/v1/responses: {gateway_body}",
+        ),
+        (
+            201,
+            "codex_http_client::transport",
+            f"span: POST to http://127.0.0.1:9099/v1/responses: {gateway_body}",
+        ),
+        (
+            400,
+            "codex_http_client::transport",
+            f"span: POST to https://chatgpt.com/backend-api/codex/responses: {direct_body}",
+        ),
+    ]
+    if post_start_gateway_request:
+        rows.append(
+            (
+                350,
+                "codex_http_client::transport",
+                f"span: POST to http://127.0.0.1:9099/v1/responses: {gateway_body}",
+            )
+        )
     connection.executemany(
         "INSERT INTO logs (ts, target, feedback_log_body) VALUES (?, ?, ?)",
-        [
-            (
-                200,
-                "codex_http_client::transport",
-                f"span: POST to http://127.0.0.1:9099/v1/responses: {gateway_body}",
-            ),
-            (
-                201,
-                "codex_http_client::transport",
-                f"span: POST to http://127.0.0.1:9099/v1/responses: {gateway_body}",
-            ),
-            (
-                400,
-                "codex_http_client::transport",
-                f"span: POST to https://chatgpt.com/backend-api/codex/responses: {direct_body}",
-            ),
-        ],
+        rows,
     )
     connection.commit()
     connection.close()
@@ -130,9 +150,12 @@ def create_gateway_db(
     *,
     prefix_available: bool = True,
     prefix_mismatch: bool = False,
+    prefix_pair: tuple[str, str] | None = None,
     request_hmac_pair: tuple[str, str] | None = None,
     response_fingerprint_column: bool = False,
     response_fingerprint_pair: tuple[str | None, str | None] | None = None,
+    request_started_at: str = "1970-01-01T00:03:20Z",
+    request_completed_at: str = "1970-01-01T00:03:21Z",
 ) -> None:
     connection = sqlite3.connect(path)
     connection.execute(
@@ -194,10 +217,12 @@ def create_gateway_db(
         "request_id": "must-not-be-retained",
     }
     if prefix_available:
-        request_start["caller_request_prefix_hmac"] = "prefix-a"
-        request_start["upstream_request_prefix_hmac"] = (
-            "prefix-b" if prefix_mismatch else "prefix-a"
+        caller_prefix, upstream_prefix = prefix_pair or (
+            "prefix-a",
+            "prefix-b" if prefix_mismatch else "prefix-a",
         )
+        request_start["caller_request_prefix_hmac"] = caller_prefix
+        request_start["upstream_request_prefix_hmac"] = upstream_prefix
     if request_hmac_pair is None:
         request_start["caller_request_body_hmac_skipped"] = True
         request_start["upstream_request_body_hmac_skipped"] = True
@@ -214,8 +239,8 @@ def create_gateway_db(
     connection.executemany(
         "INSERT INTO gateway_events (ts, event, payload_json) VALUES (?, ?, ?)",
         [
-            ("1970-01-01T00:03:20Z", "request_start", json.dumps(request_start)),
-            ("1970-01-01T00:03:21Z", "request_complete", json.dumps(request_complete)),
+            (request_started_at, "request_start", json.dumps(request_start)),
+            (request_completed_at, "request_complete", json.dumps(request_complete)),
         ],
     )
     connection.commit()
@@ -288,6 +313,38 @@ def test_audit_reports_only_sanitized_schema_and_gate_facts(tmp_path: Path) -> N
         str(gateway_db),
     ):
         assert forbidden not in serialized
+
+
+def test_clean_cold_start_requires_correlated_current_binding_identity(
+    tmp_path: Path,
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db, post_start_gateway_request=True)
+    create_gateway_db(
+        gateway_db,
+        request_started_at="1970-01-01T00:05:20Z",
+        request_completed_at="1970-01-01T00:05:21Z",
+    )
+
+    audit = run_audit(
+        module,
+        codex_db,
+        gateway_db,
+        config_written_at="1970-01-01T00:04:00Z",
+    )
+
+    timeline = audit["runtime_timeline"]
+    assert timeline["config_written_after_app_server_start"] is False
+    assert timeline["catalog_written_before_app_server_start"] is True
+    assert timeline["current_request_endpoint_classes"]["codexhub_local"] == 1
+    assert timeline["gateway_requests_after_app_server_start"] == 1
+    assert timeline["clean_cold_start_for_current_binding_proven"] is False
+    assert (
+        audit["gate_classification"]["clean_cold_start_current_binding"]
+        == "live_control_required"
+    )
 
 
 def test_audit_surfaces_unclassified_items_and_prefix_mismatch(tmp_path: Path) -> None:
@@ -433,6 +490,26 @@ def test_zero_unclassified_identity_rejects_unavailable_prefixes(
     assert audit["gate_classification"]["zero_unclassified_identity"] == "not_met"
 
 
+@pytest.mark.parametrize("prefix_pair", [("", ""), ("   ", "   ")])
+def test_zero_unclassified_identity_rejects_blank_prefixes(
+    tmp_path: Path,
+    prefix_pair: tuple[str, str],
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db, prefix_pair=prefix_pair)
+
+    audit = run_audit(module, codex_db, gateway_db)
+
+    identity = audit["gateway_identity_route"]
+    assert identity["prefix_equal"] == 0
+    assert identity["prefix_mismatch"] == 0
+    assert identity["prefix_unavailable"] == 1
+    assert audit["gate_classification"]["zero_unclassified_identity"] == "not_met"
+
+
 @pytest.mark.parametrize(
     "tool_choice",
     [True, 7, 1.5, "sometimes", {"unexpected": "shape"}],
@@ -449,8 +526,40 @@ def test_choice_controls_reject_unclassified_and_invalid_scalar_shapes(
 
     audit = run_audit(module, codex_db, gateway_db)
 
-    assert {
+    assert [
         variant["tool_choice"]
         for variant in audit["model_visible_request_plan"]["plan_variants"]
-    } == {"unclassified"}
+    ] == ["unclassified"]
+    assert audit["gate_classification"]["choice_controls"] == "unclassified"
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "function", "name": "   "},
+        {
+            "type": "function",
+            "name": "first_selector",
+            "function": {"name": "second_selector"},
+        },
+        {"type": "function", "name": "selector", "unexpected": True},
+        {"type": "function", "function": {"name": "selector"}},
+    ],
+)
+def test_choice_controls_reject_malformed_function_objects(
+    tmp_path: Path,
+    tool_choice: object,
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db, gateway_tool_choice=tool_choice)
+    create_gateway_db(gateway_db)
+
+    audit = run_audit(module, codex_db, gateway_db)
+
+    assert [
+        variant["tool_choice"]
+        for variant in audit["model_visible_request_plan"]["plan_variants"]
+    ] == ["unclassified"]
     assert audit["gate_classification"]["choice_controls"] == "unclassified"

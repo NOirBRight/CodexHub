@@ -116,16 +116,12 @@ def _sanitize_tool_choice(value: Any) -> Any:
         return value if value in VALID_TOOL_CHOICE_STRINGS else "unclassified"
     if not isinstance(value, dict):
         return "unclassified"
-    if value.get("type") != "function":
+    if set(value) != {"type", "name"} or value.get("type") != "function":
         return "unclassified"
     name = value.get("name")
-    function = value.get("function")
-    if not isinstance(name, str) or not name:
-        if isinstance(function, dict):
-            name = function.get("name")
-    if not isinstance(name, str) or not name:
+    if not isinstance(name, str) or not name.strip():
         return "unclassified"
-    return {"name": name, "type": "function"}
+    return {"name": name.strip(), "type": "function"}
 
 
 def _is_proven_tool_choice(value: Any) -> bool:
@@ -133,9 +129,11 @@ def _is_proven_tool_choice(value: Any) -> bool:
         return value in VALID_TOOL_CHOICE_STRINGS
     return (
         isinstance(value, dict)
+        and set(value) == {"type", "name"}
         and value.get("type") == "function"
         and isinstance(value.get("name"), str)
-        and bool(value["name"])
+        and bool(value["name"].strip())
+        and value["name"] == value["name"].strip()
     )
 
 
@@ -378,7 +376,12 @@ def _gateway_evidence(
 
                 caller_prefix = payload.get("caller_request_prefix_hmac")
                 upstream_prefix = payload.get("upstream_request_prefix_hmac")
-                if isinstance(caller_prefix, str) and isinstance(upstream_prefix, str):
+                if (
+                    isinstance(caller_prefix, str)
+                    and caller_prefix.strip()
+                    and isinstance(upstream_prefix, str)
+                    and upstream_prefix.strip()
+                ):
                     if caller_prefix == upstream_prefix:
                         prefix_equal += 1
                     else:
@@ -539,13 +542,11 @@ def audit_artifacts(
     config_after_start = _parse_iso_timestamp(config_written_at) > app_server_time
     catalog_before_start = _parse_iso_timestamp(catalog_written_at) <= app_server_time
     current_endpoint_classes = codex["current_request_endpoint_classes"]
-    current_codexhub_rows = current_endpoint_classes.get("codexhub_local", 0)
-    clean_cold_start_proven = (
-        not config_after_start
-        and catalog_before_start
-        and current_codexhub_rows > 0
-        and gateway["gateway_requests_after_app_server_start"] > 0
-    )
+    # Timestamp ordering and independently observed post-start rows do not bind a
+    # specific request to the catalog/config identity that was current at start.
+    # None of the bounded artifacts supplies that correlation, so this gate must
+    # remain a live-control requirement.
+    clean_cold_start_proven = False
 
     planner = codex["model_visible_request_plan"]
     identity = gateway["gateway_identity_route"]
