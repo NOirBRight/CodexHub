@@ -4,11 +4,13 @@ import io
 import json
 import ssl
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
 import codex_proxy
@@ -580,7 +582,7 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -651,7 +653,7 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch(
-                "codex_proxy.urlopen",
+                "codex_proxy._official_urlopen",
                 return_value=FakeSseResponse([f"data: {json.dumps(completed)}\n\n".encode("utf-8"), b""]),
             ) as mock_urlopen,
         ):
@@ -711,7 +713,7 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(response_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -932,6 +934,177 @@ class RoutingTests(unittest.TestCase):
         payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
         self.assertIn("model is required for provider path: volc", payload.get("error", ""))
 
+    def test_third_party_ultra_reasoning_effort_returns_openai_compatible_400(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": {"effort": "ultra"},
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp-third-party","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertIn("reasoning effort 'ultra'", payload["error"])
+        self.assertEqual(payload["detail"], payload["error"])
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+        self.assertEqual(payload["codexhub_error"]["details"]["type"], "invalid_request_error")
+        self.assertEqual(payload["codexhub_error"]["source"], "volcengine")
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+
+    def test_third_party_top_level_ultra_reasoning_effort_returns_400(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "ultra",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/chat/completions", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(
+                b'{"id":"chatcmpl-third-party","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}'
+            ),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="chat_completions")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertEqual(payload["error"]["type"], "invalid_request_error")
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+
+    def test_third_party_string_ultra_reasoning_effort_returns_400(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": "ultra",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp-third-party","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+
+    def test_supported_string_reasoning_effort_reaches_third_party_upstream(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": "high",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp-third-party","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 200)
+        open_upstream.assert_called_once()
+
+    def test_sol_ultra_reasoning_effort_reaches_official_upstream(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.6-sol",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": {"effort": "ultra"},
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"resp-official","output":[]}'),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 200)
+        open_upstream.assert_called_once()
+        forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(forwarded["reasoning"]["effort"], "ultra")
+
+    def test_terra_string_ultra_reasoning_effort_reaches_official_upstream(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.6-terra",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": "ultra",
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"resp-official","output":[]}'),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 200)
+        forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(forwarded["reasoning"], "ultra")
+
+    def test_luna_ultra_reasoning_effort_is_rejected_before_official_upstream(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.6-luna",
+                "input": [{"role": "user", "content": "hi"}],
+                "reasoning": {"effort": "ultra"},
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response") as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(fake.wfile.writes[-1].decode("utf-8"))
+        self.assertIn("supported only for gpt-5.6-sol and gpt-5.6-terra", payload["error"])
+
     def test_compressed_responses_request_extracts_model_after_decode(self):
         original = json.dumps(
             {
@@ -950,7 +1123,7 @@ class RoutingTests(unittest.TestCase):
         with (
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(b'{"id":"resp","output":[]}')) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(b'{"id":"resp","output":[]}')) as mock_urlopen,
         ):
             CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
 
@@ -994,7 +1167,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(event.kwargs["route_reason"], "request_body_limit")
         self.assertEqual(event.kwargs["status"], 413)
 
-    def test_official_http_passthrough_uses_bounded_open_attempts_and_no_stream_retry_deferral(self):
+    def test_official_http_passthrough_uses_bounded_open_attempts_and_defers_empty_stream_errors(self):
         body = json.dumps(
             {
                 "model": "gpt-5.5-fast",
@@ -1028,8 +1201,91 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(open_response.call_args.kwargs.get("max_attempts"), codex_proxy.official_upstream_open_attempts())
         self.assertFalse(open_response.call_args.kwargs.get("retry_http_errors"))
-        self.assertFalse(relayed[0]["defer_stream_errors"])
+        self.assertTrue(relayed[0]["defer_stream_errors"])
         self.assert_no_official_passthrough_gateway_events()
+
+    def test_official_http_passthrough_retries_incomplete_read_before_first_sse_byte(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5-fast",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        interrupted = FakeSseResponse([codex_proxy.IncompleteRead(b"")])
+        success = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_retry"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", side_effect=[interrupted, success]) as open_response,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(open_response.call_count, 2)
+        mock_sleep.assert_called_once()
+        self.assertEqual(fake.status, 200)
+        downstream = b"".join(fake.wfile.writes)
+        self.assertIn(b"response.completed", downstream)
+        self.assertNotIn(b"response.failed", downstream)
+        retry_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["failure_phase"], "stream_body")
+
+    def test_official_http_passthrough_never_retries_after_first_sse_byte(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5-fast",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        interrupted = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_partial"}}\n\n',
+                codex_proxy.IncompleteRead(b""),
+            ]
+        )
+        unused_success = FakeSseResponse(
+            [
+                b'data: {"type":"response.completed","response":{"id":"resp_unused","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", side_effect=[interrupted, unused_success]) as open_response,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(open_response.call_count, 1)
+        mock_sleep.assert_not_called()
+        downstream = b"".join(fake.wfile.writes)
+        self.assertIn(b"response.created", downstream)
+        self.assertIn(b"response.failed", downstream)
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "upstream_retry"
+                for call in self.write_proxy_event.call_args_list
+            )
+        )
 
     def test_official_http_passthrough_converts_compaction_input_before_upstream(self):
         input_items = [
@@ -1214,15 +1470,17 @@ class RoutingTests(unittest.TestCase):
             "Thread-id": "thread-from-app",
             "X-codex-window-id": "window-from-app",
             "X-client-request-id": "request-from-app",
+            "X-OpenAI-Internal-Codex-Responses-Lite": "true",
             "Connection": "keep-alive",
         }
-        upstream = {"name": "official", "auth": "codex_auth"}
+        upstream = {"name": "official", "auth": "codex_auth", "upstream_model": "gpt-5.6-sol"}
 
         with patch("codex_proxy.codex_access_token", return_value="new-token"):
             headers = upstream_headers(
                 incoming,
                 upstream,
                 behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                model_id="openai/gpt-5.6-sol",
             )
 
         self.assertEqual(headers["Authorization"], "Bearer new-token")
@@ -1234,7 +1492,60 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(headers["Thread-id"], "thread-from-app")
         self.assertEqual(headers["X-codex-window-id"], "window-from-app")
         self.assertEqual(headers["X-client-request-id"], "request-from-app")
+        self.assertEqual(headers["X-OpenAI-Internal-Codex-Responses-Lite"], "true")
         self.assertNotIn("Connection", headers)
+
+    def test_official_unsupported_model_requests_drop_responses_lite_header(self):
+        for model_id, prompt in (
+            ("gpt-5.4-mini", "generate a short task title"),
+            ("gpt-5.4", "generate personalized task suggestions"),
+        ):
+            with self.subTest(model_id=model_id):
+                body = json.dumps(
+                    {
+                        "model": model_id,
+                        "input": [{"type": "message", "role": "user", "content": prompt}],
+                        "stream": True,
+                        "store": False,
+                    }
+                ).encode("utf-8")
+                handler = CodexProxyHandler.__new__(CodexProxyHandler)
+                handler.path = "/v1/responses"
+                handler.headers = {
+                    "Content-Length": str(len(body)),
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "User-Agent": "Codex Desktop/0.142.4",
+                    "Session-id": "auxiliary-session",
+                    "Thread-id": "auxiliary-thread",
+                    "X-codex-window-id": "auxiliary-window:0",
+                    "X-client-request-id": "auxiliary-request",
+                    "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+                }
+                handler.rfile = io.BytesIO(body)
+                handler.close_connection = False
+                fake = FakeHandler()
+                handler.send_response = fake.send_response
+                handler.send_header = fake.send_header
+                handler.end_headers = fake.end_headers
+                handler.wfile = fake.wfile
+                handler._relay_upstream_response = lambda response, upstream_name, **kwargs: 200
+                captured_requests = []
+
+                def open_upstream(request, **_kwargs):
+                    captured_requests.append(request)
+                    return FakeContextResponse(b'{"id":"resp_auxiliary","output":[]}')
+
+                with (
+                    patch("codex_proxy.codex_access_token", return_value="sub-token"),
+                    patch("codex_proxy.codex_account_id", return_value="acct-1"),
+                    patch("codex_proxy._open_upstream_response", side_effect=open_upstream),
+                ):
+                    CodexProxyHandler.do_POST(handler)
+
+                self.assertEqual(len(captured_requests), 1)
+                forwarded_header_names = {key.lower() for key, _value in captured_requests[0].header_items()}
+                self.assertNotIn("x-openai-internal-codex-responses-lite", forwarded_header_names)
 
     def test_official_http_passthrough_does_not_generate_missing_identity_headers(self):
         incoming = {
@@ -1421,7 +1732,7 @@ class RoutingTests(unittest.TestCase):
                 "codex_proxy._normalize_third_party_tool_call",
                 side_effect=AssertionError("official passthrough HTTPError parsed SSE"),
             ),
-            patch("codex_proxy.urlopen", side_effect=error),
+            patch("codex_proxy._official_urlopen", side_effect=error),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1513,6 +1824,68 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b'"code":"URLError"', body)
         self.assertIn(b'"upstream":"official"', body)
         self.assertTrue(fake.close_connection)
+
+    def test_official_passthrough_ignores_stream_error_after_completed_event(self):
+        fake = FakeHandler()
+        usage_capture = {}
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                FakeSseResponse(
+                    [
+                        b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                        b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                        codex_proxy.IncompleteRead(b""),
+                    ]
+                ),
+                "official",
+                request_id="req-terminal-before-eof",
+                model="gpt-5.6-sol",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture=usage_capture,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(usage_capture["sse_completed_event_seen"])
+        self.assertNotIn(b"response.failed", b"".join(fake.wfile.writes))
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "official_passthrough_stream_closed"
+                for call in write_event.call_args_list
+            )
+        )
+
+    def test_official_passthrough_shortens_post_terminal_drain_timeout(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+        response.shorten_terminal_drain_timeout = Mock()
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "official",
+            request_id="req-terminal-drain-timeout",
+            model="gpt-5.6-sol",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        self.assertEqual(status, 200)
+        response.shorten_terminal_drain_timeout.assert_called_once_with(
+            codex_proxy.OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS
+        )
 
     def test_official_passthrough_stream_close_records_upstream_read_counters(self):
         fake = FakeHandler()
@@ -1638,7 +2011,7 @@ class RoutingTests(unittest.TestCase):
             ),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", side_effect=[error, success]) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -1679,7 +2052,7 @@ class RoutingTests(unittest.TestCase):
             patch.dict(os.environ, {"CODEX_PROXY_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS": "3"}, clear=False),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", side_effect=[TimeoutError("connect timed out"), success]) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", side_effect=[TimeoutError("connect timed out"), success]) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -1877,13 +2250,13 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["max_attempts"], 3)
         self.assertEqual(fields["delay_ms"], 10000)
 
-    def test_official_open_installs_keepalive_transport_before_urlopen(self):
+    def test_official_open_uses_gateway_owned_pooled_transport(self):
         request = codex_proxy.Request("https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST")
         success = FakeResponse(b'{"id":"resp_keepalive"}')
 
         with (
-            patch("codex_proxy._ensure_official_keepalive_opener_installed") as ensure_keepalive,
-            patch("codex_proxy.urlopen", return_value=success) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", return_value=success) as official_urlopen,
+            patch("codex_proxy.urlopen") as mock_urlopen,
         ):
             response = codex_proxy._open_upstream_response(
                 request,
@@ -1895,40 +2268,313 @@ class RoutingTests(unittest.TestCase):
             )
 
         self.assertIs(response, success)
-        ensure_keepalive.assert_called_once()
-        mock_urlopen.assert_called_once_with(request, timeout=1)
+        official_urlopen.assert_called_once_with(request, timeout=1)
+        mock_urlopen.assert_not_called()
 
-    def test_non_official_open_does_not_install_official_keepalive_transport(self):
-        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
-        success = FakeResponse(b'{"id":"resp_default_transport"}')
+    def test_official_retry_closes_failed_http_response_before_reusing_pool(self):
+        request = codex_proxy.Request("https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST")
+        failed_body = Mock()
+        failed_body.read.return_value = b'{"error":"temporarily unavailable"}'
+        error = HTTPError(request.full_url, 503, "Unavailable", {}, failed_body)
+        success = FakeResponse(b'{"id":"resp_recovered"}')
 
         with (
-            patch("codex_proxy._ensure_official_keepalive_opener_installed") as ensure_keepalive,
-            patch("codex_proxy.urlopen", return_value=success) as mock_urlopen,
+            patch("codex_proxy._official_urlopen", side_effect=[error, success]),
+            patch("codex_proxy.time.sleep"),
         ):
             response = codex_proxy._open_upstream_response(
                 request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=1,
+                event_context={"request_id": "req-official-http-retry"},
+                max_attempts=2,
+            )
+
+        self.assertIs(response, success)
+        failed_body.close.assert_called_once()
+
+    def test_official_transport_reuses_connection_across_sequential_requests(self):
+        client_ports: set[int] = set()
+
+        class KeepaliveHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                client_ports.add(self.client_address[1])
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length:
+                    self.rfile.read(content_length)
+                body = b'{"id":"resp_keepalive"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), KeepaliveHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/responses"
+            for _ in range(2):
+                request = codex_proxy.Request(url, data=b"{}", method="POST")
+                with codex_proxy._official_urlopen(request, timeout=2) as response:
+                    self.assertEqual(response.read(), b'{"id":"resp_keepalive"}')
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(len(client_ports), 1)
+
+    def test_official_then_third_party_does_not_leak_keepalive_transport(self):
+        official_request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST"
+        )
+        third_party_request = codex_proxy.Request(
+            "https://ark.example.test/v1/responses", data=b"{}", method="POST"
+        )
+        official_success = FakeResponse(b'{"id":"resp_official_transport"}')
+        third_party_success = FakeResponse(b'{"id":"resp_default_transport"}')
+
+        with (
+            patch("codex_proxy._official_urlopen", return_value=official_success) as official_urlopen,
+            patch("codex_proxy.urlopen", return_value=third_party_success) as mock_urlopen,
+        ):
+            official_response = codex_proxy._open_upstream_response(
+                official_request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=1,
+                event_context={"request_id": "req-official-transport"},
+            )
+            third_party_response = codex_proxy._open_upstream_response(
+                third_party_request,
                 upstream_name="volcengine",
                 upstream_format="responses",
                 timeout=1,
                 event_context={"request_id": "req-non-official-transport"},
             )
 
-        self.assertIs(response, success)
-        ensure_keepalive.assert_not_called()
-        mock_urlopen.assert_called_once_with(request, timeout=1)
+        self.assertIs(official_response, official_success)
+        self.assertIs(third_party_response, third_party_success)
+        official_urlopen.assert_called_once_with(official_request, timeout=1)
+        mock_urlopen.assert_called_once_with(third_party_request, timeout=1)
 
-    def test_configure_tcp_keepalive_enables_windows_probe_intervals(self):
+    def test_official_connection_pool_is_cached_and_bounded(self):
+        private_pool = Mock()
+        private_pool.pool_classes_by_scheme = {}
+        with (
+            patch.object(codex_proxy, "OFFICIAL_HTTP_POOLS", {}),
+            patch("codex_proxy._official_proxy_url", return_value=None),
+            patch("codex_proxy.urllib3.PoolManager", return_value=private_pool) as pool_manager,
+        ):
+            first = codex_proxy._official_pool_manager("https://chatgpt.com/backend-api/codex/responses")
+            second = codex_proxy._official_pool_manager("https://chatgpt.com/backend-api/codex/responses")
+
+        self.assertIs(first, private_pool)
+        self.assertIs(second, private_pool)
+        pool_manager.assert_called_once()
+        options = pool_manager.call_args.kwargs
+        self.assertTrue(options["block"])
+        self.assertEqual(options["maxsize"], codex_proxy.OFFICIAL_POOL_MAX_CONNECTIONS)
+        self.assertIn(
+            (codex_proxy.socket.SOL_SOCKET, codex_proxy.socket.SO_KEEPALIVE, 1),
+            options["socket_options"],
+        )
+        self.assertIs(
+            private_pool.pool_classes_by_scheme["https"],
+            codex_proxy._OfficialHTTPSConnectionPool,
+        )
+
+    def test_official_proxy_uses_windows_registry_when_environment_only_has_no_proxy(self):
+        with (
+            patch("codex_proxy.sys.platform", "win32"),
+            patch("codex_proxy.getproxies", return_value={"no": "localhost,127.0.0.1"}),
+            patch(
+                "codex_proxy.getproxies_registry",
+                return_value={"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"},
+            ),
+            patch("codex_proxy.proxy_bypass", return_value=False),
+        ):
+            proxy_url = codex_proxy._official_proxy_url(
+                "https://chatgpt.com/backend-api/codex/responses"
+            )
+
+        self.assertEqual(proxy_url, "http://127.0.0.1:7890")
+
+    def test_official_proxy_prefers_explicit_environment_proxy_over_windows_registry(self):
+        with (
+            patch("codex_proxy.sys.platform", "win32"),
+            patch(
+                "codex_proxy.getproxies",
+                return_value={"https": "http://127.0.0.1:7891", "no": "localhost"},
+            ),
+            patch("codex_proxy.getproxies_registry") as registry_proxies,
+            patch("codex_proxy.proxy_bypass", return_value=False),
+        ):
+            proxy_url = codex_proxy._official_proxy_url(
+                "https://chatgpt.com/backend-api/codex/responses"
+            )
+
+        self.assertEqual(proxy_url, "http://127.0.0.1:7891")
+        registry_proxies.assert_not_called()
+
+    def test_official_pool_discards_connection_after_idle_reuse_limit(self):
+        connection = Mock()
+        connection._codexhub_released_at = 100.0
+        pool = codex_proxy._OfficialHTTPSConnectionPool("chatgpt.com")
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_get_conn",
+                return_value=connection,
+            ),
+            patch("codex_proxy.time.monotonic", return_value=100.0 + codex_proxy.OFFICIAL_POOL_MAX_IDLE_SECONDS + 1),
+        ):
+            returned = pool._get_conn()
+
+        self.assertIs(returned, connection)
+        connection.close.assert_called_once()
+
+    def test_official_proxy_pool_keeps_connection_past_direct_idle_limit(self):
+        connection = Mock()
+        connection._codexhub_released_at = 100.0
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "chatgpt.com",
+            _proxy=codex_proxy.urllib3.util.parse_url("http://127.0.0.1:7890"),
+        )
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_get_conn",
+                return_value=connection,
+            ),
+            patch("codex_proxy.time.monotonic", return_value=100.0 + codex_proxy.OFFICIAL_POOL_MAX_IDLE_SECONDS + 1),
+        ):
+            returned = pool._get_conn()
+
+        self.assertIs(returned, connection)
+        connection.close.assert_not_called()
+
+    def test_official_proxy_pool_discards_connection_after_proxy_idle_limit(self):
+        connection = Mock()
+        connection._codexhub_released_at = 100.0
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "chatgpt.com",
+            _proxy=codex_proxy.urllib3.util.parse_url("http://127.0.0.1:7890"),
+        )
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_get_conn",
+                return_value=connection,
+            ),
+            patch(
+                "codex_proxy.time.monotonic",
+                return_value=100.0 + codex_proxy.OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS + 1,
+            ),
+        ):
+            returned = pool._get_conn()
+
+        self.assertIs(returned, connection)
+        connection.close.assert_called_once()
+
+    def test_official_transport_caps_connect_timeout_but_preserves_read_timeout(self):
+        manager = Mock()
+        response = Mock(status=200, reason="OK", headers={})
+        manager.request.return_value = response
+        request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST"
+        )
+
+        with patch("codex_proxy._official_pool_manager", return_value=manager):
+            codex_proxy._official_urlopen(request, timeout=60)
+
+        timeout = manager.request.call_args.kwargs["timeout"]
+        self.assertEqual(timeout.connect_timeout, codex_proxy.OFFICIAL_CONNECT_TIMEOUT_SECONDS)
+        self.assertEqual(timeout.read_timeout, 60)
+
+    def test_official_pool_records_release_time_for_idle_reuse_limit(self):
+        connection = Mock()
+        pool = codex_proxy._OfficialHTTPSConnectionPool("chatgpt.com")
+
+        with (
+            patch.object(
+                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                "_put_conn",
+            ) as put_conn,
+            patch("codex_proxy.time.monotonic", return_value=123.0),
+        ):
+            pool._put_conn(connection)
+
+        self.assertEqual(connection._codexhub_released_at, 123.0)
+        put_conn.assert_called_once_with(connection)
+
+    def test_official_pool_retains_five_second_tcp_keepalive_tuning(self):
+        with patch("codex_proxy.sys.platform", "linux"):
+            options = codex_proxy._official_socket_options()
+
+        self.assertIn((codex_proxy.socket.SOL_SOCKET, codex_proxy.socket.SO_KEEPALIVE, 1), options)
+        if hasattr(codex_proxy.socket, "TCP_KEEPIDLE"):
+            self.assertIn((codex_proxy.socket.IPPROTO_TCP, codex_proxy.socket.TCP_KEEPIDLE, 5), options)
+        if hasattr(codex_proxy.socket, "TCP_KEEPINTVL"):
+            self.assertIn((codex_proxy.socket.IPPROTO_TCP, codex_proxy.socket.TCP_KEEPINTVL, 5), options)
+        if hasattr(codex_proxy.socket, "TCP_KEEPCNT"):
+            self.assertIn((codex_proxy.socket.IPPROTO_TCP, codex_proxy.socket.TCP_KEEPCNT, 3), options)
+
+    def test_official_windows_pool_applies_keepalive_intervals(self):
         fake_socket = Mock()
-        fake_socket.ioctl = Mock()
-        fake_socket.setsockopt = Mock()
-        with patch("codex_proxy.sys.platform", "win32"):
-            codex_proxy._configure_tcp_keepalive(fake_socket)
+        with (
+            patch("codex_proxy.sys.platform", "win32"),
+            patch.object(codex_proxy.socket, "SIO_KEEPALIVE_VALS", 0x98000004, create=True),
+        ):
+            codex_proxy._configure_official_windows_keepalive(fake_socket)
 
-        fake_socket.setsockopt.assert_called_with(codex_proxy.socket.SOL_SOCKET, codex_proxy.socket.SO_KEEPALIVE, 1)
-        fake_socket.ioctl.assert_called_once()
-        self.assertEqual(fake_socket.ioctl.call_args.args[0], codex_proxy.socket.SIO_KEEPALIVE_VALS)
-        self.assertEqual(fake_socket.ioctl.call_args.args[1], (1, 5000, 5000))
+        fake_socket.ioctl.assert_called_once_with(0x98000004, (1, 5000, 5000))
+
+    def test_official_pooled_stream_translates_reset_and_discards_connection(self):
+        raw_response = Mock()
+        raw_response.status = 200
+        raw_response.reason = "OK"
+        raw_response.headers = {"Content-Type": "text/event-stream"}
+        raw_response.read.side_effect = codex_proxy.urllib3.exceptions.ProtocolError(
+            "stream reset",
+            ConnectionResetError("connection reset"),
+        )
+
+        with self.assertRaises(ConnectionResetError):
+            with codex_proxy._OfficialPooledResponse(raw_response) as response:
+                response.read(65536)
+
+        raw_response.close.assert_called_once()
+        raw_response.release_conn.assert_not_called()
+
+    def test_official_pooled_stream_restores_timeout_before_reuse(self):
+        raw_response = Mock()
+        raw_response.status = 200
+        raw_response.reason = "OK"
+        raw_response.headers = {"Content-Type": "text/event-stream"}
+        raw_response.readline.return_value = b""
+        raw_response.connection.sock.gettimeout.return_value = 300.0
+
+        with codex_proxy._OfficialPooledResponse(raw_response) as response:
+            response.shorten_terminal_drain_timeout(1.0)
+            self.assertEqual(response.readline(), b"")
+
+        self.assertEqual(
+            raw_response.connection.sock.settimeout.call_args_list,
+            [call(1.0), call(300.0)],
+        )
+        raw_response.release_conn.assert_called_once()
+        raw_response.close.assert_not_called()
 
     def test_transparent_retry_retries_open_failure_without_downstream_notice(self):
         request = codex_proxy.Request("https://example.test/v1/chat/completions", data=b"{}", method="POST")
@@ -3200,7 +3846,7 @@ class RoutingTests(unittest.TestCase):
         with (
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", return_value=FakeContextResponse(b'{"id":"resp_control"}')),
+            patch("codex_proxy._official_urlopen", return_value=FakeContextResponse(b'{"id":"resp_control"}')),
         ):
             CodexProxyHandler.do_GET(handler)
 
@@ -3240,7 +3886,7 @@ class RoutingTests(unittest.TestCase):
             patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
-            patch("codex_proxy.urlopen", side_effect=error),
+            patch("codex_proxy._official_urlopen", side_effect=error),
         ):
             CodexProxyHandler.do_GET(handler)
 
@@ -3671,6 +4317,71 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body)["model"], "gpt-5.5")
 
+    def test_runtime_discovered_official_models_route_for_bare_and_openai_aliases(self):
+        catalog = {
+            model: {
+                "slug": model,
+                "supported_in_api": True,
+                "codex_proxy_metadata": {
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": model,
+                },
+            }
+            for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+        }
+
+        with patch("codex_proxy.generated_catalog_by_slug", return_value=catalog):
+            for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+                with self.subTest(model=model, form="bare"):
+                    upstream = choose_upstream(model)
+                    self.assertEqual(upstream["name"], "official")
+                    self.assertEqual(upstream["auth"], "codex_auth")
+                    self.assertEqual(upstream["upstream_model"], model)
+                with self.subTest(model=model, form="alias"):
+                    upstream = choose_upstream(f"openai/{model}")
+                    self.assertEqual(upstream["name"], "official")
+                    self.assertEqual(upstream["upstream_model"], model)
+
+    def test_runtime_official_route_rejects_untrusted_catalog_metadata(self):
+        catalog = {
+            "openai/gpt-untrusted": {
+                "slug": "openai/gpt-untrusted",
+                "supported_in_api": True,
+                "codex_proxy_metadata": {
+                    "provider": "external",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-untrusted",
+                },
+            }
+        }
+
+        with patch("codex_proxy.generated_catalog_by_slug", return_value=catalog):
+            with self.assertRaisesRegex(ValueError, "model is not allowed"):
+                choose_upstream("gpt-untrusted")
+
+    def test_runtime_official_route_respects_policy_denylist(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = replace(policy, denied_models=set(policy.denied_models) | {"gpt-5.6-sol"})
+        catalog = {
+            "gpt-5.6-sol": {
+                "slug": "gpt-5.6-sol",
+                "supported_in_api": True,
+                "codex_proxy_metadata": {
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-5.6-sol",
+                },
+            }
+        }
+
+        with (
+            patch("codex_proxy.load_policy", return_value=policy),
+            patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+        ):
+            with self.assertRaisesRegex(ValueError, "model is not allowed"):
+                choose_upstream("gpt-5.6-sol")
+
     def test_openai_fast_alias_routes_to_priority_service_tier(self):
         upstream = choose_upstream("openai/gpt-5.5-fast")
 
@@ -3724,13 +4435,13 @@ class RoutingTests(unittest.TestCase):
                     {
                         "models": [
                             {
-                                "slug": "openai/gpt-5.5",
-                                "display_name": "OpenAI GPT-5.5",
+                                "slug": "gpt-5.5",
+                                "display_name": "5.5",
                                 "context_window": 258400,
                             },
                             {
-                                "slug": "openai/gpt-5.4",
-                                "display_name": "OpenAI GPT-5.4",
+                                "slug": "gpt-5.4",
+                                "display_name": "5.4",
                                 "context_window": 272000,
                             },
                         ]
@@ -3743,11 +4454,165 @@ class RoutingTests(unittest.TestCase):
                 catalog = codex_proxy.current_catalog_data()
 
         by_slug = {model["slug"]: model for model in catalog["models"]}
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["display_name"], "OpenAI GPT-5.5 Fast")
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["context_window"], 258400)
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
-        self.assertEqual(by_slug["openai/gpt-5.5-fast"]["codex_proxy_metadata"]["service_tier"], "priority")
-        self.assertEqual(by_slug["openai/gpt-5.4-fast"]["display_name"], "OpenAI GPT-5.4 Fast")
+        self.assertNotIn("openai/gpt-5.5-fast", by_slug)
+        self.assertEqual(by_slug["gpt-5.5-fast"]["display_name"], "5.5 Fast")
+        self.assertEqual(by_slug["gpt-5.5-fast"]["context_window"], 258400)
+        self.assertEqual(by_slug["gpt-5.5-fast"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
+        self.assertEqual(by_slug["gpt-5.5-fast"]["codex_proxy_metadata"]["service_tier"], "priority")
+        self.assertEqual(by_slug["gpt-5.4-fast"]["display_name"], "5.4 Fast")
+
+    def test_current_catalog_data_exposes_vision_for_every_model_only_while_image_proxy_is_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_proxy_dir = Path(tmpdir) / "proxy"
+            runtime_proxy_dir.mkdir()
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "glm-5.2",
+                                "input_modalities": ["text"],
+                            },
+                            {
+                                "slug": "text-model-without-modalities",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "1"}, clear=False),
+            ):
+                enabled_catalog = codex_proxy.current_catalog_data()
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "0"}, clear=False),
+            ):
+                disabled_catalog = codex_proxy.current_catalog_data()
+
+        enabled_by_slug = {model["slug"]: model for model in enabled_catalog["models"]}
+        disabled_by_slug = {model["slug"]: model for model in disabled_catalog["models"]}
+        self.assertEqual(enabled_by_slug["glm-5.2"]["input_modalities"], ["text", "image"])
+        self.assertEqual(
+            enabled_by_slug["text-model-without-modalities"]["input_modalities"],
+            ["text", "image"],
+        )
+        self.assertEqual(disabled_by_slug["glm-5.2"]["input_modalities"], ["text"])
+        self.assertNotIn("input_modalities", disabled_by_slug["text-model-without-modalities"])
+
+    def test_current_catalog_data_applies_context_guard_only_to_openai_models(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_proxy_dir = Path(tmpdir) / "proxy"
+            runtime_proxy_dir.mkdir()
+            (runtime_proxy_dir / "settings.json").write_text(
+                json.dumps({"openai_context_guard_enabled": True}),
+                encoding="utf-8",
+            )
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-sol",
+                                "context_window": 353_000,
+                                "max_context_window": 353_000,
+                            },
+                            {
+                                "slug": "gpt-5.3-codex-spark",
+                                "context_window": 128_000,
+                                "max_context_window": 128_000,
+                            },
+                            {
+                                "slug": "glm-5.2",
+                                "context_window": 1_000_000,
+                                "max_context_window": 1_000_000,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+            ):
+                guarded_catalog = codex_proxy.current_catalog_data()
+
+            (runtime_proxy_dir / "settings.json").write_text(
+                json.dumps({"openai_context_guard_enabled": False}),
+                encoding="utf-8",
+            )
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+            ):
+                unguarded_catalog = codex_proxy.current_catalog_data()
+
+        guarded_by_slug = {model["slug"]: model for model in guarded_catalog["models"]}
+        unguarded_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
+        self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
+        self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["max_context_window"], 272_000)
+        self.assertEqual(guarded_by_slug["gpt-5.3-codex-spark"]["context_window"], 128_000)
+        self.assertEqual(guarded_by_slug["glm-5.2"]["context_window"], 1_000_000)
+        self.assertEqual(unguarded_by_slug["gpt-5.6-sol"]["context_window"], 353_000)
+
+    def test_current_catalog_data_dedupes_official_aliases_without_touching_third_party_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "openai/gpt-5.5",
+                                "display_name": "Legacy GPT-5.5",
+                                "context_window": 1,
+                                "enabled": True,
+                            },
+                            {
+                                "slug": "gpt-5.5",
+                                "display_name": "GPT-5.5",
+                                "context_window": 258400,
+                                "enabled": False,
+                            },
+                            {
+                                "slug": "acme/gpt-5.6-sol",
+                                "display_name": "Acme Sol",
+                            },
+                            {
+                                "slug": "ollama-cloud/glm-5.2",
+                                "display_name": "GLM-5.2",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path):
+                catalog = codex_proxy.current_catalog_data()
+
+        models = catalog["models"]
+        by_slug = {model["slug"]: model for model in models}
+        self.assertEqual(
+            [model["slug"] for model in models if not model["slug"].endswith("-fast")],
+            ["gpt-5.5", "acme/gpt-5.6-sol", "ollama-cloud/glm-5.2"],
+        )
+        self.assertNotIn("openai/gpt-5.5", by_slug)
+        self.assertEqual(by_slug["gpt-5.5"]["display_name"], "5.5")
+        self.assertEqual(by_slug["gpt-5.5"]["context_window"], 258400)
+        self.assertTrue(by_slug["gpt-5.5"]["enabled"])
+        self.assertIn("acme/gpt-5.6-sol", by_slug)
+        self.assertIn("ollama-cloud/glm-5.2", by_slug)
 
     def test_responses_to_chat_completion_body_preserves_input_images(self):
         body = json.dumps(
@@ -4670,7 +5535,7 @@ class RoutingTests(unittest.TestCase):
         for forbidden in ('"type":"compaction"', '"type":"compaction_trigger"', '"type":"reasoning"', "gAAAA"):
             self.assertNotIn(forbidden, raw)
 
-    def test_external_responses_structured_body_transcripts_ordinary_tool_history(self):
+    def test_external_responses_structured_body_preserves_available_tool_history(self):
         upstream = {
             "name": "ollama_cloud",
             "upstream_model": "glm-5.2",
@@ -4711,15 +5576,16 @@ class RoutingTests(unittest.TestCase):
         raw = transformed.decode("utf-8")
 
         self.assertEqual(payload["model"], "glm-5.2")
-        self.assertEqual([item["type"] for item in payload["input"][:4]], ["message", "message", "message", "message"])
-        self.assertEqual(payload["input"][1]["role"], "developer")
-        self.assertIn("Read-only Codex function call transcript", payload["input"][1]["content"])
-        self.assertIn("shell_command", payload["input"][1]["content"])
-        self.assertEqual(payload["input"][2]["role"], "developer")
-        self.assertIn("Read-only Codex function result transcript", payload["input"][2]["content"])
-        self.assertIn("Output", payload["input"][2]["content"])
-        self.assertNotIn('"type":"function_call"', raw)
-        self.assertNotIn('"type":"function_call_output"', raw)
+        self.assertEqual(
+            [item["type"] for item in payload["input"][:4]],
+            ["message", "function_call", "function_call_output", "message"],
+        )
+        self.assertEqual(payload["input"][1]["name"], "shell_command")
+        self.assertEqual(payload["input"][1]["call_id"], "call_shell")
+        self.assertEqual(payload["input"][2]["call_id"], "call_shell")
+        self.assertIn("Output", payload["input"][2]["output"])
+        self.assertIn('"type":"function_call"', raw)
+        self.assertIn('"type":"function_call_output"', raw)
 
     def test_external_no_tool_protocol_body_sanitizes_internal_input_items(self):
         upstream = {
@@ -12458,6 +13324,47 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(call["namespace"], "mcp__node_repl")
         self.assertEqual(call["name"], "js")
         self.assertEqual(json.loads(call["arguments"])["code"], "1+1")
+
+    def test_supported_third_party_effort_preserves_explicit_subagent_lifecycle_calls(self):
+        codex_proxy._validate_reasoning_effort_for_upstream(
+            {"reasoning": {"effort": "high"}},
+            {"name": "ollama_cloud", "auth": "api_key"},
+            "ollama-cloud/glm-5.2",
+        )
+        body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"message": "return sentinel"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "name": "multi_agent_v1__wait_agent",
+                        "arguments": json.dumps({"targets": ["child-1"]}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "name": "multi_agent_v1__close_agent",
+                        "arguments": json.dumps({"target": "child-1"}),
+                    },
+                ]
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_response_body(
+            body,
+            "ollama_cloud",
+            event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_NONE},
+        )
+        calls = json.loads(transformed)["output"]
+
+        self.assertEqual([call["namespace"] for call in calls], ["multi_agent_v1"] * 3)
+        self.assertEqual([call["name"] for call in calls], ["spawn_agent", "wait_agent", "close_agent"])
 
     def test_external_response_repairs_generic_trailing_argument_json(self):
         body = json.dumps(

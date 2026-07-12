@@ -1,7 +1,8 @@
 import type { Settings } from "./types";
 import { browserLocale, resolveLocale } from "../i18n";
 
-const DEFAULT_FAST_MODEL_VARIANTS = ["openai/gpt-5.5", "openai/gpt-5.4"];
+const DEFAULT_FAST_MODEL_VARIANTS = ["gpt-5.5", "gpt-5.4"];
+const ALLOWED_FAST_MODEL_VARIANTS = new Set(DEFAULT_FAST_MODEL_VARIANTS);
 
 const DEFAULT_SETTINGS: Settings = {
   locale: browserLocale(),
@@ -23,6 +24,7 @@ const DEFAULT_SETTINGS: Settings = {
   gateway_auto_retry_max_attempts: 30,
   gateway_image_proxy_enabled: false,
   gateway_image_proxy_model: "",
+  openai_context_guard_enabled: false,
   gateway_fast_model_variants: DEFAULT_FAST_MODEL_VARIANTS,
   official_disabled_models: [],
   official_model_sort_order: [],
@@ -50,10 +52,42 @@ export function normalizeSettings(settings: LegacySettings | null | undefined): 
       source.auto_sync_clients ??
       source.auto_sync_catalog ??
       DEFAULT_SETTINGS.auto_sync_clients,
-    gateway_fast_model_variants: source.gateway_fast_model_variants?.length
-      ? source.gateway_fast_model_variants
-      : DEFAULT_FAST_MODEL_VARIANTS,
-    official_disabled_models: source.official_disabled_models ?? [],
-    official_model_sort_order: source.official_model_sort_order ?? [],
+    gateway_fast_model_variants: normalizeFastModelVariants(source.gateway_fast_model_variants),
+    official_disabled_models: normalizeModelIds(source.official_disabled_models),
+    official_model_sort_order: normalizeModelIds(source.official_model_sort_order),
   };
+}
+
+export function normalizeOfficialModelId(
+  value: string,
+  knownOfficialIds: ReadonlySet<string> = new Set([
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+  ]),
+): string | null {
+  value = value.trim();
+  if (value.startsWith("openai/gpt-")) {
+    const bare = value.slice("openai/".length);
+    return knownOfficialIds.has(bare) ? bare : null;
+  }
+  return value;
+}
+
+function normalizeModelIds(values: string[] | null | undefined) {
+  const output: string[] = [];
+  for (const value of values ?? []) {
+    const normalized = normalizeOfficialModelId(value);
+    if (normalized && !output.includes(normalized)) {
+      output.push(normalized);
+    }
+  }
+  return output;
+}
+
+function normalizeFastModelVariants(values: string[] | null | undefined) {
+  const source = values?.length ? values : DEFAULT_FAST_MODEL_VARIANTS;
+  const normalized = normalizeModelIds(source).filter((value) => ALLOWED_FAST_MODEL_VARIANTS.has(value));
+  return normalized.length ? normalized : [...DEFAULT_FAST_MODEL_VARIANTS];
 }

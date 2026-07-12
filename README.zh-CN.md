@@ -129,8 +129,10 @@ POST /v1/providers/{provider}/chat/completions
 ```text
 Base URL: http://127.0.0.1:9099/v1
 API key:  CodexHub 设置中的 Local client key
-Model:    openai/gpt-5.5 或 provider/model
+Model:    gpt-5.5 或 provider/model
 ```
+
+官方 OpenAI 模型使用裸 ID；旧版 `openai/gpt-*` 别名仍作为兼容输入保留。
 
 按 Provider 分流时，客户端可以使用：
 

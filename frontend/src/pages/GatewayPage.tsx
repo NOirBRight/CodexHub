@@ -45,9 +45,8 @@ interface GatewayPageProps {
   usageStatus: TelemetryStatus | null;
   recentEvents: GatewayEvent[];
   clientInfos: GatewayClientInfo[];
-  onApplySettings: (settings: Settings) => Promise<void>;
+  onApplySettings: (settings: Settings) => Promise<string>;
   onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
-  onRestartProxy: () => Promise<void>;
   onStartProxy: () => Promise<void>;
   onStopProxy: () => Promise<void>;
   onUsageWindowChange: (window: UsageQueryWindow) => void;
@@ -63,7 +62,6 @@ function GatewayPageImpl({
   clients,
   onApplySettings,
   onRefreshClients,
-  onRestartProxy,
   onStartProxy,
   onStopProxy,
   onUsageWindowChange,
@@ -146,7 +144,6 @@ function GatewayPageImpl({
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
-  const currentAppGatewayUrl = currentAppGatewayEndpoint(appFlavor, settings, status);
 
   function markCopied(target: string) {
     setCopiedTarget(target);
@@ -257,25 +254,10 @@ function GatewayPageImpl({
       proxy_port: Math.min(65535, Math.max(1024, cleanPort)),
       gateway_request_timeout_seconds: Math.min(600, Math.max(5, cleanTimeout)),
     };
-    const portChanged = next.proxy_port !== settings.proxy_port;
-    const timeoutChanged = next.gateway_request_timeout_seconds !== settings.gateway_request_timeout_seconds;
-    const keyChanged = next.gateway_client_key !== settings.gateway_client_key;
-    const restartRequired = running && (portChanged || timeoutChanged);
-    const toastId = showToast(
-      restartRequired ? t("gateway.saveRestarting") : t("gateway.savingSettings"),
-      "loading",
-    );
+    const toastId = showToast(t("gateway.savingSettings"), "loading");
 
     try {
-      await onApplySettings(next);
-      if (restartRequired) {
-        await onRestartProxy();
-      }
-      const message = restartRequired
-        ? t("gateway.gatewaySettingsSavedRestarted")
-        : keyChanged && !portChanged && !timeoutChanged
-          ? t("gateway.apiKeySavedNoRestart")
-          : t("gateway.gatewaySettingsSaved");
+      const message = await onApplySettings(next);
       updateToast(toastId, {
         action: null,
         text: message,
@@ -302,35 +284,21 @@ function GatewayPageImpl({
     const clientName =
       clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
     const client = clientInfoById.get(clientId);
-    if (!forceTakeover && client && client.managed_by_current_app === false) {
-      if (!runtimeOwner) {
-        setClientBusy(null);
-        showToast(t("gateway.ownerUnavailable"), "error");
-        return;
-      }
-      const confirmText = t("gateway.takeoverConfirm", {
-        name: client.name,
-        path: client.config_path ?? t("common.unknown"),
-        current: ownerDisplayName(client.route_owner, t),
-        next: ownerDisplayName(runtimeOwner, t),
-        oldEndpoint: client.route_endpoint ?? t("common.unknown"),
-        newEndpoint: currentAppGatewayUrl ?? t("common.unknown"),
-      });
-      if (!window.confirm(confirmText)) {
-        setClientBusy(null);
-        return;
-      }
-      forceTakeover = true;
-      owner = runtimeOwner;
+    const takeoverRequired = client?.route_owner !== "official" && client?.managed_by_current_app === false;
+    if (takeoverRequired && !runtimeOwner) {
+      setClientBusy(null);
+      showToast(t("gateway.ownerUnavailable"), "error");
+      return;
     }
+    const shouldForceTakeover = forceTakeover || takeoverRequired;
     const routeName = ownerDisplayName(owner, t);
     const toastId = showToast(t("gateway.switchClient", { clientName, routeName }), "loading");
     try {
-      await api.switchGatewayClientRoute(clientId, owner, defaultModel, forceTakeover);
+      await api.switchGatewayClientRoute(clientId, owner, defaultModel, shouldForceTakeover);
       await onRefreshClients();
       updateToast(toastId, {
         action: null,
-        text: t("gateway.switchClientDone", { clientName, routeName }),
+        text: t("gateway.switchClientDoneRestart", { clientName, routeName }),
         tone: "success",
       });
       setError(null);
@@ -398,6 +366,9 @@ function GatewayPageImpl({
     }
     if (action === "official") {
       return void switchClientMode(clientId, "official");
+    }
+    if (action === "takeover") {
+      return void switchClientMode(clientId, runtimeOwner, true);
     }
     return void switchClientMode(clientId, runtimeOwner);
   }
@@ -599,7 +570,12 @@ function GatewayPageImpl({
         <StackedUsageChartShell
           events={usageEvents}
           onWindowChange={onUsageWindowChange}
-          pendingMessage={pending?.usage ?? t("gateway.pendingUsage")}
+          pendingMessage={
+            pending?.usage ??
+            (appFlavor?.flavor === "beta"
+              ? t("gateway.betaUsageIsolated")
+              : t("gateway.pendingUsage"))
+          }
           providers={providers}
           summary={usageSummary}
           telemetryStatus={usageStatus}
@@ -1099,18 +1075,6 @@ function isRecoveryRetryStillActive(event: GatewayEvent) {
 function recoveryEventTime(event: GatewayEvent) {
   const timestamp = event.ts ? Date.parse(event.ts) : NaN;
   return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function currentAppGatewayEndpoint(
-  appFlavor?: AppFlavorInfo | null,
-  settings?: Settings | null,
-  status?: GatewayStatus | null,
-) {
-  const port = settings?.proxy_port ?? status?.port ?? appFlavor?.gateway_port;
-  if (!port) {
-    return null;
-  }
-  return `http://127.0.0.1:${port}/v1`;
 }
 
 function ownerDisplayName(owner: RoutingOwner, t: (key: string) => string) {

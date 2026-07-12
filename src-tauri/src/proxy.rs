@@ -43,20 +43,37 @@ pub fn restart() -> Result<AppStatus, String> {
 #[derive(Debug, Clone)]
 struct ProxyPaths {
     codex_dir: PathBuf,
+    codex_target_dir: PathBuf,
     repo_root: PathBuf,
 }
 
 impl ProxyPaths {
     fn runtime() -> Result<Self, String> {
-        let codex_dir = runtime_paths::codex_home_dir()?;
+        let codex_dir = runtime_paths::runtime_home_dir()?;
+        let codex_target_dir = runtime_paths::codex_target_home_dir()?;
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, repo_root))
+        Ok(Self::new_isolated(codex_dir, codex_target_dir, repo_root))
     }
 
+    #[cfg(test)]
     fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+        let codex_dir = codex_dir.into();
         Self {
-            codex_dir: codex_dir.into(),
+            codex_target_dir: codex_dir.clone(),
+            codex_dir,
+            repo_root: repo_root.into(),
+        }
+    }
+
+    fn new_isolated(
+        runtime_dir: impl Into<PathBuf>,
+        codex_target_dir: impl Into<PathBuf>,
+        repo_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            codex_dir: runtime_dir.into(),
+            codex_target_dir: codex_target_dir.into(),
             repo_root: repo_root.into(),
         }
     }
@@ -74,7 +91,7 @@ impl ProxyPaths {
     }
 
     fn codex_config_path(&self) -> PathBuf {
-        self.codex_dir.join("config.toml")
+        self.codex_target_dir.join("config.toml")
     }
 
     fn proxy_script_path(&self) -> PathBuf {
@@ -108,6 +125,7 @@ struct SettingsDocument {
     gateway_auto_retry_max_attempts: Option<u32>,
     gateway_image_proxy_enabled: Option<bool>,
     gateway_image_proxy_model: Option<String>,
+    openai_context_guard_enabled: Option<bool>,
     gateway_fast_model_variants: Option<Vec<String>>,
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
@@ -179,6 +197,9 @@ impl SettingsDocument {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or(defaults.gateway_image_proxy_model),
+            openai_context_guard_enabled: self
+                .openai_context_guard_enabled
+                .unwrap_or(defaults.openai_context_guard_enabled),
             gateway_fast_model_variants: self
                 .gateway_fast_model_variants
                 .unwrap_or(defaults.gateway_fast_model_variants),
@@ -306,9 +327,46 @@ fn start_with_paths_and_timeout(
     paths: &ProxyPaths,
     timeout: Duration,
 ) -> Result<AppStatus, String> {
+    start_with_paths_and_timing(paths, timeout, Duration::from_millis(200), &health)
+}
+
+fn start_with_paths_and_timing(
+    paths: &ProxyPaths,
+    timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+) -> Result<AppStatus, String> {
+    start_with_paths_and_waiter(
+        paths,
+        timeout,
+        poll_interval,
+        health_probe,
+        |child, port, timeout, poll_interval, health_probe, _output_capture| {
+            wait_for_startup_health(child, port, timeout, poll_interval, health_probe)
+        },
+    )
+}
+
+fn start_with_paths_and_waiter<F>(
+    paths: &ProxyPaths,
+    timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+    wait_for_startup: F,
+) -> Result<AppStatus, String>
+where
+    F: FnOnce(
+        &mut Child,
+        u16,
+        Duration,
+        Duration,
+        &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+        &StartupOutputCapture,
+    ) -> Result<StartupOutcome, String>,
+{
     let settings = read_settings(paths)?;
     let mode = read_mode(paths)?;
-    if let Some(response) = health(settings.proxy_port)? {
+    if let Some(response) = health_probe(settings.proxy_port)? {
         if response.is_running() {
             return Ok(AppStatus {
                 mode,
@@ -352,7 +410,14 @@ fn start_with_paths_and_timeout(
         return Err(error);
     }
 
-    match wait_for_startup_health(&mut child, settings.proxy_port, timeout)? {
+    match wait_for_startup(
+        &mut child,
+        settings.proxy_port,
+        timeout,
+        poll_interval,
+        health_probe,
+        &output_capture,
+    )? {
         StartupOutcome::Healthy(response) => Ok(AppStatus {
             mode,
             proxy_running: true,
@@ -621,6 +686,7 @@ fn build_start_command(
         .current_dir(paths.proxy_script_dir())
         .env("PYTHONPATH", paths.proxy_script_dir())
         .env("CODEX_HOME", paths.codex_dir.clone())
+        .env("CODEXHUB_CODEX_TARGET_HOME", paths.codex_target_dir.clone())
         .env(
             "CODEX_PROXY_GATEWAY_CLIENT_KEY",
             settings.gateway_client_key.trim(),
@@ -1156,10 +1222,12 @@ fn wait_for_startup_health(
     child: &mut Child,
     port: u16,
     timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
 ) -> Result<StartupOutcome, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(response) = health(port)? {
+        if let Some(response) = health_probe(port)? {
             if response.is_running() {
                 return Ok(StartupOutcome::Healthy(response));
             }
@@ -1173,7 +1241,7 @@ fn wait_for_startup_health(
         if Instant::now() >= deadline {
             return Ok(StartupOutcome::TimedOut);
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(poll_interval);
     }
 }
 
@@ -1444,10 +1512,10 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 mod tests {
     use super::{
         build_start_command, comparable_path, configure_start_stdio, detect_mode, find_python,
-        read_pid, read_pid_record, start_with_paths, start_with_paths_and_timeout,
-        status_with_paths, stop_with_paths, stop_with_paths_and_controls, write_pid,
-        InspectedProcess, ProcessInfo, ProcessInspector, ProcessKiller, ProxyPaths,
-        ProxyPidMetadata, ProxyPidRecord,
+        read_pid, read_pid_record, start_with_paths, start_with_paths_and_waiter, status_with_paths,
+        stop_with_paths, stop_with_paths_and_controls, write_pid, InspectedProcess, ProcessInfo,
+        ProcessInspector, ProcessKiller, ProxyPaths, ProxyPidMetadata, ProxyPidRecord,
+        StartupOutcome,
     };
     use crate::Settings;
     use std::cell::RefCell;
@@ -1456,7 +1524,8 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn status_returns_not_running_when_health_endpoint_is_unavailable() {
@@ -1723,8 +1792,28 @@ time.sleep(10)
 "#,
         );
 
-        let error = start_with_paths_and_timeout(&paths, Duration::from_secs(5))
-            .expect_err("startup should time out");
+        let error = start_with_paths_and_waiter(
+            &paths,
+            Duration::ZERO,
+            Duration::ZERO,
+            &|_| Ok(None),
+            |_child, _port, _timeout, _poll_interval, _health_probe, output_capture| {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let output = output_capture.snapshot();
+                    if output.stdout.contains("fake proxy stdout during startup")
+                        && output.stderr.contains("fake proxy stderr during startup")
+                    {
+                        return Ok(StartupOutcome::TimedOut);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("fake proxy did not emit startup output in time".to_string());
+                    }
+                    thread::yield_now();
+                }
+            },
+        )
+        .expect_err("startup should time out");
 
         assert!(error.contains("did not become healthy"));
         assert!(error.contains("startup stdout"));
@@ -1814,6 +1903,28 @@ time.sleep(10)
                 .and_then(|value| value.to_str()),
             Some("minimax-cn/MiniMax-M3")
         );
+    }
+
+    #[test]
+    fn beta_style_start_command_separates_runtime_and_codex_target_homes() {
+        let root = temp_root("isolated-start-homes");
+        let runtime_home = root.join(".codexhub-beta");
+        let target_home = root.join(".codex");
+        let paths = ProxyPaths::new_isolated(&runtime_home, &target_home, root.join("repo"));
+        let command = build_start_command(
+            Path::new("python-test"),
+            &paths.proxy_script_path(),
+            &paths,
+            &Settings::default(),
+        );
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| (key.to_string_lossy().into_owned(), value.map(PathBuf::from)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("CODEX_HOME"), Some(&Some(runtime_home)));
+        assert_eq!(envs.get("CODEXHUB_CODEX_TARGET_HOME"), Some(&Some(target_home)));
+        assert_eq!(paths.codex_config_path(), root.join(".codex/config.toml"));
     }
 
     #[test]
@@ -1974,11 +2085,22 @@ time.sleep(10)
         let target = repo_root.join("src-python");
         fs::create_dir_all(&target).unwrap();
 
-        for entry in fs::read_dir(source).unwrap() {
+        for entry in fs::read_dir(&source).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) == Some("py") {
                 fs::copy(&path, target.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+
+        let vendor_source = source.join("vendor");
+        let vendor_target = target.join("vendor");
+        fs::create_dir_all(&vendor_target).unwrap();
+        for entry in fs::read_dir(vendor_source).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("whl") {
+                fs::copy(&path, vendor_target.join(path.file_name().unwrap())).unwrap();
             }
         }
 

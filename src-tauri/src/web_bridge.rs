@@ -190,9 +190,10 @@ fn handle_request(
     app: Option<AppHandle>,
 ) -> Result<BridgeResponse, String> {
     if !origin_allowed(request.origin.as_deref()) {
-        return Ok(BridgeResponse::error(
+        return Ok(BridgeResponse::typed_error(
             403,
             "origin is not allowed for CodexHub web bridge".to_string(),
+            BridgeErrorKind::OriginNotAllowed,
         ));
     }
     if request.method == "OPTIONS" {
@@ -253,7 +254,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "switch_mode" => {
             let mode = string_arg(&request.args, "mode")?;
             let auto_sync = bool_arg(&request.args, "autoSync")?;
-            to_value(config::switch_mode(&mode, auto_sync))
+            let force_takeover = optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"])
+                .unwrap_or(false);
+            to_value(config::switch_mode_with_takeover(&mode, auto_sync, force_takeover))
         }
         "start_proxy" => to_value(proxy::start()),
         "stop_proxy" => to_value(proxy::stop()),
@@ -282,6 +285,11 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             )
             .map_err(|error| format!("invalid settings argument: {error}"))?;
             to_value(config::save_settings(settings))
+        }
+        "get_codex_context_guard_status" => to_value(config::get_codex_context_guard_status()),
+        "set_codex_context_guard" => {
+            let enabled = bool_arg(&request.args, "enabled")?;
+            to_value(config::set_codex_context_guard(enabled))
         }
         "refresh_official_models" => to_value(models::refresh_official_models()),
         "openai_usage_completions" => {
@@ -486,11 +494,54 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .map(ToOwned::to_owned);
             to_value(history::sync_history(target_provider.as_deref()))
         }
+        "reconcile_after_route_switch" => {
+            let target_provider = request
+                .args
+                .get("targetProvider")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            to_value(history::reconcile_after_route_switch(
+                target_provider.as_deref(),
+            ))
+        }
         "migrate_official_history_to_unified" => {
             to_value(history::migrate_official_history_to_unified())
         }
         "restore_official_history_from_unified" => {
             to_value(history::restore_official_history_from_unified())
+        }
+        "preflight_unified_history" => {
+            let apply_repairs = optional_bool_arg(
+                &request.args,
+                &[
+                    "applyRepairs",
+                    "apply_repairs",
+                    "requestRestart",
+                    "request_restart",
+                ],
+            )
+            .unwrap_or(false);
+            let target_unified =
+                optional_bool_arg(&request.args, &["targetUnified", "target_unified"]);
+            to_value(history::preflight_unified_history(
+                apply_repairs,
+                target_unified,
+            ))
+        }
+        "get_conversation_sync_status" => {
+            to_value(history::preflight_unified_history(false, None))
+        }
+        "sync_conversation_history" => {
+            let target_provider = request.args.get("targetProvider").and_then(Value::as_str);
+            to_value(history::preflight_unified_history(
+                true,
+                target_provider.map(|value| value != "openai"),
+            ))
+        }
+        "diagnose_conversation_history" => {
+            let _full_scan = optional_bool_arg(&request.args, &["fullScan", "full_scan"])
+                .unwrap_or(true);
+            to_value(history::preflight_unified_history(false, None))
         }
         "sync_catalog" => to_value(catalog::sync_catalog()),
         "set_autostart" => to_value(autostart::set_autostart(bool_arg(
@@ -514,17 +565,24 @@ fn to_value<T: serde::Serialize>(result: Result<T, String>) -> Result<Value, Str
     })
 }
 
-fn bridge_error_code(status: u16, error: &str) -> &'static str {
-    let lowered = error.to_ascii_lowercase();
-    if status == 403 && lowered.contains("origin") {
-        return "config.origin";
-    }
-    "backend.command"
+#[derive(Debug, Clone, Copy)]
+enum BridgeErrorKind {
+    BackendCommand,
+    OriginNotAllowed,
 }
 
-fn bridge_error_payload(status: u16, error: &str) -> Value {
+impl BridgeErrorKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::BackendCommand => "backend.command",
+            Self::OriginNotAllowed => "config.origin",
+        }
+    }
+}
+
+fn bridge_error_payload(status: u16, error: &str, kind: BridgeErrorKind) -> Value {
     json!({
-        "code": bridge_error_code(status, error),
+        "code": kind.code(),
         "message": error,
         "source": "web_bridge",
         "retryable": false,
@@ -599,7 +657,11 @@ impl BridgeResponse {
     }
 
     fn error(status: u16, error: String) -> Self {
-        let codexhub_error = bridge_error_payload(status, &error);
+        Self::typed_error(status, error, BridgeErrorKind::BackendCommand)
+    }
+
+    fn typed_error(status: u16, error: String, kind: BridgeErrorKind) -> Self {
+        let codexhub_error = bridge_error_payload(status, &error, kind);
         Self::json(
             status,
             json!({
@@ -632,7 +694,7 @@ impl BridgeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_request, origin_allowed, BridgeRequest};
+    use super::{handle_request, origin_allowed, BridgeRequest, BridgeResponse};
     use serde_json::json;
 
     #[test]
@@ -711,6 +773,14 @@ mod tests {
         assert_eq!(body["codexhub_error"]["code"], "config.origin");
         assert_eq!(body["codexhub_error"]["source"], "web_bridge");
         assert_eq!(body["codexhub_error"]["retryable"], false);
+    }
+
+    #[test]
+    fn backend_error_text_cannot_impersonate_origin_policy_error() {
+        let response = BridgeResponse::error(403, "backend origin lookup failed".to_string());
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+
+        assert_eq!(body["codexhub_error"]["code"], "backend.command");
     }
 
     #[test]

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from atomic_io import atomic_write_text
 import re
 import sys
+from urllib.parse import urlsplit
 
 
 MARKER_BEGIN = "# BEGIN CODEX PROXY SESSION CONFIG"
 MARKER_END = "# END CODEX PROXY SESSION CONFIG"
-TOP_LEVEL_KEYS = {"model", "model_provider", "model_catalog_json", "openai_base_url"}
+TOP_LEVEL_KEYS = {"model_provider", "model_catalog_json", "openai_base_url"}
 PROXY_FEATURE_FLAGS = {
     "responses_websockets": "false",
     "responses_websockets_v2": "false",
@@ -23,10 +26,20 @@ STALE_PROXY_PROVIDER_SECTIONS = (
     "model_providers.custom",
     "model_providers.codex_proxy",
 )
+CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
+CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT = 240_000
+CONTEXT_GUARD_KEYS = {
+    "model_context_window",
+    "model_auto_compact_token_limit",
+}
 
 
 def toml_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def toml_basic_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
 def strip_marked_overlay(text: str) -> str:
@@ -87,6 +100,142 @@ def top_level_value(text: str, key: str) -> str | None:
     return None
 
 
+def set_top_level_values(text: str, values: dict[str, str | None]) -> str:
+    cleaned = strip_top_level_keys(text, set(values))
+    assignments = [f"{key} = {value}" for key, value in values.items() if value is not None]
+    if not assignments:
+        return cleaned
+
+    prefix = "\n".join(assignments)
+    if cleaned.strip():
+        return f"{prefix}\n\n{cleaned.lstrip()}"
+    return f"{prefix}\n"
+
+
+def _top_level_positive_int(text: str, key: str) -> int | None:
+    raw = top_level_value(text, key)
+    if raw is None:
+        return None
+    try:
+        value = int(raw.replace("_", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def context_guard_status(config_path: Path) -> dict[str, int | bool | None]:
+    text = read_text_preserving_newlines(config_path) if config_path.exists() else ""
+    context_window = _top_level_positive_int(text, "model_context_window")
+    auto_compact_token_limit = _top_level_positive_int(
+        text,
+        "model_auto_compact_token_limit",
+    )
+    return {
+        "enabled": (
+            context_window == CONTEXT_GUARD_CONTEXT_WINDOW
+            and auto_compact_token_limit == CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
+        ),
+        "model_context_window": context_window,
+        "model_auto_compact_token_limit": auto_compact_token_limit,
+    }
+
+
+def _context_guard_previous_values(text: str) -> dict[str, str | None]:
+    previous = {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
+    if (
+        _top_level_positive_int(text, "model_context_window")
+        == CONTEXT_GUARD_CONTEXT_WINDOW
+        and _top_level_positive_int(text, "model_auto_compact_token_limit")
+        == CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
+    ):
+        return {key: None for key in CONTEXT_GUARD_KEYS}
+    return previous
+
+
+def _normalized_context_guard_values(payload: object) -> dict[str, str | None]:
+    if not isinstance(payload, dict):
+        return {key: None for key in CONTEXT_GUARD_KEYS}
+    return {
+        key: payload.get(key) if isinstance(payload.get(key), str) else None
+        for key in CONTEXT_GUARD_KEYS
+    }
+
+
+def _read_context_guard_state(
+    state_path: Path,
+) -> dict[str, dict[str, str | None]] | None:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if "config" in payload or "backup" in payload:
+        return {
+            target: _normalized_context_guard_values(values)
+            for target, values in payload.items()
+            if target in {"config", "backup"}
+        }
+
+    # Read the pre-release single-snapshot shape conservatively if a test build
+    # created state before live and backup values were tracked independently.
+    legacy_values = _normalized_context_guard_values(payload)
+    return {"config": legacy_values, "backup": legacy_values}
+
+
+def set_context_guard(
+    config_path: Path,
+    backup_path: Path,
+    state_path: Path,
+    *,
+    enabled: bool,
+) -> dict[str, int | bool | None]:
+    managed_values = {
+        "model_context_window": str(CONTEXT_GUARD_CONTEXT_WINDOW),
+        "model_auto_compact_token_limit": str(CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT),
+    }
+    target_paths = {"config": config_path}
+    if backup_path.exists():
+        target_paths["backup"] = backup_path
+    if enabled:
+        if not state_path.exists():
+            previous = {
+                target: _context_guard_previous_values(
+                    read_text_preserving_newlines(path) if path.exists() else ""
+                )
+                for target, path in target_paths.items()
+            }
+            atomic_write_text(
+                state_path,
+                json.dumps(previous, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        for path in target_paths.values():
+            text = read_text_preserving_newlines(path) if path.exists() else ""
+            atomic_write_text(path, set_top_level_values(text, managed_values), encoding="utf-8")
+    else:
+        previous_by_target = _read_context_guard_state(state_path) or {}
+        for target, path in target_paths.items():
+            if not path.exists():
+                continue
+            previous = previous_by_target.get(
+                target,
+                {key: None for key in CONTEXT_GUARD_KEYS},
+            )
+            text = read_text_preserving_newlines(path)
+            updates = {
+                key: previous.get(key)
+                for key, managed_value in managed_values.items()
+                if top_level_value(text, key) == managed_value
+            }
+            if updates:
+                atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
+        state_path.unlink(missing_ok=True)
+
+    return context_guard_status(config_path)
+
+
 def section_key_values(text: str, section_name: str) -> dict[str, str] | None:
     header_pattern = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
     key_pattern = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*(?:#.*)?$")
@@ -122,8 +271,45 @@ def unified_official_provider_values() -> dict[str, str]:
     }
 
 
-def has_exact_unified_official_provider(text: str) -> bool:
-    return section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}") == unified_official_provider_values()
+@dataclass(frozen=True)
+class UnifiedConfigState:
+    provider_id: str | None
+    custom_section: dict[str, str] | None
+    exact_unified: bool
+    managed_gateway: bool
+    stale_catalog: bool
+
+
+def is_managed_gateway_provider(values: dict[str, str] | None) -> bool:
+    if not values or values.get("name") != PROXY_PROVIDER_NAME:
+        return False
+    if values.get("wire_api") != "responses":
+        return False
+    if values.get("supports_websockets") != "false":
+        return False
+    legacy_auth = values.get("requires_openai_auth") == "true" and "experimental_bearer_token" not in values
+    keyed_auth = "experimental_bearer_token" in values and values.get("requires_openai_auth") in {"true", "false"}
+    if not (legacy_auth or keyed_auth):
+        return False
+    parsed = urlsplit(values.get("base_url", ""))
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        and parsed.port is not None
+        and parsed.path.rstrip("/") == "/v1"
+    )
+
+
+def unified_config_state(text: str) -> UnifiedConfigState:
+    provider_id = top_level_value(text, "model_provider")
+    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    return UnifiedConfigState(
+        provider_id=provider_id,
+        custom_section=custom_section,
+        exact_unified=custom_section == unified_official_provider_values(),
+        managed_gateway=is_managed_gateway_provider(custom_section),
+        stale_catalog=top_level_value(text, "model_catalog_json") is not None,
+    )
 
 
 def build_unified_official_provider_section() -> str:
@@ -139,38 +325,58 @@ def build_unified_official_provider_section() -> str:
     )
 
 
-def inject_unified_history_config(text: str) -> tuple[str, str]:
-    provider_id = top_level_value(text, "model_provider")
-    if provider_id is not None:
-        if provider_id == PROXY_PROVIDER_ID and has_exact_unified_official_provider(text):
-            return text, "already_unified"
-        if provider_id != "openai":
-            return text, "explicit_model_provider"
-        text = strip_top_level_keys(text, {"model_provider"})
+def inspect_unified_history_config(text: str, unified_history: bool = True) -> str:
+    state = unified_config_state(text)
+    if state.provider_id == PROXY_PROVIDER_ID and state.managed_gateway:
+        return "gateway_active"
+    if state.provider_id not in {None, "openai", PROXY_PROVIDER_ID}:
+        return "conflict"
+    if state.custom_section is not None and not (state.exact_unified or state.managed_gateway):
+        return "conflict"
+    if unified_history:
+        if state.provider_id == PROXY_PROVIDER_ID and state.exact_unified and not state.stale_catalog:
+            return "clean"
+    elif state.provider_id in {None, "openai"} and state.custom_section is None and not state.stale_catalog:
+        return "clean"
+    return "needs_repair"
 
-    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
-    if custom_section is not None and custom_section != unified_official_provider_values():
+
+def inject_unified_history_config(text: str) -> tuple[str, str]:
+    state = unified_config_state(text)
+    if state.provider_id is not None:
+        if state.provider_id == PROXY_PROVIDER_ID and state.exact_unified and not state.stale_catalog:
+            return text, "already_unified"
+        if state.provider_id not in {"openai", PROXY_PROVIDER_ID}:
+            return text, "explicit_model_provider"
+        if state.provider_id == PROXY_PROVIDER_ID and not (state.exact_unified or state.managed_gateway):
+            return text, "explicit_model_provider"
+
+    if state.custom_section is not None and not (state.exact_unified or state.managed_gateway):
         return text, "conflicting_custom_provider"
 
-    updated = text
-    if custom_section is None:
-        updated = insert_provider_section(updated, build_unified_official_provider_section())
+    updated = strip_top_level_keys(text, {"model_provider", "model_catalog_json", "openai_base_url"})
+    if state.custom_section is not None:
+        updated = strip_section(updated, f"model_providers.{PROXY_PROVIDER_ID}")
+    updated = insert_provider_section(updated, build_unified_official_provider_section())
 
     prefix = f'model_provider = "{PROXY_PROVIDER_ID}"\n'
     if updated.strip():
         updated = prefix + "\n" + updated.lstrip()
     else:
         updated = prefix
+    if state.managed_gateway:
+        return updated, "replaced_managed_gateway"
+    if state.exact_unified:
+        return updated, "repaired_unified"
     return updated, "injected"
 
 
 def strip_unified_history_config(text: str) -> str:
-    if top_level_value(text, "model_provider") != PROXY_PROVIDER_ID:
-        return text
-    if not has_exact_unified_official_provider(text):
+    custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    if custom_section != unified_official_provider_values() and not is_managed_gateway_provider(custom_section):
         return text
     stripped = strip_section(text, f"model_providers.{PROXY_PROVIDER_ID}")
-    stripped = strip_top_level_keys(stripped, {"model_provider"})
+    stripped = strip_top_level_keys(stripped, {"model_provider", "model_catalog_json", "openai_base_url"})
     return stripped.lstrip() if text.startswith("model_provider") else stripped
 
 
@@ -211,11 +417,8 @@ def set_feature_flags(text: str, flags: dict[str, str]) -> str:
     return "\n".join(result + suffix).rstrip() + "\n"
 
 
-def catalog_config_value(config_path: Path, catalog_path: Path) -> str:
-    try:
-        return catalog_path.resolve().relative_to(config_path.parent.resolve()).as_posix()
-    except ValueError:
-        return str(catalog_path)
+def catalog_config_value(_config_path: Path, catalog_path: Path) -> str:
+    return str(catalog_path.resolve())
 
 
 def build_overlay(catalog_value: str, owner: str) -> str:
@@ -223,7 +426,6 @@ def build_overlay(catalog_value: str, owner: str) -> str:
         [
             MARKER_BEGIN,
             f"# owner = {owner}",
-            'model = "openai/gpt-5.5"',
             f'model_provider = "{PROXY_PROVIDER_ID}"',
             f"model_catalog_json = {toml_literal(catalog_value)}",
             MARKER_END,
@@ -232,7 +434,53 @@ def build_overlay(catalog_value: str, owner: str) -> str:
     )
 
 
-def build_provider_section(base_url: str) -> str:
+def overlay_owner(text: str) -> str | None:
+    match = re.search(r"(?m)^\s*# owner = (release|beta)\s*$", text)
+    return match.group(1) if match else None
+
+
+def read_text_preserving_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def takeover_metadata_path(backup_path: Path) -> Path:
+    return backup_path.with_name(f"{backup_path.name}.takeover.json")
+
+
+def write_takeover_metadata(backup_path: Path, takeover_owner: str, original_owner: str | None) -> None:
+    metadata = {
+        "version": 1,
+        "takeover_owner": takeover_owner,
+        "original_owner": original_owner,
+    }
+    atomic_write_text(
+        takeover_metadata_path(backup_path),
+        json.dumps(metadata, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def is_active_takeover_backup(config_text: str, backup_text: str, backup_path: Path) -> bool:
+    metadata_path = takeover_metadata_path(backup_path)
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if metadata.get("version") != 1:
+        return False
+    takeover_owner = metadata.get("takeover_owner")
+    original_owner = metadata.get("original_owner")
+    if takeover_owner not in {"release", "beta"}:
+        return False
+    if original_owner not in {None, "release", "beta"}:
+        return False
+    if original_owner == takeover_owner:
+        return False
+    return overlay_owner(config_text) == takeover_owner and overlay_owner(backup_text) == original_owner
+
+
+def build_provider_section(base_url: str, gateway_key: str) -> str:
     return "\n".join(
         [
             f"[model_providers.{PROXY_PROVIDER_ID}]",
@@ -240,6 +488,7 @@ def build_provider_section(base_url: str) -> str:
             f"base_url = {toml_literal(base_url.rstrip('/') + '/v1')}",
             'wire_api = "responses"',
             "requires_openai_auth = true",
+            f"experimental_bearer_token = {toml_basic_string(gateway_key)}",
             "supports_websockets = false",
             "",
         ]
@@ -261,26 +510,50 @@ def apply_overlay(
     catalog_path: Path,
     base_url: str,
     owner: str = "release",
+    takeover: bool = False,
+    gateway_key: str = "codexhub-proxy",
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
-    original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    original = read_text_preserving_newlines(config_path) if config_path.exists() else ""
+    custom_section = section_key_values(original, f"model_providers.{PROXY_PROVIDER_ID}")
+    if custom_section is not None and not (
+        custom_section == unified_official_provider_values() or is_managed_gateway_provider(custom_section)
+    ):
+        raise ValueError("refusing to overwrite unknown custom provider")
     cleaned = strip_marked_overlay(original)
-    atomic_write_text(backup_path, cleaned if cleaned != original else original, encoding="utf-8")
+    active_owner = overlay_owner(original)
+    cross_owner_takeover = takeover and active_owner != owner
+    if active_owner != owner or not backup_path.exists():
+        backup = original if cross_owner_takeover else (cleaned if cleaned != original else original)
+        atomic_write_text(backup_path, backup, encoding="utf-8")
+        metadata_path = takeover_metadata_path(backup_path)
+        if cross_owner_takeover:
+            write_takeover_metadata(backup_path, owner, active_owner)
+        elif metadata_path.exists():
+            metadata_path.unlink()
 
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
     updated = build_overlay(catalog_config_value(config_path, catalog_path), owner) + cleaned.lstrip()
-    updated = insert_provider_section(updated, build_provider_section(base_url))
+    updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
 
 
 def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
     if backup_path.exists():
-        restored = backup_path.read_text(encoding="utf-8")
+        restored = read_text_preserving_newlines(backup_path)
+        current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
         restore_from_backup = True
+        if is_active_takeover_backup(current, restored, backup_path):
+            restored_owner = overlay_owner(restored)
+            if not unified_history or restored_owner is not None:
+                atomic_write_text(config_path, restored, encoding="utf-8")
+                backup_path.unlink()
+                takeover_metadata_path(backup_path).unlink()
+                return "restored_takeover_backup"
     elif config_path.exists():
         restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
         restore_from_backup = False
@@ -298,6 +571,9 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
         atomic_write_text(config_path, restored, encoding="utf-8")
     if restore_from_backup:
         backup_path.unlink()
+        metadata_path = takeover_metadata_path(backup_path)
+        if metadata_path.exists():
+            metadata_path.unlink()
     return status
 
 
@@ -311,19 +587,56 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--catalog", required=True, type=Path)
     apply_parser.add_argument("--base-url", required=True)
     apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
+    apply_parser.add_argument("--takeover", action="store_true")
+    apply_parser.add_argument("--gateway-key", default="codexhub-proxy")
 
     restore_parser = subparsers.add_parser("restore")
     restore_parser.add_argument("--config", required=True, type=Path)
     restore_parser.add_argument("--backup", required=True, type=Path)
     restore_parser.add_argument("--unified-history", action="store_true")
 
+    inspect_parser = subparsers.add_parser("inspect-unified")
+    inspect_parser.add_argument("--config", required=True, type=Path)
+    inspect_parser.add_argument("--target", choices=["unified", "separated"], default="unified")
+
+    context_status_parser = subparsers.add_parser("context-guard-status")
+    context_status_parser.add_argument("--config", required=True, type=Path)
+
+    context_set_parser = subparsers.add_parser("context-guard-set")
+    context_set_parser.add_argument("--config", required=True, type=Path)
+    context_set_parser.add_argument("--backup", required=True, type=Path)
+    context_set_parser.add_argument("--state", required=True, type=Path)
+    context_set_parser.add_argument("--enabled", required=True, choices=("true", "false"))
+
     args = parser.parse_args(argv)
     if args.command == "apply":
-        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner)
+        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner, args.takeover, args.gateway_key)
     elif args.command == "restore":
         status = restore_overlay(args.config, args.backup, args.unified_history)
         if args.unified_history:
             print(f"unified_history={status}")
+    elif args.command == "inspect-unified":
+        text = args.config.read_text(encoding="utf-8") if args.config.exists() else ""
+        print(
+            json.dumps(
+                {"status": inspect_unified_history_config(text, args.target == "unified")},
+                ensure_ascii=True,
+            )
+        )
+    elif args.command == "context-guard-status":
+        print(json.dumps(context_guard_status(args.config), ensure_ascii=False))
+    elif args.command == "context-guard-set":
+        print(
+            json.dumps(
+                set_context_guard(
+                    args.config,
+                    args.backup,
+                    args.state,
+                    enabled=args.enabled == "true",
+                ),
+                ensure_ascii=False,
+            )
+        )
     return 0
 
 

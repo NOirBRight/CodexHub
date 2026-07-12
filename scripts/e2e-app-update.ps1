@@ -88,7 +88,7 @@ function Write-VirtualRelease {
 
     $asset = Get-ReleaseAsset -AllowDummy:$ValidateOnly
     $assetName = Split-Path -Leaf $asset
-    $targetAsset = Join-Path $ReleaseRoot $assetName
+    $targetAsset = [System.IO.Path]::GetFullPath((Join-Path $ReleaseRoot $assetName))
     if ((Resolve-Path -LiteralPath $asset).Path -ne $targetAsset) {
         Copy-Item -LiteralPath $asset -Destination $targetAsset -Force
     }

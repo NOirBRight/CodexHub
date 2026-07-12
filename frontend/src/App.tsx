@@ -5,6 +5,7 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
+import { historyIssueKey } from "./lib/history";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
 import type {
@@ -265,8 +266,19 @@ function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings
     previous.gateway_auto_retry_enabled !== next.gateway_auto_retry_enabled ||
     previous.gateway_auto_retry_max_attempts !== next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
-    previous.gateway_image_proxy_model !== next.gateway_image_proxy_model
+    previous.gateway_image_proxy_model !== next.gateway_image_proxy_model ||
+    previous.openai_context_guard_enabled !== next.openai_context_guard_enabled ||
+    previous.proxy_port !== next.proxy_port ||
+    previous.gateway_request_timeout_seconds !== next.gateway_request_timeout_seconds
   );
+}
+
+function shouldRestartGateway(
+  previous: Settings | null,
+  next: Settings,
+  status: Pick<GatewayStatus, "proxy_running"> | null,
+) {
+  return Boolean(status?.proxy_running && gatewayRuntimeSettingsChanged(previous, next));
 }
 
 function visionModelOptions(models: Model[]) {
@@ -649,6 +661,53 @@ export default function App() {
     }
   }, [loadAppUpdateStatus, showToast, t]);
 
+  const repairConversationHistory = useCallback(async () => {
+    setBusy("history");
+    const toastId = showToast({
+      dedupeKey: "unified-history-preflight",
+      text: t("settings.syncingConversationHistory"),
+      timeoutMs: null,
+      tone: "loading",
+    });
+    try {
+      const result = await api.syncConversationHistory();
+      if (result.status === "repaired") {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.historyStartupRepaired", {
+            rows: result.changed_rows,
+            files: result.changed_files,
+          }),
+          tone: "success",
+        });
+      } else if (result.status === "deferred") {
+        updateToast(toastId, {
+          action: null,
+          text: t("settings.historySyncDeferred"),
+          tone: "info",
+        });
+      } else if (result.status === "restart_required" || result.status === "conflict") {
+        updateToast(toastId, {
+          action: null,
+          text: t(historyIssueKey(result)),
+          timeoutMs: null,
+          tone: "error",
+        });
+      } else {
+        dismissToast(toastId);
+      }
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("settings.historyUnexpectedFailure"),
+        timeoutMs: null,
+        tone: "error",
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [dismissToast, showToast, t, updateToast]);
+
   const runAutomaticUpdateCheck = useCallback(async () => {
     try {
       const status = await loadAppUpdateStatus();
@@ -875,12 +934,7 @@ export default function App() {
   const saveSettings = useCallback(async (next: Settings) => {
     setBusy("settings");
     try {
-      const previousUnified = settings?.unified_codex_history ?? true;
-      const nextUnified = next.unified_codex_history ?? true;
-      const currentMode = appStatus?.mode;
-      const shouldRestartGateway = Boolean(
-        appStatus?.proxy_running && gatewayRuntimeSettingsChanged(settings, next),
-      );
+      const restartGateway = shouldRestartGateway(settings, next, gatewayStatus);
       if (settings && next.auto_start_software !== settings.auto_start_software) {
         if (next.auto_start_software) {
           await api.setAutostart(true);
@@ -890,20 +944,8 @@ export default function App() {
       }
       const savedSettings = await api.saveSettings(next);
       setRuntimeCacheData("settings", savedSettings);
-      let historyMessage: string | null = null;
-      if (previousUnified !== nextUnified) {
-        if (currentMode === "official") {
-          const status = await api.switchMode("official", false);
-          setRuntimeCacheData("status", status);
-        }
-        if (nextUnified) {
-          historyMessage = await api.migrateOfficialHistoryToUnified();
-        } else if (currentMode === "official") {
-          historyMessage = await api.restoreOfficialHistoryFromUnified();
-        }
-      }
-      let saveMessage = historyMessage ?? t("settings.settingsSaved");
-      if (shouldRestartGateway) {
+      let saveMessage = t("settings.settingsSaved");
+      if (restartGateway) {
         const status = await api.restartProxy();
         setRuntimeCacheData("status", status);
         saveMessage = t("gateway.gatewaySettingsSavedRestarted");
@@ -918,12 +960,26 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [appStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
+  }, [gatewayStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
 
   const syncHistory = useCallback(async (targetProvider: string) => {
     setBusy("history");
     try {
-      const message = await api.syncHistory(targetProvider);
+      const result = await api.syncConversationHistory(targetProvider);
+      if (result.status === "deferred" || result.status === "restart_required") {
+        const message = t("settings.historySyncDeferred");
+        setBanner(null);
+        return message;
+      }
+      if (result.status === "conflict") {
+        throw new Error(result.error ?? t("settings.historyProviderConflict"));
+      }
+      const message = result.status === "repaired"
+        ? t("settings.historyStartupRepaired", {
+            rows: result.changed_rows,
+            files: result.changed_files,
+          })
+        : t("settings.conversationHistoryAlreadySynced");
       setBanner(message);
       return message;
     } catch (err) {
@@ -933,7 +989,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [t]);
 
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
@@ -941,10 +997,6 @@ export default function App() {
   const stopProxy = useCallback(() => runRuntimeAction("stop", api.stopProxy), [runRuntimeAction]);
   const startProxyQuiet = useCallback(
     () => runRuntimeAction("start", api.startProxy, { toast: false }),
-    [runRuntimeAction],
-  );
-  const restartProxyQuiet = useCallback(
-    () => runRuntimeAction("restart", api.restartProxy, { toast: false }),
     [runRuntimeAction],
   );
   const stopProxyQuiet = useCallback(
@@ -964,7 +1016,7 @@ export default function App() {
     [setRuntimeCacheData],
   );
   const applyGatewaySettings = useCallback(async (nextSettings: Settings) => {
-    await saveSettings(nextSettings);
+    return await saveSettings(nextSettings);
   }, [saveSettings]);
 
   return (
@@ -1011,6 +1063,7 @@ export default function App() {
           >
             <div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">
               <ProvidersPage
+                appFlavor={appFlavor}
                 appStatus={appStatus}
                 catalogModels={catalogModels}
                 gatewayStatus={gatewayStatus}
@@ -1018,6 +1071,7 @@ export default function App() {
                 providers={providers}
                 settings={settings}
                 onGatewayChanged={refreshProviderRuntime}
+                onRefreshClients={loadGatewayClients}
                 onProvidersChanged={updateProvidersCache}
                 onSettingsChanged={updateSettingsCache}
                 onStatusChanged={updateStatusCache}
@@ -1048,7 +1102,6 @@ export default function App() {
                 clients={contract.gatewayClients as GatewayClientContract[]}
                 onApplySettings={applyGatewaySettings}
                 onRefreshClients={loadGatewayClients}
-                onRestartProxy={restartProxyQuiet}
                 onStartProxy={startProxyQuiet}
                 onStopProxy={stopProxyQuiet}
                 onUsageWindowChange={updateUsageWindow}

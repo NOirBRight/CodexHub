@@ -49,12 +49,12 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(
             slugs,
             [
-                "openai/gpt-5.5",
+                "gpt-5.5",
                 "glm-5.2",
                 "kimi-k2.7-code",
             ],
         )
-        self.assertNotIn("openai/gpt-5.4", slugs)
+        self.assertNotIn("gpt-5.4", slugs)
         self.assertNotIn("glm-5.1", slugs)
 
     def test_build_catalog_keeps_only_official_and_allowed_cloud_models(self):
@@ -80,8 +80,8 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(
             slugs,
             [
-                "openai/gpt-5.5",
-                "openai/gpt-5.4",
+                "gpt-5.5",
+                "gpt-5.4",
                 "minimax-m3",
                 "glm-5.2",
                 "kimi-k2.7-code",
@@ -162,8 +162,8 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(
             [model["slug"] for model in catalog["models"]],
             [
-                "openai/gpt-5.5",
-                "openai/gpt-5.4",
+                "gpt-5.5",
+                "gpt-5.4",
             ],
         )
 
@@ -184,7 +184,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(
             [model["slug"] for model in catalog["models"]],
             [
-                "openai/gpt-5.5",
+                "gpt-5.5",
             ],
         )
 
@@ -214,15 +214,125 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog(official, [], self.policy, "0.142.0")
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
-        self.assertEqual(by_slug["openai/gpt-5.5"]["display_name"], "OpenAI GPT-5.5")
-        self.assertEqual(by_slug["openai/gpt-5.5"]["additional_speed_tiers"], ["fast"])
-        self.assertEqual(by_slug["openai/gpt-5.5"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
-        self.assertEqual(by_slug["openai/gpt-5.4"]["service_tiers"][0]["id"], "priority")
-        self.assertIn("base_instructions", by_slug["openai/gpt-5.4-mini"])
-        self.assertIn("context_window", by_slug["openai/gpt-5.4-mini"])
-        self.assertIn("shell_type", by_slug["openai/gpt-5.4-mini"])
-        self.assertIn("supported_reasoning_levels", by_slug["openai/gpt-5.4-mini"])
-        self.assertEqual(by_slug["openai/gpt-5.4-mini"]["additional_speed_tiers"], [])
+        self.assertEqual(by_slug["gpt-5.5"]["display_name"], "5.5")
+        self.assertEqual(by_slug["gpt-5.5"]["additional_speed_tiers"], ["fast"])
+        self.assertEqual(by_slug["gpt-5.5"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
+        self.assertEqual(by_slug["gpt-5.4"]["service_tiers"][0]["id"], "priority")
+        self.assertNotIn("context_window", by_slug["gpt-5.4-mini"])
+        self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
+        self.assertEqual(by_slug["gpt-5.4-mini"]["service_tiers"], [])
+
+    def test_shared_model_identity_vectors_reject_only_unknown_official_aliases(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "model_identity_vectors.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        for vector in fixture["vectors"]:
+            with self.subTest(vector=vector["name"]):
+                self.assertEqual(
+                    catalog_sync.normalize_official_model_id(vector["input"]),
+                    vector["expected"],
+                )
+
+    def test_bundled_seed_does_not_authorize_stale_official_aliases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_seed = root / "runtime.json"
+            bundled_seed = root / "bundled.json"
+            runtime_seed.write_text(
+                json.dumps({"models": [{"slug": "gpt-5.6-current"}]}),
+                encoding="utf-8",
+            )
+            bundled_seed.write_text(
+                json.dumps({"models": [{"slug": "gpt-5.6-stale"}]}),
+                encoding="utf-8",
+            )
+            with (
+                patch("catalog_sync.load_policy", return_value=self.policy),
+                patch("catalog_sync.RUNTIME_OFFICIAL_SEED_PATH", runtime_seed),
+                patch(
+                    "catalog_sync.official_seed_catalog_paths",
+                    return_value=[runtime_seed, bundled_seed],
+                ),
+            ):
+                known = catalog_sync.known_official_model_ids()
+
+        self.assertIn("gpt-5.6-current", known)
+        self.assertNotIn("gpt-5.6-stale", known)
+
+    def test_official_catalog_preserves_app_cli_metadata_without_generic_defaults(self):
+        official = [
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "context_window": 400000,
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Light"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "xhigh", "description": "Extra High"},
+                    {"effort": "max", "description": "Max"},
+                    {"effort": "ultra", "description": "Ultra"},
+                ],
+                "multi_agent_version": "v2",
+                "tool_mode": "native",
+                "model_messages": {"upgrade": "Use Sol"},
+                "skills_instructions": "Official skills contract",
+                "web_search_tool_type": "text",
+                "use_responses_lite": True,
+                "availability": {"plan": "plus"},
+                "upgrade": "gpt-5.7-sol",
+                "upgrade_info": {"message": "Upgrade available"},
+                "comp_hash": "sol-compat-hash",
+            }
+        ]
+
+        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        model = catalog["models"][0]
+
+        self.assertEqual(model["slug"], "gpt-5.6-sol")
+        self.assertEqual(model["display_name"], "5.6 Sol")
+        for key, value in official[0].items():
+            if key not in {"slug", "display_name"}:
+                self.assertEqual(model[key], value, key)
+        self.assertEqual(model["shell_type"], "shell_command")
+        self.assertEqual(model["supports_parallel_tool_calls"], True)
+        self.assertEqual(model["default_reasoning_level"], "medium")
+        self.assertIn("base_instructions", model)
+        self.assertEqual(model["supported_in_api"], True)
+        self.assertEqual(
+            model["codex_proxy_metadata"],
+            {
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": "gpt-5.6-sol",
+            },
+        )
+
+    def test_official_alias_duplicates_collapse_to_fresh_bare_record(self):
+        official = [
+            {
+                "slug": "openai/gpt-5.6-sol",
+                "display_name": "Legacy Sol",
+                "context_window": 1,
+                "enabled": True,
+            },
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "context_window": 400000,
+                "enabled": False,
+                "multi_agent_version": "v2",
+            },
+        ]
+
+        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        models = catalog["models"]
+
+        self.assertEqual([model["slug"] for model in models], ["gpt-5.6-sol"])
+        self.assertEqual(models[0]["display_name"], "5.6 Sol")
+        self.assertEqual(models[0]["context_window"], 400000)
+        self.assertEqual(models[0]["multi_agent_version"], "v2")
+        self.assertTrue(models[0]["enabled"])
 
     def test_load_official_seed_models_falls_back_to_runtime_seed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,8 +390,40 @@ class CatalogSyncTests(unittest.TestCase):
 
         catalog = build_codex_catalog(official, [], self.policy, "0.142.0")
 
-        self.assertEqual([model["slug"] for model in catalog["models"]], ["openai/gpt-5.6"])
-        self.assertEqual(catalog["models"][0]["display_name"], "OpenAI GPT-5.6")
+        self.assertEqual([model["slug"] for model in catalog["models"]], ["gpt-5.6"])
+        self.assertEqual(catalog["models"][0]["display_name"], "5.6")
+
+    def test_build_catalog_exposes_official_models_without_provider_prefix(self):
+        official = [{"slug": "gpt-5.6-sol", "display_name": "GPT-5.6 Sol", "visibility": "list"}]
+        external_models = [
+            {
+                "alias": "volc/glm-5.2",
+                "provider_alias": "volc",
+                "upstream_name": "volc",
+                "upstream_model": "glm-5.2",
+            }
+        ]
+
+        catalog = build_codex_catalog(
+            official,
+            [],
+            self.policy,
+            "0.142.0",
+            external_models=external_models,
+        )
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+
+        self.assertEqual(list(by_slug), ["gpt-5.6-sol", "volc/glm-5.2"])
+        self.assertNotIn("openai/gpt-5.6-sol", by_slug)
+        self.assertEqual(
+            by_slug["gpt-5.6-sol"]["codex_proxy_metadata"],
+            {
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": "gpt-5.6-sol",
+            },
+        )
+        self.assertEqual(by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["provider"], "volc")
 
     def test_minimal_official_models_use_codex_defaults(self):
         policy = CatalogPolicy(
@@ -308,20 +450,36 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog([], [], policy, "0.142.0")
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
-        self.assertEqual(by_slug["openai/gpt-5.5"]["context_window"], 258400)
-        self.assertEqual(by_slug["openai/gpt-5.5"]["max_context_window"], 258400)
+        self.assertEqual(by_slug["gpt-5.5"]["context_window"], 258400)
+        self.assertEqual(by_slug["gpt-5.5"]["max_context_window"], 258400)
         self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["context_window"], 258400)
         self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["max_context_window"], 258400)
-        self.assertEqual(by_slug["openai/gpt-5.5"]["additional_speed_tiers"], ["fast"])
-        self.assertEqual(by_slug["openai/gpt-5.5"]["service_tiers"][0]["id"], "priority")
-        self.assertEqual(by_slug["openai/gpt-5.5"]["default_reasoning_level"], "medium")
-        self.assertNotIn("openai/gpt-5.5-fast", by_slug)
-        self.assertEqual(by_slug["openai/gpt-5.4"]["context_window"], 272000)
-        self.assertEqual(by_slug["openai/gpt-5.4"]["additional_speed_tiers"], ["fast"])
-        self.assertNotIn("openai/gpt-5.4-fast", by_slug)
-        self.assertEqual(by_slug["openai/gpt-5.4-mini"]["context_window"], 272000)
-        self.assertEqual(by_slug["openai/gpt-5.4-mini"]["additional_speed_tiers"], [])
-        self.assertEqual(by_slug["openai/gpt-5.3-codex-spark"]["context_window"], 128000)
+        self.assertEqual(by_slug["gpt-5.5"]["additional_speed_tiers"], ["fast"])
+        self.assertEqual(by_slug["gpt-5.5"]["service_tiers"][0]["id"], "priority")
+        self.assertEqual(by_slug["gpt-5.5"]["default_reasoning_level"], "medium")
+        self.assertNotIn("gpt-5.5-fast", by_slug)
+        self.assertEqual(by_slug["gpt-5.4"]["context_window"], 272000)
+        self.assertEqual(by_slug["gpt-5.4"]["additional_speed_tiers"], ["fast"])
+        self.assertNotIn("gpt-5.4-fast", by_slug)
+        self.assertEqual(by_slug["gpt-5.4-mini"]["context_window"], 272000)
+        self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
+        self.assertEqual(by_slug["gpt-5.3-codex-spark"]["context_window"], 128000)
+        for model_id in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"):
+            self.assertEqual(
+                [entry["effort"] for entry in by_slug[model_id]["supported_reasoning_levels"]],
+                ["low", "medium", "high", "xhigh", "max"],
+            )
+            for required_key in (
+                "shell_type",
+                "priority",
+                "base_instructions",
+                "model_messages",
+                "include_skills_usage_instructions",
+                "truncation_policy",
+                "input_modalities",
+                "supports_parallel_tool_calls",
+            ):
+                self.assertIn(required_key, by_slug[model_id])
 
     def test_build_catalog_preserves_fallback_metadata_for_ollama_models(self):
         fallback_models = [
@@ -360,7 +518,7 @@ class CatalogSyncTests(unittest.TestCase):
                 "context_window": 1024000,
                 "max_output_tokens": 4096,
                 "input_modalities": ("text", "image"),
-                "supported_reasoning_levels": ("low", "high", "xhigh"),
+                "supported_reasoning_levels": ("high", "ultra", "low", "turbo", "max", "xhigh"),
                 "default_reasoning_level": "high",
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
@@ -395,7 +553,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["volc/glm-5.2"]["default_reasoning_level"], "high")
         self.assertEqual(
             [item["effort"] for item in by_slug["volc/glm-5.2"]["supported_reasoning_levels"]],
-            ["low", "high", "xhigh"],
+            ["low", "medium", "high", "xhigh", "max"],
         )
         self.assertEqual(by_slug["volc/minimax-m3"]["priority"], 201)
         self.assertEqual(by_slug["volc/minimax-m3"]["input_modalities"], ["text", "image"])
@@ -441,6 +599,84 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(metadata["provider"], "volc")
         self.assertNotIn("context_source", metadata)
         self.assertNotIn("max_output_source", metadata)
+
+    def test_external_reasoning_levels_normalize_and_complete_light_through_max(self):
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "supported_reasoning_levels": (" HIGH ", "low", " high", "MAX", "turbo", " ultra ", "xhigh", "MAX"),
+            "default_reasoning_level": " MAX ",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
+
+        self.assertEqual(
+            [item["effort"] for item in model["supported_reasoning_levels"]],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(model["default_reasoning_level"], "max")
+
+    def test_external_reasoning_default_ultra_falls_back_without_mapping_to_max(self):
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "supported_reasoning_levels": ("low", "max", "xhigh"),
+            "default_reasoning_level": " ultra ",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
+
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
+
+    def test_external_reasoning_sanitizes_fallback_template_ultra_metadata(self):
+        fallback_template = {
+            "supported_reasoning_levels": [
+                {"effort": " Ultra ", "description": "must not leak"},
+                {"effort": " HIGH ", "description": "fallback high"},
+                {"effort": "high", "description": "duplicate"},
+                {"effort": "turbo", "description": "unknown"},
+            ],
+            "default_reasoning_level": "ULTRA",
+        }
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, fallback_template)
+
+        self.assertEqual(
+            [item["effort"] for item in model["supported_reasoning_levels"]],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
+        self.assertNotIn("ultra", json.dumps(model).lower())
+
+    def test_external_reasoning_uses_safe_defaults_when_fallback_has_no_valid_levels(self):
+        fallback_template = {
+            "supported_reasoning_levels": [{"effort": "ultra"}, {"effort": "turbo"}],
+            "default_reasoning_level": "ultra",
+        }
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, fallback_template)
+
+        self.assertEqual(
+            [item["effort"] for item in model["supported_reasoning_levels"]],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
 
     def test_sync_catalog_ignores_provider_alias_entries_for_external_catalog_state(self):
         providers = [
@@ -775,6 +1011,7 @@ class CatalogSyncTests(unittest.TestCase):
                     {
                         "official_model_sort_order": [
                             "openai/gpt-5.4",
+                            " gpt-5.4 ",
                             "gpt-5.5",
                             "",
                             123,
@@ -789,7 +1026,7 @@ class CatalogSyncTests(unittest.TestCase):
                 importlib.reload(catalog_sync)
                 self.assertEqual(
                     catalog_sync.load_official_model_sort_order(),
-                    ["openai/gpt-5.4", "gpt-5.5"],
+                    ["gpt-5.4", "gpt-5.5"],
                 )
                 importlib.reload(catalog_sync)
 

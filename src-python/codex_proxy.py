@@ -9,7 +9,6 @@ import gzip
 import hashlib
 import hmac
 import html
-import http.client
 import io
 import json
 import logging
@@ -32,7 +31,20 @@ import uuid
 import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit
-from urllib.request import HTTPSHandler, Request, build_opener, install_opener, urlopen
+from urllib.request import Request, getproxies, proxy_bypass, urlopen
+
+try:
+    from urllib.request import getproxies_registry
+except ImportError:  # pragma: no cover - Windows-only urllib helper.
+    getproxies_registry = None
+
+VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+VENDORED_URLLIB3_WHEEL = VENDOR_DIR / "urllib3-2.7.0-py3-none-any.whl"
+if not VENDORED_URLLIB3_WHEEL.is_file():
+    raise RuntimeError(f"missing pinned Gateway transport dependency: {VENDORED_URLLIB3_WHEEL}")
+sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
+
+import urllib3
 
 from codex_semantic_adapter import (
     coerce_number as _semantic_coerce_number,
@@ -44,6 +56,7 @@ from codex_semantic_adapter import (
 )
 
 from catalog import (
+    CatalogPolicy,
     canonical_model_id,
     deny_match_model_id,
     load_catalog_models,
@@ -51,7 +64,14 @@ from catalog import (
     should_include_external_provider_model,
     should_include_model,
 )
-from catalog_sync import GENERATED_CATALOG_PATH, POLICY_PATH, existing_generated_catalog_path, sync_catalog
+from catalog_sync import (
+    GENERATED_CATALOG_PATH,
+    POLICY_PATH,
+    existing_generated_catalog_path,
+    known_official_model_ids as catalog_known_official_model_ids,
+    official_short_display_name,
+    sync_catalog,
+)
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
 from subagent_policy import (
@@ -80,55 +100,252 @@ except ImportError:  # pragma: no cover - optional dependency on older Python in
 
 DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is not None else ())
 
+OFFICIAL_POOL_MAX_CONNECTIONS = 16
+OFFICIAL_POOL_MAX_IDLE_SECONDS = 30.0
+OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS = 300.0
+OFFICIAL_CONNECT_TIMEOUT_SECONDS = 15.0
+OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
+OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS = 1.0
 OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
-OFFICIAL_KEEPALIVE_OPENER_INSTALLED = False
-OFFICIAL_KEEPALIVE_OPENER_LOCK = threading.Lock()
+OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
+OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
 
 
-def _configure_tcp_keepalive(sock: socket.socket) -> None:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+def _official_socket_options() -> list[tuple[int, int, int]]:
+    options = list(urllib3.connection.HTTPConnection.default_socket_options)
+    options.append((socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1))
+    if not sys.platform.startswith("win"):
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            options.append(
+                (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, max(1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS // 1000))
+            )
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            options.append(
+                (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, max(1, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS // 1000))
+            )
+        if hasattr(socket, "TCP_KEEPCNT"):
+            options.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3))
+    return options
+
+
+def _configure_official_windows_keepalive(sock: Any) -> None:
     if sys.platform.startswith("win") and hasattr(socket, "SIO_KEEPALIVE_VALS"):
         sock.ioctl(
             socket.SIO_KEEPALIVE_VALS,
-            (
-                1,
-                OFFICIAL_TCP_KEEPALIVE_IDLE_MS,
-                OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS,
-            ),
+            (1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS),
         )
-        return
-    if hasattr(socket, "TCP_KEEPIDLE"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, max(1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS // 1000))
-    if hasattr(socket, "TCP_KEEPINTVL"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, max(1, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS // 1000))
-    if hasattr(socket, "TCP_KEEPCNT"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
 
-class _OfficialKeepaliveHTTPSConnection(http.client.HTTPSConnection):
+class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
     def connect(self) -> None:
-        http.client.HTTPConnection.connect(self)
+        super().connect()
         if self.sock is not None:
-            _configure_tcp_keepalive(self.sock)
-        server_hostname = self._tunnel_host if self._tunnel_host else self.host
-        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+            _configure_official_windows_keepalive(self.sock)
 
 
-class _OfficialKeepaliveHTTPSHandler(HTTPSHandler):
-    def https_open(self, req: Request) -> Any:
-        return self.do_open(_OfficialKeepaliveHTTPSConnection, req, context=self._context)
+class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
+    ConnectionCls = _OfficialHTTPSConnection
+
+    def _get_conn(self, timeout: float | None = None) -> Any:
+        connection = super()._get_conn(timeout)
+        released_at = getattr(connection, "_codexhub_released_at", None)
+        idle_seconds = time.monotonic() - released_at if isinstance(released_at, (int, float)) else None
+        max_idle_seconds = (
+            OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS if self.proxy is not None else OFFICIAL_POOL_MAX_IDLE_SECONDS
+        )
+        if idle_seconds is not None and idle_seconds >= max_idle_seconds:
+            connection.close()
+        return connection
+
+    def _put_conn(self, connection: Any) -> None:
+        if connection is not None:
+            connection._codexhub_released_at = time.monotonic()
+        super()._put_conn(connection)
 
 
-def _ensure_official_keepalive_opener_installed() -> None:
-    global OFFICIAL_KEEPALIVE_OPENER_INSTALLED
-    if OFFICIAL_KEEPALIVE_OPENER_INSTALLED:
-        return
-    with OFFICIAL_KEEPALIVE_OPENER_LOCK:
-        if OFFICIAL_KEEPALIVE_OPENER_INSTALLED:
+class _OfficialPooledResponse:
+    def __init__(self, response: Any):
+        self._response = response
+        self._exhausted = False
+        self._released = False
+        self.status = response.status
+        self.reason = response.reason
+        self.headers = response.headers
+        self._terminal_drain_socket: Any = None
+        self._terminal_drain_original_timeout: float | None = None
+
+    def read(self, amount: int | None = None) -> bytes:
+        try:
+            data = self._response.read(amount)
+        except urllib3.exceptions.HTTPError as exc:
+            translated = _stdlib_transport_error(exc)
+            raise translated from exc
+        if amount is None or data == b"":
+            self._exhausted = True
+        return data
+
+    def readline(self, limit: int = -1) -> bytes:
+        try:
+            data = self._response.readline(limit)
+        except urllib3.exceptions.HTTPError as exc:
+            translated = _stdlib_transport_error(exc)
+            raise translated from exc
+        if data == b"":
+            self._exhausted = True
+        return data
+
+    def getcode(self) -> int:
+        return self.status
+
+    def shorten_terminal_drain_timeout(self, timeout_seconds: float) -> None:
+        connection = getattr(self._response, "connection", None)
+        sock = getattr(connection, "sock", None)
+        if sock is None or self._terminal_drain_socket is not None:
             return
-        install_opener(build_opener(_OfficialKeepaliveHTTPSHandler()))
-        OFFICIAL_KEEPALIVE_OPENER_INSTALLED = True
+        try:
+            original_timeout = sock.gettimeout()
+            sock.settimeout(timeout_seconds)
+        except OSError:
+            return
+        self._terminal_drain_socket = sock
+        self._terminal_drain_original_timeout = original_timeout
+
+    def _restore_terminal_drain_timeout(self) -> None:
+        if self._terminal_drain_socket is None:
+            return
+        try:
+            self._terminal_drain_socket.settimeout(self._terminal_drain_original_timeout)
+        except OSError:
+            pass
+        self._terminal_drain_socket = None
+        self._terminal_drain_original_timeout = None
+
+    def close(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._exhausted:
+            self._restore_terminal_drain_timeout()
+            self._response.release_conn()
+        else:
+            self._response.close()
+
+    def __enter__(self) -> "_OfficialPooledResponse":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        self.close()
+        return False
+
+
+def _official_proxy_url(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if parsed.hostname:
+        try:
+            if proxy_bypass(parsed.hostname):
+                return None
+        except OSError:
+            pass
+    proxies = getproxies()
+    proxy = proxies.get(parsed.scheme)
+    if (
+        not proxy
+        and sys.platform.startswith("win")
+        and callable(getproxies_registry)
+        and not any(proxies.get(scheme) for scheme in ("http", "https"))
+    ):
+        try:
+            proxy = getproxies_registry().get(parsed.scheme)
+        except OSError:
+            proxy = None
+    return str(proxy) if proxy else None
+
+
+def _official_pool_manager(url: str) -> Any:
+    proxy_url = _official_proxy_url(url)
+    pool_key = proxy_url or "direct"
+    existing = OFFICIAL_HTTP_POOLS.get(pool_key)
+    if existing is not None:
+        return existing
+    with OFFICIAL_HTTP_POOLS_LOCK:
+        existing = OFFICIAL_HTTP_POOLS.get(pool_key)
+        if existing is None:
+            pool_options = {
+                "num_pools": 4,
+                "maxsize": OFFICIAL_POOL_MAX_CONNECTIONS,
+                "block": True,
+                "retries": False,
+                "socket_options": _official_socket_options(),
+            }
+            existing = (
+                urllib3.ProxyManager(proxy_url, **pool_options)
+                if proxy_url is not None
+                else urllib3.PoolManager(**pool_options)
+            )
+            existing.pool_classes_by_scheme = {
+                **existing.pool_classes_by_scheme,
+                "https": _OfficialHTTPSConnectionPool,
+            }
+            OFFICIAL_HTTP_POOLS[pool_key] = existing
+        return existing
+
+
+def _stdlib_transport_error(exc: BaseException) -> BaseException:
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if not isinstance(candidate, BaseException) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        if isinstance(candidate, (ssl.SSLError, TimeoutError, ConnectionError, OSError, IncompleteRead)):
+            return candidate
+        pending.extend(
+            value
+            for value in (
+                getattr(candidate, "reason", None),
+                candidate.__cause__,
+                candidate.__context__,
+                *candidate.args,
+            )
+            if isinstance(value, BaseException)
+        )
+    if isinstance(exc, urllib3.exceptions.TimeoutError):
+        return TimeoutError(str(exc))
+    return URLError(exc)
+
+
+def _official_urlopen(request: Request, *, timeout: float) -> Any:
+    manager = _official_pool_manager(request.full_url)
+    headers = {key: value for key, value in request.header_items() if key.lower() != "connection"}
+    try:
+        response = manager.request(
+            request.get_method(),
+            request.full_url,
+            body=request.data,
+            headers=headers,
+            preload_content=False,
+            decode_content=False,
+            redirect=False,
+            retries=False,
+            timeout=urllib3.Timeout(connect=min(timeout, OFFICIAL_CONNECT_TIMEOUT_SECONDS), read=timeout),
+            pool_timeout=timeout,
+        )
+    except urllib3.exceptions.HTTPError as exc:
+        translated = _stdlib_transport_error(exc)
+        raise translated from exc
+
+    pooled_response = _OfficialPooledResponse(response)
+    if response.status >= 400:
+        raise HTTPError(
+            request.full_url,
+            response.status,
+            str(response.reason or "upstream error"),
+            response.headers,
+            pooled_response,
+        )
+    return pooled_response
 
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
@@ -177,19 +394,25 @@ PROXY_FEATURES = [
     "third-party-multi-agent-deterministic-repair",
     "third-party-required-subagent-action-repair",
     "third-party-chat-output-repair-parity",
-    "official-upstream-tcp-keepalive",
+    "official-upstream-connection-pool",
+    "official-upstream-idle-connection-expiry",
+    "official-terminal-sse-authoritative",
+    "official-title-responses-lite-header-strip",
+    "zstd-request-body-runtime",
     "raw-provider-probe-opt-out",
 ]
 DEFAULT_OFFICIAL_PREFIXES = ("gpt-",)
 OFFICIAL_ALIAS_PREFIX = "openai/"
+OFFICIAL_ULTRA_REASONING_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}
+OFFICIAL_RESPONSES_LITE_UNSUPPORTED_MODELS = {"gpt-5.4", "gpt-5.4-mini"}
 OFFICIAL_FAST_VARIANT_SERVICE_TIER = "priority"
 OFFICIAL_FAST_VARIANT_BASE_MODELS = {
     "gpt-5.5-fast": "gpt-5.5",
     "gpt-5.4-fast": "gpt-5.4",
 }
 OFFICIAL_FAST_VARIANT_DISPLAY_NAMES = {
-    "gpt-5.5-fast": "OpenAI GPT-5.5 Fast",
-    "gpt-5.4-fast": "OpenAI GPT-5.4 Fast",
+    "gpt-5.5-fast": "5.5 Fast",
+    "gpt-5.4-fast": "5.4 Fast",
 }
 OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
 UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6", "kimi-k2.7")
@@ -410,6 +633,7 @@ DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEO
 DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
+OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
@@ -1077,6 +1301,14 @@ def gateway_image_proxy_model() -> str:
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
 
 
+def openai_context_guard_enabled() -> bool:
+    return _env_or_settings_flag(
+        "CODEX_PROXY_OPENAI_CONTEXT_GUARD_ENABLED",
+        "openai_context_guard_enabled",
+        False,
+    )
+
+
 def gateway_transparent_vision_proxy_enabled() -> bool:
     settings_value = _runtime_settings_value("gateway_transparent_vision_proxy_enabled")
     if isinstance(settings_value, bool):
@@ -1519,6 +1751,33 @@ def policy_denies_any_model(model_ids: tuple[Any, ...], policy: Any) -> bool:
     return any(model_id is not None and policy_denies_model(model_id, policy) for model_id in model_ids)
 
 
+def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | None:
+    upstream_model = slug[len(OFFICIAL_ALIAS_PREFIX) :] if slug.startswith(OFFICIAL_ALIAS_PREFIX) else slug
+    if not upstream_model.startswith(official_prefixes()):
+        return None
+
+    alias = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
+    catalog = generated_catalog_by_slug()
+    model = catalog.get(upstream_model) or catalog.get(alias)
+    if not model or model.get("supported_in_api") is False:
+        return None
+
+    metadata = model.get("codex_proxy_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    catalog_upstream = canonical_model_id(str(metadata.get("upstream_model", "")))
+    if (
+        metadata.get("provider") != "openai"
+        or metadata.get("upstream_name") != "official"
+        or catalog_upstream != upstream_model
+        or not catalog_upstream.startswith(official_prefixes())
+    ):
+        return None
+    if policy_denies_any_model((slug, alias, catalog_upstream), policy):
+        raise ValueError(f"model is not allowed: {slug}")
+    return catalog_upstream
+
+
 def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
     if not slug.startswith(OFFICIAL_ALIAS_PREFIX):
         return None
@@ -1656,6 +1915,16 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "reports_cached_input_tokens": True,
         }
 
+    discovered_official = generated_official_catalog_upstream_model(slug, policy)
+    if discovered_official is not None:
+        return {
+            "name": "official",
+            "base_url": official_base_url(),
+            "auth": "codex_auth",
+            "upstream_model": discovered_official,
+            "reports_cached_input_tokens": True,
+        }
+
     ollama_alias = ollama_cloud_alias_upstream_model(slug, policy)
     if ollama_alias is not None:
         return ollama_alias
@@ -1729,6 +1998,37 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
         if any(model_key.startswith(prefix) for prefix in UNSUPPORTED_REASONING_MODEL_PREFIXES):
             return True
     return False
+
+
+def _validate_reasoning_effort_for_upstream(
+    payload: Any,
+    upstream: Mapping[str, Any],
+    model: str | None,
+) -> None:
+    if not isinstance(payload, Mapping):
+        return
+    requested_efforts = [payload.get("reasoning_effort")]
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        requested_efforts.append(reasoning.get("effort"))
+    elif isinstance(reasoning, str):
+        requested_efforts.append(reasoning)
+    is_ultra = any(
+        isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
+    )
+    if not is_ultra:
+        return
+    is_official = upstream.get("name") == "official" and upstream.get("auth") == "codex_auth"
+    model_id = canonical_model_id(model or "").lower()
+    if model_id.startswith(OFFICIAL_ALIAS_PREFIX):
+        model_id = model_id[len(OFFICIAL_ALIAS_PREFIX) :]
+    if is_official and model_id in OFFICIAL_ULTRA_REASONING_MODELS:
+        return
+    if is_official:
+        raise ValueError(
+            "reasoning effort 'ultra' is supported only for gpt-5.6-sol and gpt-5.6-terra"
+        )
+    raise ValueError("reasoning effort 'ultra' is not supported for third-party models")
 
 
 def decoded_request_body(body: bytes, content_encoding: str | None = None) -> tuple[bytes, bool, str | None]:
@@ -5278,12 +5578,21 @@ def _rewrite_structured_tool_input_items(
     changed = False
     rewritten_items: list[Any] = []
     preserved_structured_call_ids: set[str] = set()
+    available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
-            if _multi_agent_function_call_name(item) is not None or _node_repl_function_call_name(item) is not None:
+            function_name = item.get("name")
+            preserve_available_function = (
+                isinstance(function_name, str) and function_name in available_function_names
+            )
+            if (
+                preserve_available_function
+                or _multi_agent_function_call_name(item) is not None
+                or _node_repl_function_call_name(item) is not None
+            ):
                 call_id = item.get("call_id")
                 if isinstance(call_id, str):
                     preserved_structured_call_ids.add(call_id)
@@ -9096,13 +9405,24 @@ def upstream_headers(
     upstream: Mapping[str, Any],
     drop_content_encoding: bool = False,
     behavior_profile: str | None = None,
+    model_id: str | None = None,
 ) -> dict[str, str]:
     auth_mode = upstream.get("auth")
     outgoing: dict[str, str] = {}
+    upstream_model_id = canonical_model_id(
+        str(upstream.get("upstream_model") or model_id or "")
+    ).lower()
+    if upstream_model_id.startswith(OFFICIAL_ALIAS_PREFIX):
+        upstream_model_id = upstream_model_id[len(OFFICIAL_ALIAS_PREFIX) :]
+    drop_responses_lite_header = (
+        auth_mode == "codex_auth" and upstream_model_id in OFFICIAL_RESPONSES_LITE_UNSUPPORTED_MODELS
+    )
 
     for key, value in _header_items(incoming_headers):
         lowered = key.lower()
         if lowered in HOP_BY_HOP_REQUEST_HEADERS or lowered == "authorization":
+            continue
+        if drop_responses_lite_header and lowered == "x-openai-internal-codex-responses-lite":
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
@@ -9170,9 +9490,67 @@ def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
-    return catalog_with_official_fast_variants(
-        json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+    return catalog_with_vision_proxy_capabilities(
+        catalog_with_openai_context_guard(
+            catalog_with_official_fast_variants(
+                json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+            )
+        )
     )
+
+
+def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]:
+    if not openai_context_guard_enabled():
+        return catalog
+
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return catalog
+
+    def guarded_model(model: Any) -> Any:
+        if not isinstance(model, Mapping):
+            return model
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if not slug.startswith("gpt-"):
+            return model
+        context_window = model.get("context_window")
+        guarded_window = (
+            min(context_window, OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW)
+            if isinstance(context_window, int) and context_window > 0
+            else OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW
+        )
+        return {
+            **model,
+            "context_window": guarded_window,
+            "max_context_window": guarded_window,
+        }
+
+    updated = dict(catalog)
+    updated["models"] = [guarded_model(model) for model in models]
+    return updated
+
+
+def catalog_with_vision_proxy_capabilities(catalog: dict[str, Any]) -> dict[str, Any]:
+    if not gateway_image_proxy_enabled():
+        return catalog
+
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return catalog
+
+    updated = dict(catalog)
+    updated["models"] = [
+        {
+            **model,
+            "input_modalities": list(
+                dict.fromkeys([*(model.get("input_modalities") or ["text"]), "image"])
+            ),
+        }
+        if isinstance(model, Mapping)
+        else model
+        for model in models
+    ]
+    return updated
 
 
 def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, Any]:
@@ -9180,15 +9558,19 @@ def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, An
     if not isinstance(models, list):
         return catalog
 
+    policy = load_policy(POLICY_PATH)
+    models = canonical_catalog_models(models, policy)
+    catalog["models"] = models
+
     by_slug = {
         canonical_model_id(str(model.get("slug", ""))): model
         for model in models
         if isinstance(model, Mapping)
     }
     for fast_model, upstream_model in OFFICIAL_FAST_VARIANT_BASE_MODELS.items():
-        base_slug = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
-        fast_slug = f"{OFFICIAL_ALIAS_PREFIX}{fast_model}"
-        base_model = by_slug.get(base_slug)
+        legacy_base_slug = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
+        fast_slug = fast_model
+        base_model = by_slug.get(upstream_model) or by_slug.get(legacy_base_slug)
         if not isinstance(base_model, Mapping) or fast_slug in by_slug:
             continue
         fast_entry = deepcopy(dict(base_model))
@@ -9209,6 +9591,57 @@ def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, An
         models.append(fast_entry)
         by_slug[fast_slug] = fast_entry
     return catalog
+
+
+def canonical_catalog_models(
+    models: list[Any],
+    policy: CatalogPolicy,
+) -> list[Any]:
+    known_official_ids = catalog_known_official_model_ids()
+    for model in models:
+        if not isinstance(model, Mapping):
+            continue
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if slug.startswith("gpt-"):
+            known_official_ids.add(slug)
+
+    output: list[Any] = []
+    official_positions: dict[str, int] = {}
+    official_bare_sources: dict[str, bool] = {}
+    for model in models:
+        if not isinstance(model, Mapping):
+            output.append(model)
+            continue
+        raw_slug = canonical_model_id(str(model.get("slug", "")))
+        is_legacy_alias = raw_slug.startswith(OFFICIAL_ALIAS_PREFIX + "gpt-")
+        if is_legacy_alias:
+            canonical_slug = raw_slug[len(OFFICIAL_ALIAS_PREFIX) :]
+            if canonical_slug not in known_official_ids:
+                continue
+        elif raw_slug.startswith("gpt-"):
+            canonical_slug = raw_slug
+        else:
+            output.append(model)
+            continue
+
+        candidate = deepcopy(dict(model))
+        candidate["slug"] = canonical_slug
+        candidate["display_name"] = official_short_display_name(canonical_slug, candidate, policy)
+        position = official_positions.get(canonical_slug)
+        if position is None:
+            official_positions[canonical_slug] = len(output)
+            official_bare_sources[canonical_slug] = not is_legacy_alias
+            output.append(candidate)
+            continue
+
+        existing = output[position]
+        existing_is_bare = official_bare_sources.get(canonical_slug, False)
+        fresh = candidate if not is_legacy_alias or not existing_is_bare else deepcopy(dict(existing))
+        if "enabled" in existing or "enabled" in candidate:
+            fresh["enabled"] = bool(existing.get("enabled", True) or candidate.get("enabled", True))
+        output[position] = fresh
+        official_bare_sources[canonical_slug] = existing_is_bare or not is_legacy_alias
+    return output
 
 
 def _json_response_bytes(payload: dict[str, Any]) -> bytes:
@@ -10060,7 +10493,12 @@ def _http_error_body_bytes(exc: HTTPError) -> bytes:
     try:
         body = fp.read()
     except OSError:
-        return b""
+        body = b""
+    finally:
+        try:
+            fp.close()
+        except OSError:
+            pass
     replacement = io.BytesIO(body)
     exc.fp = replacement
     exc.file = replacement
@@ -10271,6 +10709,7 @@ def _emit_upstream_retry_event(
     exc: BaseException,
     delay_seconds: int,
     failure_class: str | None = None,
+    failure_phase: str | None = None,
 ) -> None:
     resolved_failure_class = failure_class or _upstream_failure_class(exc)
     _write_adapter_event(
@@ -10288,7 +10727,7 @@ def _emit_upstream_retry_event(
         delay_ms=delay_seconds * 1000,
         error=type(exc).__name__,
         detail=safe_upstream_error_detail(exc),
-        failure_phase=transport_failure_phase(exc),
+        failure_phase=failure_phase or transport_failure_phase(exc),
     )
 
 
@@ -10302,6 +10741,7 @@ def _downstream_retry_payload(
     exc: BaseException,
     delay_seconds: int,
     failure_class: str | None = None,
+    failure_phase: str | None = None,
 ) -> dict[str, Any]:
     return {
         "type": "codexhub.retry",
@@ -10315,7 +10755,7 @@ def _downstream_retry_payload(
         "delay_ms": delay_seconds * 1000,
         "error": type(exc).__name__,
         "detail": safe_upstream_error_detail(exc),
-        "failure_phase": transport_failure_phase(exc),
+        "failure_phase": failure_phase or transport_failure_phase(exc),
     }
 
 
@@ -10339,10 +10779,6 @@ def _typed_error_code(
 ) -> str:
     if error_type == "gateway_auth_error":
         return "gateway.auth"
-    if error_type == "backend_error":
-        return "backend.command"
-    if error_type == "config_error":
-        return "config.origin"
     if error_type in {"invalid_request_error", "validation_error"}:
         return "provider.request"
     if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
@@ -10553,6 +10989,37 @@ def _chat_completion_error_payload(
     }
 
 
+def _with_codexhub_http_error(
+    body: bytes,
+    *,
+    upstream_name: str,
+    status: int,
+    exc: BaseException | None = None,
+) -> bytes:
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(payload, dict) or "codexhub_error" in payload:
+        return body
+    upstream_error = payload.get("error")
+    if isinstance(upstream_error, Mapping):
+        message = str(upstream_error.get("message") or upstream_error.get("detail") or "HTTPError")
+        error_type = str(upstream_error.get("type") or "upstream_error")
+    else:
+        message = str(upstream_error or payload.get("detail") or "HTTPError")
+        error_type = "upstream_error"
+    payload["codexhub_error"] = _codexhub_error_payload(
+        source=upstream_name,
+        message=message,
+        status=status,
+        exc=exc,
+        error="HTTPError",
+        error_type=error_type,
+    )
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
 def _downstream_json_error_payload(error: DownstreamErrorSpec) -> dict[str, Any]:
     return _json_error_payload_for_inbound_format(
         inbound_format=error.inbound_format,
@@ -10708,7 +11175,7 @@ def _open_upstream_response(
     while True:
         try:
             if upstream_name == "official":
-                _ensure_official_keepalive_opener_installed()
+                return _official_urlopen(request, timeout=timeout)
             return urlopen(request, timeout=timeout)
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
             if isinstance(exc, HTTPError) and not retry_http_errors:
@@ -10927,6 +11394,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
+            _validate_reasoning_effort_for_upstream(inbound_payload, upstream, model)
             route_decision = route_decision_for_request(
                 upstream,
                 request_context,
@@ -11157,9 +11625,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     model_id=model,
                 )
             else:
+                compatibility_upstream = upstream
+                if upstream_format == "auto":
+                    compatibility_upstream = {**upstream, "upstream_format": "responses"}
                 body = compatible_request_body(
                     body,
-                    upstream,
+                    compatibility_upstream,
                     model_id=model,
                     event_context=adapter_event_context,
                     inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT and not raw_provider_probe,
@@ -11219,6 +11690,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream,
                 drop_content_encoding=content_decoded,
                 behavior_profile=behavior_profile,
+                model_id=model,
             )
 
             def upstream_body_for_format(selected_format: str) -> bytes:
@@ -11331,7 +11803,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             selected_upstream_format = upstream_format
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
             for format_index, selected_upstream_format in enumerate(upstream_format_options):
-                base_relay_attempts = 1 if is_official_http_passthrough else _upstream_retry_attempts(request_kind)
+                if isinstance(adapter_event_context, dict):
+                    adapter_event_context["tool_protocol"] = _external_tool_protocol(
+                        {**upstream, "upstream_format": selected_upstream_format}
+                    )
+                base_relay_attempts = (
+                    OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS
+                    if is_official_http_passthrough
+                    else _upstream_retry_attempts(request_kind)
+                )
                 relay_attempts = base_relay_attempts
                 lifecycle_final_extra_attempts = (
                     1
@@ -11374,9 +11854,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
                                     request_kind=request_kind,
-                                    defer_stream_errors=False
-                                    if is_official_http_passthrough
-                                    else relay_attempt < relay_attempts,
+                                    defer_stream_errors=relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                     behavior_profile=behavior_profile,
                                 )
@@ -11453,6 +11931,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 exc=retry_exc,
                                 delay_seconds=delay_seconds,
                                 failure_class=failure_class,
+                                failure_phase="stream_body" if stream_failure else None,
                             )
                             emit_downstream_retry(
                                 _downstream_retry_payload(
@@ -11464,6 +11943,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     exc=retry_exc,
                                     delay_seconds=delay_seconds,
                                     failure_class=failure_class,
+                                    failure_phase="stream_body" if stream_failure else None,
                                 )
                             )
                             time.sleep(delay_seconds)
@@ -12365,10 +12845,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         headers_already_sent: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
         event_context: Mapping[str, Any] | None = None,
+        defer_stream_errors: bool = False,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         headers_sent_downstream = bool(headers_already_sent)
-        if not headers_already_sent:
+
+        def send_downstream_headers_once() -> None:
+            nonlocal headers_sent_downstream
+            if headers_sent_downstream:
+                return
             self.send_response(status)
             for key, value in _filtered_response_headers(response.headers, True):
                 self.send_header(key, value)
@@ -12378,6 +12863,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             headers_sent_downstream = True
             if mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
+
+        if not defer_stream_errors:
+            send_downstream_headers_once()
 
         usage_context = {
             "request_id": request_id,
@@ -12392,12 +12880,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         last_upstream_byte_at: float | None = None
         failure_side = "upstream_read"
         sse_stats = PassthroughSseSemanticStats()
+        terminal_drain_timeout_shortened = False
         try:
             while True:
                 failure_side = "upstream_read"
                 line = response.readline()
                 if not line:
+                    if defer_stream_errors and not headers_sent_downstream:
+                        raise UpstreamStreamIncompleteError("Official stream ended before its first SSE byte")
                     break
+                send_downstream_headers_once()
                 last_upstream_byte_at = time.monotonic()
                 failure_side = "downstream_write"
                 self.wfile.write(line)
@@ -12406,8 +12898,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 bytes_streamed += len(line)
                 sse_stats.observe_line(line)
                 _offer_official_passthrough_usage_line(usage_context, line)
+                if sse_stats.terminal_event_seen and not terminal_drain_timeout_shortened:
+                    shorten_terminal_drain_timeout = getattr(response, "shorten_terminal_drain_timeout", None)
+                    if callable(shorten_terminal_drain_timeout):
+                        shorten_terminal_drain_timeout(OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS)
+                    terminal_drain_timeout_shortened = True
         except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+            if defer_stream_errors and not headers_sent_downstream:
+                raise UpstreamStreamInterruptedError(exc) from exc
             self.close_connection = True
+            if failure_side == "upstream_read" and sse_stats.terminal_event_seen:
+                sse_stats.finalize_pending()
+                if usage_capture is not None:
+                    usage_capture.update(sse_stats.fields())
+                return status
             now = time.monotonic()
             last_upstream_byte_age_ms = (
                 None
@@ -12759,6 +13263,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 headers_already_sent=headers_already_sent,
                 mark_downstream_sse_started=mark_downstream_sse_started,
                 event_context=event_context,
+                defer_stream_errors=defer_stream_errors,
             )
         defer_stream_headers = (
             is_event_stream
@@ -12852,6 +13357,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
             else:
                 body = compatible_response_body(body, upstream_name, event_context=event_context)
+            if status >= 400:
+                body = _with_codexhub_http_error(
+                    body,
+                    upstream_name=upstream_name,
+                    status=status,
+                    exc=response if isinstance(response, BaseException) else None,
+                )
             if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
                 _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
                 _offer_usage_observed_body(usage_context, upstream_body_for_usage)

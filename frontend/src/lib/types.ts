@@ -7,6 +7,11 @@ export interface Model {
   codex_enabled?: boolean;
   gateway_exported?: boolean;
   context_window?: number | null;
+  max_context_window?: number | null;
+  effective_source?: string | null;
+  max_source?: string | null;
+  confidence?: string | null;
+  verified_at?: string | null;
   max_output_tokens?: number | null;
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
@@ -87,6 +92,17 @@ export interface AppStatus {
   history_sync_message?: string | null;
 }
 
+export interface UnifiedHistoryResult {
+  status: "clean" | "repaired" | "deferred" | "restart_required" | "conflict";
+  changed_rows: number;
+  changed_files: number;
+  backup_path?: string | null;
+  receipt_path?: string | null;
+  reason?: string | null;
+  error?: string | null;
+  codex_restarted: boolean;
+}
+
 export interface AppVersionInfo {
   current_version: string;
 }
@@ -101,6 +117,10 @@ export interface AppFlavorInfo {
   bridge_port: number;
   gateway_port: number;
   default_codex_home_suffix: string;
+  runtime_home_suffix: string;
+  codex_target_home_suffix: string;
+  codex_target_owner: RoutingOwner | null;
+  codex_takeover_required: boolean;
 }
 
 export interface AppUpdateStatus {
@@ -313,6 +333,15 @@ export interface GatewayClientConfig {
   curl_test: string;
 }
 
+export type GatewayClientRouteMode =
+  | "official"
+  | "release"
+  | "beta"
+  | "hub"
+  | "stale"
+  | "other_channel"
+  | "unknown";
+
 export interface GatewayClientInfo {
   id: string;
   name: string;
@@ -320,7 +349,7 @@ export interface GatewayClientInfo {
   installed: boolean;
   auto_apply_supported: boolean;
   config_path?: string | null;
-  route_mode: string;
+  route_mode: GatewayClientRouteMode;
   route_owner: RoutingOwner;
   route_endpoint?: string | null;
   managed_by_current_app: boolean;
@@ -432,11 +461,20 @@ export interface Settings {
   gateway_auto_retry_max_attempts: number;
   gateway_image_proxy_enabled: boolean;
   gateway_image_proxy_model: string;
+  openai_context_guard_enabled: boolean;
   gateway_fast_model_variants: string[];
   official_disabled_models: string[];
   official_model_sort_order: string[];
   official_provider_sort_order: number;
   proxy_port: number;
+}
+
+export interface CodexContextGuardStatus {
+  enabled: boolean;
+  codex_enabled: boolean;
+  gateway_enabled: boolean;
+  model_context_window?: number | null;
+  model_auto_compact_token_limit?: number | null;
 }
 
 export type TabId = "codexhub" | "gateway";

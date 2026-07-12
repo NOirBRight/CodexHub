@@ -1,0 +1,32 @@
+{
+  "known_official_ids": [
+    "gpt-5.5"
+  ],
+  "vectors": [
+    {
+      "name": "official bare",
+      "input": "gpt-5.5",
+      "expected": "gpt-5.5"
+    },
+    {
+      "name": "official legacy alias",
+      "input": "openai/gpt-5.5",
+      "expected": "gpt-5.5"
+    },
+    {
+      "name": "unknown official alias",
+      "input": "openai/gpt-9.9-unknown",
+      "expected": null
+    },
+    {
+      "name": "third-party gpt id",
+      "input": "acme/gpt-5.6-sol",
+      "expected": "acme/gpt-5.6-sol"
+    },
+    {
+      "name": "ollama cloud model",
+      "input": "ollama-cloud/glm-5.2",
+      "expected": "ollama-cloud/glm-5.2"
+    }
+  ]
+}

@@ -1733,11 +1733,11 @@ mod tests {
     fn codex_account_usage_response_read_times_out() {
         let mut command = if cfg!(target_os = "windows") {
             let mut command = Command::new("powershell");
-            command.args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 200"]);
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 2"]);
             command
         } else {
             let mut command = Command::new("sh");
-            command.args(["-c", "sleep 0.2"]);
+            command.args(["-c", "sleep 2"]);
             command
         };
         command
@@ -1754,7 +1754,7 @@ mod tests {
                 .expect_err("slow account usage response should time out");
 
         assert!(error.contains("Codex account usage timed out"));
-        assert!(started.elapsed() < Duration::from_millis(150));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

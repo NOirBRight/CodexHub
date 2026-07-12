@@ -23,9 +23,12 @@ import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToa
 import { SortableList } from "../components/SortableList";
 import i18n from "../i18n";
 import { cx, displayModel, mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
+import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
+  AppFlavorInfo,
   AppStatus,
+  CodexContextGuardStatus,
   GatewayStatus,
   GatewayClientSyncSummary,
   Model,
@@ -40,12 +43,17 @@ import type {
 
 const OFFICIAL_ID = "__official__";
 const ADD_ID = "__add__";
-const DEFAULT_FAST_MODEL_VARIANTS = ["openai/gpt-5.5", "openai/gpt-5.4"];
+const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = [
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
+];
 const DEFAULT_OFFICIAL_MODEL_ORDER = [
-  "openai/gpt-5.5",
-  "openai/gpt-5.4",
-  "openai/gpt-5.4-mini",
-  "openai/gpt-5.3-codex-spark",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  ...LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER,
 ];
 const OPENAI_USAGE_DAY_SECONDS = 86_400;
 const OPENAI_USAGE_MIN_WINDOW_DAYS = 365;
@@ -274,6 +282,7 @@ type OfficialOpenAIUsageTooltipState = {
 };
 
 type ProvidersPageProps = {
+  appFlavor?: AppFlavorInfo | null;
   appStatus: AppStatus | null;
   catalogModels: Model[];
   gatewayStatus?: GatewayStatus | null;
@@ -281,6 +290,7 @@ type ProvidersPageProps = {
   providers: Provider[];
   settings: Settings | null;
   onGatewayChanged?: () => Promise<GatewayStatus | null | void>;
+  onRefreshClients?: () => Promise<void>;
   onProvidersChanged?: (providers: Provider[]) => void;
   onSettingsChanged?: (settings: Settings) => void;
   onStartProxy?: () => Promise<void>;
@@ -288,11 +298,13 @@ type ProvidersPageProps = {
 };
 
 function ProvidersPageImpl({
+  appFlavor,
   appStatus: appStatusSnapshot,
   catalogModels,
   gatewayStatus: gatewayStatusSnapshot,
   modelMetadata,
   onGatewayChanged,
+  onRefreshClients,
   onProvidersChanged,
   onSettingsChanged,
   onStartProxy,
@@ -312,8 +324,24 @@ function ProvidersPageImpl({
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(() => (
     settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
   ));
+  const [officialDisabledModelsDraft, setOfficialDisabledModelsDraft] = useState<string[]>(() => (
+    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_disabled_models : []
+  ));
+  const [officialModelOrderDraft, setOfficialModelOrderDraft] = useState<string[]>(() => (
+    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order : []
+  ));
+  const persistedOfficialSettingsRef = useRef({
+    disabledModels: settingsSnapshot
+      ? withDefaultFastVariants(settingsSnapshot).official_disabled_models
+      : [],
+    modelOrder: settingsSnapshot
+      ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order
+      : [],
+  });
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
+  const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] =
+    useState<AppFlavorInfo["codex_target_owner"] | undefined>(undefined);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
   const [officialModels, setOfficialModels] = useState<Model[]>(() => {
@@ -328,6 +356,7 @@ function ProvidersPageImpl({
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
+  const officialModelRefreshStartedRef = useRef(false);
   const [selectedId, setSelectedId] = useState<string>(OFFICIAL_ID);
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
@@ -349,8 +378,19 @@ function ProvidersPageImpl({
 
   useEffect(() => {
     const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
+    const disabledModels = normalizedSettings?.official_disabled_models ?? [];
+    const modelOrder = normalizedSettings?.official_model_sort_order ?? [];
+    const persistedOfficialSettings = persistedOfficialSettingsRef.current;
+    const officialSettingsChanged =
+      JSON.stringify(disabledModels) !== JSON.stringify(persistedOfficialSettings.disabledModels) ||
+      JSON.stringify(modelOrder) !== JSON.stringify(persistedOfficialSettings.modelOrder);
     setSettings(normalizedSettings);
     setSettingsDraft(normalizedSettings);
+    if (officialSettingsChanged) {
+      setOfficialDisabledModelsDraft(disabledModels);
+      setOfficialModelOrderDraft(modelOrder);
+      persistedOfficialSettingsRef.current = { disabledModels, modelOrder };
+    }
   }, [settingsSnapshot]);
 
   useEffect(() => {
@@ -386,6 +426,7 @@ function ProvidersPageImpl({
     if (selectedId !== OFFICIAL_ID || codexAuthState !== "authorized") {
       return;
     }
+    void primeOfficialModels();
     void primeOfficialOpenAIUsage();
     const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(true), OPENAI_USAGE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(usageRefreshTimer);
@@ -430,7 +471,14 @@ function ProvidersPageImpl({
       ),
     [providers],
   );
-  const officialDisabledModels = settings?.official_disabled_models ?? [];
+  const officialDisabledModels = officialDisabledModelsDraft;
+  const officialModelDraftDirty = Boolean(
+    settings &&
+    (
+      JSON.stringify(officialDisabledModelsDraft) !== JSON.stringify(settings.official_disabled_models ?? []) ||
+      JSON.stringify(officialModelOrderDraft) !== JSON.stringify(settings.official_model_sort_order ?? [])
+    ),
+  );
   const officialEnabledCount = officialModels.filter(
     (model) => !isOfficialModelDisabled(officialDisabledModels, model.id),
   ).length;
@@ -451,7 +499,21 @@ function ProvidersPageImpl({
   const canAdd = Boolean(form.name.trim());
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
   const realCodexConnected = codexStatus?.mode === "custom" && codexStatus.proxy_running === true;
-  const codexConnected = realCodexConnected;
+  const effectiveCodexTargetOwner = codexTargetOwnerOverride === undefined
+    ? appFlavor?.codex_target_owner ?? null
+    : codexTargetOwnerOverride;
+  const codexOwnedByOtherApp = Boolean(
+    !realCodexConnected &&
+      effectiveCodexTargetOwner !== null &&
+      effectiveCodexTargetOwner !== "official" &&
+      effectiveCodexTargetOwner !== appFlavor?.routing_owner,
+  );
+  const codexConnected = realCodexConnected || codexOwnedByOtherApp;
+  const codexRouteOwnerLabel = realCodexConnected
+    ? codexTakeoverOwnerLabel(appFlavor?.routing_owner ?? null, tr)
+    : codexOwnedByOtherApp
+      ? codexTakeoverOwnerLabel(effectiveCodexTargetOwner, tr)
+      : null;
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
@@ -657,6 +719,14 @@ function ProvidersPageImpl({
       return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
     }
     return baseMessage ?? null;
+  }
+
+  async function primeOfficialModels() {
+    if (officialModelRefreshStartedRef.current) {
+      return;
+    }
+    officialModelRefreshStartedRef.current = true;
+    await refreshOfficialModels({ quiet: true });
   }
 
   async function primeOfficialOpenAIUsage() {
@@ -874,6 +944,20 @@ function ProvidersPageImpl({
     }
   }
 
+  function reflectContextGuardSetting(enabled: boolean) {
+    setSettings((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = { ...current, openai_context_guard_enabled: enabled };
+      onSettingsChanged?.(next);
+      return next;
+    });
+    setSettingsDraft((current) => (
+      current ? { ...current, openai_context_guard_enabled: enabled } : current
+    ));
+  }
+
   async function updateProvider(next: Provider, successMessage?: string) {
     await saveProviders(
       providers.map((provider) => (provider.id === next.id ? next : provider)),
@@ -933,39 +1017,30 @@ function ProvidersPageImpl({
   }
 
   function toggleOfficialModel(modelId: string, enabled: boolean) {
-    if (!settingsDraft) {
-      return;
-    }
-    const current = settingsDraft.official_disabled_models ?? [];
+    const current = officialDisabledModelsDraft;
     const nextDisabled = enabled
       ? current.filter((item) => !modelIdMatches(item, modelId))
       : [...new Set([...current, modelId])];
-    const nextSettings = { ...settingsDraft, official_disabled_models: nextDisabled };
-    setSettings(nextSettings);
-    setSettingsDraft(nextSettings);
+    setOfficialDisabledModelsDraft(nextDisabled);
     setOfficialModels((currentModels) =>
       currentModels.map((model) => (modelIdMatches(model.id, modelId) ? { ...model, enabled } : model)),
-    );
-    const toastId = showToast(
-      enabled ? t("providers.enablingModel", { modelId }) : t("providers.disablingModel", { modelId }),
-      "loading",
-    );
-    void saveSettings(
-      nextSettings,
-      true,
-      enabled ? t("providers.modelEnabledNamed", { modelId }) : t("providers.modelDisabledNamed", { modelId }),
-      toastId,
     );
   }
 
   async function toggleCodexHubConnection() {
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
+    await applyCodexHubConnection(nextMode, Boolean(appFlavor?.codex_takeover_required));
+  }
+
+  async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
     const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
     setBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
-      let status = await api.switchMode(nextMode, false);
+      let status = forceTakeover
+        ? await api.switchMode(nextMode, false, true)
+        : await api.switchMode(nextMode, false);
       if (nextMode === "custom" && !status.proxy_running) {
         updateToast(toastId, {
           action: null,
@@ -976,12 +1051,17 @@ function ProvidersPageImpl({
         status = refreshedStatus ?? status;
       }
       setCodexStatus(status);
+      setCodexTargetOwnerOverride(nextMode === "custom" ? appFlavor?.routing_owner ?? null : "official");
       onStatusChanged?.(status);
       setConnectionPendingMode(null);
       setError(null);
-      const targetProvider =
-        nextMode === "custom" || (settingsDraft?.unified_codex_history ?? true) ? "custom" : "openai";
-      void repairUnifiedHistoryInBackground(targetProvider, toastId, codexHubConnectionSuccessMessage(nextMode, tr));
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.codexRouteChangedRestart", {
+          status: codexHubConnectionSuccessMessage(nextMode, tr),
+        }),
+        tone: "success",
+      });
     } catch (err) {
       const message = messageFromError(err);
       if (isBackendDisconnectedMessage(message)) {
@@ -1007,48 +1087,24 @@ function ProvidersPageImpl({
     }
   }
 
-  async function repairUnifiedHistoryInBackground(
-    targetProvider: "custom" | "openai",
-    toastId?: string,
-    prefix?: string,
-  ) {
-    const activeToastId = toastId ?? showToast(t("settings.repairingHistoryBucket"), "loading");
-    updateToast(activeToastId, {
-      action: null,
-      text: prefix ? `${prefix}; ${t("settings.repairingHistoryBucket")}` : t("settings.repairingHistoryBucket"),
-      tone: "loading",
-    });
-    try {
-      const message = await api.syncHistory(targetProvider);
-      updateToast(activeToastId, {
-        action: null,
-        text: prefix ? `${prefix}; ${message}` : message,
-        tone: "success",
-      });
-    } catch (err) {
-      updateToast(activeToastId, {
-        action: null,
-        text: prefix
-          ? `${prefix}; ${t("providers.historyRepairFailed", { message: messageFromError(err) })}`
-          : t("providers.historyRepairFailed", { message: messageFromError(err) }),
-        tone: "error",
-      });
-    }
-  }
-
   async function reorderOfficialModels(models: Model[]) {
     const nextModels = renumberModels(models);
     setOfficialModels(nextModels);
+    setOfficialModelOrderDraft(nextModels.map((model) => model.id));
+  }
+
+  async function saveOfficialModels() {
     if (!settingsDraft) {
       return;
     }
     await saveSettings(
       {
         ...settingsDraft,
-        official_model_sort_order: nextModels.map((model) => model.id),
+        official_disabled_models: officialDisabledModelsDraft,
+        official_model_sort_order: officialModelOrderDraft,
       },
       true,
-      t("providers.officialModelOrderSaved"),
+      t("providers.officialModelsSaved"),
     );
   }
 
@@ -1092,22 +1148,40 @@ function ProvidersPageImpl({
     }
   }
 
-  async function refreshOfficialModels() {
-    setBusy("official-refresh");
-    const toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
+  async function refreshOfficialModels(options?: { quiet?: boolean }) {
+    const quiet = options?.quiet ?? false;
+    if (!quiet) {
+      setBusy("official-refresh");
+    }
+    const toastId = quiet
+      ? null
+      : showToast(t("providers.refreshingOfficialModels"), "loading");
     try {
       const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
-      setOfficialModels(sortOfficialModels(refreshed, settingsDraft?.official_model_sort_order ?? []));
-      const syncResult = await updateGatewayAfterCatalog(undefined, toastId);
+      const followsAutomaticOrder = shouldFollowOfficialCatalogOrder(officialModelOrderDraft);
+      const nextOrder = followsAutomaticOrder
+        ? officialModelOrderDraft
+        : refreshedOfficialModelOrder(officialModelOrderDraft, refreshed);
+      if (!followsAutomaticOrder) {
+        setOfficialModelOrderDraft(nextOrder);
+      }
+      setOfficialModels(sortOfficialModels(refreshed, nextOrder));
+      if (quiet) {
+        await api.generateCatalog();
+        await refreshGatewayState();
+        setModelDiscoveryError(null);
+        return;
+      }
+      const syncResult = await updateGatewayAfterCatalog(undefined, toastId ?? undefined);
       const toastMessage = catalogSyncToastMessage(t("providers.officialModelsRefreshed"), syncResult);
       if (syncResult?.failed) {
-        updateToast(toastId, {
+        updateToast(toastId!, {
           action: null,
           text: toastMessage ?? t("providers.officialModelsRefreshedSyncFailed"),
           tone: "error",
         });
       } else {
-        updateToast(toastId, {
+        updateToast(toastId!, {
           action: null,
           text: toastMessage ?? t("providers.officialModelsRefreshed"),
           tone: "success",
@@ -1115,9 +1189,16 @@ function ProvidersPageImpl({
         setError(null);
       }
     } catch (err) {
-      updateToastWithError(toastId, err);
+      if (quiet) {
+        officialModelRefreshStartedRef.current = false;
+        setModelDiscoveryError(messageFromError(err));
+      } else {
+        updateToastWithError(toastId!, err);
+      }
     } finally {
-      setBusy(null);
+      if (!quiet) {
+        setBusy(null);
+      }
     }
   }
 
@@ -1291,6 +1372,8 @@ function ProvidersPageImpl({
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
           codexConnected={codexConnected}
+          codexForeignOwner={codexOwnedByOtherApp}
+          codexOwnerLabel={codexRouteOwnerLabel}
           connectionPendingMode={connectionPendingMode}
           gatewayStatus={gatewayStatus}
           busy={busy}
@@ -1337,12 +1420,18 @@ function ProvidersPageImpl({
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
+                onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={() => void refreshOfficialModels()}
+                onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
                 onReorder={(models) => void reorderOfficialModels(models)}
+                onSave={() => void saveOfficialModels()}
                 onToggleModel={toggleOfficialModel}
+                dirty={officialModelDraftDirty}
+                saveBusy={busy === "settings"}
+                syncBoundClients={settings?.auto_sync_clients ?? true}
                 usageBusy={officialUsageBusy}
                 usageError={officialUsageError}
                 usageHidden={officialUsageHidden}
@@ -1454,6 +1543,8 @@ function ProviderSourceSidebar({
   busy,
   codexAuthState,
   codexConnected,
+  codexForeignOwner,
+  codexOwnerLabel,
   connectionPendingMode,
   enabledProviderModels,
   gatewayStatus,
@@ -1473,6 +1564,8 @@ function ProviderSourceSidebar({
   busy: string | null;
   codexAuthState: CodexAuthState;
   codexConnected: boolean;
+  codexForeignOwner: boolean;
+  codexOwnerLabel: string | null;
   connectionPendingMode: ConnectionMode | null;
   enabledProviderModels: number;
   gatewayStatus: GatewayStatus | null;
@@ -1504,6 +1597,8 @@ function ProviderSourceSidebar({
       />
       <HubConnectionBridge
         connected={codexConnected}
+        foreignOwner={codexForeignOwner}
+        ownerLabel={codexOwnerLabel}
         pendingMode={connectionPendingMode}
         disabled={busy === "route" || Boolean(connectionPendingMode)}
         onToggle={onToggleConnection}
@@ -1620,12 +1715,16 @@ function OfficialOpenAICard({
 function HubConnectionBridge({
   connected,
   disabled,
+  foreignOwner,
   onToggle,
+  ownerLabel,
   pendingMode,
 }: {
   connected: boolean;
   disabled: boolean;
+  foreignOwner: boolean;
   onToggle: () => void;
+  ownerLabel: string | null;
   pendingMode: ConnectionMode | null;
 }) {
   const { t } = useTranslation();
@@ -1634,7 +1733,9 @@ function HubConnectionBridge({
     : pendingMode === "official"
       ? t("providers.disconnecting")
     : connected
-      ? t("providers.connectedToHub")
+      ? ownerLabel
+        ? t("providers.connectedToHubChannel", { channel: ownerLabel })
+        : t("providers.connectedToHub")
       : t("providers.connectToHub");
   const icon = pendingMode === "official" || (!pendingMode && !connected)
     ? <Link2Off size={15} className={pendingMode ? "opacity-70" : undefined} />
@@ -1648,8 +1749,10 @@ function HubConnectionBridge({
         className={cx(
           "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-100",
           pendingMode && "animate-pulse bg-slate-200/85 text-slate-600",
-          !pendingMode && connected
-            ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
+          !pendingMode && foreignOwner
+            ? "border border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:shadow-raised"
+            : !pendingMode && connected
+              ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
             : !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
         )}
         disabled={disabled}
@@ -1659,8 +1762,10 @@ function HubConnectionBridge({
             ? t("providers.connectingToHub")
             : pendingMode === "official"
               ? t("providers.disconnectingFromHub")
-              : connected
-                ? t("providers.disconnectFromHubTitle")
+               : foreignOwner
+                 ? t("providers.takeOverFromChannelTitle", { channel: ownerLabel ?? t("common.unknown") })
+               : connected
+                 ? t("providers.disconnectFromHubTitle")
                 : t("providers.connectToHubTitle")
         }
       >
@@ -2251,17 +2356,23 @@ function OfficialDetail({
   authIssue,
   authState,
   busy,
+  dirty,
   gatewayContextById,
   models,
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
+  onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
+  onRefreshClients,
   onRefreshAuth,
   onRefreshUsage,
   onReorder,
+  onSave,
   onToggleModel,
+  saveBusy,
+  syncBoundClients,
   usageBusy,
   usageError,
   usageHidden,
@@ -2270,17 +2381,23 @@ function OfficialDetail({
   authIssue: string | null;
   authState: CodexAuthState;
   busy: string | null;
+  dirty: boolean;
   gatewayContextById: Map<string, number>;
   models: Model[];
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
+  onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: () => void;
+  onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
+  onSave: () => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
+  saveBusy: boolean;
+  syncBoundClients: boolean;
   usageBusy: boolean;
   usageError: string | null;
   usageHidden: boolean;
@@ -2290,6 +2407,122 @@ function OfficialDetail({
   const { showToast, updateToast } = useToasts();
   const authorized = authState === "authorized";
   const authRefreshBusy = busy === "auth-refresh";
+  const [contextGuardStatus, setContextGuardStatus] = useState<CodexContextGuardStatus | null>(null);
+  const [contextGuardBusy, setContextGuardBusy] = useState(false);
+  const displayedGatewayContextById = useMemo(() => {
+    if (!contextGuardStatus?.gateway_enabled) {
+      return gatewayContextById;
+    }
+    return new Map(
+      Array.from(gatewayContextById, ([modelId, contextWindow]) => [
+        modelId,
+        Math.min(
+          contextWindow,
+          contextGuardStatus.model_context_window ?? contextWindow,
+        ),
+      ]),
+    );
+  }, [
+    contextGuardStatus?.gateway_enabled,
+    contextGuardStatus?.model_context_window,
+    gatewayContextById,
+  ]);
+
+  useEffect(() => {
+    let active = true;
+    void api.getCodexContextGuardStatus()
+      .then((status) => {
+        if (active) {
+          setContextGuardStatus(status);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          showToast(t("providers.contextGuardStatusFailed", { message: messageFromError(err) }), "error");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [showToast, t]);
+
+  async function toggleContextGuard(enabled: boolean) {
+    if (contextGuardBusy) {
+      return;
+    }
+    setContextGuardBusy(true);
+    const toastId = showToast(
+      enabled ? t("providers.enablingContextGuard") : t("providers.disablingContextGuard"),
+      "loading",
+    );
+    try {
+      const status = await api.setCodexContextGuard(enabled);
+      setContextGuardStatus(status);
+      onContextGuardChanged(status.gateway_enabled);
+      let syncResult: GatewayClientSyncSummary | null = null;
+      let syncError: string | null = null;
+      if (syncBoundClients) {
+        updateToast(toastId, {
+          action: null,
+          text: t("providers.syncBoundClients"),
+          tone: "loading",
+        });
+        try {
+          syncResult = await api.syncGatewayClients();
+        } catch (err) {
+          syncError = messageFromError(err);
+        }
+        await onRefreshClients?.().catch(() => undefined);
+      }
+      const restartMessage = enabled
+        ? t("providers.contextGuardEnabledRestartCodex")
+        : t("providers.contextGuardDisabledRestartCodex");
+      const syncedClientNames = syncResult?.results
+        .filter((result) => result.applied)
+        .map((result) => result.name)
+        .join(", ");
+      const failedClientNames = syncResult?.results
+        .filter((result) => result.status === "failed")
+        .map((result) => result.name)
+        .join(", ");
+      const syncedMessage = syncedClientNames
+        ? t("providers.contextGuardClientsSyncedRestart", {
+            clientNames: syncedClientNames,
+            restartMessage,
+          })
+        : restartMessage;
+      const failedMessage = syncError
+        ? t("providers.contextGuardClientSyncError", {
+            message: syncError,
+            restartMessage,
+          })
+        : failedClientNames && syncedClientNames
+          ? t("providers.contextGuardClientsPartiallySyncedRestart", {
+              failedClientNames,
+              restartMessage,
+              syncedClientNames,
+            })
+          : failedClientNames
+          ? t("providers.contextGuardClientsSyncFailed", {
+              clientNames: failedClientNames,
+              restartMessage,
+            })
+          : null;
+      updateToast(toastId, {
+        action: null,
+        text: failedMessage ?? syncedMessage,
+        tone: failedMessage ? "error" : "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.contextGuardUpdateFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+    } finally {
+      setContextGuardBusy(false);
+    }
+  }
 
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
@@ -2317,7 +2550,7 @@ function OfficialDetail({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-3 border-b border-line p-4">
         <HeaderRow
           title={t("common.codex")}
@@ -2367,19 +2600,48 @@ function OfficialDetail({
         )}
       </div>
       <ModelSection
-        contextById={gatewayContextById}
+        contextById={displayedGatewayContextById}
         disabled
+        headerControl={
+          <div className="group relative">
+            <SwitchControl
+              ariaDescribedBy="context-guard-tooltip"
+              checked={contextGuardStatus?.enabled ?? false}
+              className="h-7"
+              disabled={contextGuardBusy || !contextGuardStatus}
+              label={t("providers.contextGuard")}
+              onChange={(enabled) => void toggleContextGuard(enabled)}
+            />
+            <div
+              id="context-guard-tooltip"
+              role="tooltip"
+              className="pointer-events-none absolute bottom-full right-0 z-30 mb-2 hidden w-80 whitespace-normal rounded-inner bg-ink px-3 py-2 text-left text-xs font-medium leading-5 text-white shadow-floating group-hover:block group-focus-within:block"
+            >
+              {t("providers.contextGuardTooltip")}
+            </div>
+          </div>
+        }
         interactionDisabled={authState !== "authorized"}
         models={models}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
         onReorder={onReorder}
         onTestModel={testOfficialModel}
-        reorderable={false}
         refreshBusy={busy === "official-refresh"}
         onToggleOfficialModel={onToggleModel}
         modelTestDisabled={authState !== "authorized"}
       />
+      <div className="flex items-center justify-end border-t border-line px-5 py-3">
+        <button
+          type="button"
+          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+          disabled={!dirty || saveBusy}
+          onClick={onSave}
+        >
+          <Save size={16} />
+          {t("common.save")}
+        </button>
+      </div>
     </div>
   );
 }
@@ -2664,6 +2926,7 @@ function ModelSection({
   discoverBusy,
   discoverDisabled,
   discoverError,
+  headerControl,
   interactionDisabled = false,
   models,
   modelTestDisabled,
@@ -2687,6 +2950,7 @@ function ModelSection({
   discoverBusy?: boolean;
   discoverDisabled?: boolean;
   discoverError?: string | null;
+  headerControl?: React.ReactNode;
   interactionDisabled?: boolean;
   models: Model[];
   modelTestDisabled?: boolean;
@@ -2761,13 +3025,9 @@ function ModelSection({
     const modelEnabled = disabled
       ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
       : model.enabled;
-    const rowInteractable = !interactionDisabled && (!disabled || Boolean(onToggleOfficialModel));
+    const rowInteractable = !interactionDisabled && !disabled;
     function activateModelRow() {
       if (interactionDisabled) {
-        return;
-      }
-      if (disabled && onToggleOfficialModel) {
-        onToggleOfficialModel(model.id, !modelEnabled);
         return;
       }
       setEditingModelId(model.id);
@@ -2777,7 +3037,10 @@ function ModelSection({
         {modelCapabilityTags(model).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
-        <CapabilityChip label={formatContextWindow(contextWindow)} />
+        <CapabilityChip
+          label={formatContextWindow(contextWindow)}
+          title={modelLimitDetails(model, contextWindow)}
+        />
         {disabled && onToggleOfficialModel && (
           <SwitchControl
             checked={modelEnabled}
@@ -2855,6 +3118,7 @@ function ModelSection({
           </p>
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+          {headerControl}
           {discoverError && (
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
               {discoverError}
@@ -2863,7 +3127,10 @@ function ModelSection({
           {onRefresh && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              className={cx(
+                "focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-slate-100 disabled:bg-slate-100",
+                headerControl ? "h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
+              )}
               disabled={interactionDisabled || refreshBusy}
               onClick={onRefresh}
             >
@@ -3245,9 +3512,9 @@ function optionalPositiveNumber(value: string) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function CapabilityChip({ icon, label }: { icon?: React.ReactNode; label: string }) {
+function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label: string; title?: string }) {
   return (
-    <span className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
+    <span title={title} className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
       {icon}
       {label}
     </span>
@@ -3263,13 +3530,17 @@ function ModelCapabilityChip({ tag }: { tag: "vision" | "thinking" }) {
 }
 
 function SwitchControl({
+  ariaDescribedBy,
   checked,
+  className,
   disabled = false,
   label,
   onChange,
   showLabel = true,
 }: {
+  ariaDescribedBy?: string;
   checked: boolean;
+  className?: string;
   disabled?: boolean;
   label: string;
   onChange: (checked: boolean) => void;
@@ -3280,7 +3551,9 @@ function SwitchControl({
       className={cx(
         "inline-flex h-6 shrink-0 items-center gap-2 whitespace-nowrap text-xs font-semibold text-slate-600",
         showLabel && "rounded-full border border-line bg-panel pl-2 pr-1",
+        className,
       )}
+      aria-describedby={ariaDescribedBy}
     >
       <span className={showLabel ? "truncate" : "sr-only"}>{label}</span>
       <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
@@ -3327,27 +3600,16 @@ function isOfficialModelDisabled(disabledModels: string[], modelId: string) {
 }
 
 function modelIdMatches(left: string, right: string) {
-  const normalize = (value: string) => value.trim().replace(/^openai\//, "");
-  return normalize(left) === normalize(right);
+  return normalizeOfficialModelId(left) === normalizeOfficialModelId(right);
 }
 
 function withDefaultFastVariants(settings: Settings): Settings {
-  const base = {
-    ...settings,
-    auto_sync_history: settings.auto_sync_history ?? false,
-    unified_codex_history: settings.unified_codex_history ?? true,
-    auto_sync_clients: settings.auto_sync_clients ?? settings.auto_sync_catalog ?? true,
-    official_disabled_models: settings.official_disabled_models ?? [],
-  };
-  if (settings.gateway_fast_model_variants?.length) {
-    return base;
-  }
-  return { ...base, gateway_fast_model_variants: DEFAULT_FAST_MODEL_VARIANTS };
+  return normalizeSettings(settings);
 }
 
 function formatContextWindow(value?: number | null) {
   if (!value) {
-    return i18n.t("common.unknown");
+    return i18n.t("providers.contextDynamic");
   }
   if (value >= 1_000_000) {
     return `${(value / 1_000_000).toFixed(1)}M`;
@@ -3357,6 +3619,20 @@ function formatContextWindow(value?: number | null) {
     return `${new Intl.NumberFormat(i18n.language || "en-US").format(rounded)}K`;
   }
   return new Intl.NumberFormat(i18n.language || "en-US").format(value);
+}
+
+function modelLimitDetails(model: Model, effective?: number | null) {
+  const effectiveLabel = formatContextWindow(effective);
+  const maxLabel = model.max_context_window
+    ? formatContextWindow(model.max_context_window)
+    : i18n.t("common.unknown");
+  const verified = model.verified_at ?? i18n.t("common.unknown");
+  return i18n.t("providers.contextDetails", {
+    effective: effectiveLabel,
+    max: maxLabel,
+    source: model.effective_source ?? model.max_source ?? i18n.t("common.unknown"),
+    verified,
+  });
 }
 
 function hasVision(model: Model) {
@@ -3504,13 +3780,14 @@ function isFiveHourUsageLimit(limit: OpenAIUsageLimit) {
   return (
     /\b5\s*h(?:our)?s?\b/.test(value) ||
     /\bfive[-_\s]?h(?:our)?s?\b/.test(value) ||
-    ((value.includes("5") || value.includes("five")) && value.includes("hour"))
+    ((value.includes("5") || value.includes("five")) && value.includes("hour")) ||
+    /\bprimary\b/.test(value)
   );
 }
 
 function isWeeklyUsageLimit(limit: OpenAIUsageLimit) {
   const value = usageLimitSearchText(limit);
-  return value.includes("week") || value.includes("weekly");
+  return value.includes("week") || value.includes("weekly") || /\bsecondary\b/.test(value);
 }
 
 function usageLimitSearchText(limit: OpenAIUsageLimit) {
@@ -3945,7 +4222,9 @@ function mondayWeekdayIndex(date: Date) {
 
 function sortOfficialModels(models: Model[], sortOrder: string[]) {
   const order = new Map<string, number>();
-  const effectiveOrder = sortOrder.length ? sortOrder : DEFAULT_OFFICIAL_MODEL_ORDER;
+  const effectiveOrder = shouldFollowOfficialCatalogOrder(sortOrder)
+    ? DEFAULT_OFFICIAL_MODEL_ORDER
+    : sortOrder;
   effectiveOrder.forEach((id, index) => {
     for (const key of officialModelSortKeys(id)) {
       order.set(key, index);
@@ -3967,28 +4246,93 @@ function sortOfficialModels(models: Model[], sortOrder: string[]) {
   });
 }
 
-function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
-  const merged = new Map<string, Model>();
-  for (const model of metadata.filter(isOfficialModel)) {
-    merged.set(model.id, {
-      ...model,
-      enabled: true,
-    });
+function shouldFollowOfficialCatalogOrder(currentOrder: string[]) {
+  if (!currentOrder.length) {
+    return true;
   }
+  const normalized = currentOrder
+    .map((id) => normalizeOfficialModelId(id))
+    .filter((id): id is string => Boolean(id));
+  let legacyIndex = 0;
+  let sawNewModel = false;
+  for (const id of normalized) {
+    const index = LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER.indexOf(id);
+    if (index < 0) {
+      sawNewModel = true;
+      continue;
+    }
+    if (sawNewModel || index !== legacyIndex) {
+      return false;
+    }
+    legacyIndex += 1;
+  }
+  return legacyIndex > 0;
+}
+
+function refreshedOfficialModelOrder(currentOrder: string[], refreshedModels: Model[]) {
+  const refreshedKeySets = refreshedModels.map((model) => new Set(officialModelSortKeys(model.id)));
+  const nextOrder = currentOrder.filter((id) => {
+    const keys = officialModelSortKeys(id);
+    return refreshedKeySets.some((refreshedKeys) => keys.some((key) => refreshedKeys.has(key)));
+  });
+  const seen = new Set(nextOrder.flatMap(officialModelSortKeys));
+  for (const model of refreshedModels) {
+    const keys = officialModelSortKeys(model.id);
+    if (keys.some((key) => seen.has(key))) {
+      continue;
+    }
+    nextOrder.push(model.id);
+    keys.forEach((key) => seen.add(key));
+  }
+  return nextOrder;
+}
+
+function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
+  const knownOfficialIds = officialModelIdSet(catalog, metadata);
+  const merged = new Map<string, Model>();
   for (const model of catalog.filter(isOfficialModel)) {
-    const existing = merged.get(model.id);
-    merged.set(model.id, {
+    const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
+    if (!canonicalId) {
+      continue;
+    }
+    const existing = merged.get(canonicalId);
+    merged.set(canonicalId, {
       ...existing,
       ...model,
-      context_window: existing?.context_window ?? model.context_window,
-      max_output_tokens: existing?.max_output_tokens ?? model.max_output_tokens,
-      input_modalities: existing?.input_modalities ?? model.input_modalities,
-      supported_reasoning_levels: existing?.supported_reasoning_levels ?? model.supported_reasoning_levels,
-      default_reasoning_level: existing?.default_reasoning_level ?? model.default_reasoning_level,
-      enabled: true,
+      id: canonicalId,
+      enabled: existing
+        ? (existing.enabled ?? true) || (model.enabled ?? true)
+        : model.enabled ?? true,
+    });
+  }
+  for (const model of metadata.filter(isOfficialModel)) {
+    const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
+    if (!canonicalId) {
+      continue;
+    }
+    const existing = merged.get(canonicalId);
+    merged.set(canonicalId, {
+      ...existing,
+      ...model,
+      id: canonicalId,
+      enabled: existing
+        ? (existing.enabled ?? true) || (model.enabled ?? true)
+        : model.enabled ?? true,
     });
   }
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
+}
+
+function officialModelIdSet(...groups: Model[][]) {
+  const known = new Set<string>();
+  for (const model of groups.flatMap((group) => group).filter(isOfficialModel)) {
+    const value = model.id.trim();
+    const bare = value.startsWith("openai/gpt-") ? value.slice("openai/".length) : value;
+    if (bare.startsWith("gpt-")) {
+      known.add(bare);
+    }
+  }
+  return known;
 }
 
 function isOfficialModel(model: Model) {
@@ -4005,8 +4349,8 @@ function isOfficialGatewayFastVariant(model: Model) {
 }
 
 function officialModelSortKeys(id: string) {
-  const prefix = "openai/";
-  return id.startsWith(prefix) ? [id, id.slice(prefix.length)] : [`${prefix}${id}`, id];
+  const normalized = normalizeOfficialModelId(id);
+  return normalized ? [normalized, `openai/${normalized}`] : [id.trim()];
 }
 
 function uniqueModelId(models: Model[]) {
@@ -4450,7 +4794,22 @@ function shortProviderDiscoveryError(err: unknown, t: Translate) {
 function codexHubConnectionErrorMessage(err: unknown, t: Translate) {
   const message = messageFromError(err);
 
+  if (message.includes("route.takeover_required")) {
+    return t("providers.betaTakeoverRequired");
+  }
+  if (message.includes("route.owner_mismatch")) {
+    return t("providers.betaOwnerConflict");
+  }
+
   return t("providers.codexHubConnectionFailed", { message });
+}
+
+function codexTakeoverOwnerLabel(owner: AppFlavorInfo["codex_target_owner"], t: Translate) {
+  if (owner === null) return t("providers.betaTakeoverUnowned");
+  if (owner === "official") return t("common.official");
+  if (owner === "release") return t("gateway.ownerRelease");
+  if (owner === "beta") return t("gateway.ownerBeta");
+  return t("gateway.ownerExternal");
 }
 
 function codexHubConnectionSuccessMessage(mode: string, t: Translate) {

@@ -1,5 +1,6 @@
 use crate::{
-    app_flavor::RoutingOwner, config, models, safe_file, Provider, Settings, UpstreamFormat,
+    app_flavor::RoutingOwner, config, models, runtime_paths, safe_file, Provider, Settings,
+    UpstreamFormat,
 };
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -21,40 +22,28 @@ const EVENT_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 const TELEMETRY_INGEST_BATCH_LINES: usize = 1000;
 const TELEMETRY_INGEST_BATCH_BYTES: u64 = 1024 * 1024;
 const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
-const DEFAULT_MODEL: &str = "openai/gpt-5.5";
+const DEFAULT_MODEL: &str = "gpt-5.5";
+const OPENAI_CONTEXT_GUARD_WINDOW: u32 = 272_000;
 
 const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
-    ("openai/gpt-5.5", "OpenAI GPT-5.5", 258400),
-    ("openai/gpt-5.4", "OpenAI GPT-5.4", 272000),
-    ("openai/gpt-5.4-mini", "OpenAI GPT-5.4-Mini", 272000),
-    (
-        "openai/gpt-5.3-codex-spark",
-        "OpenAI GPT-5.3-Codex-Spark",
-        128000,
-    ),
+    ("gpt-5.5", "5.5", 258400),
+    ("gpt-5.4", "5.4", 272000),
+    ("gpt-5.4-mini", "5.4 Mini", 272000),
+    ("gpt-5.3-codex-spark", "5.3 Codex Spark", 128000),
 ];
 
 const OFFICIAL_FAST_VARIANTS: &[(&str, &str, &str, u32)] = &[
-    (
-        "openai/gpt-5.5",
-        "openai/gpt-5.5-fast",
-        "OpenAI GPT-5.5 Fast",
-        258400,
-    ),
-    (
-        "openai/gpt-5.4",
-        "openai/gpt-5.4-fast",
-        "OpenAI GPT-5.4 Fast",
-        272000,
-    ),
+    ("gpt-5.5", "gpt-5.5-fast", "5.5 Fast", 258400),
+    ("gpt-5.4", "gpt-5.4-fast", "5.4 Fast", 272000),
 ];
 
 const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
-    ("openai/gpt-5.5-fast", 12.50, 1.25, 75.00),
-    ("openai/gpt-5.4-fast", 5.00, 0.50, 30.00),
+    ("gpt-5.5-fast", 12.50, 1.25, 75.00),
+    ("gpt-5.4-fast", 5.00, 0.50, 30.00),
 ];
 
 static GATEWAY_CLIENT_CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static GATEWAY_CLIENT_SYNC_STATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static TELEMETRY_INGEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static TELEMETRY_INGESTER_STARTED: OnceLock<()> = OnceLock::new();
 
@@ -110,7 +99,8 @@ pub struct GatewayModel {
     pub source_kind: String,
     pub supports_responses: bool,
     pub supports_chat_completions: bool,
-    pub context_window: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +176,7 @@ impl GatewayClientEndpointSelection {
 struct GatewayClientProviderModel {
     id: String,
     display_name: String,
-    context_window: u32,
+    context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -366,6 +356,11 @@ pub struct GatewayClientSyncSummary {
     pub message: String,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct GatewayClientSyncState {
+    pending_client_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PiConfigPaths {
     settings_path: PathBuf,
@@ -489,6 +484,14 @@ pub fn gateway_test_request(
     model: Option<String>,
 ) -> Result<GatewayTestResult, String> {
     let settings = config::get_settings()?;
+    gateway_test_request_with_settings(kind, model, &settings)
+}
+
+fn gateway_test_request_with_settings(
+    kind: GatewayTestKind,
+    model: Option<String>,
+    settings: &Settings,
+) -> Result<GatewayTestResult, String> {
     let model = model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
@@ -508,6 +511,7 @@ pub fn gateway_test_request(
             "chat_completions",
             &endpoints.chat_completions,
             Some(model.clone()),
+            Some(settings),
             json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "Say hello in one word."}],
@@ -520,6 +524,7 @@ pub fn gateway_test_request(
             "chat_completions_stream",
             &endpoints.chat_completions,
             Some(model.clone()),
+            Some(settings),
             json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "Say hello in one word."}],
@@ -532,6 +537,7 @@ pub fn gateway_test_request(
             "responses_stream",
             &endpoints.responses,
             Some(model.clone()),
+            Some(settings),
             json!({
                 "model": model,
                 "input": "Say hello in one word.",
@@ -626,6 +632,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let current_owner = crate::app_flavor::current().routing_owner();
+    let pending_client_ids = read_pending_client_ids();
     let opencode_path = detect_opencode_config_path();
     let opencode_installed = opencode_path
         .as_ref()
@@ -663,7 +670,15 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             )
         })
         .unwrap_or((RoutingOwner::UnknownExternal, None));
-    let opencode_route_mode = route_mode_for_owner(opencode_owner_details.0, current_owner, false);
+    let opencode_route_mode = route_mode_for_owner(
+        opencode_owner_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("opencode"),
+            opencode_owner_details.0,
+            current_owner,
+        ),
+    );
     clients.push(GatewayClientInfo {
         id: "opencode".to_string(),
         name: "OpenCode".to_string(),
@@ -701,11 +716,17 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || zcode_store_path.exists()
         || zcode_executable.is_some()
         || command_exists(&["zcode", "ZCode", "ZCode.exe"]);
-    let zcode_stale =
+    let zcode_expected_stale =
         zcode_route_mode_with_expected(&zcode_targets, &settings, &providers, DEFAULT_MODEL)
             == "stale";
     let zcode_route_details =
         detect_zcode_route_details(&zcode_targets, current_owner, settings.proxy_port);
+    let zcode_stale = zcode_expected_stale
+        || pending_sync_is_stale(
+            pending_client_ids.contains("zcode"),
+            zcode_route_details.0,
+            current_owner,
+        );
     let zcode_route_mode = route_mode_for_owner(zcode_route_details.0, current_owner, zcode_stale);
     clients.push(GatewayClientInfo {
         id: "zcode".to_string(),
@@ -741,7 +762,15 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .unwrap_or(false)
         || command_exists(&["pi"]);
     let pi_route_details = detect_pi_route_details(&pi_paths, current_owner, settings.proxy_port);
-    let pi_route_mode = route_mode_for_owner(pi_route_details.0, current_owner, false);
+    let pi_route_mode = route_mode_for_owner(
+        pi_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("pi"),
+            pi_route_details.0,
+            current_owner,
+        ),
+    );
     clients.push(GatewayClientInfo {
         id: "pi".to_string(),
         name: "Pi".to_string(),
@@ -772,7 +801,15 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || command_exists(&["omp"]);
     let omp_route_details =
         detect_omp_route_details(&omp_paths, current_owner, settings.proxy_port);
-    let omp_route_mode = route_mode_for_owner(omp_route_details.0, current_owner, false);
+    let omp_route_mode = route_mode_for_owner(
+        omp_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("omp"),
+            omp_route_details.0,
+            current_owner,
+        ),
+    );
     clients.push(GatewayClientInfo {
         id: "omp".to_string(),
         name: "OMP".to_string(),
@@ -860,10 +897,10 @@ pub fn apply_gateway_client_config(
             message: "This client is copy-only; no native adapter is registered.".to_string(),
         });
     }
-    let current_app_owner = crate::app_flavor::current().routing_owner();
-    with_gateway_client_mutation_owner_gate(id, current_app_owner, false, move |id| {
+    let result = with_gateway_client_mutation_owner_gate(id, false, move |id, _| {
         apply_gateway_client_config_locked(id, model)
-    })
+    })?;
+    clear_pending_sync_after_successful_apply(result)
 }
 
 fn apply_gateway_client_config_locked(
@@ -943,42 +980,51 @@ pub fn restore_gateway_client_config(
             message: "Restore is not available for this copy-only client.".to_string(),
         });
     }
-    with_gateway_client_mutation_owner_gate(id, RoutingOwner::Official, false, |id| {
-        restore_gateway_client_config_locked(id)
-    })
+    let result = with_gateway_client_mutation_owner_gate(id, false, |id, owner| {
+        restore_gateway_client_config_locked(id, owner)
+    })?;
+    clear_pending_sync_after_successful_apply(result)
 }
 
 fn restore_gateway_client_config_locked(
     client_id: String,
+    backup_owner: RoutingOwner,
 ) -> Result<GatewayClientApplyResult, String> {
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
+    let backup_roots = client_backup_roots_for_restore(&client_id, backup_owner);
     match client_id.as_str() {
         "opencode" => {
             let path = detect_opencode_config_path()
                 .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-            restore_latest_backup("opencode", &path, &client_backup_root("opencode"))
+            restore_opencode_config_with_backup_roots(&path, &backup_roots)
         }
         "pi" => {
             let paths = detect_pi_config_paths();
-            restore_pi_config_with_paths(
-                &paths.settings_path,
-                &paths.models_path,
-                &client_backup_root("pi"),
-            )
+            restore_with_backup_roots(&backup_roots, |backup_root| {
+                restore_pi_config_with_paths(
+                    &paths.settings_path,
+                    &paths.models_path,
+                    backup_root,
+                )
+            })
         }
         "omp" => {
             let paths = detect_omp_config_paths();
-            restore_omp_config_with_paths(
-                &paths.config_path,
-                &paths.models_path,
-                &client_backup_root("omp"),
-            )
+            restore_with_backup_roots(&backup_roots, |backup_root| {
+                restore_omp_config_with_paths(
+                    &paths.config_path,
+                    &paths.models_path,
+                    backup_root,
+                )
+            })
         }
         "zcode" => {
             let targets = detect_zcode_config_targets();
-            restore_zcode_config_with_targets(&targets, &client_backup_root("zcode"))
+            restore_with_backup_roots(&backup_roots, |backup_root| {
+                restore_zcode_config_with_targets(&targets, backup_root)
+            })
         }
         _ => Ok(GatewayClientApplyResult {
             client_id,
@@ -1008,13 +1054,12 @@ pub fn switch_gateway_client_route(
         "hub" => current_app_owner,
         other => return Err(format!("unsupported routing owner: {other}")),
     };
-    with_gateway_client_mutation_owner_gate(
+    let result = with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
-        next_owner,
         force_takeover.unwrap_or(false),
-        move |id| {
+        move |id, current_target_owner| {
             if next_owner == RoutingOwner::Official {
-                restore_gateway_client_config_locked(id)
+                restore_gateway_client_config_locked(id, current_target_owner)
             } else if next_owner == current_app_owner {
                 apply_gateway_client_config_locked(id, model)
             } else {
@@ -1025,7 +1070,8 @@ pub fn switch_gateway_client_route(
                 ))
             }
         },
-    )
+    )?;
+    clear_pending_sync_after_successful_apply(result)
 }
 
 pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSummary, String> {
@@ -1033,11 +1079,9 @@ pub fn sync_gateway_clients(model: Option<String>) -> Result<GatewayClientSyncSu
     let providers = config::get_providers()?;
     let model = Some(gateway_client_sync_model_arg(model, &settings, &providers)?);
     let clients = list_gateway_clients(false)?;
-    Ok(sync_gateway_clients_from_infos(
-        clients,
-        model,
-        apply_gateway_client_config,
-    ))
+    let summary = sync_gateway_clients_from_infos(clients, model, apply_gateway_client_config);
+    persist_pending_client_syncs(&summary)?;
+    Ok(summary)
 }
 
 fn sync_gateway_clients_from_infos<F>(
@@ -1131,6 +1175,93 @@ where
     }
 }
 
+fn gateway_client_sync_state_path() -> Result<PathBuf, String> {
+    Ok(runtime_paths::runtime_home_dir()?
+        .join("proxy")
+        .join("gateway-client-sync-state.json"))
+}
+
+fn read_pending_client_ids() -> HashSet<String> {
+    let Ok(path) = gateway_client_sync_state_path() else {
+        return HashSet::new();
+    };
+    read_pending_client_ids_from_path(&path)
+}
+
+fn read_pending_client_ids_from_path(path: &Path) -> HashSet<String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    serde_json::from_str::<GatewayClientSyncState>(&text)
+        .map(|state| state.pending_client_ids.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn write_pending_client_ids(pending: &HashSet<String>) -> Result<(), String> {
+    let path = gateway_client_sync_state_path()?;
+    write_pending_client_ids_to_path(&path, pending)
+}
+
+fn write_pending_client_ids_to_path(path: &Path, pending: &HashSet<String>) -> Result<(), String> {
+    if pending.is_empty() {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "failed to remove Gateway client sync state {}: {error}",
+                path.display()
+            )),
+        };
+    }
+    let mut pending_client_ids = pending.iter().cloned().collect::<Vec<_>>();
+    pending_client_ids.sort();
+    let text = serde_json::to_string_pretty(&GatewayClientSyncState { pending_client_ids })
+        .map_err(|error| format!("failed to serialize Gateway client sync state: {error}"))?;
+    safe_file::write_text_atomic(path, &format!("{text}\n"))
+}
+
+fn update_pending_client_ids_after_sync(
+    pending: &mut HashSet<String>,
+    summary: &GatewayClientSyncSummary,
+) {
+    for result in &summary.results {
+        if result.applied {
+            pending.remove(&result.client_id);
+        } else if result.status == "failed" {
+            pending.insert(result.client_id.clone());
+        }
+    }
+}
+
+fn persist_pending_client_syncs(summary: &GatewayClientSyncSummary) -> Result<(), String> {
+    let _guard = GATEWAY_CLIENT_SYNC_STATE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Gateway client sync state lock is poisoned".to_string())?;
+    let mut pending = read_pending_client_ids();
+    update_pending_client_ids_after_sync(&mut pending, summary);
+    write_pending_client_ids(&pending)
+}
+
+fn clear_pending_sync_after_successful_apply(
+    result: GatewayClientApplyResult,
+) -> Result<GatewayClientApplyResult, String> {
+    if result.applied {
+        clear_client_sync_pending(&result.client_id)?;
+    }
+    Ok(result)
+}
+
+fn clear_client_sync_pending(client_id: &str) -> Result<(), String> {
+    let _guard = GATEWAY_CLIENT_SYNC_STATE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Gateway client sync state lock is poisoned".to_string())?;
+    let mut pending_client_ids = read_pending_client_ids();
+    pending_client_ids.remove(client_id);
+    write_pending_client_ids(&pending_client_ids)
+}
+
 fn gateway_client_sync_model_arg(
     model: Option<String>,
     settings: &Settings,
@@ -1196,12 +1327,11 @@ fn gateway_client_supports_native_apply(client_id: &str) -> bool {
 
 fn with_gateway_client_mutation_owner_gate<F>(
     client_id: String,
-    next_owner: RoutingOwner,
     force_takeover: bool,
     operation: F,
 ) -> Result<GatewayClientApplyResult, String>
 where
-    F: FnOnce(String) -> Result<GatewayClientApplyResult, String>,
+    F: FnOnce(String, RoutingOwner) -> Result<GatewayClientApplyResult, String>,
 {
     let current_app_owner = crate::app_flavor::current().routing_owner();
     let current_target_owner = list_gateway_clients(false)?
@@ -1210,15 +1340,14 @@ where
         .map(|client| client.route_owner)
         .ok_or_else(|| format!("unknown gateway client: {client_id}"))?;
     if !gateway_client_has_existing_config(&client_id) {
-        return operation(client_id);
+        return operation(client_id, current_target_owner);
     }
     ensure_route_owner_mutation_allowed(
         current_app_owner,
         current_target_owner,
-        next_owner,
         force_takeover,
     )?;
-    operation(client_id)
+    operation(client_id, current_target_owner)
 }
 
 fn gateway_client_has_existing_config(client_id: &str) -> bool {
@@ -1339,15 +1468,19 @@ fn request_json(
     kind: &str,
     endpoint: &str,
     model: Option<String>,
+    local_gateway_settings: Option<&Settings>,
     body: Value,
     stream: bool,
 ) -> Result<GatewayTestResult, String> {
     let started = Instant::now();
-    let response = client
+    let mut request = client
         .post(endpoint)
         .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send();
+        .body(body.to_string());
+    if let Some(settings) = local_gateway_settings {
+        request = attach_local_gateway_authorization(request, endpoint, settings);
+    }
+    let response = request.send();
 
     match response {
         Ok(mut response) => {
@@ -1411,6 +1544,45 @@ fn request_json(
             error: Some(error.without_url().to_string()),
         }),
     }
+}
+
+fn attach_local_gateway_authorization(
+    request: reqwest::blocking::RequestBuilder,
+    endpoint: &str,
+    settings: &Settings,
+) -> reqwest::blocking::RequestBuilder {
+    let has_authorization = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .is_some_and(|request| request.headers().contains_key("Authorization"));
+    if has_authorization {
+        return request;
+    }
+    let Some(key) = local_gateway_client_key_for_endpoint(endpoint, settings) else {
+        return request;
+    };
+    request.header("Authorization", format!("Bearer {key}"))
+}
+
+fn local_gateway_client_key_for_endpoint<'a>(
+    endpoint: &str,
+    settings: &'a Settings,
+) -> Option<&'a str> {
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    if url.scheme() != "http" || url.port_or_known_default() != Some(settings.proxy_port) {
+        return None;
+    }
+    let host = url.host_str()?;
+    if !host.eq_ignore_ascii_case("localhost")
+        && host.parse::<std::net::IpAddr>().ok().is_none_or(|host| !host.is_loopback())
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    if path != "/v1" && !path.starts_with("/v1/") {
+        return None;
+    }
+    non_empty_str(&settings.gateway_client_key)
 }
 
 fn endpoints(port: u16) -> GatewayEndpoints {
@@ -1553,11 +1725,17 @@ fn read_codex_auth_status() -> CodexAuthStatus {
 }
 
 fn codex_home() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-        .unwrap_or_else(|| PathBuf::from(".codex"))
+    crate::runtime_paths::codex_target_home_dir()
+        .unwrap_or_else(|_| PathBuf::from(".codex"))
+}
+
+fn runtime_home() -> PathBuf {
+    crate::runtime_paths::runtime_home_dir()
+        .unwrap_or_else(|_| PathBuf::from(crate::app_flavor::current().runtime_home_suffix()))
+}
+
+fn runtime_proxy_dir(home: &Path) -> PathBuf {
+    home.join("proxy")
 }
 
 fn official_models(settings: &Settings) -> Vec<GatewayModel> {
@@ -1571,10 +1749,42 @@ fn official_models_from_metadata(
 ) -> Vec<GatewayModel> {
     let mut models: Vec<GatewayModel> =
         match subscription_models.filter(|models| !models.is_empty()) {
-            Some(models) => models
-                .into_iter()
-                .filter_map(|model| official_gateway_model_from_metadata(settings, model))
-                .collect(),
+            Some(source_models) => {
+                let mut models = Vec::<GatewayModel>::new();
+                let mut positions = HashMap::<String, usize>::new();
+                let mut bare_sources = HashMap::<String, bool>::new();
+                let mut enabled_by_id = HashMap::<String, bool>::new();
+                for model in source_models {
+                    let source_is_bare = !model.id.trim().starts_with("openai/");
+                    let source_enabled = model.enabled;
+                    let Some(gateway_model) = official_gateway_model_from_metadata(settings, model)
+                    else {
+                        continue;
+                    };
+                    if let Some(position) = positions.get(&gateway_model.id).copied() {
+                        enabled_by_id
+                            .entry(gateway_model.id.clone())
+                            .and_modify(|enabled| *enabled = *enabled || source_enabled);
+                        let existing_is_bare = bare_sources
+                            .get(&gateway_model.id)
+                            .copied()
+                            .unwrap_or(false);
+                        if source_is_bare || !existing_is_bare {
+                            let id = gateway_model.id.clone();
+                            models[position] = gateway_model;
+                            bare_sources.insert(id, source_is_bare);
+                        }
+                        continue;
+                    }
+                    let id = gateway_model.id.clone();
+                    positions.insert(id.clone(), models.len());
+                    bare_sources.insert(id, source_is_bare);
+                    enabled_by_id.insert(gateway_model.id.clone(), source_enabled);
+                    models.push(gateway_model);
+                }
+                models.retain(|model| enabled_by_id.get(&model.id).copied().unwrap_or(true));
+                models
+            }
             None => fallback_official_gateway_models(settings),
         };
 
@@ -1598,8 +1808,19 @@ fn official_models_from_metadata(
                 source_kind: "official".to_string(),
                 supports_responses: true,
                 supports_chat_completions: true,
-                context_window: *context_window,
+                context_window: Some(*context_window),
             });
+        }
+    }
+
+    if settings.openai_context_guard_enabled {
+        for model in &mut models {
+            model.context_window = Some(
+                model
+                    .context_window
+                    .unwrap_or(OPENAI_CONTEXT_GUARD_WINDOW)
+                    .min(OPENAI_CONTEXT_GUARD_WINDOW),
+            );
         }
     }
 
@@ -1616,14 +1837,16 @@ fn official_gateway_model_from_metadata(
     }
     Some(GatewayModel {
         id: id.clone(),
-        display_name: model.display_name.unwrap_or_else(|| id.clone()),
+        display_name: model
+            .display_name
+            .as_deref()
+            .map(models::official_short_display_name)
+            .unwrap_or_else(|| models::official_short_display_name(&id)),
         source: "Official Codex subscription".to_string(),
         source_kind: "official".to_string(),
         supports_responses: true,
         supports_chat_completions: true,
-        context_window: model
-            .context_window
-            .unwrap_or_else(|| gateway_model_context_window(&id)),
+        context_window: model.context_window,
     })
 }
 
@@ -1638,20 +1861,15 @@ fn fallback_official_gateway_models(settings: &Settings) -> Vec<GatewayModel> {
             source_kind: "official".to_string(),
             supports_responses: true,
             supports_chat_completions: true,
-            context_window: *context_window,
+            context_window: Some(*context_window),
         })
         .collect()
 }
 
 fn official_gateway_model_id(id: &str) -> Option<String> {
     let id = id.trim();
-    if id.starts_with("openai/gpt-") {
-        Some(id.to_string())
-    } else if id.starts_with("gpt-") {
-        Some(format!("openai/{id}"))
-    } else {
-        None
-    }
+    let bare_id = id.strip_prefix("openai/").unwrap_or(id);
+    bare_id.starts_with("gpt-").then(|| bare_id.to_string())
 }
 
 fn is_gateway_fast_variant_id(id: &str) -> bool {
@@ -1708,9 +1926,7 @@ fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Ve
                     })
                     .unwrap_or(true),
                 supports_chat_completions: true,
-                context_window: model
-                    .context_window
-                    .unwrap_or_else(|| gateway_model_context_window(&model_id)),
+                context_window: model.context_window,
             });
         }
     }
@@ -1775,6 +1991,11 @@ fn resolve_gateway_client_model_id(
     if exported.contains(requested) {
         return Ok(requested.to_string());
     }
+    if let Some(canonical) = official_gateway_model_id(requested) {
+        if exported.contains(&canonical) {
+            return Ok(canonical);
+        }
+    }
     if let Some(canonical) = gateway_model_alias_map(providers).get(requested) {
         return Ok(canonical.clone());
     }
@@ -1795,7 +2016,12 @@ fn gateway_client_models(
         }
     }
 
-    if !seen.contains(&default_model) {
+    if let Some(position) = output.iter().position(|model| model.id == default_model) {
+        if position > 0 {
+            let selected = output.remove(position);
+            output.insert(0, selected);
+        }
+    } else {
         output.insert(
             0,
             GatewayModel {
@@ -1805,7 +2031,7 @@ fn gateway_client_models(
                 source_kind: "default".to_string(),
                 supports_responses: true,
                 supports_chat_completions: true,
-                context_window: gateway_model_context_window(&default_model),
+                context_window: known_gateway_model_context_window(&default_model),
             },
         );
     }
@@ -1814,6 +2040,9 @@ fn gateway_client_models(
 
 fn split_gateway_model_id(model_id: &str) -> (String, String) {
     let model_id = model_id.trim();
+    if let Some(official_id) = official_gateway_model_id(model_id) {
+        return ("openai".to_string(), official_id);
+    }
     if let Some((provider_id, short_id)) = model_id.split_once('/') {
         let provider_id = provider_id.trim();
         let short_id = short_id.trim();
@@ -1912,13 +2141,12 @@ fn owner_label(owner: RoutingOwner) -> &'static str {
 fn ensure_route_owner_mutation_allowed(
     current_app_owner: RoutingOwner,
     current_target_owner: RoutingOwner,
-    next_owner: RoutingOwner,
     force_takeover: bool,
 ) -> Result<(), String> {
     if current_target_owner == RoutingOwner::Official || current_target_owner == current_app_owner {
         return Ok(());
     }
-    if force_takeover && next_owner != RoutingOwner::Official {
+    if force_takeover {
         return Ok(());
     }
     Err(format!(
@@ -2268,12 +2496,11 @@ fn read_recent_events(
 }
 
 fn event_log_path() -> PathBuf {
-    codex_home().join("proxy").join("codex-proxy-events.jsonl")
+    runtime_proxy_dir(&runtime_home()).join("codex-proxy-events.jsonl")
 }
 
 fn telemetry_db_path() -> PathBuf {
-    codex_home()
-        .join("proxy")
+    runtime_proxy_dir(&runtime_home())
         .join("codex-proxy-telemetry.sqlite")
 }
 
@@ -3915,6 +4142,18 @@ fn route_mode_for_owner(owner: RoutingOwner, current: RoutingOwner, stale: bool)
     }
 }
 
+fn pending_sync_is_stale(
+    pending: bool,
+    detected_owner: RoutingOwner,
+    current_owner: RoutingOwner,
+) -> bool {
+    pending
+        && !matches!(
+            detected_owner,
+            RoutingOwner::Release | RoutingOwner::Beta if detected_owner != current_owner
+        )
+}
+
 fn route_owner_from_endpoint(
     endpoint: Option<&str>,
     managed: bool,
@@ -4832,10 +5071,54 @@ fn windows_file_version(path: &Path) -> Option<String> {
 }
 
 fn client_backup_root(client_id: &str) -> PathBuf {
-    codex_home()
-        .join("proxy")
+    client_backup_root_at(&runtime_home(), client_id)
+}
+
+fn client_backup_root_at(owner_home: &Path, client_id: &str) -> PathBuf {
+    runtime_proxy_dir(owner_home)
         .join("client-backups")
         .join(client_id)
+}
+
+fn client_backup_root_for_owner(client_id: &str, owner: RoutingOwner) -> PathBuf {
+    let current_owner = crate::app_flavor::current().routing_owner();
+    let owner_home = if owner == current_owner {
+        Some(runtime_home())
+    } else {
+        let flavor = match owner {
+            RoutingOwner::Release => Some(crate::app_flavor::RuntimeFlavor::Stable),
+            RoutingOwner::Beta => Some(crate::app_flavor::RuntimeFlavor::Beta),
+            RoutingOwner::Official | RoutingOwner::UnknownExternal => None,
+        };
+        dirs::home_dir().and_then(|home| {
+            flavor.map(|flavor| crate::runtime_paths::homes_for_flavor(&home, flavor).runtime)
+        })
+    }
+    .unwrap_or_else(runtime_home);
+    client_backup_root_at(&owner_home, client_id)
+}
+
+fn client_backup_roots_for_restore(client_id: &str, owner: RoutingOwner) -> Vec<PathBuf> {
+    let candidates = [
+        client_backup_root_for_owner(client_id, owner),
+        client_backup_root_for_owner(client_id, RoutingOwner::Release),
+        client_backup_root_for_owner(client_id, RoutingOwner::Beta),
+        client_backup_root(client_id),
+    ];
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        if !roots.contains(&candidate) {
+            roots.push(candidate);
+        }
+    }
+    roots.sort_by_key(|root| !backup_root_has_entries(root));
+    roots
+}
+
+fn backup_root_has_entries(root: &Path) -> bool {
+    fs::read_dir(root)
+        .ok()
+        .is_some_and(|mut entries| entries.next().is_some())
 }
 
 fn preview_opencode_config_with_path(
@@ -5138,6 +5421,36 @@ fn restore_latest_backup(
         config_path: Some(config_path.to_path_buf()),
         backup_path: Some(latest),
         message: "OpenCode official config restored.".to_string(),
+    })
+}
+
+fn restore_opencode_config_with_backup_roots(
+    config_path: &Path,
+    backup_roots: &[PathBuf],
+) -> Result<GatewayClientApplyResult, String> {
+    restore_with_backup_roots(backup_roots, |backup_root| {
+        restore_latest_backup("opencode", config_path, backup_root)
+    })
+}
+
+fn restore_with_backup_roots<F>(
+    backup_roots: &[PathBuf],
+    mut restore: F,
+) -> Result<GatewayClientApplyResult, String>
+where
+    F: FnMut(&Path) -> Result<GatewayClientApplyResult, String>,
+{
+    let mut errors = Vec::new();
+    for backup_root in backup_roots {
+        match restore(backup_root) {
+            Ok(result) => return Ok(result),
+            Err(error) => errors.push(format!("{}: {error}", backup_root.display())),
+        }
+    }
+    Err(if errors.is_empty() {
+        "no channel backup roots are available".to_string()
+    } else {
+        errors.join("; ")
     })
 }
 
@@ -5596,7 +5909,7 @@ fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProvider
 }
 
 fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
-    json!({
+    let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
         "reasoning": true,
@@ -5604,7 +5917,6 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
         "headers": {
             "x-codex-client-id": "pi",
         },
-        "contextWindow": model.context_window,
         "maxTokens": 32768,
         "cost": {
             "input": 0,
@@ -5612,7 +5924,11 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
             "cacheRead": 0,
             "cacheWrite": 0,
         },
-    })
+    });
+    if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
+        object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    value
 }
 
 fn omp_config_text(current: Option<&str>, selector: &str) -> String {
@@ -5666,9 +5982,12 @@ fn omp_models_yml_text(
         for gateway_model in &group.models {
             let model_id = yaml_scalar(&gateway_model.id);
             let model_name = yaml_scalar(&gateway_model.display_name);
-            let context_window = gateway_model.context_window;
+            let context_window = gateway_model
+                .context_window
+                .map(|value| format!("        contextWindow: {value}\n"))
+                .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n        contextWindow: {context_window}\n        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -5777,7 +6096,7 @@ fn zcode_provider_endpoint(
 }
 
 fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
-    json!({
+    let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
         "kinds": [kind],
@@ -5786,9 +6105,12 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
             "input": ["text", "image"],
             "output": ["text"],
         },
-        "contextWindow": model.context_window,
         "maxOutputTokens": 32768,
-    })
+    });
+    if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
+        object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    value
 }
 
 fn zcode_v2_config_text(
@@ -5834,17 +6156,25 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
         .map(|model| {
             (
                 model.id.clone(),
-                json!({
+                {
+                    let mut value = json!({
                     "name": model.display_name.clone(),
                     "limit": {
-                        "context": model.context_window,
                         "output": 32768,
                     },
                     "modalities": {
                         "input": ["text", "image"],
                         "output": ["text"],
                     },
-                }),
+                    });
+                    if let (Some(limit), Some(context_window)) = (
+                        value.get_mut("limit").and_then(Value::as_object_mut),
+                        model.context_window,
+                    ) {
+                        limit.insert("context".to_string(), json!(context_window));
+                    }
+                    value
+                },
             )
         })
         .collect::<Map<_, _>>();
@@ -6211,7 +6541,7 @@ fn combined_named_text(files: &[(&str, &str)]) -> String {
         .join("\n")
 }
 
-fn gateway_model_context_window(model: &str) -> u32 {
+fn known_gateway_model_context_window(model: &str) -> Option<u32> {
     OFFICIAL_MODELS
         .iter()
         .find_map(|(id, _, context)| (*id == model).then_some(*context))
@@ -6220,7 +6550,6 @@ fn gateway_model_context_window(model: &str) -> u32 {
                 .iter()
                 .find_map(|(_, id, _, context)| (*id == model).then_some(*context))
         })
-        .unwrap_or(200_000)
 }
 
 fn gateway_model_display_name(model: &str) -> String {
@@ -6299,18 +6628,27 @@ mod tests {
         pi_settings_text, read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, sanitize_event,
-        sanitize_text, usage_pricing_by_model, zcode_catalog_text, UsagePricing,
+        sanitize_text, usage_pricing_by_model, zcode_catalog_text, runtime_proxy_dir, UsagePricing,
     };
     use crate::{Model, Provider, Settings, UpstreamFormat};
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn runtime_artifacts_are_rooted_under_flavor_home() {
+        let runtime_home = PathBuf::from("C:\\Users\\tester\\.codexhub-beta");
+        assert_eq!(runtime_proxy_dir(&runtime_home), runtime_home.join("proxy"));
+    }
 
     #[test]
     fn write_text_replace_does_not_clobber_existing_stale_temp_file() {
@@ -6382,6 +6720,146 @@ mod tests {
         assert!(!diagnostics
             .iter()
             .any(|item| item.category == "proxy" && item.level == "error"));
+    }
+
+    #[test]
+    fn gateway_post_tests_attach_configured_client_key_to_every_shape() {
+        let server = CapturingPostServer::start(3);
+        let settings = Settings {
+            proxy_port: server.port,
+            gateway_client_key: "local-test-key".to_string(),
+            gateway_request_timeout_seconds: 5,
+            ..Settings::default()
+        };
+
+        for kind in [
+            super::GatewayTestKind::ChatCompletions,
+            super::GatewayTestKind::ChatCompletionsStream,
+            super::GatewayTestKind::ResponsesStream,
+        ] {
+            let result = super::gateway_test_request_with_settings(
+                kind,
+                Some("gpt-5.6-sol".to_string()),
+                &settings,
+            )
+            .expect("Gateway POST test");
+            assert!(result.ok, "{result:?}");
+        }
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(request_path(&requests[0]), "/v1/chat/completions");
+        assert_eq!(request_path(&requests[1]), "/v1/chat/completions");
+        assert_eq!(request_path(&requests[2]), "/v1/responses");
+        for request in requests {
+            assert_eq!(header_value(&request, "authorization"), Some("Bearer local-test-key"));
+        }
+    }
+
+    #[test]
+    fn gateway_request_auth_preserves_explicit_header_and_never_leaks() {
+        let client = reqwest::blocking::Client::new();
+        let settings = Settings {
+            proxy_port: 4555,
+            gateway_client_key: "local-test-key".to_string(),
+            ..Settings::default()
+        };
+        let local_endpoint = "http://127.0.0.1:4555/v1/responses";
+        let explicit = super::attach_local_gateway_authorization(
+            client
+                .post(local_endpoint)
+                .header("Authorization", "Bearer explicit-key"),
+            local_endpoint,
+            &settings,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            explicit.headers().get("Authorization").unwrap(),
+            "Bearer explicit-key"
+        );
+
+        for endpoint in [
+            "https://api.openai.com/v1/responses",
+            "https://127.0.0.1:4555/v1/responses",
+            "http://127.0.0.1:4556/v1/responses",
+        ] {
+            let request = super::attach_local_gateway_authorization(
+                client.post(endpoint),
+                endpoint,
+                &settings,
+            )
+            .build()
+            .unwrap();
+            assert!(
+                request.headers().get("Authorization").is_none(),
+                "Gateway key leaked to {endpoint}"
+            );
+        }
+    }
+
+    struct CapturingPostServer {
+        port: u16,
+        requests: mpsc::Receiver<String>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl CapturingPostServer {
+        fn start(request_count: usize) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (sender, requests) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                for _ in 0..request_count {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    sender.send(request).unwrap();
+                    let body = "{}";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            Self {
+                port,
+                requests,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<String> {
+            self.handle.join().unwrap();
+            self.requests.try_iter().collect()
+        }
+    }
+
+    fn read_http_request(stream: &mut impl Read) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn request_path(request: &str) -> &str {
+        request.lines().next().unwrap().split_whitespace().nth(1).unwrap()
+    }
+
+    fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
     }
 
     fn case_sensitive_client_export_test_providers() -> Vec<Provider> {
@@ -6620,6 +7098,79 @@ mod tests {
     }
 
     #[test]
+    fn failed_client_syncs_remain_pending_until_a_successful_retry() {
+        let root = unique_temp_dir("codexhub-client-sync-state");
+        let state_path = root.join("proxy").join("gateway-client-sync-state.json");
+        let mut pending = std::collections::HashSet::new();
+        let failed = super::GatewayClientSyncSummary {
+            applied: 0,
+            skipped: 0,
+            failed: 1,
+            results: vec![super::GatewayClientSyncItem {
+                client_id: "pi".to_string(),
+                name: "Pi".to_string(),
+                status: "failed".to_string(),
+                applied: false,
+                skipped: false,
+                message: "write failed".to_string(),
+                config_path: None,
+                backup_path: None,
+            }],
+            message: "sync failed".to_string(),
+        };
+
+        super::update_pending_client_ids_after_sync(&mut pending, &failed);
+        super::write_pending_client_ids_to_path(&state_path, &pending).unwrap();
+        let persisted = super::read_pending_client_ids_from_path(&state_path);
+        assert!(persisted.contains("pi"));
+        assert_eq!(
+            super::route_mode_for_owner(
+                crate::app_flavor::RoutingOwner::Release,
+                crate::app_flavor::RoutingOwner::Release,
+                persisted.contains("pi"),
+            ),
+            "stale"
+        );
+        assert!(super::pending_sync_is_stale(
+            true,
+            crate::app_flavor::RoutingOwner::UnknownExternal,
+            crate::app_flavor::RoutingOwner::Release,
+        ));
+        assert!(super::pending_sync_is_stale(
+            true,
+            crate::app_flavor::RoutingOwner::Official,
+            crate::app_flavor::RoutingOwner::Release,
+        ));
+        assert!(!super::pending_sync_is_stale(
+            true,
+            crate::app_flavor::RoutingOwner::Beta,
+            crate::app_flavor::RoutingOwner::Release,
+        ));
+
+        let succeeded = super::GatewayClientSyncSummary {
+            applied: 1,
+            skipped: 0,
+            failed: 0,
+            results: vec![super::GatewayClientSyncItem {
+                client_id: "pi".to_string(),
+                name: "Pi".to_string(),
+                status: "applied".to_string(),
+                applied: true,
+                skipped: false,
+                message: "applied".to_string(),
+                config_path: None,
+                backup_path: None,
+            }],
+            message: "synced".to_string(),
+        };
+
+        super::update_pending_client_ids_after_sync(&mut pending, &succeeded);
+        super::write_pending_client_ids_to_path(&state_path, &pending).unwrap();
+        assert!(!state_path.exists());
+        assert!(!super::read_pending_client_ids_from_path(&state_path).contains("pi"));
+    }
+
+    #[test]
     fn gateway_client_sync_default_model_skips_disabled_default_model() {
         let settings = Settings {
             official_disabled_models: vec!["openai/gpt-5.5".to_string()],
@@ -6629,7 +7180,7 @@ mod tests {
         let model = super::default_gateway_client_sync_model(&settings, &[])
             .expect("enabled fallback model");
 
-        assert_eq!(model, "openai/gpt-5.4");
+        assert_eq!(model, "gpt-5.4");
     }
 
     #[cfg(target_os = "windows")]
@@ -6729,7 +7280,8 @@ mod tests {
 
         let models = gateway_models_from_config(&settings, &providers);
 
-        assert!(models.iter().any(|model| model.id == "openai/gpt-5.5"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
+        assert!(!models.iter().any(|model| model.id == "openai/gpt-5.5"));
         assert!(models.iter().any(|model| model.id == "minimax/minimax-m3"));
         assert!(!models
             .iter()
@@ -6828,10 +7380,10 @@ mod tests {
 
         let models = gateway_models_from_config(&settings, &[]);
 
-        assert!(models.iter().any(|model| model.id == "openai/gpt-5.5"));
-        assert!(models.iter().any(|model| model.id == "openai/gpt-5.5-fast"));
-        assert!(!models.iter().any(|model| model.id == "openai/gpt-5.4"));
-        assert!(!models.iter().any(|model| model.id == "openai/gpt-5.4-fast"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5-fast"));
+        assert!(!models.iter().any(|model| model.id == "gpt-5.4"));
+        assert!(!models.iter().any(|model| model.id == "gpt-5.4-fast"));
     }
 
     #[test]
@@ -6840,17 +7392,145 @@ mod tests {
         let models = official_models_from_metadata(
             &settings,
             Some(vec![Model {
-                id: "openai/gpt-5.6".to_string(),
-                display_name: Some("OpenAI GPT-5.6".to_string()),
-                context_window: Some(300_000),
+                id: "openai/gpt-5.6-sol".to_string(),
+                display_name: Some("GPT-5.6-Sol".to_string()),
+                context_window: Some(400_000),
                 ..Model::default()
             }]),
         );
 
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "openai/gpt-5.6");
-        assert_eq!(models[0].display_name, "OpenAI GPT-5.6");
-        assert_eq!(models[0].context_window, 300_000);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert_eq!(models[0].display_name, "5.6 Sol");
+        assert_eq!(models[0].context_window, Some(400_000));
+    }
+
+    #[test]
+    fn openai_context_guard_clamps_gateway_official_models_without_changing_external_models() {
+        let settings = Settings {
+            openai_context_guard_enabled: true,
+            ..Settings::default()
+        };
+        let official = official_models_from_metadata(
+            &settings,
+            Some(vec![
+                Model {
+                    id: "gpt-5.6-sol".to_string(),
+                    context_window: Some(353_000),
+                    ..Model::default()
+                },
+                Model {
+                    id: "gpt-5.3-codex-spark".to_string(),
+                    context_window: Some(128_000),
+                    ..Model::default()
+                },
+            ]),
+        );
+
+        assert_eq!(official[0].context_window, Some(272_000));
+        assert_eq!(official[1].context_window, Some(128_000));
+
+        let providers: Vec<Provider> = serde_json::from_value(json!([{
+            "id": "ollama-cloud",
+            "name": "Ollama Cloud",
+            "base_url": "https://ollama.com/v1",
+            "models": [{
+                "id": "glm-5.2",
+                "context_window": 1000000,
+                "gateway_exported": true
+            }]
+        }]))
+        .unwrap();
+        let exported = gateway_models_from_config(&settings, &providers);
+        assert_eq!(
+            exported
+                .iter()
+                .find(|model| model.id == "ollama-cloud/glm-5.2")
+                .expect("external model")
+                .context_window,
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn official_gateway_models_dedupe_legacy_alias_with_fresh_metadata_winning() {
+        let models = official_models_from_metadata(
+            &Settings::default(),
+            Some(vec![
+                Model {
+                    id: "openai/gpt-5.6-sol".to_string(),
+                    display_name: Some("Legacy Sol".to_string()),
+                    context_window: Some(1),
+                    ..Model::default()
+                },
+                Model {
+                    id: "gpt-5.6-sol".to_string(),
+                    display_name: Some("GPT-5.6-Sol".to_string()),
+                    context_window: Some(400_000),
+                    ..Model::default()
+                },
+            ]),
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert_eq!(models[0].display_name, "5.6 Sol");
+        assert_eq!(models[0].context_window, Some(400_000));
+    }
+
+    #[test]
+    fn official_gateway_alias_merge_exports_only_when_any_record_is_enabled() {
+        let merged = |legacy_enabled, bare_enabled| {
+            official_models_from_metadata(
+                &Settings::default(),
+                Some(vec![
+                    Model {
+                        id: "openai/gpt-5.6-sol".to_string(),
+                        enabled: legacy_enabled,
+                        ..Model::default()
+                    },
+                    Model {
+                        id: "gpt-5.6-sol".to_string(),
+                        enabled: bare_enabled,
+                        ..Model::default()
+                    },
+                ]),
+            )
+        };
+
+        assert!(merged(false, false).is_empty());
+        assert_eq!(merged(false, true)[0].id, "gpt-5.6-sol");
+        assert_eq!(merged(true, false)[0].id, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn official_gateway_model_ids_are_bare_and_accept_legacy_aliases() {
+        assert_eq!(
+            super::official_gateway_model_id("openai/gpt-5.6").as_deref(),
+            Some("gpt-5.6")
+        );
+        assert_eq!(
+            super::official_gateway_model_id("gpt-5.6").as_deref(),
+            Some("gpt-5.6")
+        );
+        assert_eq!(
+            super::official_gateway_model_id("ollama-cloud/glm-5.2"),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_official_client_selection_resolves_to_exported_bare_id() {
+        let settings = Settings::default();
+
+        let resolved =
+            super::resolve_gateway_client_model_id(&settings, &[], "openai/gpt-5.5").unwrap();
+
+        assert_eq!(resolved, "gpt-5.5");
+        assert_eq!(
+            super::split_gateway_model_id(&resolved),
+            ("openai".to_string(), "gpt-5.5".to_string())
+        );
     }
 
     #[test]
@@ -7331,7 +8011,7 @@ mod tests {
     }
 
     #[test]
-    fn omp_models_use_valid_context_window_for_external_models_without_metadata() {
+    fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
         let settings = Settings {
             include_official_models: false,
             ..Settings::default()
@@ -7362,8 +8042,7 @@ mod tests {
 
         assert!(text.contains("codexhub-ollama-cloud:"));
         assert!(text.contains("id: nemotron-3-nano:30b"));
-        assert!(text.contains("contextWindow: 200000"));
-        assert!(!text.contains("contextWindow: 0"));
+        assert!(!text.contains("contextWindow:"));
     }
 
     #[test]
@@ -8149,6 +8828,45 @@ mod tests {
     }
 
     #[test]
+    fn opencode_official_restore_survives_stable_then_beta_takeover() {
+        let root = unique_temp_dir("codexhub-opencode-cross-channel-restore");
+        let config_path = root.join("opencode.json");
+        let stable_backups = root.join("stable-backups");
+        let beta_backups = root.join("beta-backups");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&config_path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+        let settings = Settings::default();
+
+        apply_opencode_config_with_paths(
+            &config_path,
+            &stable_backups,
+            &settings,
+            &[],
+            "openai/gpt-5.5",
+        )
+        .unwrap();
+        apply_opencode_config_with_paths(
+            &config_path,
+            &beta_backups,
+            &settings,
+            &[],
+            "openai/gpt-5.4",
+        )
+        .unwrap();
+
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[beta_backups, stable_backups],
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("anthropic/claude-sonnet-4"));
+    }
+
+    #[test]
     fn pi_apply_writes_models_and_settings_with_backup() {
         let root = unique_temp_dir("codexhub-pi");
         let settings_path = root.join("settings.json");
@@ -8731,7 +9449,6 @@ mod tests {
         let error = super::ensure_route_owner_mutation_allowed(
             current,
             target,
-            crate::app_flavor::RoutingOwner::Official,
             false,
         )
         .expect_err("release must not disconnect beta-owned config");
@@ -8743,7 +9460,6 @@ mod tests {
         let error = super::ensure_route_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Release,
             crate::app_flavor::RoutingOwner::Beta,
-            crate::app_flavor::RoutingOwner::Release,
             false,
         )
         .expect_err("release must not apply over beta-owned config");
@@ -8791,10 +9507,32 @@ mod tests {
         super::ensure_route_owner_mutation_allowed(
             crate::app_flavor::RoutingOwner::Release,
             crate::app_flavor::RoutingOwner::Beta,
-            crate::app_flavor::RoutingOwner::Release,
             true,
         )
         .expect("explicit takeover should be allowed");
+    }
+
+    #[test]
+    fn foreign_owner_restore_uses_the_owning_channel_backup_root() {
+        let user_home = dirs::home_dir().expect("user home");
+        let foreign_owner = match crate::app_flavor::current().routing_owner() {
+            crate::app_flavor::RoutingOwner::Release => crate::app_flavor::RoutingOwner::Beta,
+            _ => crate::app_flavor::RoutingOwner::Release,
+        };
+        let foreign_flavor = match foreign_owner {
+            crate::app_flavor::RoutingOwner::Release => crate::app_flavor::RuntimeFlavor::Stable,
+            _ => crate::app_flavor::RuntimeFlavor::Beta,
+        };
+        let expected_runtime =
+            crate::runtime_paths::homes_for_flavor(&user_home, foreign_flavor).runtime;
+
+        assert_eq!(
+            super::client_backup_root_for_owner("opencode", foreign_owner),
+            expected_runtime
+                .join("proxy")
+                .join("client-backups")
+                .join("opencode")
+        );
     }
 
     #[test]
