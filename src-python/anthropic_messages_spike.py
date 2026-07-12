@@ -1015,6 +1015,12 @@ def _chat_usage_to_responses_usage(value: Any) -> dict[str, int]:
     return usage
 
 
+def _reject_unsupported_chat_fields(value: Mapping[str, Any], allowed: set[str], scope: str) -> None:
+    unsupported_fields = sorted(str(field) for field in set(value).difference(allowed))
+    if unsupported_fields:
+        raise ValueError(f"Unsupported Chat Completions {scope} field: {unsupported_fields[0]}")
+
+
 def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     if not chunks:
         raise ValueError("Chat Completions stream is empty")
@@ -1022,21 +1028,42 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
     events: list[dict[str, Any]] = []
     response_id = "resp_chat_spike"
     model = "unknown"
+    established_chunk_id: str | None = None
+    established_chunk_model: str | None = None
     created = False
     next_output_index = 0
     text_output_index: int | None = None
     tool_states: dict[int, dict[str, Any]] = {}
+    tool_id_indexes: dict[str, int] = {}
     terminal = False
     latest_usage: dict[str, int] | None = None
 
     for chunk in chunks:
         if not isinstance(chunk, Mapping):
             raise ValueError("Chat Completions stream chunk is not an object")
+        _reject_unsupported_chat_fields(
+            chunk,
+            {"id", "model", "choices", "usage", "service_tier", "system_fingerprint"},
+            "chunk",
+        )
+        for nullable_field in ("service_tier", "system_fingerprint"):
+            if chunk.get(nullable_field) is not None:
+                raise ValueError(f"Unsupported Chat Completions chunk field: {nullable_field}")
         chunk_id = chunk.get("id")
         chunk_model = chunk.get("model")
-        if isinstance(chunk_id, str) and chunk_id:
+        if "id" in chunk and (not isinstance(chunk_id, str) or not chunk_id):
+            raise ValueError("Chat Completions chunk id is not a non-empty string")
+        if "model" in chunk and (not isinstance(chunk_model, str) or not chunk_model):
+            raise ValueError("Chat Completions chunk model is not a non-empty string")
+        if isinstance(chunk_id, str):
+            if established_chunk_id is not None and chunk_id != established_chunk_id:
+                raise ValueError("Chat Completions chunk id changed during stream")
+            established_chunk_id = chunk_id
             response_id = chunk_id
-        if isinstance(chunk_model, str) and chunk_model:
+        if isinstance(chunk_model, str):
+            if established_chunk_model is not None and chunk_model != established_chunk_model:
+                raise ValueError("Chat Completions chunk model changed during stream")
+            established_chunk_model = chunk_model
             model = chunk_model
         if not created:
             events.append(
@@ -1048,20 +1075,46 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
             created = True
         if "usage" in chunk:
             latest_usage = _chat_usage_to_responses_usage(chunk.get("usage"))
-        choices = chunk.get("choices")
-        if not isinstance(choices, list):
+        if "choices" not in chunk:
             continue
+        choices = chunk["choices"]
+        if not isinstance(choices, list):
+            raise ValueError("Chat Completions choices is not a list")
+        if len(choices) > 1:
+            raise ValueError("Multiple Chat Completions choices are unsupported")
         for choice in choices:
             if not isinstance(choice, Mapping):
-                continue
-            delta = choice.get("delta")
-            if not isinstance(delta, Mapping):
+                raise ValueError("Chat Completions choice is not an object")
+            _reject_unsupported_chat_fields(choice, {"index", "delta", "finish_reason", "logprobs"}, "choice")
+            if choice.get("logprobs") is not None:
+                raise ValueError("Unsupported Chat Completions choice field: logprobs")
+            choice_index = choice.get("index")
+            if "index" in choice and (
+                isinstance(choice_index, bool) or not isinstance(choice_index, int) or choice_index < 0
+            ):
+                raise ValueError("Chat Completions choice index is not a non-negative integer")
+            if isinstance(choice_index, int) and choice_index != 0:
+                raise ValueError(f"Unsupported Chat Completions choice index: {choice_index}")
+            if "delta" not in choice:
                 delta = {}
-            unsupported_delta_fields = set(delta).difference({"role", "content", "tool_calls"})
-            if unsupported_delta_fields:
-                field = sorted(str(name) for name in unsupported_delta_fields)[0]
-                raise ValueError(f"Unsupported Chat Completions delta field: {field}")
+            else:
+                delta = choice["delta"]
+                if not isinstance(delta, Mapping):
+                    raise ValueError("Chat Completions delta is not an object")
+            _reject_unsupported_chat_fields(
+                delta,
+                {"role", "content", "tool_calls", "function_call", "refusal"},
+                "delta",
+            )
+            for nullable_field in ("function_call", "refusal"):
+                if delta.get(nullable_field) is not None:
+                    raise ValueError(f"Unsupported Chat Completions delta field: {nullable_field}")
+            role = delta.get("role")
+            if "role" in delta and role is not None and role != "assistant":
+                raise ValueError("Chat Completions delta role is not assistant or null")
             content = delta.get("content")
+            if "content" in delta and content is not None and not isinstance(content, str):
+                raise ValueError("Chat Completions delta content is not a string or null")
             if isinstance(content, str) and content:
                 if text_output_index is None:
                     text_output_index = next_output_index
@@ -1086,22 +1139,51 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
                     }
                 )
             raw_tool_calls = delta.get("tool_calls")
+            if "tool_calls" in delta and raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
+                raise ValueError("Chat Completions delta tool_calls is not a list or null")
             if isinstance(raw_tool_calls, list):
                 for fallback_index, raw_call in enumerate(raw_tool_calls):
                     if not isinstance(raw_call, Mapping):
                         raise ValueError("Chat Completions tool call is not an object")
-                    tool_index = raw_call.get("index")
-                    if not isinstance(tool_index, int):
+                    _reject_unsupported_chat_fields(
+                        raw_call,
+                        {"index", "id", "type", "function"},
+                        "tool call",
+                    )
+                    if "index" not in raw_call:
                         tool_index = fallback_index
+                    else:
+                        tool_index = raw_call["index"]
+                        if isinstance(tool_index, bool) or not isinstance(tool_index, int) or tool_index < 0:
+                            raise ValueError("Chat Completions tool call index is not a non-negative integer")
+                    call_type = raw_call.get("type")
+                    if "type" in raw_call and call_type is not None and call_type != "function":
+                        raise ValueError("Chat Completions tool call type is not function or null")
                     function = raw_call.get("function")
                     if not isinstance(function, Mapping):
                         raise ValueError("Chat Completions tool call has no function")
+                    _reject_unsupported_chat_fields(function, {"name", "arguments"}, "function")
+                    arguments = function.get("arguments")
+                    if "arguments" in function and arguments is not None and not isinstance(arguments, str):
+                        raise ValueError("Chat Completions function arguments is not a string or null")
+                    call_id = raw_call.get("id")
+                    if "id" in raw_call and call_id is not None and (
+                        not isinstance(call_id, str) or not call_id
+                    ):
+                        raise ValueError("Chat Completions tool call id is not a non-empty string or null")
+                    name = function.get("name")
+                    if "name" in function and name is not None and (not isinstance(name, str) or not name):
+                        raise ValueError("Chat Completions function name is not a non-empty string or null")
                     state = tool_states.get(tool_index)
                     if state is None:
-                        call_id = raw_call.get("id")
-                        name = function.get("name")
                         if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
                             raise ValueError("First Chat Completions tool delta needs id and function name")
+                        previous_index = tool_id_indexes.get(call_id)
+                        if previous_index is not None and previous_index != tool_index:
+                            raise ValueError(
+                                f"Chat Completions tool call id reused for indexes {previous_index} and {tool_index}"
+                            )
+                        tool_id_indexes[call_id] = tool_index
                         output_index = next_output_index
                         next_output_index += 1
                         state = {"output_index": output_index, "call_id": call_id, "name": name}
@@ -1119,7 +1201,11 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
                                 },
                             }
                         )
-                    arguments = function.get("arguments")
+                    else:
+                        if call_id is not None and call_id != state["call_id"]:
+                            raise ValueError(f"Chat Completions tool call id changed for index {tool_index}")
+                        if name is not None and name != state["name"]:
+                            raise ValueError(f"Chat Completions function name changed for index {tool_index}")
                     if isinstance(arguments, str) and arguments:
                         events.append(
                             {
@@ -1128,7 +1214,12 @@ def _chat_chunks_to_responses_events(chunks: list[Mapping[str, Any]]) -> list[di
                                 "delta": arguments,
                             }
                         )
-            if choice.get("finish_reason") is not None:
+            finish_reason = choice.get("finish_reason")
+            if "finish_reason" in choice and finish_reason is not None and not isinstance(finish_reason, str):
+                raise ValueError("Chat Completions finish_reason is not a string or null")
+            if isinstance(finish_reason, str) and finish_reason not in {"stop", "tool_calls"}:
+                raise ValueError(f"Unsupported Chat Completions finish_reason: {finish_reason}")
+            if finish_reason is not None:
                 terminal = True
 
     if not terminal:

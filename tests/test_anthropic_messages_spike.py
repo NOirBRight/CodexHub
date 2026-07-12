@@ -619,6 +619,616 @@ class ChatCompletionsPrototypeTests(unittest.TestCase):
                 ]
             )
 
+    def test_present_non_list_chat_choices_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions choices is not a list"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_choices_001",
+                        "model": "chat-test",
+                        "choices": {"index": 0},
+                    }
+                ]
+            )
+
+    def test_present_non_object_chat_choice_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions choice is not an object"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_choice_001",
+                        "model": "chat-test",
+                        "choices": ["not-an-object"],
+                    }
+                ]
+            )
+
+    def test_present_non_object_chat_delta_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions delta is not an object"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_delta_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": "not-an-object",
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_present_non_string_chat_content_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions delta content is not a string or null"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_content_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": ["not", "a", "string"]},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_present_non_list_chat_tool_calls_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions delta tool_calls is not a list or null"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_tool_calls_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"tool_calls": {"index": 0}},
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_present_invalid_chat_chunk_identity_fields_fail_closed(self):
+        invalid_fields = (
+            ("id", 7, "Chat Completions chunk id is not a non-empty string"),
+            ("model", [], "Chat Completions chunk model is not a non-empty string"),
+        )
+
+        for field, value, error in invalid_fields:
+            with self.subTest(field=field):
+                chunk = {
+                    "id": "chatcmpl_valid_identity_001",
+                    "model": "chat-test",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+                chunk[field] = value
+                with self.assertRaisesRegex(ValueError, error):
+                    chat_chunks_to_messages_sse([chunk])
+
+    def test_present_non_string_chat_finish_reason_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions finish_reason is not a string or null"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_finish_reason_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": "SANITIZED_REPLY"},
+                                "finish_reason": 7,
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_present_invalid_chat_tool_call_index_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions tool call index is not a non-negative integer"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_tool_index_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": "0",
+                                            "id": "toolu_bad_index_001",
+                                            "type": "function",
+                                            "function": {"name": "read_file", "arguments": "{}"},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_present_non_string_chat_function_arguments_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "Chat Completions function arguments is not a string or null"):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_bad_arguments_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "toolu_bad_arguments_001",
+                                            "type": "function",
+                                            "function": {"name": "read_file", "arguments": {}},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_chat_tool_continuation_rejects_invalid_or_changed_identity(self):
+        continuation_cases = (
+            (
+                "invalid_id",
+                {"index": 0, "id": 7, "function": {"arguments": '"fixture.txt"}'}},
+                "Chat Completions tool call id is not a non-empty string or null",
+            ),
+            (
+                "changed_id",
+                {
+                    "index": 0,
+                    "id": "toolu_other_001",
+                    "function": {"arguments": '"fixture.txt"}'},
+                },
+                "Chat Completions tool call id changed for index 0",
+            ),
+            (
+                "invalid_name",
+                {"index": 0, "function": {"name": 7, "arguments": '"fixture.txt"}'}},
+                "Chat Completions function name is not a non-empty string or null",
+            ),
+            (
+                "changed_name",
+                {
+                    "index": 0,
+                    "function": {"name": "write_file", "arguments": '"fixture.txt"}'},
+                },
+                "Chat Completions function name changed for index 0",
+            ),
+        )
+
+        for case, continuation, error in continuation_cases:
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(ValueError, error):
+                    chat_chunks_to_messages_sse(
+                        [
+                            {
+                                "id": "chatcmpl_identity_001",
+                                "model": "chat-test",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "tool_calls": [
+                                                {
+                                                    "index": 0,
+                                                    "id": "toolu_identity_001",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "read_file",
+                                                        "arguments": '{"path":',
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            },
+                            {
+                                "id": "chatcmpl_identity_001",
+                                "model": "chat-test",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"tool_calls": [continuation]},
+                                        "finish_reason": "tool_calls",
+                                    }
+                                ],
+                            },
+                        ]
+                    )
+
+    def test_chat_tool_call_id_cannot_be_reused_by_another_index(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "Chat Completions tool call id reused for indexes 0 and 1",
+        ):
+            chat_chunks_to_messages_sse(
+                [
+                    {
+                        "id": "chatcmpl_duplicate_tool_id_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "toolu_duplicate_001",
+                                            "type": "function",
+                                            "function": {"name": "read_file", "arguments": "{}"},
+                                        },
+                                        {
+                                            "index": 1,
+                                            "id": "toolu_duplicate_001",
+                                            "type": "function",
+                                            "function": {"name": "write_file", "arguments": "{}"},
+                                        },
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    def test_present_invalid_known_chat_discriminators_fail_closed(self):
+        invalid_chunks = (
+            (
+                "choice_index",
+                {
+                    "id": "chatcmpl_bad_choice_index_001",
+                    "model": "chat-test",
+                    "choices": [{"index": "0", "delta": {}, "finish_reason": "stop"}],
+                },
+                "Chat Completions choice index is not a non-negative integer",
+            ),
+            (
+                "delta_role",
+                {
+                    "id": "chatcmpl_bad_role_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {"index": 0, "delta": {"role": 7}, "finish_reason": "stop"}
+                    ],
+                },
+                "Chat Completions delta role is not assistant or null",
+            ),
+            (
+                "tool_call_type",
+                {
+                    "id": "chatcmpl_bad_tool_type_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "toolu_bad_type_001",
+                                        "type": "custom",
+                                        "function": {"name": "read_file", "arguments": "{}"},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+                "Chat Completions tool call type is not function or null",
+            ),
+        )
+
+        for case, chunk, error in invalid_chunks:
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(ValueError, error):
+                    chat_chunks_to_messages_sse([chunk])
+
+    def test_unsupported_chat_choice_cardinality_fails_closed(self):
+        invalid_streams = (
+            (
+                "nonzero_index",
+                [
+                    {
+                        "id": "chatcmpl_choice_index_001",
+                        "model": "chat-test",
+                        "choices": [{"index": 1, "delta": {}, "finish_reason": "stop"}],
+                    }
+                ],
+                "Unsupported Chat Completions choice index: 1",
+            ),
+            (
+                "multiple_choices",
+                [
+                    {
+                        "id": "chatcmpl_multiple_choices_001",
+                        "model": "chat-test",
+                        "choices": [
+                            {"index": 0, "delta": {"content": "FIRST"}, "finish_reason": "stop"},
+                            {"index": 1, "delta": {"content": "SECOND"}, "finish_reason": "stop"},
+                        ],
+                    }
+                ],
+                "Multiple Chat Completions choices are unsupported",
+            ),
+        )
+
+        for case, chunks, error in invalid_streams:
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(ValueError, error):
+                    chat_chunks_to_messages_sse(chunks)
+
+    def test_chat_chunk_identity_cannot_change_during_stream(self):
+        conflicts = (
+            (
+                "id",
+                "chatcmpl_identity_other_001",
+                "Chat Completions chunk id changed during stream",
+            ),
+            (
+                "model",
+                "chat-other",
+                "Chat Completions chunk model changed during stream",
+            ),
+        )
+
+        for field, conflicting_value, error in conflicts:
+            with self.subTest(field=field):
+                terminal_chunk = {
+                    "id": "chatcmpl_stable_identity_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {"index": 0, "delta": {"content": "SECOND"}, "finish_reason": "stop"}
+                    ],
+                }
+                terminal_chunk[field] = conflicting_value
+                with self.assertRaisesRegex(ValueError, error):
+                    chat_chunks_to_messages_sse(
+                        [
+                            {
+                                "id": "chatcmpl_stable_identity_001",
+                                "model": "chat-test",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": "FIRST"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            },
+                            terminal_chunk,
+                        ]
+                    )
+
+    def test_unsupported_chat_finish_reasons_fail_closed(self):
+        for finish_reason in ("length", "content_filter", "function_call"):
+            with self.subTest(finish_reason=finish_reason):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Unsupported Chat Completions finish_reason: {finish_reason}",
+                ):
+                    chat_chunks_to_messages_sse(
+                        [
+                            {
+                                "id": "chatcmpl_unsupported_finish_001",
+                                "model": "chat-test",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": "SANITIZED_REPLY"},
+                                        "finish_reason": finish_reason,
+                                    }
+                                ],
+                            }
+                        ]
+                    )
+
+    def test_unsupported_chat_container_fields_fail_closed(self):
+        invalid_chunks = (
+            (
+                "chunk",
+                {
+                    "id": "chatcmpl_unknown_chunk_field_001",
+                    "model": "chat-test",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "service_tier": "priority",
+                },
+                "Unsupported Chat Completions chunk field: service_tier",
+            ),
+            (
+                "choice",
+                {
+                    "id": "chatcmpl_unknown_choice_field_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                            "logprobs": {"content": []},
+                        }
+                    ],
+                },
+                "Unsupported Chat Completions choice field: logprobs",
+            ),
+            (
+                "delta",
+                {
+                    "id": "chatcmpl_unsupported_refusal_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"refusal": "SANITIZED_REFUSAL"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+                "Unsupported Chat Completions delta field: refusal",
+            ),
+            (
+                "tool_call",
+                {
+                    "id": "chatcmpl_unknown_tool_field_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "toolu_unknown_field_001",
+                                        "type": "function",
+                                        "function": {"name": "read_file", "arguments": "{}"},
+                                        "provider_detail": {},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+                "Unsupported Chat Completions tool call field: provider_detail",
+            ),
+            (
+                "function",
+                {
+                    "id": "chatcmpl_unknown_function_field_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "toolu_unknown_function_field_001",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": "{}",
+                                            "provider_detail": {},
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+                "Unsupported Chat Completions function field: provider_detail",
+            ),
+        )
+
+        for scope, chunk, error in invalid_chunks:
+            with self.subTest(scope=scope):
+                with self.assertRaisesRegex(ValueError, error):
+                    chat_chunks_to_messages_sse([chunk])
+
+    def test_absent_and_nullable_chat_stream_fields_remain_permitted(self):
+        records = chat_chunks_to_messages_sse(
+            [
+                {
+                    "id": "chatcmpl_optional_fields_001",
+                    "model": "chat-test",
+                    "usage": None,
+                    "service_tier": None,
+                    "system_fingerprint": None,
+                },
+                {
+                    "id": "chatcmpl_optional_fields_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "delta": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": None,
+                                "function_call": None,
+                                "refusal": None,
+                            },
+                            "finish_reason": None,
+                            "logprobs": None,
+                        }
+                    ],
+                },
+                {
+                    "id": "chatcmpl_optional_fields_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "id": "toolu_optional_fields_001",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": '{"path":',
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                {
+                    "id": "chatcmpl_optional_fields_001",
+                    "model": "chat-test",
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "id": None,
+                                        "type": None,
+                                        "function": {
+                                            "name": None,
+                                            "arguments": '"fixture.txt"}',
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+            ]
+        )
+
+        events = _decode_sse(records)
+        self.assertEqual(events[1][1]["content_block"]["id"], "toolu_optional_fields_001")
+        self.assertEqual(
+            [payload["delta"]["partial_json"] for event, payload in events if event == "content_block_delta"],
+            ['{"path":', '"fixture.txt"}'],
+        )
+
 
 class InMemoryUpstreamExerciseTests(unittest.TestCase):
     def test_responses_upstream_exercise_keeps_the_gateway_seam_in_memory(self):
