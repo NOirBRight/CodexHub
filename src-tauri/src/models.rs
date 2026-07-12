@@ -661,6 +661,7 @@ fn subscription_models_to_metadata_models(
                 defaults,
             )),
             upstream_model: Some(subscription_model.slug.clone()),
+            tool_surface_strategy: None,
             aliases: Vec::new(),
             source_kind: Some("official".to_string()),
             locked: true,
@@ -1714,6 +1715,9 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         id: override_model.id,
         display_name: override_model.display_name.or(base.display_name.take()),
         upstream_model: override_model.upstream_model.or(base.upstream_model.take()),
+        tool_surface_strategy: override_model
+            .tool_surface_strategy
+            .or(base.tool_surface_strategy.take()),
         aliases,
         source_kind: override_model.source_kind.or(base.source_kind.take()),
         locked: base.locked || override_model.locked,
@@ -2003,6 +2007,7 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
                     .and_then(Value::as_str)
                     .and_then(nonblank)
             }),
+        tool_surface_strategy: None,
         aliases: object
             .get("aliases")
             .and_then(string_array)
@@ -2171,7 +2176,7 @@ mod tests {
         test_model_endpoint_with_timeout, AppServerModelListRunner, CatalogCommandOutcome,
         CatalogSyncRunner, ModelPaths,
     };
-    use crate::{MetadataProvenance, Model, Settings, UpstreamFormat};
+    use crate::{MetadataProvenance, Model, Settings, ToolSurfaceStrategy, UpstreamFormat};
     use reqwest::blocking::Client;
     use serde_json::{json, Value};
     use std::cell::RefCell;
@@ -2795,6 +2800,7 @@ mod tests {
         let base = vec![Model {
             id: "minimax/minimax-m3".to_string(),
             context_window: Some(1_000_000),
+            tool_surface_strategy: Some(ToolSurfaceStrategy::DeferredCore),
             metadata_provenance: Some(MetadataProvenance {
                 source: "official".to_string(),
                 source_url: Some("https://platform.minimax.io/docs".to_string()),
@@ -2814,6 +2820,10 @@ mod tests {
 
         assert_eq!(merged[0].context_window, Some(245_000));
         assert_eq!(merged[0].display_name.as_deref(), Some("MiniMax M3 Custom"));
+        assert_eq!(
+            merged[0].tool_surface_strategy,
+            Some(ToolSurfaceStrategy::DeferredCore)
+        );
         assert_eq!(
             merged[0].metadata_provenance.as_ref().unwrap().source,
             "user_override"

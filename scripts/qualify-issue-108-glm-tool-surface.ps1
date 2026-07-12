@@ -1,0 +1,688 @@
+param(
+    [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    [string]$OutputDir = '',
+    [string]$CodexCommand = '',
+    [int]$TimeoutSeconds = 240,
+    [int]$ProxyStartupSeconds = 20,
+    [switch]$CaptureRequestShape,
+    [switch]$UseCliSandboxBypass
+)
+
+$ErrorActionPreference = 'Stop'
+
+function ConvertTo-ProcessArgument {
+    param([AllowNull()][string]$Argument)
+
+    if ($null -eq $Argument -or $Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Invoke-Checked {
+    param(
+        [string]$FileName,
+        [string[]]$Arguments
+    )
+
+    & $FileName @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$FileName exited with code $LASTEXITCODE"
+    }
+}
+
+function Start-TrackedProcess {
+    param(
+        [string]$FileName,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [hashtable]$Environment = @{}
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FileName
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.UseShellExecute = $false
+    # The desktop task injects a managed read-only profile and thread context
+    # into its own process.  The qualification child must instead use its
+    # explicit isolated workspace-write policy and temporary CODEX_HOME.
+    foreach ($isolatedVariable in @('CODEX_PERMISSION_PROFILE', 'CODEX_THREAD_ID', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE')) {
+        [void]$startInfo.Environment.Remove($isolatedVariable)
+    }
+    if ($null -ne $startInfo.ArgumentList) {
+        foreach ($argument in $Arguments) {
+            [void]$startInfo.ArgumentList.Add($argument)
+        }
+    }
+    else {
+        $startInfo.Arguments = ($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
+    }
+    foreach ($key in $Environment.Keys) {
+        $startInfo.Environment[$key] = [string]$Environment[$key]
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "Failed to start $FileName"
+    }
+    [pscustomobject]@{
+        Process = $process
+        StdoutTask = $process.StandardOutput.ReadToEndAsync()
+        StderrTask = $process.StandardError.ReadToEndAsync()
+    }
+}
+
+function Stop-TrackedProcess {
+    param($Tracked)
+
+    if ($null -eq $Tracked -or $null -eq $Tracked.Process -or $Tracked.Process.HasExited) {
+        return
+    }
+    $Tracked.Process.Kill($true)
+    [void]$Tracked.Process.WaitForExit(10000)
+}
+
+function Save-BoundedText {
+    param(
+        [string]$Path,
+        [string]$Text,
+        [int]$MaximumCharacters = 1000000
+    )
+
+    if ($Text.Length -gt $MaximumCharacters) {
+        $Text = $Text.Substring(0, $MaximumCharacters) + "`n[truncated]`n"
+    }
+    [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Read-JsonLines {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+    $entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if (-not $line.Trim()) {
+            continue
+        }
+        try {
+            [void]$entries.Add(($line | ConvertFrom-Json))
+        }
+        catch {
+            continue
+        }
+    }
+    return $entries.ToArray()
+}
+
+function Wait-ProxyHealth {
+    param(
+        [string]$BaseUrl,
+        [int]$StartupSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($StartupSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $health = Invoke-RestMethod -Uri "$BaseUrl/health" -TimeoutSec 2
+            if ($health.ok -eq $true) {
+                return
+            }
+        }
+        catch {
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "Isolated proxy did not become healthy at $BaseUrl"
+}
+
+function Start-TrackedCodex {
+    param(
+        [string]$CommandPath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [hashtable]$Environment
+    )
+
+    $extension = [System.IO.Path]::GetExtension($CommandPath).ToLowerInvariant()
+    if ($extension -notin @('.cmd', '.bat')) {
+        return Start-TrackedProcess -FileName $CommandPath -Arguments $Arguments -WorkingDirectory $WorkingDirectory -Environment $Environment
+    }
+
+    $commandLine = @(
+        (ConvertTo-ProcessArgument $CommandPath)
+        ($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
+    ) -join ' '
+    $commandProcessor = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+    return Start-TrackedProcess -FileName $commandProcessor -Arguments @('/d', '/s', '/c', $commandLine) -WorkingDirectory $WorkingDirectory -Environment $Environment
+}
+
+$Workspace = (Resolve-Path -LiteralPath $Workspace).Path
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $Workspace 'test-results\issue-108-glm-tool-surface'
+}
+$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+
+if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('OLLAMA_API_KEY'))) {
+    throw 'OLLAMA_API_KEY is required for the isolated GLM qualification.'
+}
+
+if (-not $CodexCommand) {
+    $command = Get-Command 'codex.cmd' -ErrorAction SilentlyContinue
+    if (-not $command) {
+        $command = Get-Command 'codex' -ErrorAction Stop
+    }
+    $CodexCommand = $command.Source
+}
+if (-not (Test-Path -LiteralPath $CodexCommand)) {
+    throw "Codex command was not found: $CodexCommand"
+}
+
+$PythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+$SharedAuthPath = Join-Path $HOME '.codex\auth.json'
+if (-not (Test-Path -LiteralPath $SharedAuthPath)) {
+    throw 'The local Codex auth file is required for the isolated CLI process.'
+}
+$SharedModelsCachePath = Join-Path $HOME '.codex\models_cache.json'
+if (-not (Test-Path -LiteralPath $SharedModelsCachePath)) {
+    throw 'The local Codex model catalog is required for the isolated CLI process.'
+}
+
+$runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
+$runRoot = Join-Path $OutputDir "run-$runId"
+$runtimeHome = Join-Path $runRoot 'runtime'
+$testWorkspace = Join-Path $runRoot 'workspace'
+$cliStdoutPath = Join-Path $runRoot 'cli-stdout.jsonl'
+$cliStderrPath = Join-Path $runRoot 'cli-stderr.txt'
+$proxyStdoutPath = Join-Path $runRoot 'proxy-stdout.txt'
+$proxyStderrPath = Join-Path $runRoot 'proxy-stderr.txt'
+$requestShapePath = Join-Path $runRoot 'request-tool-shape.jsonl'
+$summaryPath = Join-Path $runRoot 'summary.json'
+$targetPath = Join-Path $testWorkspace 'qualification-target.txt'
+$authCopyPath = Join-Path $runtimeHome 'auth.json'
+$proxy = $null
+$cli = $null
+$cliExitCode = $null
+$summary = [ordered]@{
+    model = 'ollama-cloud/glm-5.2'
+    expected_upstream = 'ollama_cloud'
+    expected_route_mode = 'codexhub'
+    cli_sandbox = if ($UseCliSandboxBypass) { 'isolated_bypass' } else { 'workspace_write' }
+    run_root = $runRoot
+    passed = $false
+    failures = @()
+}
+
+try {
+    New-Item -ItemType Directory -Force -Path $runtimeHome, $testWorkspace, (Join-Path $runtimeHome 'proxy\config') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Workspace 'config\providers.toml') -Destination (Join-Path $runtimeHome 'proxy\config\providers.toml')
+    Copy-Item -LiteralPath $SharedAuthPath -Destination $authCopyPath
+    $modelsCache = Get-Content -LiteralPath $SharedModelsCachePath -Raw | ConvertFrom-Json
+    $templateModel = @($modelsCache.models | Where-Object { $_.slug -eq 'gpt-5.6-terra' }) | Select-Object -First 1
+    if ($null -eq $templateModel) {
+        throw 'The local Codex model catalog did not contain the required freeform apply_patch metadata template.'
+    }
+    # The isolated CLI needs local metadata for the exact GLM slug to expose its freeform apply_patch tool.
+    $glmModel = $templateModel | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+    $glmModel.slug = 'ollama-cloud/glm-5.2'
+    $glmModel.display_name = 'GLM-5.2 (Ollama Cloud)'
+    $glmModel.tool_mode = 'direct'
+    $modelsCache.models = @($modelsCache.models) + @($glmModel)
+    $modelCatalogJson = [pscustomobject]@{ models = @($modelsCache.models) } | ConvertTo-Json -Depth 100 -Compress
+    $modelCatalogPath = Join-Path $runtimeHome 'model-catalog.json'
+    [System.IO.File]::WriteAllText($modelCatalogPath, $modelCatalogJson, [System.Text.UTF8Encoding]::new($false))
+    $modelCatalogConfigPath = $modelCatalogPath.Replace('\', '/')
+    [System.IO.File]::WriteAllText($targetPath, "issue108-before`n", [System.Text.UTF8Encoding]::new($false))
+
+    Invoke-Checked -FileName 'git' -Arguments @('-C', $testWorkspace, 'init', '--quiet')
+    Invoke-Checked -FileName 'git' -Arguments @('-C', $testWorkspace, 'config', 'user.name', 'Issue 108 Qualification')
+    Invoke-Checked -FileName 'git' -Arguments @('-C', $testWorkspace, 'config', 'user.email', 'issue108@example.invalid')
+    Invoke-Checked -FileName 'git' -Arguments @('-C', $testWorkspace, 'add', 'qualification-target.txt')
+    Invoke-Checked -FileName 'git' -Arguments @('-C', $testWorkspace, 'commit', '--quiet', '--no-gpg-sign', '-m', 'qualification baseline')
+
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $proxyPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $listener.Stop()
+    $proxyBaseUrl = "http://127.0.0.1:$proxyPort"
+    $childEnvironment = @{
+        CODEX_HOME = $runtimeHome
+        CODEX_PROXY_PORT = "$proxyPort"
+    }
+    $proxyArguments = @('-u', 'codex_proxy.py', '--port', "$proxyPort")
+    if ($CaptureRequestShape) {
+        $captureProxyPath = Join-Path $runRoot 'capture-proxy.py'
+        $captureProxy = @'
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.getcwd())
+import codex_proxy
+
+
+_capture_path = Path(os.environ["CODEXHUB_REQUEST_TOOL_SHAPE_PATH"])
+_capture_count = 0
+_sse_capture_count = 0
+_apply_patch_capture_count = 0
+_original_compatible_request_body = codex_proxy.compatible_request_body
+_original_compatible_sse_line = codex_proxy.compatible_sse_line
+_original_apply_patch_events_for_event = codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event
+_apply_patch_item_ids = set()
+
+
+def _tool_shape(tools):
+    if not isinstance(tools, list):
+        return []
+    result = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            result.append({"kind": type(tool).__name__})
+            continue
+        item = {"type": tool.get("type"), "name": tool.get("name"), "keys": sorted(tool)}
+        nested = tool.get("tools")
+        if isinstance(nested, list):
+            item["nested_tools"] = _tool_shape(nested)
+        result.append(item)
+    return result
+
+
+def _tool_output_shape(value):
+    text_parts = []
+
+    def collect(candidate):
+        if isinstance(candidate, str):
+            text_parts.append(candidate)
+        elif isinstance(candidate, list):
+            for entry in candidate:
+                collect(entry)
+        elif isinstance(candidate, dict):
+            for entry in candidate.values():
+                collect(entry)
+
+    collect(value)
+    normalized = "\n".join(text_parts).lower()
+    return {
+        "kind": type(value).__name__,
+        "text_fragment_count": len(text_parts),
+        "text_character_count": sum(len(part) for part in text_parts),
+        "contains_apply_patch_error": "apply_patch verification failed" in normalized,
+        "contains_expected_lines_error": "failed to find expected lines" in normalized,
+        "contains_success_marker": "success" in normalized or "applied" in normalized,
+    }
+
+
+def _patch_structure(arguments):
+    if isinstance(arguments, str):
+        try:
+            decoded = json.loads(arguments)
+        except (TypeError, ValueError):
+            decoded = None
+    elif isinstance(arguments, dict):
+        decoded = arguments
+    else:
+        decoded = None
+    patch = decoded.get("patch") if isinstance(decoded, dict) else None
+    if not isinstance(patch, str):
+        return None
+    operation_markers = (
+        "*** Add File:",
+        "*** Delete File:",
+        "*** Update File:",
+        "*** Move to:",
+    )
+    lines = patch.splitlines()
+    operation_count = sum(patch.count(marker) for marker in operation_markers)
+    return {
+        "character_count": len(patch),
+        "line_count": len(lines),
+        "begin_marker_count": patch.count("*** Begin Patch"),
+        "end_marker_count": patch.count("*** End Patch"),
+        "operation_count": operation_count,
+        "hunk_count": patch.count("@@"),
+        "added_line_count": sum(
+            line.startswith("+") and not line.startswith("+++") for line in lines
+        ),
+        "removed_line_count": sum(
+            line.startswith("-") and not line.startswith("---") for line in lines
+        ),
+        "has_exact_single_wrapper": (
+            patch.count("*** Begin Patch") == 1
+            and patch.count("*** End Patch") == 1
+            and operation_count == 1
+        ),
+    }
+
+
+def _request_shape(body):
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"parseable": False}
+    if not isinstance(payload, dict):
+        return {"parseable": False}
+    input_items = payload.get("input")
+    input_shape = []
+    if isinstance(input_items, list):
+        for item in input_items:
+            if not isinstance(item, dict):
+                input_shape.append({"kind": type(item).__name__})
+                continue
+            entry = {"type": item.get("type"), "role": item.get("role"), "keys": sorted(item)}
+            if item.get("type") == "additional_tools":
+                entry["tools"] = _tool_shape(item.get("tools"))
+            if item.get("type") == "custom_tool_call_output":
+                entry["output_shape"] = _tool_output_shape(item.get("output"))
+            input_shape.append(entry)
+    return {"parseable": True, "input": input_shape, "tools": _tool_shape(payload.get("tools"))}
+
+
+def _capture(stage, body):
+    global _capture_count
+    if _capture_count >= 8:
+        return
+    _capture_count += 1
+    record = {"stage": stage, "shape": _request_shape(body)}
+    with _capture_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+
+
+def _compatible_request_body_with_capture(body, *args, **kwargs):
+    _capture("before", body)
+    rewritten = _original_compatible_request_body(body, *args, **kwargs)
+    _capture("after", rewritten)
+    return rewritten
+
+
+def _apply_patch_response_shape(line):
+    if not isinstance(line, bytes) or not line.startswith(b"data: "):
+        return None
+    try:
+        payload = json.loads(line[6:].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidates = []
+    item = payload.get("item")
+    if isinstance(item, dict):
+        candidates.append(item)
+    response = payload.get("response")
+    if isinstance(response, dict):
+        output = response.get("output")
+        if isinstance(output, list):
+            candidates.extend(value for value in output if isinstance(value, dict))
+    for candidate in candidates:
+        if candidate.get("type") != "function_call" or candidate.get("name") != "apply_patch":
+            continue
+        arguments = candidate.get("arguments")
+        argument_keys = None
+        if isinstance(arguments, str):
+            try:
+                decoded = json.loads(arguments)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, dict):
+                argument_keys = sorted(decoded)
+        elif isinstance(arguments, dict):
+            argument_keys = sorted(arguments)
+        return {
+            "event_type": payload.get("type"),
+            "item_keys": sorted(candidate),
+            "arguments_kind": type(arguments).__name__,
+            "argument_keys": argument_keys,
+            "patch_structure": _patch_structure(arguments),
+        }
+    return None
+
+
+def _compatible_sse_line_with_capture(line, *args, **kwargs):
+    global _sse_capture_count
+    shape = _apply_patch_response_shape(line)
+    if shape is not None and _sse_capture_count < 8:
+        _sse_capture_count += 1
+        record = {"stage": "sse_before", "shape": shape}
+        with _capture_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+    return _original_compatible_sse_line(line, *args, **kwargs)
+
+
+def _apply_patch_event_shape(event):
+    if not isinstance(event, dict):
+        return None
+    candidate = event.get("item")
+    if isinstance(candidate, dict) and candidate.get("type") == "function_call" and candidate.get("name") == "apply_patch":
+        item_id = candidate.get("id")
+        if isinstance(item_id, str) and item_id:
+            _apply_patch_item_ids.add(item_id)
+    elif event.get("item_id") in _apply_patch_item_ids:
+        candidate = event
+    else:
+        return None
+    arguments = candidate.get("arguments") if isinstance(candidate, dict) else None
+    argument_keys = None
+    if isinstance(arguments, str):
+        try:
+            decoded = json.loads(arguments)
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, dict):
+            argument_keys = sorted(decoded)
+    elif isinstance(arguments, dict):
+        argument_keys = sorted(arguments)
+    return {
+        "event_type": event.get("type"),
+        "event_keys": sorted(event),
+        "item_keys": sorted(candidate) if isinstance(candidate, dict) else None,
+        "arguments_kind": type(arguments).__name__,
+        "argument_keys": argument_keys,
+        "patch_structure": _patch_structure(arguments),
+    }
+
+
+def _apply_patch_events_for_event_with_capture(self, event):
+    shape = _apply_patch_event_shape(event)
+    if shape is not None:
+        global _apply_patch_capture_count
+        if _apply_patch_capture_count < 20:
+            _apply_patch_capture_count += 1
+            record = {"stage": "apply_patch_event_before", "shape": shape}
+            with _capture_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+    return _original_apply_patch_events_for_event(self, event)
+
+
+codex_proxy.compatible_request_body = _compatible_request_body_with_capture
+codex_proxy.compatible_sse_line = _compatible_sse_line_with_capture
+codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event = _apply_patch_events_for_event_with_capture
+raise SystemExit(codex_proxy.main())
+'@
+        [System.IO.File]::WriteAllText($captureProxyPath, $captureProxy, [System.Text.UTF8Encoding]::new($false))
+        $childEnvironment['CODEXHUB_REQUEST_TOOL_SHAPE_PATH'] = $requestShapePath
+        $proxyArguments = @('-u', $captureProxyPath, '--port', "$proxyPort")
+    }
+    $cliConfig = @"
+model_provider = "custom"
+model_catalog_json = "$modelCatalogConfigPath"
+
+[model_providers.custom]
+name = "Issue108"
+base_url = "$proxyBaseUrl/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"@
+    [System.IO.File]::WriteAllText((Join-Path $runtimeHome 'config.toml'), $cliConfig, [System.Text.UTF8Encoding]::new($false))
+    $proxy = Start-TrackedProcess -FileName $PythonCommand -Arguments $proxyArguments -WorkingDirectory (Join-Path $Workspace 'src-python') -Environment $childEnvironment
+    Wait-ProxyHealth -BaseUrl $proxyBaseUrl -StartupSeconds $ProxyStartupSeconds
+
+    $prompt = @'
+Automated qualification: follow this exact tool sequence and use no other tools.
+1. Call shell_command exactly once to read only qualification-target.txt.
+2. Call apply_patch exactly once to replace only issue108-before with issue108-after in qualification-target.txt. Do not use shell to write the file.
+3. Call shell_command exactly once to read only qualification-target.txt and verify issue108-after.
+After a successful apply_patch result, step 2 is complete. Do not call apply_patch again for any reason: your next and only tool call must be the step-3 shell_command. Treat a repeated apply_patch call as an incorrect result.
+For the apply_patch action, emit exactly one upstream function-call argument named patch whose value is exactly this one-operation patch, with no duplicate hunks or additional file operations:
+*** Begin Patch
+*** Update File: qualification-target.txt
+@@
+-issue108-before
++issue108-after
+*** End Patch
+Do not use an empty argument name or additional arguments.
+Do not call tool_search, collaboration tools, namespaces, or any other tool. Do not edit or create any other file. Finish with exactly: SENTINEL:issue108-shell-apply-shell
+'@
+    if ($UseCliSandboxBypass -and -not $testWorkspace.StartsWith("$runRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The CLI sandbox bypass is permitted only for the generated isolated workspace.'
+    }
+    $cliArguments = @()
+    if ($UseCliSandboxBypass) {
+        # The Windows workspace-write setup is unavailable on this host. This
+        # opt-in path is confined to the generated one-file Git workspace and
+        # still verifies the exact tool sequence and final diff below.
+        $cliArguments += '--dangerously-bypass-approvals-and-sandbox'
+    }
+    else {
+        $cliArguments += '-a', 'never'
+    }
+    $cliArguments += @(
+        'exec', '--strict-config', '--ephemeral', '--json',
+        '-C', $testWorkspace,
+        '--add-dir', $testWorkspace,
+        '-m', 'ollama-cloud/glm-5.2'
+    )
+    if (-not $UseCliSandboxBypass) {
+        $cliArguments += @('-s', 'workspace-write')
+    }
+    $cliArguments += @(
+        '-'
+    )
+    $cli = Start-TrackedCodex -CommandPath $CodexCommand -Arguments $cliArguments -WorkingDirectory $testWorkspace -Environment $childEnvironment
+    $cli.Process.StandardInput.Write($prompt)
+    $cli.Process.StandardInput.Close()
+    if (-not $cli.Process.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-TrackedProcess $cli
+        throw "Codex CLI timed out after $TimeoutSeconds seconds."
+    }
+    $cliExitCode = $cli.Process.ExitCode
+    $cliStdout = $cli.StdoutTask.GetAwaiter().GetResult()
+    $cliStderr = $cli.StderrTask.GetAwaiter().GetResult()
+    Save-BoundedText -Path $cliStdoutPath -Text $cliStdout
+    Save-BoundedText -Path $cliStderrPath -Text $cliStderr
+    Start-Sleep -Milliseconds 750
+
+    $events = Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')
+    $cliEvents = Read-JsonLines -Path $cliStdoutPath
+    $toolSequence = [System.Collections.Generic.List[string]]::new()
+    foreach ($event in $cliEvents) {
+        if ($event.type -ne 'item.completed' -or $null -eq $event.item) {
+            continue
+        }
+        if ($event.item.type -eq 'command_execution') {
+            [void]$toolSequence.Add('shell_command')
+        }
+        elseif ($event.item.type -eq 'custom_tool_call' -and $event.item.name -eq 'apply_patch') {
+            [void]$toolSequence.Add('apply_patch')
+        }
+        elseif ($event.item.type -eq 'file_change') {
+            [void]$toolSequence.Add('apply_patch')
+        }
+    }
+    $requestStarts = @($events | Where-Object { $_.event -eq 'request_start' })
+    $surfaceEvents = @($events | Where-Object { $_.event -eq 'external_tool_surface_prepared' })
+    $adapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
+    $requestErrors = @($events | Where-Object { $_.event -eq 'request_error' })
+    $statusLines = @(& git -C $testWorkspace status --porcelain)
+    $numstat = ((& git -C $testWorkspace diff --numstat) | Out-String).Trim()
+    $targetText = [System.IO.File]::ReadAllText($targetPath)
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if ($cliExitCode -ne 0) {
+        [void]$failures.Add("Codex CLI exited with code $cliExitCode")
+    }
+    if ($targetText.Trim() -ne 'issue108-after') {
+        [void]$failures.Add('qualification target did not contain only issue108-after')
+    }
+    if (($statusLines -join "`n") -ne ' M qualification-target.txt') {
+        [void]$failures.Add('qualification workspace changed more than the one target file')
+    }
+    if ($numstat -ne "1`t1`tqualification-target.txt") {
+        [void]$failures.Add("qualification target was not exactly one-line replacement: $numstat")
+    }
+    if (($toolSequence -join ',') -ne 'shell_command,apply_patch,shell_command') {
+        [void]$failures.Add("unexpected CLI tool sequence: $($toolSequence -join ',')")
+    }
+    if ($requestStarts.Count -eq 0) {
+        [void]$failures.Add('proxy did not record a request_start event')
+    }
+    foreach ($request in $requestStarts) {
+        $model = [string]$request.model
+        if ($request.upstream -ne 'ollama_cloud' -or $request.provider_id -ne 'ollama_cloud' -or $request.route_mode -ne 'codexhub' -or $model -notmatch '^(ollama-cloud/)?glm-5\.2$') {
+            [void]$failures.Add('request identity was not GLM/ollama_cloud/codexhub')
+            break
+        }
+    }
+    if (@($requestStarts | Where-Object { [string]$_.model -match '(?i)terra|luna' }).Count -gt 0) {
+        [void]$failures.Add('request telemetry showed a Luna or Terra fallback')
+    }
+    if ($surfaceEvents.Count -eq 0 -or @($surfaceEvents | Where-Object { $_.tool_surface_strategy -ne 'deferred_core' }).Count -gt 0) {
+        [void]$failures.Add('deferred_core tool-surface telemetry was not recorded for every prepared request')
+    }
+    if (@($adapterEvents | Where-Object { $_.outcome -eq 'adapted' }).Count -eq 0) {
+        [void]$failures.Add('the third-party apply_patch freeform adapter never reported adapted')
+    }
+    if ($requestErrors.Count -gt 0) {
+        [void]$failures.Add('proxy recorded a request_error during qualification')
+    }
+
+    $summary.cli_exit_code = $cliExitCode
+    $summary.tool_sequence = @($toolSequence)
+    $summary.request_start_count = $requestStarts.Count
+    $summary.deferred_surface_event_count = $surfaceEvents.Count
+    $summary.apply_patch_adapter_outcomes = @($adapterEvents | ForEach-Object { [string]$_.outcome })
+    $summary.git_status = @($statusLines)
+    $summary.git_numstat = $numstat
+    $summary.failures = @($failures)
+    $summary.passed = $failures.Count -eq 0
+}
+catch {
+    $summary.failures = @($summary.failures) + ("line {0}: {1}" -f $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
+    $summary.passed = $false
+}
+finally {
+    if ($null -ne $cli) {
+        Stop-TrackedProcess $cli
+        $cliStdout = $cli.StdoutTask.GetAwaiter().GetResult()
+        $cliStderr = $cli.StderrTask.GetAwaiter().GetResult()
+        Save-BoundedText -Path $cliStdoutPath -Text $cliStdout
+        Save-BoundedText -Path $cliStderrPath -Text $cliStderr
+    }
+    if ($null -ne $proxy) {
+        Stop-TrackedProcess $proxy
+        $proxyStdout = $proxy.StdoutTask.GetAwaiter().GetResult()
+        $proxyStderr = $proxy.StderrTask.GetAwaiter().GetResult()
+        Save-BoundedText -Path $proxyStdoutPath -Text $proxyStdout
+        Save-BoundedText -Path $proxyStderrPath -Text $proxyStderr
+    }
+    if (Test-Path -LiteralPath $authCopyPath) {
+        Remove-Item -LiteralPath $authCopyPath -Force
+    }
+    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+}
+
+Get-Content -LiteralPath $summaryPath -Raw
+if (-not $summary.passed) {
+    exit 1
+}

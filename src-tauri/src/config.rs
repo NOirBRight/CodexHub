@@ -1040,7 +1040,7 @@ mod tests {
         switch_mode_with_paths_takeover_as_owner, CommandOutcome, CommandRunner,
         ConfigPaths, ProcessCommandRunner,
     };
-    use crate::{Model, Provider, Settings, ToolProtocol, UpstreamFormat};
+    use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
     use std::cell::RefCell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1066,6 +1066,7 @@ mod tests {
                 UpstreamFormat::ChatCompletions,
             ]),
             tool_protocol: Some(ToolProtocol::ChatTools),
+            tool_surface_strategy: Some(ToolSurfaceStrategy::Eager),
             reports_cached_input_tokens: Some(true),
             display_prefix: Some("Volc".to_string()),
             sort_order: Some(2),
@@ -1087,6 +1088,7 @@ mod tests {
                         "xhigh".to_string(),
                     ]),
                     default_reasoning_level: Some("high".to_string()),
+                    tool_surface_strategy: Some(ToolSurfaceStrategy::DeferredCore),
                     sort_order: Some(1),
                     enabled: true,
                     ..Model::default()
@@ -1118,6 +1120,7 @@ mod tests {
         assert!(written.contains("upstream_format = \"chat_completions\""));
         assert!(written.contains("available_upstream_formats"));
         assert!(written.contains("tool_protocol = \"chat_tools\""));
+        assert!(written.contains("tool_surface_strategy = \"eager\""));
         assert!(written.contains("reports_cached_input_tokens = true"));
         assert!(written.contains("\"responses\""));
         assert!(written.contains("upstream_model = \"ep-20260629\""));
@@ -1133,6 +1136,7 @@ mod tests {
         assert!(written.contains("supported_reasoning_levels"));
         assert!(written.contains("\"xhigh\""));
         assert!(written.contains("default_reasoning_level = \"high\""));
+        assert!(written.contains("tool_surface_strategy = \"deferred_core\""));
     }
 
     #[test]
@@ -1147,6 +1151,7 @@ mod tests {
             upstream_format: Some(UpstreamFormat::AnthropicMessages),
             available_upstream_formats: Some(vec![UpstreamFormat::AnthropicMessages]),
             tool_protocol: Some(ToolProtocol::None),
+            tool_surface_strategy: None,
             reports_cached_input_tokens: None,
             display_prefix: Some("anthropic/".to_string()),
             sort_order: Some(3),

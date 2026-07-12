@@ -2511,6 +2511,20 @@ test("provider discovery updates the selected provider and reports progress", as
   assert.match(providersSource, /t\("providers\.discoveredProviderModels", \{/);
 });
 
+test("provider discovery preserves a prior model tool surface strategy", async () => {
+  const [formatSource, typesSource] = await Promise.all([
+    readFile(new URL("../src/lib/format.ts", import.meta.url), "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export type ToolSurfaceStrategy = "eager" \| "deferred_core";/);
+  assert.match(typesSource, /tool_surface_strategy\?: ToolSurfaceStrategy \| null;/);
+  assert.match(
+    formatSource,
+    /tool_surface_strategy: previous\?\.tool_surface_strategy \?\? model\.tool_surface_strategy \?\? null,/,
+  );
+});
+
 test("provider discovery preserves missing API key environment variable names", async () => {
   const providersSource = await readProviderContractSource();
 

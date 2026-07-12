@@ -2,6 +2,7 @@ export interface Model {
   id: string;
   display_name?: string | null;
   upstream_model?: string | null;
+  tool_surface_strategy?: ToolSurfaceStrategy | null;
   source_kind?: string | null;
   locked?: boolean;
   codex_enabled?: boolean;
@@ -40,6 +41,7 @@ export interface MetadataProvenance {
 
 export type UpstreamFormat = "auto" | "responses" | "chat_completions" | "anthropic_messages";
 export type ToolProtocol = "auto" | "responses_structured" | "chat_tools" | "text_compat" | "none";
+export type ToolSurfaceStrategy = "eager" | "deferred_core";
 
 export interface Provider {
   id: string;
@@ -49,6 +51,7 @@ export interface Provider {
   upstream_format?: UpstreamFormat | null;
   available_upstream_formats?: UpstreamFormat[] | null;
   tool_protocol?: ToolProtocol | null;
+  tool_surface_strategy?: ToolSurfaceStrategy | null;
   reports_cached_input_tokens?: boolean | null;
   display_prefix?: string | null;
   sort_order?: number | null;

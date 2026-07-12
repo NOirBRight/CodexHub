@@ -23,6 +23,7 @@ enabled = true
   max_output_tokens = 131072
   sort_order = 2
   enabled = true
+  tool_surface_strategy = "deferred_core"
 
   [[providers.models]]
   id = "kimi-k2.6"

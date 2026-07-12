@@ -554,6 +554,8 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
 ]
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
+TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
+TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -587,6 +589,7 @@ BROWSER_CONTEXT_GUIDANCE = (
     '- In a CLI/no-browser environment, report "browser session unavailable"; do not report "browser tool not exposed".'
 )
 INTERNAL_INPUT_ITEM_TYPES = {
+    "additional_tools",
     "compaction",
     "compaction_trigger",
     "reasoning",
@@ -1879,6 +1882,7 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
         "upstream_model": upstream_model,
         "upstream_format": runtime_model.get("upstream_format", "responses"),
         "tool_protocol": runtime_model.get("tool_protocol", "auto"),
+        "tool_surface_strategy": runtime_model.get("tool_surface_strategy", "eager"),
         "reports_cached_input_tokens": False,
         "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
     }
@@ -1979,6 +1983,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),
+            "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
@@ -4065,6 +4070,10 @@ def _is_flattened_namespace_schema(value: Any) -> bool:
     )
 
 
+def _is_raw_namespace_schema(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("type") == "namespace"
+
+
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for namespace in tools:
@@ -4130,6 +4139,19 @@ def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
     return "text_compat"
 
 
+def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
+    configured = upstream.get("tool_surface_strategy", "eager")
+    if isinstance(configured, str) and configured in TOOL_SURFACE_STRATEGIES:
+        return configured
+    write_proxy_event("external_tool_surface_rejected", reason="invalid_tool_surface_strategy")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            TOOL_SURFACE_STRATEGY_ERROR_CODE,
+            "External tool surface strategy is invalid.",
+        )
+    )
+
+
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if item.get("type") != "function_call":
         return None
@@ -4149,6 +4171,40 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
         rewritten["name"] = f"{NODE_REPL_NAMESPACE}__{node_name}"
         return rewritten
     return dict(item)
+
+
+def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
+    """Promote Codex's internal tool carrier to the standard Responses field."""
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    promoted_tools: list[Any] = []
+    rewritten_items: list[Any] = []
+    changed = False
+    for item in input_items:
+        if not isinstance(item, Mapping) or item.get("type") != "additional_tools":
+            rewritten_items.append(item)
+            continue
+        item_tools = item.get("tools")
+        if isinstance(item_tools, list):
+            promoted_tools.extend(item_tools)
+        changed = True
+
+    if not changed:
+        return False
+
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        tools.extend(promoted_tools)
+    elif tools is None:
+        payload["tools"] = promoted_tools
+    else:
+        # The caller's top-level tools are already malformed; remove the
+        # internal-only item so it cannot be forwarded to a third party.
+        payload["tools"] = promoted_tools
+    payload["input"] = rewritten_items
+    return True
 
 
 def _rewrite_structured_tool_input_items(
@@ -4234,10 +4290,21 @@ def _inject_explicit_codex_tools(
     include_node_repl_tools: bool = True,
     include_local_tool_gateway_tools: bool = True,
     strip_namespace_tools: bool = True,
+    include_flattened_namespace_tools: bool = True,
+    tool_surface_counts: dict[str, int] | None = None,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
 ) -> bool:
+    if tool_surface_counts is not None:
+        tool_surface_counts.update(
+            {
+                "namespace_declaration_count": 0,
+                "eager_tool_count": 0,
+                "retained_core_count": 0,
+                "deferred_tool_count": 0,
+            }
+        )
     tools = payload.get("tools")
     if tools is None:
         tools = []
@@ -4246,9 +4313,18 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
+    caller_non_namespace_tools = tuple(
+        tool
+        for tool in tools
+        if not (isinstance(tool, Mapping) and tool.get("type") == "namespace")
+    )
+    namespace_declaration_count = sum(1 for tool in tools if _is_flattened_namespace_schema(tool))
     flattened_namespace_tools = _flatten_namespace_function_tools(tools)
     if strip_namespace_tools:
-        filtered_tools = [tool for tool in tools if not _is_flattened_namespace_schema(tool)]
+        # Namespaces are an internal Codex declaration form.  Only the existing
+        # eligible subset is flattened and counted; every raw declaration stays
+        # out of the third-party request.
+        filtered_tools = [tool for tool in tools if not _is_raw_namespace_schema(tool)]
         if len(filtered_tools) != len(tools):
             tools[:] = filtered_tools
             changed = True
@@ -4305,11 +4381,11 @@ def _inject_explicit_codex_tools(
 
     existing_names = {_tool_schema_name(tool) for tool in tools}
     existing_names.discard(None)
-    additions = []
+    core_additions = []
     if include_tool_search:
-        additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
+        core_additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
     if include_multi_agent_tools:
-        additions.extend(
+        core_additions.extend(
             _multi_agent_explicit_function_tools(
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,
@@ -4321,15 +4397,29 @@ def _inject_explicit_codex_tools(
                 close_agent_ids=close_agent_ids,
             )
         )
-    additions.extend(flattened_namespace_tools)
     if not include_multi_agent_tools:
-        additions = [tool for tool in additions if not _is_multi_agent_tool_schema(tool)]
+        core_additions = [tool for tool in core_additions if not _is_multi_agent_tool_schema(tool)]
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_multi_agent_tool_schema(tool)
+        ]
     if not include_node_repl_tools:
-        additions = [tool for tool in additions if not _is_node_repl_tool_schema(tool)]
+        core_additions = [tool for tool in core_additions if not _is_node_repl_tool_schema(tool)]
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_node_repl_tool_schema(tool)
+        ]
     if excluded_tool_names:
-        additions = [
+        core_additions = [
             tool
-            for tool in additions
+            for tool in core_additions
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("type") == "function"
+                and tool.get("name") in excluded_tool_names
+            )
+        ]
+        flattened_namespace_tools = [
+            tool
+            for tool in flattened_namespace_tools
             if not (
                 isinstance(tool, Mapping)
                 and tool.get("type") == "function"
@@ -4337,6 +4427,24 @@ def _inject_explicit_codex_tools(
             )
         ]
 
+    potential_names = set(existing_names)
+    for tool in core_additions:
+        name = _tool_schema_name(tool)
+        if name:
+            potential_names.add(name)
+    deferred_tool_count = 0
+    for tool in flattened_namespace_tools:
+        name = _tool_schema_name(tool)
+        if name and name not in potential_names:
+            potential_names.add(name)
+            deferred_tool_count += 1
+
+    flattened_tool_ids = {id(tool) for tool in flattened_namespace_tools}
+    additions = list(core_additions)
+    if include_flattened_namespace_tools:
+        additions.extend(flattened_namespace_tools)
+
+    eager_tool_count = 0
     for tool in additions:
         name = _tool_schema_name(tool)
         if not name:
@@ -4355,7 +4463,21 @@ def _inject_explicit_codex_tools(
             continue
         tools.append(tool)
         existing_names.add(name)
+        if id(tool) in flattened_tool_ids:
+            eager_tool_count += 1
         changed = True
+    if tool_surface_counts is not None:
+        surviving_tool_ids = {id(tool) for tool in tools}
+        tool_surface_counts.update(
+            {
+                "namespace_declaration_count": namespace_declaration_count,
+                "eager_tool_count": eager_tool_count if include_flattened_namespace_tools else 0,
+                "retained_core_count": sum(
+                    1 for tool in caller_non_namespace_tools if id(tool) in surviving_tool_ids
+                ),
+                "deferred_tool_count": deferred_tool_count if not include_flattened_namespace_tools else 0,
+            }
+        )
     return changed
 
 
@@ -7019,6 +7141,7 @@ def compatible_request_body(
 
     raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = _external_tool_protocol(upstream)
+    tool_surface_strategy = _external_tool_surface_strategy(upstream)
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
@@ -7026,6 +7149,8 @@ def compatible_request_body(
     if raw_provider_probe:
         pass
     else:
+        if _hoist_additional_tools_input_items(payload):
+            changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
             if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
@@ -7357,7 +7482,8 @@ def compatible_request_body(
                 )
                 changed = True
             tool_names_before = _function_tool_names(payload.get("tools"))
-            if _inject_explicit_codex_tools(
+            tool_surface_counts: dict[str, int] = {}
+            explicit_tools_injected = _inject_explicit_codex_tools(
                 payload,
                 include_tool_search=include_tool_search,
                 include_multi_agent_tools=not subagent_worker_context,
@@ -7372,10 +7498,18 @@ def compatible_request_body(
                     else not node_repl_single_step_complete
                 ),
                 include_local_tool_gateway_tools=not subagent_worker_context,
+                include_flattened_namespace_tools=tool_surface_strategy == "eager",
+                tool_surface_counts=tool_surface_counts,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
-            ):
+            )
+            write_proxy_event(
+                "external_tool_surface_prepared",
+                tool_surface_strategy=tool_surface_strategy,
+                **tool_surface_counts,
+            )
+            if explicit_tools_injected:
                 added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
                 _write_adapter_event(
                     event_context,

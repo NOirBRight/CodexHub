@@ -4789,6 +4789,27 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["base_url"], "https://ollama.example.test/v1")
         self.assertEqual(upstream["upstream_model"], "new-runtime-model")
 
+    def test_runtime_ollama_tool_surface_strategy_is_copied_for_qualified_and_unqualified_routes(self):
+        runtime_model = {
+            "alias": "ollama-cloud/glm-5.2",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-runtime-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "tool_protocol": "auto",
+            "tool_surface_strategy": "deferred_core",
+            "input_modalities": ("text",),
+        }
+
+        with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, runtime_model)):
+            unqualified = choose_upstream("glm-5.2")
+            qualified = choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
+
     def test_runtime_ollama_provider_rejects_disabled_model_despite_static_policy_allowlist(self):
         with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, None)):
             with self.assertRaises(ValueError) as context:
@@ -10887,6 +10908,330 @@ Execution constraints:
         self.assertIn("ordinary assistant message content", transcript)
         self.assertIn("first visible output token", transcript)
         self.assertTrue(event_context["subagent_lifecycle_complete"])
+
+    def test_external_tool_surface_ab_harness_defers_large_mcp_namespace(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "description": "Run a PowerShell command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        }
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a unified diff patch.",
+        }
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "description": "Synthetic App/MCP namespace for the deterministic tool-surface A/B.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": f"synthetic_tool_{index:03d}",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+                for index in range(200)
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use the visible core tools only.",
+                "tool_surface_strategy": "eager",
+                "tools": [shell_command, apply_patch, namespace],
+            }
+        ).encode("utf-8")
+
+        legacy_body = compatible_request_body(body, {"name": "ollama_cloud"})
+        eager_body = compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+        )
+        deferred = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        legacy = json.loads(legacy_body)
+        eager = json.loads(eager_body)
+        eager_names = {
+            tool["name"]
+            for tool in eager["tools"]
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+        deferred_names = {
+            tool["name"]
+            for tool in deferred["tools"]
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+
+        self.assertEqual(eager_body, legacy_body)
+        self.assertEqual(eager, legacy)
+        self.assertEqual(deferred["tools"][:2], [shell_command, apply_patch])
+        self.assertEqual(len(eager_names) - len(deferred_names), 200)
+        self.assertTrue(
+            all(f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" in eager_names for index in range(200))
+        )
+        self.assertTrue(
+            all(f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" not in deferred_names for index in range(200))
+        )
+        self.assertEqual(
+            [
+                tool["name"]
+                for tool in eager["tools"]
+                if isinstance(tool, dict)
+                and isinstance(tool.get("name"), str)
+                and tool["name"].startswith("mcp__synthetic_namespace__synthetic_tool_")
+            ],
+            [f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" for index in range(200)],
+        )
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
+        self.assertNotIn("tool_search", eager_names)
+        self.assertNotIn("tool_search", deferred_names)
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertIn(f"multi_agent_v1__{tool_name}", deferred_names)
+
+    def test_external_tool_surface_keeps_caller_order_and_deduplicates_flattened_names(self):
+        caller_alias = {
+            "type": "function",
+            "name": "mcp__synthetic_namespace__already_visible",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {"type": "function", "name": "already_visible", "parameters": {"type": "object"}},
+                {"type": "function", "name": "second", "parameters": {"type": "object"}},
+                {"type": "function", "name": "second", "parameters": {"type": "object"}},
+                {"type": "function", "name": "third", "parameters": {"type": "object"}},
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use the visible core tools only.",
+                "tools": [caller_alias, namespace],
+            }
+        ).encode("utf-8")
+
+        eager = json.loads(
+            compatible_request_body(body, {"name": "ollama_cloud", "tool_surface_strategy": "eager"})
+        )
+        deferred = json.loads(
+            compatible_request_body(body, {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"})
+        )
+        namespace_aliases = lambda payload: [
+            tool["name"]
+            for tool in payload["tools"]
+            if isinstance(tool, dict)
+            and isinstance(tool.get("name"), str)
+            and tool["name"].startswith("mcp__synthetic_namespace__")
+        ]
+
+        self.assertEqual(eager["tools"][0], caller_alias)
+        self.assertEqual(
+            namespace_aliases(eager),
+            [
+                "mcp__synthetic_namespace__already_visible",
+                "mcp__synthetic_namespace__second",
+                "mcp__synthetic_namespace__third",
+            ],
+        )
+        self.assertEqual(namespace_aliases(deferred), ["mcp__synthetic_namespace__already_visible"])
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
+
+    def test_external_tool_surface_strips_raw_ineligible_namespaces_without_deferring_them(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        eligible_namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [{"type": "function", "name": "visible", "parameters": {"type": "object"}}],
+        }
+        collaboration_namespace = {
+            "type": "namespace",
+            "name": "collaboration",
+            "tools": [{"type": "function", "name": "spawn_agent", "parameters": {"type": "object"}}],
+        }
+        image_namespace = {
+            "type": "namespace",
+            "name": "image_gen",
+            "tools": [{"type": "function", "name": "imagegen", "parameters": {"type": "object"}}],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use the visible core tools only.",
+                "tools": [shell_command, eligible_namespace, collaboration_namespace, image_namespace],
+            }
+        ).encode("utf-8")
+
+        eager = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            )
+        )
+        deferred = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        eager_names = {tool.get("name") for tool in eager["tools"] if isinstance(tool, dict)}
+        deferred_names = {tool.get("name") for tool in deferred["tools"] if isinstance(tool, dict)}
+
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
+        self.assertIn("mcp__synthetic_namespace__visible", eager_names)
+        self.assertNotIn("mcp__synthetic_namespace__visible", deferred_names)
+        self.assertNotIn("collaboration__spawn_agent", eager_names)
+        self.assertNotIn("image_gen__imagegen", eager_names)
+
+    def test_external_tool_surface_hoists_cli_additional_tools_without_losing_freeform_apply_patch(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "description": "Run a PowerShell command.",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+        }
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a unified diff patch.",
+            "format": {"type": "grammar", "syntax": "lark", "definition": "start: patch"},
+        }
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {"type": "function", "name": "deferred", "parameters": {"type": "object"}},
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [shell_command, apply_patch, namespace],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Apply the one requested change."}],
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        payload = json.loads(
+            compatible_request_body(
+                body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_surface_strategy": "deferred_core",
+                },
+            )
+        )
+
+        self.assertFalse(any(item.get("type") == "additional_tools" for item in payload["input"]))
+        self.assertEqual(payload["tools"][:2], [shell_command, apply_patch])
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in payload["tools"]))
+        self.assertNotIn(
+            "mcp__synthetic_namespace__deferred",
+            {tool.get("name") for tool in payload["tools"] if isinstance(tool, dict)},
+        )
+
+    def test_external_tool_surface_preparation_telemetry_uses_sanitized_structural_counts(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        apply_patch = {"type": "custom", "name": "apply_patch", "description": "Apply a patch."}
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {"type": "function", "name": "first", "parameters": {"type": "object"}},
+                {"type": "function", "name": "second", "parameters": {"type": "object"}},
+            ],
+        }
+        body = json.dumps(
+            {"model": "glm-5.2", "input": "Use tools.", "tools": [shell_command, apply_patch, namespace]}
+        ).encode("utf-8")
+
+        compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "external_tool_surface_prepared"
+        ]
+        self.assertEqual(
+            events,
+            [
+                {
+                    "tool_surface_strategy": "eager",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 2,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 0,
+                },
+                {
+                    "tool_surface_strategy": "deferred_core",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 0,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 2,
+                },
+            ],
+        )
+
+    def test_external_tool_surface_rejects_invalid_internal_capability_before_any_upstream_io(self):
+        body = json.dumps({"model": "glm-5.2", "input": "Use core tools."}).encode("utf-8")
+
+        with patch("codex_proxy.urlopen") as mock_urlopen:
+            with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                compatible_request_body(
+                    body,
+                    {"name": "ollama_cloud", "tool_surface_strategy": "not-a-strategy"},
+                    event_context={"request_id": "must-not-be-logged"},
+                )
+
+        self.assertEqual(raised.exception.cause.code, "invalid_external_tool_surface_strategy")
+        mock_urlopen.assert_not_called()
+        rejected = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "external_tool_surface_rejected"
+        ]
+        self.assertEqual(rejected, [{"reason": "invalid_tool_surface_strategy"}])
 
     def test_external_request_flattens_mcp_node_repl_namespace_without_tool_search(self):
         body = json.dumps(
