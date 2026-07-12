@@ -6794,6 +6794,39 @@ class RoutingTests(unittest.TestCase):
                 self.assertNotIn("input", adapter_event)
                 self.assertNotIn("patch", adapter_event)
 
+    def test_apply_patch_adapter_rejects_conflicting_item_fields_and_custom_call_id_collisions(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        arguments = json.dumps({"patch": fixture["patch"]})
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": arguments,
+        }
+        conflicting_item = {**function_item, "input": "must-not-be-overwritten"}
+        existing_custom = {
+            "id": "ctc_existing",
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "input": fixture["patch"],
+        }
+
+        for shape, output in (
+            ("conflicting_item_field", [conflicting_item]),
+            ("custom_call_id_collision", [existing_custom, function_item]),
+        ):
+            with self.subTest(shape=shape), self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                compatible_response_body(
+                    json.dumps({"output": output}, ensure_ascii=True).encode("utf-8"),
+                    "volcengine",
+                    event_context={"request_id": "<sanitized-request-id>"},
+                )
+            self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+
     def test_apply_patch_adapter_preserves_unrelated_and_existing_custom_calls(self):
         fixture = _load_glm_apply_patch_retry_fixture()
         body = {
@@ -6872,6 +6905,50 @@ class RoutingTests(unittest.TestCase):
                 self.assertNotIn("arguments", adapter_event)
                 self.assertNotIn("input", adapter_event)
                 self.assertNotIn("patch", adapter_event)
+
+    def test_apply_patch_stream_adapter_rejects_incomplete_fragments_and_terminal_only_calls(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        arguments = json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":"))
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": arguments,
+        }
+        incomplete_fragments = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**function_item, "status": "in_progress", "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": function_item["id"],
+                "output_index": 0,
+                "delta": arguments[:8],
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": function_item["id"],
+                "output_index": 0,
+                "arguments": arguments,
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": function_item},
+            {"type": "response.completed", "response": {"status": "completed", "output": [function_item]}},
+        ]
+        terminal_only = [
+            {"type": "response.completed", "response": {"status": "completed", "output": [function_item]}}
+        ]
+
+        for shape, events in (("incomplete_fragments", incomplete_fragments), ("terminal_only", terminal_only)):
+            with self.subTest(shape=shape), self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                codex_proxy._adapt_third_party_apply_patch_stream_events(
+                    events,
+                    event_context={"request_id": "<sanitized-request-id>"},
+                )
+            self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
 
     def test_chat_completions_non_sse_relay_converts_xmlish_tool_call_text(self):
         body = json.dumps(

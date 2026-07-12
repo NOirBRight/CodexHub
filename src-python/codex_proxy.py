@@ -7471,6 +7471,9 @@ def compatible_request_body(
 APPLY_PATCH_FUNCTION_NAME = "apply_patch"
 APPLY_PATCH_ADAPTER_EVENT = "third_party_apply_patch_freeform_adapter"
 APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
+APPLY_PATCH_FUNCTION_CALL_FIELDS = frozenset(
+    {"id", "type", "status", "call_id", "name", "arguments"}
+)
 
 
 class _ApplyPatchAdapterFailure(ValueError):
@@ -7531,6 +7534,11 @@ def _is_apply_patch_custom_tool_call(item: Any) -> bool:
         and item.get("type") == "custom_tool_call"
         and item.get("name") == APPLY_PATCH_FUNCTION_NAME
     )
+
+
+def _require_exact_apply_patch_function_call_fields(item: Mapping[str, Any]) -> None:
+    if set(item) != APPLY_PATCH_FUNCTION_CALL_FIELDS:
+        raise _ApplyPatchAdapterFailure("function_call_fields_not_exact")
 
 
 def _apply_patch_arguments_text_and_input(arguments: Any) -> tuple[str, str]:
@@ -7605,6 +7613,8 @@ def _adapt_third_party_apply_patch_response_body(
     untouched = 0
     seen_item_ids: set[str] = set()
     seen_call_ids: set[str] = set()
+    seen_custom_item_ids: set[str] = set()
+    seen_custom_call_ids: set[str] = set()
     seen_custom_keys: set[str] = set()
     rewritten_output: list[Any] = []
 
@@ -7612,11 +7622,12 @@ def _adapt_third_party_apply_patch_response_body(
         if _is_apply_patch_function_call(raw_item):
             assert isinstance(raw_item, Mapping)
             try:
+                _require_exact_apply_patch_function_call_fields(raw_item)
                 item_id, call_id = _apply_patch_item_identity(raw_item)
                 _, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
-                if item_id in seen_item_ids:
+                if item_id in seen_item_ids or item_id in seen_custom_item_ids:
                     raise _ApplyPatchAdapterFailure("duplicate_item_id")
-                if call_id in seen_call_ids:
+                if call_id in seen_call_ids or call_id in seen_custom_call_ids:
                     raise _ApplyPatchAdapterFailure("duplicate_call_id")
             except _ApplyPatchAdapterFailure as exc:
                 _raise_apply_patch_adapter_failure(event_context, surface="body", reason=exc.reason)
@@ -7630,6 +7641,22 @@ def _adapt_third_party_apply_patch_response_body(
             assert isinstance(raw_item, Mapping)
             raw_item_id = raw_item.get("id")
             raw_call_id = raw_item.get("call_id")
+            if isinstance(raw_item_id, str) and raw_item_id:
+                if raw_item_id in seen_item_ids:
+                    _raise_apply_patch_adapter_failure(
+                        event_context,
+                        surface="body",
+                        reason="duplicate_item_id",
+                    )
+                seen_custom_item_ids.add(raw_item_id)
+            if isinstance(raw_call_id, str) and raw_call_id:
+                if raw_call_id in seen_call_ids:
+                    _raise_apply_patch_adapter_failure(
+                        event_context,
+                        surface="body",
+                        reason="duplicate_call_id",
+                    )
+                seen_custom_call_ids.add(raw_call_id)
             key = (
                 f"item:{raw_item_id}"
                 if isinstance(raw_item_id, str) and raw_item_id
@@ -7681,6 +7708,8 @@ class _ThirdPartyApplyPatchStreamAdapter:
         self._states: dict[str, _ApplyPatchStreamState] = {}
         self._item_id_by_call_id: dict[str, str] = {}
         self._adapted_item_ids: set[str] = set()
+        self._custom_item_ids: set[str] = set()
+        self._custom_call_ids: set[str] = set()
         self._untouched_keys: set[str] = set()
         self._terminal_seen = False
         self._finished = False
@@ -7701,6 +7730,14 @@ class _ThirdPartyApplyPatchStreamAdapter:
     def _remember_untouched(self, item: Mapping[str, Any], fallback: str) -> None:
         item_id = item.get("id")
         call_id = item.get("call_id")
+        if isinstance(item_id, str) and item_id:
+            if item_id in self._states:
+                self._fail("duplicate_item_id")
+            self._custom_item_ids.add(item_id)
+        if isinstance(call_id, str) and call_id:
+            if call_id in self._item_id_by_call_id:
+                self._fail("duplicate_call_id")
+            self._custom_call_ids.add(call_id)
         key = (
             f"item:{item_id}"
             if isinstance(item_id, str) and item_id
@@ -7716,6 +7753,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
         output_index: int,
     ) -> tuple[_ApplyPatchStreamState, str]:
         try:
+            _require_exact_apply_patch_function_call_fields(item)
             item_id, call_id = _apply_patch_item_identity(item)
             arguments = item.get("arguments")
             if isinstance(arguments, str) and not arguments:
@@ -7724,9 +7762,9 @@ class _ThirdPartyApplyPatchStreamAdapter:
                 initial_arguments, _ = _apply_patch_arguments_text_and_input(arguments)
         except _ApplyPatchAdapterFailure as exc:
             self._fail(exc.reason)
-        if item_id in self._states:
+        if item_id in self._states or item_id in self._custom_item_ids:
             self._fail("duplicate_item_added")
-        if call_id in self._item_id_by_call_id:
+        if call_id in self._item_id_by_call_id or call_id in self._custom_call_ids:
             self._fail("duplicate_call_id")
         state = _ApplyPatchStreamState(
             item_id=item_id,
@@ -7756,6 +7794,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
         state: _ApplyPatchStreamState,
     ) -> None:
         try:
+            _require_exact_apply_patch_function_call_fields(item)
             item_id, call_id = _apply_patch_item_identity(item)
             arguments, patch = _apply_patch_arguments_text_and_input(item.get("arguments"))
         except _ApplyPatchAdapterFailure as exc:
@@ -7781,6 +7820,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
             if _is_apply_patch_function_call(raw_item):
                 assert isinstance(raw_item, Mapping)
                 try:
+                    _require_exact_apply_patch_function_call_fields(raw_item)
                     item_id, call_id = _apply_patch_item_identity(raw_item)
                     arguments, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
                 except _ApplyPatchAdapterFailure as exc:
@@ -7789,13 +7829,10 @@ class _ThirdPartyApplyPatchStreamAdapter:
                     self._fail("duplicate_terminal_item")
                 seen_terminal_item_ids.add(item_id)
                 state = self._states.get(item_id)
-                if state is not None:
-                    if call_id != state.call_id or not state.item_done or state.arguments != arguments or state.patch != patch:
-                        self._fail("conflicting_terminal_item")
-                elif call_id in self._item_id_by_call_id:
-                    self._fail("conflicting_item_identity")
-                else:
-                    self._adapted_item_ids.add(item_id)
+                if state is None:
+                    self._fail("unpaired_terminal_item")
+                if call_id != state.call_id or not state.item_done or state.arguments != arguments or state.patch != patch:
+                    self._fail("conflicting_terminal_item")
                 rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
                 changed = True
                 continue
@@ -7860,7 +7897,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
                     self._fail(exc.reason)
                 if state.initial_arguments is not None and arguments != state.initial_arguments:
                     self._fail("conflicting_arguments")
-                if state.delta_arguments and not arguments.startswith(state.delta_arguments):
+                if state.delta_arguments and arguments != state.delta_arguments:
                     self._fail("conflicting_arguments")
                 state.arguments = arguments
                 state.patch = patch
@@ -7878,6 +7915,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
             if _is_apply_patch_function_call(item):
                 assert isinstance(item, Mapping)
                 try:
+                    _require_exact_apply_patch_function_call_fields(item)
                     item_id, _ = _apply_patch_item_identity(item)
                 except _ApplyPatchAdapterFailure as exc:
                     self._fail(exc.reason)
