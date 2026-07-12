@@ -21,7 +21,6 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f4247-8b5e-7f93-940b-765be510251b:turn",
             "content_length": 388558,
             "is_stream": 1,
         },
@@ -54,10 +53,10 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
             "event": "official_passthrough_stream_closed",
             "failure_phase": "stream_body",
             "failure_side": "upstream_read",
-            "failure_class": "unknown",
+            "failure_class": "connection_reset",
             "error": "ConnectionResetError",
             "size_bucket": "256KB-512KB",
-            "window_id": "019f4247-8b5e-7f93-940b-765be510251b:turn",
+            "time_window": "2026-07-09T02:20:00Z/2026-07-09T02:25:00Z",
             "count": 1,
             "request_ids": ["req-stream"],
             "statuses": [502],
@@ -77,7 +76,7 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
     ]
 
 
-def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
+def test_analyzer_excludes_downstream_client_cancellations_from_transport_groups():
     events = [
         {
             "ts": "2026-07-09T04:22:12Z",
@@ -87,7 +86,6 @@ def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f4519-70f4-7d81-861b-530b3849aa01:0",
             "content_length": 418614,
             "is_stream": 1,
         },
@@ -98,7 +96,6 @@ def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
             "client_id": "unknown",
             "provider_id": "unknown",
             "model_canonical": "unknown",
-            "window_id": "unknown",
             "status": 499,
             "error": "ConnectionAbortedError",
             "detail": "ConnectionAbortedError: [WinError 10053]",
@@ -112,16 +109,38 @@ def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
 
     report = analyze_events(events)
 
-    group = report["groups"][0]
-    assert group["provider_id"] == "official"
-    assert group["provider_scope"] == "official"
-    assert group["client_id"] == "codex-app"
-    assert group["model_canonical"] == "openai/gpt-5.5"
-    assert group["window_id"] == "019f4519-70f4-7d81-861b-530b3849aa01:0"
-    assert group["statuses"] == [499]
+    assert report["failure_count"] == 0
+    assert report["groups"] == []
+    assert report["excluded_downstream_cancellation_count"] == 1
 
 
-def test_analyzer_infers_ssl_eof_phase_for_older_retry_events():
+def test_analyzer_keeps_downstream_write_event_without_cancellation_status():
+    events = [
+        {
+            "ts": "2026-07-09T04:22:59Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "synthetic-downstream-control",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "status": 502,
+            "error": "ConnectionAbortedError",
+            "detail": "ConnectionAbortedError: [WinError 10053]",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "failure_class": "downstream_client_closed",
+        }
+    ]
+
+    report = analyze_events(events)
+
+    assert report["failure_count"] == 1
+    assert report["excluded_downstream_cancellation_count"] == 0
+    assert report["groups"][0]["failure_side"] == "downstream_write"
+
+
+def test_analyzer_infers_ssl_eof_phase_and_class_for_older_retry_events():
     events = [
         {
             "ts": "2026-07-09T02:24:50Z",
@@ -131,7 +150,6 @@ def test_analyzer_infers_ssl_eof_phase_for_older_retry_events():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
             "content_length": 388558,
         },
         {
@@ -158,6 +176,37 @@ def test_analyzer_infers_ssl_eof_phase_for_older_retry_events():
     phases = {(group["event"], group["failure_phase"], group["error"], group["count"]) for group in report["groups"]}
     assert ("upstream_retry", "tls_handshake", "URLError", 1) in phases
     assert ("request_error", "tls_handshake", "URLError", 1) in phases
+    assert {group["failure_class"] for group in report["groups"]} == {"tls_eof"}
+
+
+def test_analyzer_keeps_read_timeout_unknown_without_connect_evidence():
+    events = [
+        {
+            "ts": "2026-07-09T02:24:50Z",
+            "event": "request_start",
+            "request_id": "synthetic-read-timeout",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:51Z",
+            "event": "upstream_retry",
+            "request_id": "synthetic-read-timeout",
+            "status": 502,
+            "error": "URLError",
+            "detail": "TimeoutError: upstream stream read timed out",
+        },
+    ]
+
+    report = analyze_events(events)
+
+    assert report["failure_count"] == 1
+    group = report["groups"][0]
+    assert group["failure_phase"] == "unknown"
+    assert group["failure_class"] == "unknown"
 
 
 def test_analyzer_separates_official_and_third_party_transport_failures():
@@ -170,7 +219,6 @@ def test_analyzer_separates_official_and_third_party_transport_failures():
             "provider_id": "ollama_cloud",
             "upstream": "ollama_cloud",
             "model_canonical": "ollama-cloud/glm-5.2",
-            "window_id": "opencode:turn",
             "content_length": 2048,
         },
         {
@@ -189,7 +237,6 @@ def test_analyzer_separates_official_and_third_party_transport_failures():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "codex-app:turn",
             "content_length": 388558,
         },
         {
@@ -228,7 +275,6 @@ def test_analyzer_excludes_provider_capacity_upstream_retry_without_transport_ph
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
             "content_length": 388558,
         },
         {
@@ -267,7 +313,6 @@ def test_analyzer_groups_by_failure_class_and_keeps_diagnostic_examples():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "thread:turn",
             "content_length": 388558,
         },
         {
@@ -288,7 +333,6 @@ def test_analyzer_groups_by_failure_class_and_keeps_diagnostic_examples():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "thread:turn",
             "content_length": 388558,
         },
         {
@@ -318,6 +362,106 @@ def test_analyzer_groups_by_failure_class_and_keeps_diagnostic_examples():
     assert groups["downstream_client_closed"]["examples"][0]["duration_ms"] == 10060
 
 
+def test_analyzer_groups_cross_request_failures_by_utc_time_window_without_correlation_id():
+    events = [
+        {
+            "ts": "2026-07-09T02:24:50Z",
+            "event": "request_start",
+            "request_id": "synthetic-request-a",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "window_id": "synthetic-correlation-a",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:51Z",
+            "event": "request_error",
+            "request_id": "synthetic-request-a",
+            "status": 502,
+            "error": "URLError",
+            "detail": "SSLEOFError: EOF occurred in violation of protocol",
+        },
+        {
+            "ts": "2026-07-09T02:24:52Z",
+            "event": "request_start",
+            "request_id": "synthetic-request-b",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "window_id": "synthetic-correlation-b",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:53Z",
+            "event": "request_error",
+            "request_id": "synthetic-request-b",
+            "status": 502,
+            "error": "URLError",
+            "detail": "SSLEOFError: EOF occurred in violation of protocol",
+        },
+    ]
+
+    report = analyze_events(events)
+
+    assert report["group_count"] == 1
+    group = report["groups"][0]
+    assert group["count"] == 2
+    assert group["time_window"] == "2026-07-09T02:20:00Z/2026-07-09T02:25:00Z"
+    assert "window_id" not in group
+
+
+def test_analyzer_uses_timestamp_boundaries_for_selected_window():
+    events = [
+        {
+            "ts": "2026-07-09T02:00:00.999Z",
+            "event": "request_error",
+            "request_id": "synthetic-boundary",
+            "status": 502,
+            "error": "URLError",
+            "detail": "SSLEOFError: EOF occurred in violation of protocol",
+        }
+    ]
+
+    report = analyze_events(
+        events,
+        since="2026-07-09T02:00:00Z",
+        until="2026-07-09T02:00:00Z",
+    )
+
+    assert report["failure_count"] == 0
+    assert report["groups"] == []
+    assert report["skipped_out_of_window_count"] == 1
+
+
+def test_analyzer_reports_missing_and_invalid_timestamps_for_selected_window():
+    events = [
+        {
+            "event": "request_error",
+            "request_id": "synthetic-missing-timestamp",
+            "status": 502,
+            "error": "URLError",
+            "detail": "SSLEOFError: EOF occurred in violation of protocol",
+        },
+        {
+            "ts": "not-an-iso-timestamp",
+            "event": "request_error",
+            "request_id": "synthetic-invalid-timestamp",
+            "status": 502,
+            "error": "URLError",
+            "detail": "SSLEOFError: EOF occurred in violation of protocol",
+        },
+    ]
+
+    report = analyze_events(events, since="2026-07-09T02:00:00Z")
+
+    assert report["failure_count"] == 0
+    assert report["skipped_missing_timestamp_count"] == 1
+    assert report["skipped_invalid_timestamp_count"] == 1
+
+
 def test_analyzer_excludes_provider_http_retry_without_transport_signal():
     events = [
         {
@@ -328,7 +472,6 @@ def test_analyzer_excludes_provider_http_retry_without_transport_signal():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
             "content_length": 388558,
         },
         {
@@ -369,7 +512,6 @@ def test_analyzer_excludes_non_transport_request_errors_without_phase_or_detail_
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
             "content_length": 388558,
         },
         {
@@ -388,7 +530,7 @@ def test_analyzer_excludes_non_transport_request_errors_without_phase_or_detail_
     assert report["groups"] == []
 
 
-def test_analyzer_includes_generic_legacy_request_errors_with_tcp_connect_phase():
+def test_analyzer_classifies_only_connect_specific_legacy_request_errors_as_tcp_connect():
     events = [
         {
             "ts": "2026-07-09T02:24:53Z",
@@ -398,7 +540,6 @@ def test_analyzer_includes_generic_legacy_request_errors_with_tcp_connect_phase(
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
             "content_length": 388558,
         },
         {
@@ -438,8 +579,9 @@ def test_analyzer_includes_generic_legacy_request_errors_with_tcp_connect_phase(
     report = analyze_events(events)
 
     grouped = {(group["event"], group["failure_phase"], group["error"], group["count"]) for group in report["groups"]}
-    assert ("request_error", "tcp_connect", "URLError", 3) in grouped
-    assert ("request_error", "tcp_connect", "OSError", 1) in grouped
+    assert ("request_error", "tcp_connect", "URLError", 2) in grouped
+    assert ("request_error", "unknown", "URLError", 1) in grouped
+    assert ("request_error", "unknown", "OSError", 1) in grouped
 
 
 def test_analyzer_buckets_zero_content_length_as_small_request():
@@ -452,7 +594,6 @@ def test_analyzer_buckets_zero_content_length_as_small_request():
             "provider_id": "official",
             "upstream": "official",
             "model_canonical": "openai/gpt-5.5",
-            "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
             "content_length": 0,
         },
         {
@@ -484,7 +625,6 @@ def test_cli_reads_temp_jsonl_and_emits_json_report(tmp_path):
                         "provider_id": "official",
                         "upstream": "official",
                         "model_canonical": "openai/gpt-5.5",
-                        "window_id": "019f446c-0015-7643-a75a-94c486480235:turn",
                         "content_length": 1,
                     }
                 ),
@@ -514,7 +654,7 @@ def test_cli_reads_temp_jsonl_and_emits_json_report(tmp_path):
     assert report["groups"][0]["request_ids"] == ["req-cli"]
 
 
-def test_analyzer_cli_reads_checked_in_fixture(tmp_path):
+def test_analyzer_cli_reads_sanitized_fixture_and_separates_provider_scopes():
     import subprocess
 
     fixture = ROOT / "tests" / "fixtures" / "transport_failures.jsonl"
@@ -524,10 +664,8 @@ def test_analyzer_cli_reads_checked_in_fixture(tmp_path):
             str(ROOT / "scripts" / "analyze_transport_failures.py"),
             "--input",
             str(fixture),
-            "--since",
-            "2026-07-09T02:23:00Z",
-            "--until",
-            "2026-07-09T02:25:30Z",
+            "--window-minutes",
+            "30",
         ],
         check=True,
         capture_output=True,
@@ -536,8 +674,41 @@ def test_analyzer_cli_reads_checked_in_fixture(tmp_path):
 
     report = json.loads(result.stdout)
 
-    assert report["failure_count"] == 3
-    grouped = {(group["event"], group["failure_phase"], group["count"]) for group in report["groups"]}
-    assert ("official_passthrough_stream_closed", "stream_body", 1) in grouped
-    assert ("upstream_retry", "tls_handshake", 1) in grouped
-    assert ("request_error", "tls_handshake", 1) in grouped
+    assert report["failure_count"] == 5
+    assert report["excluded_downstream_cancellation_count"] == 1
+    assert report["time_window_minutes"] == 30
+    grouped = {
+        (
+            group["provider_scope"],
+            group["provider_id"],
+            group["event"],
+            group["failure_class"],
+            group["time_window"],
+            group["count"],
+        )
+        for group in report["groups"]
+    }
+    assert (
+        "official",
+        "official",
+        "official_passthrough_stream_closed",
+        "connection_reset",
+        "2026-07-09T02:00:00Z/2026-07-09T02:30:00Z",
+        1,
+    ) in grouped
+    assert (
+        "third_party",
+        "ollama_cloud",
+        "request_error",
+        "tls_eof",
+        "2026-07-09T00:30:00Z/2026-07-09T01:00:00Z",
+        1,
+    ) in grouped
+    assert (
+        "third_party",
+        "ollama_cloud",
+        "request_error",
+        "connect_timeout",
+        "2026-07-09T01:00:00Z/2026-07-09T01:30:00Z",
+        1,
+    ) in grouped
