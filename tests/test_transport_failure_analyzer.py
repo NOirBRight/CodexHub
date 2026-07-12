@@ -76,7 +76,7 @@ def test_analyzer_groups_official_stream_close_with_request_start_metadata():
     ]
 
 
-def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
+def test_analyzer_excludes_downstream_client_cancellations_from_transport_groups():
     events = [
         {
             "ts": "2026-07-09T04:22:12Z",
@@ -109,13 +109,35 @@ def test_analyzer_replaces_unknown_placeholders_with_request_start_metadata():
 
     report = analyze_events(events)
 
-    group = report["groups"][0]
-    assert group["provider_id"] == "official"
-    assert group["provider_scope"] == "official"
-    assert group["client_id"] == "codex-app"
-    assert group["model_canonical"] == "openai/gpt-5.5"
-    assert group["time_window"] == "2026-07-09T04:20:00Z/2026-07-09T04:25:00Z"
-    assert group["statuses"] == [499]
+    assert report["failure_count"] == 0
+    assert report["groups"] == []
+    assert report["excluded_downstream_cancellation_count"] == 1
+
+
+def test_analyzer_keeps_downstream_write_event_without_cancellation_status():
+    events = [
+        {
+            "ts": "2026-07-09T04:22:59Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "synthetic-downstream-control",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "status": 502,
+            "error": "ConnectionAbortedError",
+            "detail": "ConnectionAbortedError: [WinError 10053]",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "failure_class": "downstream_client_closed",
+        }
+    ]
+
+    report = analyze_events(events)
+
+    assert report["failure_count"] == 1
+    assert report["excluded_downstream_cancellation_count"] == 0
+    assert report["groups"][0]["failure_side"] == "downstream_write"
 
 
 def test_analyzer_infers_ssl_eof_phase_and_class_for_older_retry_events():
@@ -155,6 +177,36 @@ def test_analyzer_infers_ssl_eof_phase_and_class_for_older_retry_events():
     assert ("upstream_retry", "tls_handshake", "URLError", 1) in phases
     assert ("request_error", "tls_handshake", "URLError", 1) in phases
     assert {group["failure_class"] for group in report["groups"]} == {"tls_eof"}
+
+
+def test_analyzer_keeps_read_timeout_unknown_without_connect_evidence():
+    events = [
+        {
+            "ts": "2026-07-09T02:24:50Z",
+            "event": "request_start",
+            "request_id": "synthetic-read-timeout",
+            "client_id": "codex-app",
+            "provider_id": "official",
+            "upstream": "official",
+            "model_canonical": "openai/gpt-5.5",
+            "content_length": 388558,
+        },
+        {
+            "ts": "2026-07-09T02:24:51Z",
+            "event": "upstream_retry",
+            "request_id": "synthetic-read-timeout",
+            "status": 502,
+            "error": "URLError",
+            "detail": "TimeoutError: upstream stream read timed out",
+        },
+    ]
+
+    report = analyze_events(events)
+
+    assert report["failure_count"] == 1
+    group = report["groups"][0]
+    assert group["failure_phase"] == "unknown"
+    assert group["failure_class"] == "unknown"
 
 
 def test_analyzer_separates_official_and_third_party_transport_failures():
@@ -478,7 +530,7 @@ def test_analyzer_excludes_non_transport_request_errors_without_phase_or_detail_
     assert report["groups"] == []
 
 
-def test_analyzer_includes_generic_legacy_request_errors_with_tcp_connect_phase():
+def test_analyzer_classifies_only_connect_specific_legacy_request_errors_as_tcp_connect():
     events = [
         {
             "ts": "2026-07-09T02:24:53Z",
@@ -527,8 +579,9 @@ def test_analyzer_includes_generic_legacy_request_errors_with_tcp_connect_phase(
     report = analyze_events(events)
 
     grouped = {(group["event"], group["failure_phase"], group["error"], group["count"]) for group in report["groups"]}
-    assert ("request_error", "tcp_connect", "URLError", 3) in grouped
-    assert ("request_error", "tcp_connect", "OSError", 1) in grouped
+    assert ("request_error", "tcp_connect", "URLError", 2) in grouped
+    assert ("request_error", "unknown", "URLError", 1) in grouped
+    assert ("request_error", "unknown", "OSError", 1) in grouped
 
 
 def test_analyzer_buckets_zero_content_length_as_small_request():
@@ -622,6 +675,7 @@ def test_analyzer_cli_reads_sanitized_fixture_and_separates_provider_scopes():
     report = json.loads(result.stdout)
 
     assert report["failure_count"] == 5
+    assert report["excluded_downstream_cancellation_count"] == 1
     assert report["time_window_minutes"] == 30
     grouped = {
         (

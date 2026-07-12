@@ -47,7 +47,13 @@ LEGACY_TRANSPORT_FAILURES = (
         "tls_eof",
     ),
     (
-        ("timed out", "timeout", "winerror 10060"),
+        (
+            "winerror 10060",
+            "connection attempt failed",
+            "connect timeout",
+            "connect timed out",
+            "tcp connect",
+        ),
         "tcp_connect",
         "connect_timeout",
     ),
@@ -58,13 +64,18 @@ LEGACY_TRANSPORT_FAILURES = (
     ),
 )
 
-ADDITIONAL_TRANSPORT_DETAIL_SIGNALS = (
+CONNECT_PHASE_DETAIL_SIGNALS = (
     "connection refused",
     "winerror 10061",
     "name or service not known",
     "nodename nor servname provided",
     "temporary failure in name resolution",
     "getaddrinfo failed",
+)
+
+AMBIGUOUS_TIMEOUT_DETAIL_SIGNALS = (
+    "timed out",
+    "timeout",
 )
 
 GENERIC_TRANSPORT_ERRORS = {
@@ -175,6 +186,16 @@ def _legacy_transport_failure(event: Mapping[str, Any]) -> tuple[str, str] | Non
     return None
 
 
+def _has_connect_phase_detail(event: Mapping[str, Any]) -> bool:
+    detail = _event_error_detail(event)
+    return any(signal in detail for signal in CONNECT_PHASE_DETAIL_SIGNALS)
+
+
+def _has_ambiguous_timeout_detail(event: Mapping[str, Any]) -> bool:
+    detail = _event_error_detail(event)
+    return any(signal in detail for signal in AMBIGUOUS_TIMEOUT_DETAIL_SIGNALS)
+
+
 def _time_window(event: Mapping[str, Any], window_minutes: int) -> str:
     timestamp = _parse_timestamp(_string(event.get("ts")))
     if timestamp is None:
@@ -191,16 +212,12 @@ def _infer_failure_phase(event: Mapping[str, Any]) -> str:
     if explicit:
         return explicit
     event_name = _string(event.get("event"))
-    error_name = _string(event.get("error"))
     if event_name == "official_passthrough_stream_closed":
         return "stream_body"
     legacy_failure = _legacy_transport_failure(event)
     if legacy_failure is not None:
         return legacy_failure[0]
-    if (
-        event_name == "request_error"
-        and error_name in GENERIC_TRANSPORT_ERRORS
-    ):
+    if _has_connect_phase_detail(event):
         return "tcp_connect"
     return "unknown"
 
@@ -224,14 +241,22 @@ def _infer_failure_side(event: Mapping[str, Any]) -> str:
     return "upstream_open"
 
 
+def _is_downstream_cancellation(event: Mapping[str, Any]) -> bool:
+    return (
+        _string(event.get("event")) == "official_passthrough_stream_closed"
+        and (_string(event.get("failure_side")) or "").lower() == "downstream_write"
+        and (_string(event.get("failure_class")) or "").lower() == "downstream_client_closed"
+        and _as_int(event.get("status")) == 499
+    )
+
+
 def _has_transport_detail_signal(event: Mapping[str, Any]) -> bool:
     explicit_phase = _string(event.get("failure_phase"))
     if explicit_phase in TRANSPORT_FAILURE_PHASES:
         return True
     if _legacy_transport_failure(event) is not None:
         return True
-    detail = _event_error_detail(event)
-    return any(signal in detail for signal in ADDITIONAL_TRANSPORT_DETAIL_SIGNALS)
+    return _has_connect_phase_detail(event)
 
 
 def _is_non_transport_capacity_retry(event: Mapping[str, Any]) -> bool:
@@ -247,13 +272,13 @@ def _is_failure_event(event: Mapping[str, Any]) -> bool:
     if event_name not in FAILURE_EVENTS:
         return False
     if event_name == "official_passthrough_stream_closed":
-        return True
+        return not _is_downstream_cancellation(event)
     if event_name == "upstream_retry":
         if _string(event.get("failure_phase")) in TRANSPORT_FAILURE_PHASES:
             return True
         if _is_non_transport_capacity_retry(event):
             return False
-        return _has_transport_detail_signal(event)
+        return _has_transport_detail_signal(event) or _has_ambiguous_timeout_detail(event)
     if event_name == "request_error":
         error_name = _string(event.get("error"))
         if error_name in GENERIC_TRANSPORT_ERRORS:
@@ -324,11 +349,16 @@ def analyze_events(
     }
     groups: dict[tuple[str, ...], dict[str, Any]] = {}
     failure_count = 0
+    excluded_downstream_cancellation_count = 0
     skipped_out_of_window_count = 0
     skipped_missing_timestamp_count = 0
     skipped_invalid_timestamp_count = 0
 
     for raw_event in materialized:
+        if _is_downstream_cancellation(raw_event):
+            if _window_status(raw_event, since_timestamp, until_timestamp) == "included":
+                excluded_downstream_cancellation_count += 1
+            continue
         if not _is_failure_event(raw_event):
             continue
         window_status = _window_status(raw_event, since_timestamp, until_timestamp)
@@ -440,6 +470,7 @@ def analyze_events(
         "until": until,
         "time_window_minutes": window_minutes,
         "failure_count": failure_count,
+        "excluded_downstream_cancellation_count": excluded_downstream_cancellation_count,
         "skipped_out_of_window_count": skipped_out_of_window_count,
         "skipped_missing_timestamp_count": skipped_missing_timestamp_count,
         "skipped_invalid_timestamp_count": skipped_invalid_timestamp_count,
