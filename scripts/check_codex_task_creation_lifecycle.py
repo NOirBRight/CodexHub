@@ -28,19 +28,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVIDENCE_PATH = (
     REPO_ROOT / "docs" / "evidence" / "issue-106" / "task-creation-lifecycle.json"
 )
+APP_SERVER_PROBE_MARKERS = {
+    Path("src-tauri/src/models.rs"): 'args(["app-server", "--stdio"])',
+    Path("src-tauri/src/openai_usage.rs"): 'args(["app-server", "--stdio"])',
+}
 OWNERSHIP_BOUNDARY_PATHS = (
     Path("src-python/config_overlay.py"),
     Path("src-python/catalog_sync.py"),
     Path("src-tauri/src/catalog.rs"),
     Path("src-tauri/src/config.rs"),
     Path("src-tauri/src/proxy.rs"),
-    Path("src-tauri/src/models.rs"),
-    Path("src-tauri/src/openai_usage.rs"),
+    *APP_SERVER_PROBE_MARKERS,
 )
-APP_SERVER_PROBE_MARKERS = {
-    Path("src-tauri/src/models.rs"): 'args(["app-server", "--stdio"])',
-    Path("src-tauri/src/openai_usage.rs"): 'args(["app-server", "--stdio"])',
-}
 GLOBAL_MCP_CONFIGURATION_TOKENS = ("openaideveloperdocs", "mcp_servers")
 FORBIDDEN_KEYS = {
     "api_key",
@@ -160,7 +159,8 @@ TASK_OR_SESSION_IDENTIFIER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CREDENTIAL_SHAPE_PATTERN = re.compile(
-    r"(?:\b(?:sk|ghp|gho|github_pat)_[a-z0-9_-]+\b|\bbearer\s+\S+|"
+    r"(?:\b(?:sk(?:[-_][a-z0-9][a-z0-9_-]*)+|ghp_[a-z0-9_-]+|gho_[a-z0-9_-]+|"
+    r"github_pat_[a-z0-9_-]+)\b|\bbearer\s+\S+|"
     r"\b(?:api[_ -]?key|authorization|credential|secret|password|token)\b)",
     re.IGNORECASE,
 )
@@ -191,7 +191,7 @@ def _require_exact_fields(
 def _expect_equal(
     actual: Any, expected: Any, label: str, mismatches: list[str]
 ) -> None:
-    if actual != expected:
+    if type(actual) is not type(expected) or actual != expected:
         mismatches.append(f"{label} did not match the expected contract")
 
 

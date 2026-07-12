@@ -69,6 +69,39 @@ def test_task_creation_evidence_rejects_unknown_and_unsafe_source_values() -> No
     assert "synthetic-secret-value" not in rendered
 
 
+def test_task_creation_evidence_rejects_json_scalar_type_aliases() -> None:
+    evidence = read_evidence()
+    evidence["schema_version"] = True
+    product_boundary = evidence["product_boundary"]
+    assert isinstance(product_boundary, dict)
+    product_boundary["codexhub_manages_global_mcp"] = 0
+    green_case = evidence["green_case"]
+    assert isinstance(green_case, dict)
+    green_case["materialized"] = 1
+
+    mismatches = CHECKER.validate_evidence(evidence, repo_root=ROOT)
+
+    assert "schema_version did not match the expected contract" in mismatches
+    assert "product_boundary.codexhub_manages_global_mcp did not match the expected contract" in mismatches
+    assert "green_case.materialized did not match the expected contract" in mismatches
+
+
+@pytest.mark.parametrize("credential_shape", ["sk-abcdefghijklmnop", "sk-proj-abcdefghijklmnop"])
+def test_task_creation_evidence_rejects_common_openai_credential_shapes(
+    credential_shape: str,
+) -> None:
+    evidence = read_evidence()
+    source = evidence["source"]
+    assert isinstance(source, dict)
+    source["evidence_type"] = credential_shape
+
+    mismatches = CHECKER.validate_evidence(evidence, repo_root=ROOT)
+    rendered = " | ".join(mismatches)
+
+    assert "unsafe credential-like string at $.source.evidence_type" in mismatches
+    assert credential_shape not in rendered
+
+
 def test_task_creation_evidence_reports_unavailable_boundary_sources_without_local_paths(tmp_path: Path) -> None:
     mismatches = CHECKER.validate_evidence(read_evidence(), repo_root=tmp_path)
     rendered = " | ".join(mismatches)
