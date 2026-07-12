@@ -1,13 +1,14 @@
 param(
     [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
     [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
+    [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
     [ValidateSet('identity', 'mutation', 'deletion', 'loss', 'required-set-deletion', 'required-membership-mutation')]
     [string]$ReplayCase = 'identity'
 )
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($path in @($TracePath, $WireFixturePath)) {
+foreach ($path in @($TracePath, $WireFixturePath, $AuditPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Evidence file not found: $path"
     }
@@ -15,6 +16,7 @@ foreach ($path in @($TracePath, $WireFixturePath)) {
 
 $trace = Get-Content -Raw -LiteralPath $TracePath | ConvertFrom-Json
 $wire = Get-Content -Raw -LiteralPath $WireFixturePath | ConvertFrom-Json
+$audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
 $mismatches = [System.Collections.Generic.List[string]]::new()
 
 function Add-Mismatch {
@@ -263,12 +265,98 @@ if (@($wire.response.streaming.observed_event_counts).Count -eq 0) {
     Add-Mismatch 'streaming SSE event evidence is empty'
 }
 
+if ($audit.schema_version -ne 1 -or $audit.capture_kind -ne 'sanitized_bounded_read_only_audit') {
+    Add-Mismatch 'bounded read-only audit schema is invalid'
+}
+$auditGateway = $audit.gateway_identity_route
+if (
+    $auditGateway.request_starts -le 0 -or
+    $auditGateway.streaming_requests -ne $auditGateway.request_starts -or
+    $auditGateway.non_streaming_requests -ne 0 -or
+    $auditGateway.prefix_equal -ne $auditGateway.request_starts -or
+    $auditGateway.prefix_mismatch -ne 0 -or
+    $auditGateway.prefix_unavailable -ne 0 -or
+    $auditGateway.full_body_hmac_pairs -ne 0 -or
+    $auditGateway.full_body_hmac_both_skipped -ne $auditGateway.request_starts -or
+    $auditGateway.response_body_fingerprint_fields_present -ne $false
+) {
+    Add-Mismatch 'bounded Gateway identity evidence or its full-wire boundary is invalid'
+}
+if (@($auditGateway.observed_sse_event_type_counts.PSObject.Properties).Count -eq 0) {
+    Add-Mismatch 'bounded Gateway SSE event-type evidence is empty'
+}
+
+$auditPlan = $audit.model_visible_request_plan
+if (
+    $auditPlan.model -ne 'gpt-5.6-sol' -or
+    $auditPlan.transport_log_rows -le 0 -or
+    @($auditPlan.unclassified_item_types).Count -ne 0 -or
+    @($auditPlan.plan_variants).Count -eq 0
+) {
+    Add-Mismatch 'bounded model-visible request-plan evidence is invalid'
+}
+foreach ($variant in @($auditPlan.plan_variants)) {
+    if (
+        $variant.stream -ne $true -or
+        $variant.tool_choice -ne 'auto' -or
+        $variant.parallel_tool_calls -ne $false -or
+        -not ($auditPlan.tool_surfaces.PSObject.Properties.Name -contains $variant.tool_surface)
+    ) {
+        Add-Mismatch "invalid bounded planner variant $($variant.plan)"
+    }
+}
+
+$auditTimeline = $audit.runtime_timeline
+if (
+    $auditTimeline.catalog_written_before_app_server_start -ne $true -or
+    $auditTimeline.config_written_after_app_server_start -ne $true -or
+    $auditTimeline.clean_cold_start_for_current_binding_proven -ne $false -or
+    $auditTimeline.gateway_requests_after_app_server_start -ne 0 -or
+    $auditTimeline.current_request_endpoint_classes.official_direct -le 0
+) {
+    Add-Mismatch 'bounded runtime timeline no longer preserves the missing current-binding cold-start control'
+}
+
+$auditGates = $audit.gate_classification
+if (
+    $auditGates.choice_controls -ne 'observed' -or
+    $auditGates.complete_contributors_runtime_gate -ne 'partial' -or
+    $auditGates.zero_unclassified_identity -ne 'partial' -or
+    $auditGates.clean_cold_start_current_binding -ne 'live_control_required' -or
+    $auditGates.full_pre_post_request_response -ne 'live_control_required' -or
+    $auditGates.non_streaming -ne 'live_control_required' -or
+    $auditGates.non_direct_states -ne 'live_control_required'
+) {
+    Add-Mismatch 'bounded audit overstates or misclassifies a remaining Issue #62 gate'
+}
+
+$recovery = $audit.recovery_observation
+if (
+    $recovery.route_level_cause -ne 'unknown' -or
+    $recovery.causal_attribution -ne 'not_assigned_to_model_alone' -or
+    $recovery.intervening_shared_state_mutation -ne $false -or
+    $recovery.collaboration_lifecycle_owner -ne '#64'
+) {
+    Add-Mismatch 'recovery observation exceeds its non-causal classification boundary'
+}
+$sanitization = $audit.sanitization
+if (
+    $sanitization.emits_full_bodies -ne $false -or
+    $sanitization.emits_headers_or_credentials -ne $false -or
+    $sanitization.emits_paths -ne $false -or
+    $sanitization.emits_prompt_arguments_or_outputs -ne $false -or
+    $sanitization.emits_session_task_or_call_identifiers -ne $false
+) {
+    Add-Mismatch 'bounded audit sanitization contract is invalid'
+}
+
 Write-Output "Capture: $($trace.source.capture_id)"
 Write-Output "Provider/model: $($trace.source.configured_provider_id) / $($trace.source.model)"
 Write-Output "Gateway route: $($trace.gateway_route.behavior_profile)"
 Write-Output "Registered Codex app tools: $($registered.Count)"
 Write-Output "Direct / Deferred: $($direct.Count) / $($deferred.Count)"
 Write-Output "Deferred tools discoverable through tool_search: $($discoverable.Count)"
+Write-Output "Bounded audit transport rows / Gateway starts: $($auditPlan.transport_log_rows) / $($auditGateway.request_starts)"
 Write-Output "Replay case: $ReplayCase"
 
 if ($mismatches.Count -gt 0) {
