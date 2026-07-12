@@ -83,6 +83,27 @@ def _raise_for_unsupported_chat_message_semantics(message: Mapping[str, Any]) ->
             )
 
 
+def _require_supported_chat_message_fields(message: Mapping[str, Any], label: str) -> None:
+    role = message.get("role")
+    allowed_by_role = {
+        "system": {"role", "content"},
+        "user": {"role", "content"},
+        "assistant": {
+            "role",
+            "content",
+            "tool_calls",
+            "refusal",
+            "audio",
+            "annotations",
+            "reasoning",
+            "reasoning_content",
+        },
+        "tool": {"role", "content", "tool_call_id"},
+    }
+    _require_supported_fields(message, allowed_by_role.get(role, {"role", "content"}), label)
+    _raise_for_unsupported_chat_message_semantics(message)
+
+
 def _require_supported_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
     unsupported = sorted(str(key) for key in value.keys() if key not in allowed)
     if unsupported:
@@ -275,6 +296,25 @@ def responses_request_to_chat_completion_body(body: bytes) -> bytes:
     payload = json.loads(body.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         return body
+    _require_supported_fields(
+        payload,
+        {
+            "model",
+            "input",
+            "instructions",
+            "tools",
+            "tool_choice",
+            "stream",
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "parallel_tool_calls",
+            "max_output_tokens",
+            "reasoning",
+        },
+        "Responses request",
+    )
     if payload.get("reasoning") is not None:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -380,18 +420,33 @@ def chat_messages_to_responses_input(
                 "unsupported_protocol_semantics",
                 "Cannot translate a non-object Chat Completions message.",
             )
-        _raise_for_unsupported_chat_message_semantics(message)
+        _require_supported_chat_message_fields(message, "Chat Completions message")
         role = message.get("role")
         if role == "system":
             content = message.get("content")
-            text = content if isinstance(content, str) else chat_content_text(content)
+            if content is not None and not isinstance(content, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-text Chat Completions system content to Responses instructions.",
+                )
+            text = content if isinstance(content, str) else ""
             if text:
                 instructions_parts.append(text)
             continue
         tool_calls = message.get("tool_calls")
+        if role == "assistant" and tool_calls is not None and not isinstance(tool_calls, list):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a non-list assistant tool_calls payload.",
+            )
         if isinstance(tool_calls, list) and role == "assistant":
             content = message.get("content")
-            text = content if isinstance(content, str) else chat_content_text(content)
+            if content is not None and not isinstance(content, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-text assistant content alongside tool calls.",
+                )
+            text = content if isinstance(content, str) else ""
             if text:
                 input_items.append(
                     {
@@ -406,6 +461,11 @@ def chat_messages_to_responses_input(
                         "unsupported_protocol_semantics",
                         "Cannot translate a non-object assistant tool call.",
                     )
+                _require_supported_fields(
+                    tool_call,
+                    {"id", "type", "function"},
+                    "Chat Completions assistant tool call",
+                )
                 tool_type = tool_call.get("type")
                 if tool_type not in (None, "function"):
                     raise UnsupportedProtocolTranslationError(
@@ -418,6 +478,11 @@ def chat_messages_to_responses_input(
                         "unsupported_protocol_semantics",
                         "Cannot translate an assistant tool call without a function payload.",
                     )
+                _require_supported_fields(
+                    function,
+                    {"name", "arguments"},
+                    "Chat Completions assistant function call",
+                )
                 name = function.get("name")
                 if not isinstance(name, str) or not name:
                     raise UnsupportedProtocolTranslationError(
@@ -448,7 +513,12 @@ def chat_messages_to_responses_input(
                     "Cannot translate a tool result without a non-empty tool_call_id.",
                 )
             content = message.get("content")
-            output = content if isinstance(content, str) else chat_content_text(content)
+            if content is not None and not isinstance(content, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate non-text Chat Completions tool result content to Responses.",
+                )
+            output = content if isinstance(content, str) else ""
             input_items.append(
                 {
                     "type": "function_call_output",
@@ -552,10 +622,36 @@ def chat_completions_request_to_responses_body(
     payload = json.loads(body.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         return body
+    _require_supported_fields(
+        payload,
+        {
+            "model",
+            "messages",
+            "tools",
+            "tool_choice",
+            "stream",
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "parallel_tool_calls",
+            "max_tokens",
+            "max_output_tokens",
+            "reasoning",
+            "reasoning_effort",
+            "n",
+        },
+        "Chat Completions request",
+    )
     if payload.get("reasoning") is not None or payload.get("reasoning_effort") is not None:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
             "Cannot translate Chat Completions reasoning controls to Responses without a proven equivalent.",
+        )
+    if "n" in payload and payload.get("n") not in (None, 1):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate multiple Chat Completions choices to a single Responses result.",
         )
 
     instructions, input_items = chat_messages_to_responses_input(
@@ -712,9 +808,20 @@ def chat_completion_to_response_body(
     incomplete_details: dict[str, str] | None = None
     choices = payload.get("choices")
     if isinstance(choices, list):
+        if len(choices) > 1:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate multiple Chat Completions choices to a single Responses result.",
+            )
         for index, choice in enumerate(choices):
             if not isinstance(choice, dict):
                 continue
+            choice_index = choice.get("index", index)
+            if choice_index not in (None, 0):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    f"Cannot translate Chat Completions choice index {choice_index!r} to a single Responses result.",
+                )
             finish_reason = choice.get("finish_reason")
             if finish_reason == "length":
                 incomplete_details = {"reason": "max_output_tokens"}
@@ -726,6 +833,7 @@ def chat_completion_to_response_body(
             message = choice.get("message")
             if not isinstance(message, dict):
                 continue
+            _require_supported_chat_message_fields(message, "Chat Completions response message")
             tool_outputs = _chat_completion_tool_outputs(
                 message,
                 chat_content_text=chat_content_text,
@@ -919,6 +1027,7 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
         message = choice.get("message")
         if not isinstance(message, Mapping):
             continue
+        _require_supported_chat_message_fields(message, "Chat Completions response message")
         content = message.get("content")
         if isinstance(content, str) and content:
             chunks.append(
@@ -938,12 +1047,28 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
                         "unsupported_protocol_semantics",
                         "Cannot translate a non-object assistant tool call into Chat Completions chunks.",
                     )
+                _require_supported_fields(
+                    tool_call,
+                    {"id", "type", "function", "index"},
+                    "Chat Completions assistant tool call",
+                )
+                tool_type = tool_call.get("type")
+                if tool_type not in (None, "function"):
+                    raise UnsupportedProtocolTranslationError(
+                        "unsupported_protocol_semantics",
+                        f"Cannot translate assistant tool type {tool_type!r} into Chat Completions chunks.",
+                    )
                 function = tool_call.get("function")
                 if not isinstance(function, Mapping):
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
                         "Cannot translate an assistant tool call without a function payload into Chat Completions chunks.",
                     )
+                _require_supported_fields(
+                    function,
+                    {"name", "arguments"},
+                    "Chat Completions assistant function call",
+                )
                 name = function.get("name")
                 if not isinstance(name, str) or not name:
                     raise UnsupportedProtocolTranslationError(

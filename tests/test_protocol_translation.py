@@ -160,6 +160,100 @@ class ProtocolTranslationTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
+    def test_unmapped_request_message_and_tool_fields_fail_closed(self):
+        responses_payload = {
+            "model": "example-model",
+            "input": [{"type": "message", "role": "user", "content": "Hello"}],
+            "future_semantic_field": {"must": "not disappear"},
+        }
+        chat_payload = {
+            "model": "example-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "future_semantic_field": {"must": "not disappear"},
+        }
+        for convert, payload in (
+            (protocol_translation.responses_request_to_chat_completion_body, responses_payload),
+            (protocol_translation.chat_completions_request_to_responses_body, chat_payload),
+        ):
+            with self.subTest(convert=convert.__name__), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                convert(json.dumps(payload).encode("utf-8"))
+
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        lossy_chat_messages = (
+            {"role": "system", "content": [{"type": "file", "file_id": "file_123"}]},
+            {"role": "tool", "tool_call_id": "call_123", "content": [{"type": "file", "file_id": "file_123"}]},
+            {"role": "user", "name": "unmapped-name", "content": "Hello"},
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Call it", "annotations": [{"type": "url_citation"}]}],
+                "tool_calls": [
+                    {"id": "call_123", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+                ],
+            },
+        )
+        for message in lossy_chat_messages:
+            with self.subTest(message=message), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                protocol_translation.chat_completions_request_to_responses_body(
+                    json.dumps({"model": "example-model", "messages": [message]}).encode("utf-8")
+                )
+
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_non_reversible_chat_choice_semantics_fail_closed(self):
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.chat_completions_request_to_responses_body(
+                json.dumps(
+                    {"model": "example-model", "messages": [{"role": "user", "content": "Hello"}], "n": 2}
+                ).encode("utf-8")
+            )
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        body = json.dumps(
+            {
+                "id": "chatcmpl_choices",
+                "model": "example-model",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "A"}, "finish_reason": "stop"},
+                    {"index": 1, "message": {"role": "assistant", "content": "B"}, "finish_reason": "stop"},
+                ],
+            }
+        ).encode("utf-8")
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.chat_completion_to_response_body(body)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_chat_completion_chunking_rejects_lossy_message_semantics(self):
+        for message in (
+            {"role": "assistant", "content": None, "refusal": "I cannot help with that."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "call_123", "type": "custom", "function": {"name": "apply_patch", "arguments": "{}"}}
+                ],
+            },
+            {"role": "assistant", "content": "Hello", "future_semantic_field": {"id": "future"}},
+        ):
+            with self.subTest(message=message), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                protocol_translation.chat_completion_body_to_stream_chunks(
+                    json.dumps(
+                        {
+                            "id": "chatcmpl_123",
+                            "model": "example-model",
+                            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+                        }
+                    ).encode("utf-8")
+                )
+
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
     def test_responses_semantic_items_without_chat_equivalents_fail_closed(self):
         payloads = {
             "reasoning": {
