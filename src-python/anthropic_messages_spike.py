@@ -70,6 +70,7 @@ class HeaderPolicy:
     forwarded: tuple[str, ...]
     consumed: tuple[str, ...]
     unsupported: tuple[str, ...]
+    semantic_headers: dict[str, str]
     sanitized: dict[str, str]
 
 
@@ -122,6 +123,7 @@ def classify_claude_headers(
     forwarded: list[str] = []
     consumed: list[str] = []
     unsupported: list[str] = []
+    semantic_headers: dict[str, str] = {}
     sanitized: dict[str, str] = {}
     for raw_name, raw_value in headers.items():
         if not isinstance(raw_name, str):
@@ -134,6 +136,7 @@ def classify_claude_headers(
             continue
         if name.startswith("x-claude-code-"):
             consumed.append(name)
+            semantic_headers[name] = value
             sanitized[name] = "<pseudonymized>"
             continue
         if name in {
@@ -150,6 +153,7 @@ def classify_claude_headers(
             sanitized[name] = "<transport>"
             continue
         if name.startswith("anthropic-"):
+            semantic_headers[name] = value
             if name == "anthropic-version":
                 sanitized[name] = value
             else:
@@ -167,6 +171,7 @@ def classify_claude_headers(
         forwarded=tuple(dict.fromkeys(forwarded)),
         consumed=tuple(dict.fromkeys(consumed)),
         unsupported=tuple(dict.fromkeys(unsupported)),
+        semantic_headers=semantic_headers,
         sanitized=sanitized,
     )
 

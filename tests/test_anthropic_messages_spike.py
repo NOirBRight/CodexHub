@@ -383,6 +383,8 @@ class SafetyPolicyTests(unittest.TestCase):
 
         self.assertEqual(policy.sanitized["authorization"], "<redacted>")
         self.assertEqual(policy.sanitized["x-claude-code-session-id"], "<pseudonymized>")
+        self.assertEqual(policy.semantic_headers["anthropic-beta"], "future-capability")
+        self.assertEqual(policy.semantic_headers["x-claude-code-future-field"], "opaque-value")
         self.assertIn("anthropic-version", policy.consumed)
         self.assertIn("x-claude-code-future-field", policy.consumed)
         self.assertEqual(policy.unsupported, ("header.anthropic-beta", "header.x-custom-header"))
