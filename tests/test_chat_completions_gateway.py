@@ -492,13 +492,12 @@ class ChatToolChoiceTests(unittest.TestCase):
 
 
 class ChatToolsToResponsesTests(unittest.TestCase):
-    def test_filters_non_function_tools(self):
-        result = _chat_tools_to_responses_tools([
-            {"type": "function", "function": {"name": "foo"}},
-            {"type": "other"},
-        ])
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["name"], "foo")
+    def test_rejects_non_function_tools_that_cannot_cross_the_protocol_seam(self):
+        with self.assertRaises(ValueError):
+            _chat_tools_to_responses_tools([
+                {"type": "function", "function": {"name": "foo"}},
+                {"type": "other"},
+            ])
 
 
 class ResponseBodyToChatTests(unittest.TestCase):
@@ -643,7 +642,15 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
                 "response": {
                     "id": "resp_2",
                     "model": "gpt-5.5",
-                    "output": [{"type": "function_call", "id": "fc_call_1", "call_id": "call_1", "name": "get_weather", "arguments": '{}'}],
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "fc_call_1",
+                            "call_id": "call_1",
+                            "name": "get_weather",
+                            "arguments": '{"city":"NYC"}',
+                        }
+                    ],
                 },
             },
         ]
@@ -924,6 +931,28 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi there!")
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(handler._fake.status, 200)
+
+    def test_post_chat_completions_rejects_unsupported_upstream_response_semantics(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_reasoning",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]}],
+        }).encode("utf-8")
+
+        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 502)
+        self.assertEqual(result["error"]["type"], "unsupported_protocol_semantics")
 
     def test_post_chat_completions_events_use_proxy_request_kind(self):
         body = json.dumps({
@@ -3584,6 +3613,32 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b'"error":"OSError"', written)
         self.assertIn(b'"codexhub_error"', written)
         self.assertIn(b'"code":"upstream.transport"', written)
+
+    def test_post_responses_streaming_preserves_buffered_incomplete_terminal(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "input": "Hello",
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/responses")
+        upstream_body = json.dumps(
+            {
+                "id": "resp_incomplete",
+                "object": "response",
+                "status": "incomplete",
+                "model": "gpt-5.5",
+                "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }
+        ).encode("utf-8")
+
+        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"event: response.incomplete", written)
+        self.assertIn(b'"status":"incomplete"', written)
+        self.assertNotIn(b"event: response.completed", written)
 
     def test_auto_upstream_format_uses_responses_when_responses_succeeds(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
