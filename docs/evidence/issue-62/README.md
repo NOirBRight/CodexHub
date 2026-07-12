@@ -77,3 +77,64 @@ changes selection. The in-process rewrite and clean-cold-start cases remain
 separate; no shared-runtime restart or configuration experiment was run for
 this evidence update. Reluctant-model and tool_search lifecycle work belongs
 to #63.
+
+## Bounded read-only gate audit
+
+`read-only-gate-audit.json` is a frozen, sanitized audit of the already-existing
+Codex request log and Gateway telemetry database. The reusable auditor opens
+both SQLite inputs in `mode=ro` and emits only schema names, field presence,
+counts, booleans, and enums. It never emits paths, headers, credentials,
+request bodies, prompts, descriptions, arguments, results, HMAC values, or any
+session, task, turn, call, item, request, or response identifiers.
+
+The bounded audit establishes these additional facts without a restart,
+reconnect, configuration write, or production-handler change:
+
+- Forty-three retained Sol transport rows resolve to three actual
+  model-visible planner surfaces. The largest retained surface includes the
+  base functions, collaboration namespace, goal functions, image generation,
+  the three Direct codex_app functions, and client-executed tool_search.
+- Every retained Sol surface is a real streaming request with
+  `tool_choice=auto` and `parallel_tool_calls=false`. This replaces the prior
+  choice-control sentinel with observed request evidence, but it does not
+  supply a non-streaming control.
+- The bounded request rows contain eight classified input item types and zero
+  unknown item types. This is request-side classification only; it cannot
+  satisfy full pre/post identity while full response evidence is absent.
+- The current Gateway-process window contains 525 official Responses identity
+  route starts. All 525 have equal caller/upstream 65,536-byte prefix HMACs and
+  no prefix mismatches. All 525 are streaming, all 525 deliberately skipped
+  full-body HMACs, and the telemetry schema has no response-body fingerprint.
+- The current app-server process predates the current configuration write,
+  there are no Gateway requests after that app-server start, and the retained
+  post-start Sol transport rows classify as direct official endpoints. A clean
+  cold start for the current binding is therefore not proved. The configured
+  provider id is not used as route provenance.
+
+The recovery observation remains deliberately non-causal: repeated task-level
+system errors affected both continued and fresh Terra tasks on unchanged clean
+branches, unrelated already-running Terra tasks continued, and fresh Sol tasks
+started normally with no intervening shared-state mutation. This supports only
+task-start recovery and model-binding fallback classification. The route-level
+cause is unknown, model-only causality is not claimed, and full collaboration
+lifecycle closure remains owned by #64.
+
+Run the sanitizer with explicit bounded inputs and observation cutoffs:
+
+```powershell
+python scripts/audit_issue_62_runtime_artifacts.py `
+  --codex-log-db <codex-log-db> `
+  --gateway-db <gateway-telemetry-db> `
+  --model gpt-5.6-sol `
+  --gateway-started-at <gateway-start-utc> `
+  --app-server-started-at <app-server-start-utc> `
+  --config-written-at <config-write-utc> `
+  --catalog-written-at <catalog-write-utc> `
+  --snapshot-ended-at <snapshot-end-utc>
+```
+
+The remaining gates require a separately authorized live control: complete
+registered contributor/defer-loading capture, a clean current-binding cold
+start, independently fingerprinted full caller/upstream/downstream requests
+and responses, a real non-streaming request, and observed non-Direct states.
+No such control was run for this audit.

@@ -1,0 +1,413 @@
+{
+  "capture_kind": "sanitized_bounded_read_only_audit",
+  "gate_classification": {
+    "choice_controls": "observed",
+    "clean_cold_start_current_binding": "live_control_required",
+    "complete_contributors_runtime_gate": "partial",
+    "full_pre_post_request_response": "live_control_required",
+    "non_direct_states": "live_control_required",
+    "non_streaming": "live_control_required",
+    "zero_unclassified_identity": "partial"
+  },
+  "gateway_identity_route": {
+    "full_body_hmac_both_skipped": 525,
+    "full_body_hmac_pairs": 0,
+    "non_streaming_requests": 0,
+    "observed_sse_event_type_counts": {
+      "keepalive": 1,
+      "response.completed": 515,
+      "response.content_part.added": 148,
+      "response.content_part.done": 148,
+      "response.created": 520,
+      "response.custom_tool_call_input.delta": 22,
+      "response.custom_tool_call_input.done": 22,
+      "response.function_call_arguments.delta": 453,
+      "response.function_call_arguments.done": 460,
+      "response.in_progress": 520,
+      "response.metadata": 9,
+      "response.output_item.added": 520,
+      "response.output_item.done": 520,
+      "response.output_text.delta": 148,
+      "response.output_text.done": 148,
+      "response.reasoning_summary_part.added": 424,
+      "response.reasoning_summary_part.done": 424,
+      "response.reasoning_summary_text.delta": 424,
+      "response.reasoning_summary_text.done": 424
+    },
+    "prefix_equal": 525,
+    "prefix_mismatch": 0,
+    "prefix_unavailable": 0,
+    "request_starts": 525,
+    "response_body_fingerprint_fields_present": false,
+    "route_variants": [
+      {
+        "behavior_profile": "official_codex_app_http_passthrough",
+        "codex_semantic_adapter": "none",
+        "inbound_format": "responses",
+        "repair_policy": "none",
+        "request_starts": 525,
+        "route": "route_01",
+        "route_mode": "official",
+        "upstream": "official",
+        "upstream_format": "responses",
+        "wire_format_adapter": "transparent"
+      }
+    ],
+    "streaming_requests": 525
+  },
+  "model_visible_request_plan": {
+    "model": "gpt-5.6-sol",
+    "observed_input_item_type_counts": {
+      "additional_tools": 43,
+      "agent_message": 52,
+      "custom_tool_call": 10,
+      "custom_tool_call_output": 10,
+      "function_call": 992,
+      "function_call_output": 992,
+      "message": 789,
+      "reasoning": 1061
+    },
+    "plan_variants": [
+      {
+        "parallel_tool_calls": false,
+        "plan": "plan_01",
+        "stream": true,
+        "tool_choice": "auto",
+        "tool_surface": "surface_01",
+        "transport_log_rows": 28
+      },
+      {
+        "parallel_tool_calls": false,
+        "plan": "plan_02",
+        "stream": true,
+        "tool_choice": "auto",
+        "tool_surface": "surface_02",
+        "transport_log_rows": 11
+      },
+      {
+        "parallel_tool_calls": false,
+        "plan": "plan_03",
+        "stream": true,
+        "tool_choice": "auto",
+        "tool_surface": "surface_03",
+        "transport_log_rows": 4
+      }
+    ],
+    "tool_surfaces": {
+      "surface_01": [
+        {
+          "defer_loading_present": false,
+          "name": "shell_command",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "list_mcp_resources",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "list_mcp_resource_templates",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "read_mcp_resource",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "update_plan",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "request_user_input",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "request_plugin_install",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "apply_patch",
+          "type": "custom"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "view_image",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "collaboration",
+          "namespace_tools": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "get_goal",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "create_goal",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "update_goal",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "image_gen",
+          "namespace_tools": [
+            "imagegen"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "codex_app",
+          "namespace_tools": [
+            "load_workspace_dependencies",
+            "navigate_to_codex_page",
+            "read_thread_terminal"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "execution": "client",
+          "name": null,
+          "type": "tool_search"
+        }
+      ],
+      "surface_02": [
+        {
+          "defer_loading_present": false,
+          "name": "shell_command",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "list_mcp_resources",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "list_mcp_resource_templates",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "read_mcp_resource",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "update_plan",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "request_user_input",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "request_plugin_install",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "apply_patch",
+          "type": "custom"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "view_image",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "get_goal",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "create_goal",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "update_goal",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "image_gen",
+          "namespace_tools": [
+            "imagegen"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "codex_app",
+          "namespace_tools": [
+            "load_workspace_dependencies",
+            "navigate_to_codex_page",
+            "read_thread_terminal"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "execution": "client",
+          "name": null,
+          "type": "tool_search"
+        }
+      ],
+      "surface_03": [
+        {
+          "defer_loading_present": false,
+          "name": "shell_command",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "list_mcp_resources",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "list_mcp_resource_templates",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "read_mcp_resource",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "update_plan",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "request_user_input",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "request_plugin_install",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "apply_patch",
+          "type": "custom"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "view_image",
+          "type": "function"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "image_gen",
+          "namespace_tools": [
+            "imagegen"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "name": "probe_ns",
+          "namespace_tools": [
+            "direct_probe"
+          ],
+          "type": "namespace"
+        },
+        {
+          "defer_loading_present": false,
+          "execution": "client",
+          "name": null,
+          "type": "tool_search"
+        }
+      ]
+    },
+    "top_level_field_presence": [
+      "client_metadata",
+      "include",
+      "input",
+      "model",
+      "parallel_tool_calls",
+      "prompt_cache_key",
+      "reasoning",
+      "store",
+      "stream",
+      "text",
+      "tool_choice"
+    ],
+    "transport_log_rows": 43,
+    "unclassified_item_types": []
+  },
+  "recovery_observation": {
+    "causal_attribution": "not_assigned_to_model_alone",
+    "collaboration_lifecycle_owner": "#64",
+    "existing_terra_tasks_repeated_system_error": true,
+    "fresh_sol_same_clean_branches_started_normally": true,
+    "fresh_terra_same_clean_branches_failed_before_agent_response": true,
+    "intervening_shared_state_mutation": false,
+    "permitted_classification": [
+      "task_start_recovery",
+      "model_binding_fallback"
+    ],
+    "route_level_cause": "unknown",
+    "source": "orchestrator_read_only_observation",
+    "unrelated_existing_terra_tasks_continued_normally": true
+  },
+  "runtime_timeline": {
+    "catalog_written_before_app_server_start": true,
+    "clean_cold_start_for_current_binding_proven": false,
+    "config_written_after_app_server_start": true,
+    "current_request_endpoint_classes": {
+      "official_direct": 80
+    },
+    "gateway_requests_after_app_server_start": 0
+  },
+  "sanitization": {
+    "emits_existing_hash_values": false,
+    "emits_full_bodies": false,
+    "emits_headers_or_credentials": false,
+    "emits_paths": false,
+    "emits_prompt_arguments_or_outputs": false,
+    "emits_session_task_or_call_identifiers": false,
+    "output_classes": [
+      "booleans",
+      "counts",
+      "enums",
+      "field_presence",
+      "schema_names"
+    ]
+  },
+  "schema_version": 1,
+  "sources": {
+    "codex_transport_requests": "read_only_sqlite",
+    "gateway_events": "read_only_sqlite",
+    "merged_baseline": "PR_95"
+  }
+}
