@@ -1,0 +1,556 @@
+{
+  "fixture_schema": "codexhub-claude-messages-real-smoke/v1",
+  "sanitized": true,
+  "capture_kind": "real_cli_to_local_loopback_prototype",
+  "local_cli_version": "2.1.201 (Claude Code)",
+  "node_version": "v25.7.0",
+  "platform": "Windows",
+  "capture_succeeded": true,
+  "full_compatibility": false,
+  "compatibility_outcome": "scoped PARTIAL",
+  "scenarios": [
+    {
+      "scenario": "text",
+      "passed": false,
+      "client": {
+        "returncode": 0,
+        "expected_output_seen": true,
+        "stdout_length": 14,
+        "stderr_length": 0
+      },
+      "request_summaries": [
+        {
+          "path": "/v1/messages",
+          "header_policy": {
+            "consumed": [
+              "accept",
+              "content-type",
+              "user-agent",
+              "x-claude-code-session-id",
+              "x-stainless-arch",
+              "x-stainless-lang",
+              "x-stainless-os",
+              "x-stainless-package-version",
+              "x-stainless-retry-count",
+              "x-stainless-runtime",
+              "x-stainless-runtime-version",
+              "x-stainless-timeout",
+              "anthropic-version",
+              "x-api-key",
+              "x-app",
+              "connection",
+              "host",
+              "accept-encoding",
+              "content-length"
+            ],
+            "unsupported": [
+              "header.anthropic-beta",
+              "header.anthropic-dangerous-direct-browser-access"
+            ],
+            "sanitized": {
+              "accept": "<transport>",
+              "content-type": "<transport>",
+              "user-agent": "<transport>",
+              "x-claude-code-session-id": "<pseudonymized>",
+              "x-stainless-arch": "<transport>",
+              "x-stainless-lang": "<transport>",
+              "x-stainless-os": "<transport>",
+              "x-stainless-package-version": "<transport>",
+              "x-stainless-retry-count": "<transport>",
+              "x-stainless-runtime": "<transport>",
+              "x-stainless-runtime-version": "<transport>",
+              "x-stainless-timeout": "<transport>",
+              "anthropic-beta": "<redacted-open-set>",
+              "anthropic-dangerous-direct-browser-access": "<redacted-open-set>",
+              "anthropic-version": "2023-06-01",
+              "x-api-key": "<redacted>",
+              "x-app": "<transport>",
+              "connection": "<transport>",
+              "host": "<transport>",
+              "accept-encoding": "<transport>",
+              "content-length": "<transport>"
+            }
+          },
+          "request_keys": [
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "selected_field_shapes": {
+            "metadata": {
+              "keys": [
+                "user_id"
+              ]
+            },
+            "thinking": {
+              "keys": [
+                "type"
+              ]
+            },
+            "output_config": {
+              "keys": [
+                "effort"
+              ]
+            },
+            "system": [
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              },
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              }
+            ],
+            "tools": []
+          },
+          "message_history": [
+            {
+              "role": "user",
+              "content_block_types": [
+                "text",
+                "text"
+              ]
+            }
+          ],
+          "messages_to_responses_forwardable": false,
+          "messages_to_responses_unsupported": [
+            "request.metadata",
+            "request.thinking",
+            "request.output_config",
+            "messages[0].content[1]",
+            "system[0]"
+          ],
+          "contains_expected_tool_result": false,
+          "tool_result_is_first_content_block": false
+        }
+      ],
+      "tool_follow_up_verified": false,
+      "stream_started": false,
+      "disconnect_observed": false
+    },
+    {
+      "scenario": "tool",
+      "passed": false,
+      "client": {
+        "returncode": 0,
+        "expected_output_seen": true,
+        "stdout_length": 14,
+        "stderr_length": 0
+      },
+      "request_summaries": [
+        {
+          "path": "/v1/messages",
+          "header_policy": {
+            "consumed": [
+              "accept",
+              "content-type",
+              "user-agent",
+              "x-claude-code-session-id",
+              "x-stainless-arch",
+              "x-stainless-lang",
+              "x-stainless-os",
+              "x-stainless-package-version",
+              "x-stainless-retry-count",
+              "x-stainless-runtime",
+              "x-stainless-runtime-version",
+              "x-stainless-timeout",
+              "anthropic-version",
+              "x-api-key",
+              "x-app",
+              "connection",
+              "host",
+              "accept-encoding",
+              "content-length"
+            ],
+            "unsupported": [
+              "header.anthropic-beta",
+              "header.anthropic-dangerous-direct-browser-access"
+            ],
+            "sanitized": {
+              "accept": "<transport>",
+              "content-type": "<transport>",
+              "user-agent": "<transport>",
+              "x-claude-code-session-id": "<pseudonymized>",
+              "x-stainless-arch": "<transport>",
+              "x-stainless-lang": "<transport>",
+              "x-stainless-os": "<transport>",
+              "x-stainless-package-version": "<transport>",
+              "x-stainless-retry-count": "<transport>",
+              "x-stainless-runtime": "<transport>",
+              "x-stainless-runtime-version": "<transport>",
+              "x-stainless-timeout": "<transport>",
+              "anthropic-beta": "<redacted-open-set>",
+              "anthropic-dangerous-direct-browser-access": "<redacted-open-set>",
+              "anthropic-version": "2023-06-01",
+              "x-api-key": "<redacted>",
+              "x-app": "<transport>",
+              "connection": "<transport>",
+              "host": "<transport>",
+              "accept-encoding": "<transport>",
+              "content-length": "<transport>"
+            }
+          },
+          "request_keys": [
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "selected_field_shapes": {
+            "metadata": {
+              "keys": [
+                "user_id"
+              ]
+            },
+            "thinking": {
+              "keys": [
+                "type"
+              ]
+            },
+            "output_config": {
+              "keys": [
+                "effort"
+              ]
+            },
+            "system": [
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              },
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              }
+            ],
+            "tools": [
+              {
+                "keys": [
+                  "description",
+                  "input_schema",
+                  "name"
+                ]
+              }
+            ]
+          },
+          "message_history": [
+            {
+              "role": "user",
+              "content_block_types": [
+                "text",
+                "text"
+              ]
+            }
+          ],
+          "messages_to_responses_forwardable": false,
+          "messages_to_responses_unsupported": [
+            "request.metadata",
+            "request.thinking",
+            "request.output_config",
+            "messages[0].content[1]",
+            "system[0]"
+          ],
+          "contains_expected_tool_result": false,
+          "tool_result_is_first_content_block": false
+        },
+        {
+          "path": "/v1/messages",
+          "header_policy": {
+            "consumed": [
+              "accept",
+              "content-type",
+              "user-agent",
+              "x-claude-code-session-id",
+              "x-stainless-arch",
+              "x-stainless-lang",
+              "x-stainless-os",
+              "x-stainless-package-version",
+              "x-stainless-retry-count",
+              "x-stainless-runtime",
+              "x-stainless-runtime-version",
+              "x-stainless-timeout",
+              "anthropic-version",
+              "x-api-key",
+              "x-app",
+              "connection",
+              "host",
+              "accept-encoding",
+              "content-length"
+            ],
+            "unsupported": [
+              "header.anthropic-beta",
+              "header.anthropic-dangerous-direct-browser-access"
+            ],
+            "sanitized": {
+              "accept": "<transport>",
+              "content-type": "<transport>",
+              "user-agent": "<transport>",
+              "x-claude-code-session-id": "<pseudonymized>",
+              "x-stainless-arch": "<transport>",
+              "x-stainless-lang": "<transport>",
+              "x-stainless-os": "<transport>",
+              "x-stainless-package-version": "<transport>",
+              "x-stainless-retry-count": "<transport>",
+              "x-stainless-runtime": "<transport>",
+              "x-stainless-runtime-version": "<transport>",
+              "x-stainless-timeout": "<transport>",
+              "anthropic-beta": "<redacted-open-set>",
+              "anthropic-dangerous-direct-browser-access": "<redacted-open-set>",
+              "anthropic-version": "2023-06-01",
+              "x-api-key": "<redacted>",
+              "x-app": "<transport>",
+              "connection": "<transport>",
+              "host": "<transport>",
+              "accept-encoding": "<transport>",
+              "content-length": "<transport>"
+            }
+          },
+          "request_keys": [
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "selected_field_shapes": {
+            "metadata": {
+              "keys": [
+                "user_id"
+              ]
+            },
+            "thinking": {
+              "keys": [
+                "type"
+              ]
+            },
+            "output_config": {
+              "keys": [
+                "effort"
+              ]
+            },
+            "system": [
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              },
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              }
+            ],
+            "tools": [
+              {
+                "keys": [
+                  "description",
+                  "input_schema",
+                  "name"
+                ]
+              }
+            ]
+          },
+          "message_history": [
+            {
+              "role": "user",
+              "content_block_types": [
+                "text",
+                "text"
+              ]
+            },
+            {
+              "role": "assistant",
+              "content_block_types": [
+                "tool_use"
+              ]
+            },
+            {
+              "role": "user",
+              "content_block_types": [
+                "tool_result"
+              ]
+            }
+          ],
+          "messages_to_responses_forwardable": false,
+          "messages_to_responses_unsupported": [
+            "request.metadata",
+            "request.thinking",
+            "request.output_config",
+            "messages[2].content[0]",
+            "system[0]"
+          ],
+          "contains_expected_tool_result": true,
+          "tool_result_is_first_content_block": true
+        }
+      ],
+      "tool_follow_up_verified": true,
+      "stream_started": false,
+      "disconnect_observed": false
+    },
+    {
+      "scenario": "cancel",
+      "passed": true,
+      "client": {
+        "returncode": 1,
+        "expected_output_seen": false,
+        "stdout_length": 0,
+        "stderr_length": 0,
+        "forced_process_termination": true
+      },
+      "request_summaries": [
+        {
+          "path": "/v1/messages",
+          "header_policy": {
+            "consumed": [
+              "accept",
+              "content-type",
+              "user-agent",
+              "x-claude-code-session-id",
+              "x-stainless-arch",
+              "x-stainless-lang",
+              "x-stainless-os",
+              "x-stainless-package-version",
+              "x-stainless-retry-count",
+              "x-stainless-runtime",
+              "x-stainless-runtime-version",
+              "x-stainless-timeout",
+              "anthropic-version",
+              "x-api-key",
+              "x-app",
+              "connection",
+              "host",
+              "accept-encoding",
+              "content-length"
+            ],
+            "unsupported": [
+              "header.anthropic-beta",
+              "header.anthropic-dangerous-direct-browser-access"
+            ],
+            "sanitized": {
+              "accept": "<transport>",
+              "content-type": "<transport>",
+              "user-agent": "<transport>",
+              "x-claude-code-session-id": "<pseudonymized>",
+              "x-stainless-arch": "<transport>",
+              "x-stainless-lang": "<transport>",
+              "x-stainless-os": "<transport>",
+              "x-stainless-package-version": "<transport>",
+              "x-stainless-retry-count": "<transport>",
+              "x-stainless-runtime": "<transport>",
+              "x-stainless-runtime-version": "<transport>",
+              "x-stainless-timeout": "<transport>",
+              "anthropic-beta": "<redacted-open-set>",
+              "anthropic-dangerous-direct-browser-access": "<redacted-open-set>",
+              "anthropic-version": "2023-06-01",
+              "x-api-key": "<redacted>",
+              "x-app": "<transport>",
+              "connection": "<transport>",
+              "host": "<transport>",
+              "accept-encoding": "<transport>",
+              "content-length": "<transport>"
+            }
+          },
+          "request_keys": [
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "selected_field_shapes": {
+            "metadata": {
+              "keys": [
+                "user_id"
+              ]
+            },
+            "thinking": {
+              "keys": [
+                "type"
+              ]
+            },
+            "output_config": {
+              "keys": [
+                "effort"
+              ]
+            },
+            "system": [
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              },
+              {
+                "keys": [
+                  "cache_control",
+                  "text",
+                  "type"
+                ]
+              }
+            ],
+            "tools": []
+          },
+          "message_history": [
+            {
+              "role": "user",
+              "content_block_types": [
+                "text",
+                "text"
+              ]
+            }
+          ],
+          "messages_to_responses_forwardable": false,
+          "messages_to_responses_unsupported": [
+            "request.metadata",
+            "request.thinking",
+            "request.output_config",
+            "messages[0].content[1]",
+            "system[0]"
+          ],
+          "contains_expected_tool_result": false,
+          "tool_result_is_first_content_block": false
+        }
+      ],
+      "tool_follow_up_verified": false,
+      "stream_started": true,
+      "disconnect_observed": true
+    }
+  ],
+  "cancellation_interpretation": "Forced process termination is an attempted downstream disconnect only; it does not prove Ctrl+C/Escape wire semantics."
+}
