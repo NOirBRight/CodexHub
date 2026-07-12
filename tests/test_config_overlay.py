@@ -9,13 +9,17 @@ import unittest
 from unittest.mock import patch
 
 from config_overlay import (
+    CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
+    CONTEXT_GUARD_CONTEXT_WINDOW,
     MARKER_BEGIN,
     apply_overlay,
+    context_guard_status,
     inject_unified_history_config,
     inspect_unified_history_config,
     main as config_overlay_main,
     restore_overlay,
     catalog_config_value,
+    set_context_guard,
     set_feature_flags,
     strip_section,
     strip_top_level_keys,
@@ -679,6 +683,170 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("model_catalog_json", updated)
             self.assertNotIn("[model_providers.custom]", updated)
             self.assertIn("[features]", updated)
+
+    def test_context_guard_updates_live_and_overlay_backup_then_restores_previous_values(self):
+        original = "\n".join(
+            [
+                "model_context_window = 400000",
+                "model_auto_compact_token_limit = 360000",
+                'model_reasoning_effort = "high"',
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(original, encoding="utf-8")
+            backup_path.write_text(original, encoding="utf-8")
+
+            enabled = set_context_guard(config_path, backup_path, state_path, enabled=True)
+
+            self.assertTrue(enabled["enabled"])
+            self.assertEqual(enabled["model_context_window"], CONTEXT_GUARD_CONTEXT_WINDOW)
+            self.assertEqual(
+                enabled["model_auto_compact_token_limit"],
+                CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
+            )
+            for path in (config_path, backup_path):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(f"model_context_window = {CONTEXT_GUARD_CONTEXT_WINDOW}", text)
+                self.assertIn(
+                    f"model_auto_compact_token_limit = {CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT}",
+                    text,
+                )
+                self.assertIn('model_reasoning_effort = "high"', text)
+                self.assertIn("[features]", text)
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            for target in ("config", "backup"):
+                self.assertEqual(state[target]["model_context_window"], "400000")
+                self.assertEqual(
+                    state[target]["model_auto_compact_token_limit"],
+                    "360000",
+                )
+
+            disabled = set_context_guard(config_path, backup_path, state_path, enabled=False)
+
+            self.assertFalse(disabled["enabled"])
+            self.assertFalse(state_path.exists())
+            for path in (config_path, backup_path):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("model_context_window = 400000", text)
+                self.assertIn("model_auto_compact_token_limit = 360000", text)
+                self.assertIn('model_reasoning_effort = "high"', text)
+
+    def test_context_guard_disable_removes_managed_values_when_no_previous_values_exist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text("[features]\nhooks = true\n", encoding="utf-8")
+
+            set_context_guard(config_path, backup_path, state_path, enabled=True)
+            self.assertTrue(context_guard_status(config_path)["enabled"])
+
+            set_context_guard(config_path, backup_path, state_path, enabled=False)
+            text = config_path.read_text(encoding="utf-8")
+            self.assertNotIn("model_context_window", text)
+            self.assertNotIn("model_auto_compact_token_limit", text)
+            self.assertIn("[features]", text)
+            self.assertIn("hooks = true", text)
+
+    def test_context_guard_restores_distinct_live_and_backup_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(
+                "model_context_window = 500000\n"
+                "model_auto_compact_token_limit = 450000\n",
+                encoding="utf-8",
+            )
+            backup_path.write_text(
+                "model_context_window = 400000\n"
+                "model_auto_compact_token_limit = 360000\n",
+                encoding="utf-8",
+            )
+
+            set_context_guard(config_path, backup_path, state_path, enabled=True)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["config"]["model_context_window"], "500000")
+            self.assertEqual(state["backup"]["model_context_window"], "400000")
+
+            set_context_guard(config_path, backup_path, state_path, enabled=False)
+
+            self.assertIn(
+                "model_context_window = 500000",
+                config_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "model_auto_compact_token_limit = 450000",
+                config_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "model_context_window = 400000",
+                backup_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "model_auto_compact_token_limit = 360000",
+                backup_path.read_text(encoding="utf-8"),
+            )
+
+    def test_context_guard_disable_preserves_a_value_changed_after_enable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text("model_context_window = 500000\n", encoding="utf-8")
+
+            set_context_guard(config_path, backup_path, state_path, enabled=True)
+            changed = config_path.read_text(encoding="utf-8").replace(
+                f"model_context_window = {CONTEXT_GUARD_CONTEXT_WINDOW}",
+                "model_context_window = 600000",
+            )
+            config_path.write_text(changed, encoding="utf-8")
+
+            set_context_guard(config_path, backup_path, state_path, enabled=False)
+            text = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_context_window = 600000", text)
+            self.assertNotIn("model_auto_compact_token_limit", text)
+
+    def test_context_guard_adopts_preexisting_managed_values_and_can_fully_disable_them(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"model_context_window = {CONTEXT_GUARD_CONTEXT_WINDOW}",
+                        (
+                            "model_auto_compact_token_limit = "
+                            f"{CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT}"
+                        ),
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            set_context_guard(config_path, backup_path, state_path, enabled=True)
+            set_context_guard(config_path, backup_path, state_path, enabled=False)
+
+            self.assertFalse(context_guard_status(config_path)["enabled"])
+            text = config_path.read_text(encoding="utf-8")
+            self.assertNotIn("model_context_window", text)
+            self.assertNotIn("model_auto_compact_token_limit", text)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,12 @@ STALE_PROXY_PROVIDER_SECTIONS = (
     "model_providers.custom",
     "model_providers.codex_proxy",
 )
+CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
+CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT = 240_000
+CONTEXT_GUARD_KEYS = {
+    "model_context_window",
+    "model_auto_compact_token_limit",
+}
 
 
 def toml_literal(value: str) -> str:
@@ -92,6 +98,142 @@ def top_level_value(text: str, key: str) -> str | None:
             return raw[1:-1]
         return raw
     return None
+
+
+def set_top_level_values(text: str, values: dict[str, str | None]) -> str:
+    cleaned = strip_top_level_keys(text, set(values))
+    assignments = [f"{key} = {value}" for key, value in values.items() if value is not None]
+    if not assignments:
+        return cleaned
+
+    prefix = "\n".join(assignments)
+    if cleaned.strip():
+        return f"{prefix}\n\n{cleaned.lstrip()}"
+    return f"{prefix}\n"
+
+
+def _top_level_positive_int(text: str, key: str) -> int | None:
+    raw = top_level_value(text, key)
+    if raw is None:
+        return None
+    try:
+        value = int(raw.replace("_", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def context_guard_status(config_path: Path) -> dict[str, int | bool | None]:
+    text = read_text_preserving_newlines(config_path) if config_path.exists() else ""
+    context_window = _top_level_positive_int(text, "model_context_window")
+    auto_compact_token_limit = _top_level_positive_int(
+        text,
+        "model_auto_compact_token_limit",
+    )
+    return {
+        "enabled": (
+            context_window == CONTEXT_GUARD_CONTEXT_WINDOW
+            and auto_compact_token_limit == CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
+        ),
+        "model_context_window": context_window,
+        "model_auto_compact_token_limit": auto_compact_token_limit,
+    }
+
+
+def _context_guard_previous_values(text: str) -> dict[str, str | None]:
+    previous = {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
+    if (
+        _top_level_positive_int(text, "model_context_window")
+        == CONTEXT_GUARD_CONTEXT_WINDOW
+        and _top_level_positive_int(text, "model_auto_compact_token_limit")
+        == CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
+    ):
+        return {key: None for key in CONTEXT_GUARD_KEYS}
+    return previous
+
+
+def _normalized_context_guard_values(payload: object) -> dict[str, str | None]:
+    if not isinstance(payload, dict):
+        return {key: None for key in CONTEXT_GUARD_KEYS}
+    return {
+        key: payload.get(key) if isinstance(payload.get(key), str) else None
+        for key in CONTEXT_GUARD_KEYS
+    }
+
+
+def _read_context_guard_state(
+    state_path: Path,
+) -> dict[str, dict[str, str | None]] | None:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if "config" in payload or "backup" in payload:
+        return {
+            target: _normalized_context_guard_values(values)
+            for target, values in payload.items()
+            if target in {"config", "backup"}
+        }
+
+    # Read the pre-release single-snapshot shape conservatively if a test build
+    # created state before live and backup values were tracked independently.
+    legacy_values = _normalized_context_guard_values(payload)
+    return {"config": legacy_values, "backup": legacy_values}
+
+
+def set_context_guard(
+    config_path: Path,
+    backup_path: Path,
+    state_path: Path,
+    *,
+    enabled: bool,
+) -> dict[str, int | bool | None]:
+    managed_values = {
+        "model_context_window": str(CONTEXT_GUARD_CONTEXT_WINDOW),
+        "model_auto_compact_token_limit": str(CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT),
+    }
+    target_paths = {"config": config_path}
+    if backup_path.exists():
+        target_paths["backup"] = backup_path
+    if enabled:
+        if not state_path.exists():
+            previous = {
+                target: _context_guard_previous_values(
+                    read_text_preserving_newlines(path) if path.exists() else ""
+                )
+                for target, path in target_paths.items()
+            }
+            atomic_write_text(
+                state_path,
+                json.dumps(previous, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        for path in target_paths.values():
+            text = read_text_preserving_newlines(path) if path.exists() else ""
+            atomic_write_text(path, set_top_level_values(text, managed_values), encoding="utf-8")
+    else:
+        previous_by_target = _read_context_guard_state(state_path) or {}
+        for target, path in target_paths.items():
+            if not path.exists():
+                continue
+            previous = previous_by_target.get(
+                target,
+                {key: None for key in CONTEXT_GUARD_KEYS},
+            )
+            text = read_text_preserving_newlines(path)
+            updates = {
+                key: previous.get(key)
+                for key, managed_value in managed_values.items()
+                if top_level_value(text, key) == managed_value
+            }
+            if updates:
+                atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
+        state_path.unlink(missing_ok=True)
+
+    return context_guard_status(config_path)
 
 
 def section_key_values(text: str, section_name: str) -> dict[str, str] | None:
@@ -457,6 +599,15 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("--config", required=True, type=Path)
     inspect_parser.add_argument("--target", choices=["unified", "separated"], default="unified")
 
+    context_status_parser = subparsers.add_parser("context-guard-status")
+    context_status_parser.add_argument("--config", required=True, type=Path)
+
+    context_set_parser = subparsers.add_parser("context-guard-set")
+    context_set_parser.add_argument("--config", required=True, type=Path)
+    context_set_parser.add_argument("--backup", required=True, type=Path)
+    context_set_parser.add_argument("--state", required=True, type=Path)
+    context_set_parser.add_argument("--enabled", required=True, choices=("true", "false"))
+
     args = parser.parse_args(argv)
     if args.command == "apply":
         apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner, args.takeover, args.gateway_key)
@@ -470,6 +621,20 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {"status": inspect_unified_history_config(text, args.target == "unified")},
                 ensure_ascii=True,
+            )
+        )
+    elif args.command == "context-guard-status":
+        print(json.dumps(context_guard_status(args.config), ensure_ascii=False))
+    elif args.command == "context-guard-set":
+        print(
+            json.dumps(
+                set_context_guard(
+                    args.config,
+                    args.backup,
+                    args.state,
+                    enabled=args.enabled == "true",
+                ),
+                ensure_ascii=False,
             )
         )
     return 0

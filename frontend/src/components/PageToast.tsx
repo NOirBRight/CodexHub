@@ -209,11 +209,9 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       <span
         className={cx(
           "min-w-0",
-          toast.action
-            ? "truncate"
-            : toast.tone === "error"
-              ? "max-h-32 overflow-auto whitespace-pre-wrap break-words"
-              : "truncate",
+          toast.tone === "error"
+            ? "max-h-32 overflow-auto whitespace-pre-wrap break-words"
+            : "whitespace-pre-wrap break-words leading-5",
         )}
       >
         {toast.text}

@@ -286,6 +286,11 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             .map_err(|error| format!("invalid settings argument: {error}"))?;
             to_value(config::save_settings(settings))
         }
+        "get_codex_context_guard_status" => to_value(config::get_codex_context_guard_status()),
+        "set_codex_context_guard" => {
+            let enabled = bool_arg(&request.args, "enabled")?;
+            to_value(config::set_codex_context_guard(enabled))
+        }
         "refresh_official_models" => to_value(models::refresh_official_models()),
         "openai_usage_completions" => {
             let start_time = optional_u64_arg(&request.args, &["startTime", "start_time"]);

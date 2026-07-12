@@ -7,6 +7,7 @@ import type {
   AppUpdateInstallStatus,
   AppUpdateStatus,
   AppVersionInfo,
+  CodexContextGuardStatus,
   CodexHubError,
   GatewayClientConfig,
   GatewayClientApplyResult,
@@ -198,6 +199,10 @@ export const api = {
         settings: normalizeSettings(settings),
       }),
     ),
+  getCodexContextGuardStatus: () =>
+    call<CodexContextGuardStatus>("get_codex_context_guard_status"),
+  setCodexContextGuard: (enabled: boolean) =>
+    call<CodexContextGuardStatus>("set_codex_context_guard", { enabled }),
   refreshOfficialModels: () => call<Model[]>("refresh_official_models"),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
     call<OpenAIUsageSnapshot>("openai_usage_completions", openaiUsageWindowArgs(window)),

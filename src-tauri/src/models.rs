@@ -1845,34 +1845,50 @@ struct ResolvedLimitsEntry {
     model_id: String,
     effective_context_window: Option<u32>,
     max_context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
     effective_source: Option<String>,
     max_source: Option<String>,
     confidence: String,
     verified_at: Option<String>,
 }
 
-fn official_resolved_metadata(id: &str, display_name: &str) -> Model {
+pub(crate) fn apply_resolved_model_limits(provider_id: &str, model: &mut Model) -> bool {
     let document: ResolvedLimitsDocument = serde_json::from_str(RESOLVED_MODEL_LIMITS_JSON)
         .expect("bundled resolved model limits must be valid JSON");
-    let limits = document
+    let Some(limits) = document
         .entries
         .into_iter()
-        .find(|entry| entry.provider_id == "openai" && entry.model_id == id)
-        .expect("official resolved model limit must exist");
-    Model {
+        .find(|entry| entry.provider_id == provider_id && entry.model_id == model.id)
+    else {
+        return false;
+    };
+
+    model.context_window = limits.effective_context_window;
+    model.max_context_window = limits.max_context_window;
+    if model.max_output_tokens.is_none() {
+        model.max_output_tokens = limits.max_output_tokens;
+    }
+    model.effective_source = limits.effective_source;
+    model.max_source = limits.max_source;
+    model.confidence = Some(limits.confidence);
+    model.verified_at = limits.verified_at;
+    true
+}
+
+fn official_resolved_metadata(id: &str, display_name: &str) -> Model {
+    let mut model = Model {
         id: id.to_string(),
         display_name: Some(display_name.to_string()),
         source_kind: Some("official".to_string()),
         locked: true,
-        context_window: limits.effective_context_window,
-        max_context_window: limits.max_context_window,
-        effective_source: limits.effective_source,
-        max_source: limits.max_source,
-        confidence: Some(limits.confidence),
-        verified_at: limits.verified_at,
         input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
         ..Model::default()
-    }
+    };
+    assert!(
+        apply_resolved_model_limits("openai", &mut model),
+        "official resolved model limit must exist"
+    );
+    model
 }
 
 fn official_priced_metadata(

@@ -298,7 +298,7 @@ function GatewayPageImpl({
       await onRefreshClients();
       updateToast(toastId, {
         action: null,
-        text: t("gateway.switchClientDone", { clientName, routeName }),
+        text: t("gateway.switchClientDoneRestart", { clientName, routeName }),
         tone: "success",
       });
       setError(null);

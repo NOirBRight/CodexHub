@@ -28,6 +28,7 @@ import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/taur
 import type {
   AppFlavorInfo,
   AppStatus,
+  CodexContextGuardStatus,
   GatewayStatus,
   GatewayClientSyncSummary,
   Model,
@@ -289,6 +290,7 @@ type ProvidersPageProps = {
   providers: Provider[];
   settings: Settings | null;
   onGatewayChanged?: () => Promise<GatewayStatus | null | void>;
+  onRefreshClients?: () => Promise<void>;
   onProvidersChanged?: (providers: Provider[]) => void;
   onSettingsChanged?: (settings: Settings) => void;
   onStartProxy?: () => Promise<void>;
@@ -302,6 +304,7 @@ function ProvidersPageImpl({
   gatewayStatus: gatewayStatusSnapshot,
   modelMetadata,
   onGatewayChanged,
+  onRefreshClients,
   onProvidersChanged,
   onSettingsChanged,
   onStartProxy,
@@ -941,6 +944,20 @@ function ProvidersPageImpl({
     }
   }
 
+  function reflectContextGuardSetting(enabled: boolean) {
+    setSettings((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = { ...current, openai_context_guard_enabled: enabled };
+      onSettingsChanged?.(next);
+      return next;
+    });
+    setSettingsDraft((current) => (
+      current ? { ...current, openai_context_guard_enabled: enabled } : current
+    ));
+  }
+
   async function updateProvider(next: Provider, successMessage?: string) {
     await saveProviders(
       providers.map((provider) => (provider.id === next.id ? next : provider)),
@@ -1040,7 +1057,7 @@ function ProvidersPageImpl({
       setError(null);
       updateToast(toastId, {
         action: null,
-        text: t("providers.reopenCodexForRoute", {
+        text: t("providers.codexRouteChangedRestart", {
           status: codexHubConnectionSuccessMessage(nextMode, tr),
         }),
         tone: "success",
@@ -1403,8 +1420,10 @@ function ProvidersPageImpl({
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
+                onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={() => void refreshOfficialModels()}
+                onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
                 onReorder={(models) => void reorderOfficialModels(models)}
@@ -1412,6 +1431,7 @@ function ProvidersPageImpl({
                 onToggleModel={toggleOfficialModel}
                 dirty={officialModelDraftDirty}
                 saveBusy={busy === "settings"}
+                syncBoundClients={settings?.auto_sync_clients ?? true}
                 usageBusy={officialUsageBusy}
                 usageError={officialUsageError}
                 usageHidden={officialUsageHidden}
@@ -2342,14 +2362,17 @@ function OfficialDetail({
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
+  onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
+  onRefreshClients,
   onRefreshAuth,
   onRefreshUsage,
   onReorder,
   onSave,
   onToggleModel,
   saveBusy,
+  syncBoundClients,
   usageBusy,
   usageError,
   usageHidden,
@@ -2364,14 +2387,17 @@ function OfficialDetail({
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
+  onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: () => void;
+  onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
   onSave: () => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
   saveBusy: boolean;
+  syncBoundClients: boolean;
   usageBusy: boolean;
   usageError: string | null;
   usageHidden: boolean;
@@ -2381,6 +2407,122 @@ function OfficialDetail({
   const { showToast, updateToast } = useToasts();
   const authorized = authState === "authorized";
   const authRefreshBusy = busy === "auth-refresh";
+  const [contextGuardStatus, setContextGuardStatus] = useState<CodexContextGuardStatus | null>(null);
+  const [contextGuardBusy, setContextGuardBusy] = useState(false);
+  const displayedGatewayContextById = useMemo(() => {
+    if (!contextGuardStatus?.gateway_enabled) {
+      return gatewayContextById;
+    }
+    return new Map(
+      Array.from(gatewayContextById, ([modelId, contextWindow]) => [
+        modelId,
+        Math.min(
+          contextWindow,
+          contextGuardStatus.model_context_window ?? contextWindow,
+        ),
+      ]),
+    );
+  }, [
+    contextGuardStatus?.gateway_enabled,
+    contextGuardStatus?.model_context_window,
+    gatewayContextById,
+  ]);
+
+  useEffect(() => {
+    let active = true;
+    void api.getCodexContextGuardStatus()
+      .then((status) => {
+        if (active) {
+          setContextGuardStatus(status);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          showToast(t("providers.contextGuardStatusFailed", { message: messageFromError(err) }), "error");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [showToast, t]);
+
+  async function toggleContextGuard(enabled: boolean) {
+    if (contextGuardBusy) {
+      return;
+    }
+    setContextGuardBusy(true);
+    const toastId = showToast(
+      enabled ? t("providers.enablingContextGuard") : t("providers.disablingContextGuard"),
+      "loading",
+    );
+    try {
+      const status = await api.setCodexContextGuard(enabled);
+      setContextGuardStatus(status);
+      onContextGuardChanged(status.gateway_enabled);
+      let syncResult: GatewayClientSyncSummary | null = null;
+      let syncError: string | null = null;
+      if (syncBoundClients) {
+        updateToast(toastId, {
+          action: null,
+          text: t("providers.syncBoundClients"),
+          tone: "loading",
+        });
+        try {
+          syncResult = await api.syncGatewayClients();
+        } catch (err) {
+          syncError = messageFromError(err);
+        }
+        await onRefreshClients?.().catch(() => undefined);
+      }
+      const restartMessage = enabled
+        ? t("providers.contextGuardEnabledRestartCodex")
+        : t("providers.contextGuardDisabledRestartCodex");
+      const syncedClientNames = syncResult?.results
+        .filter((result) => result.applied)
+        .map((result) => result.name)
+        .join(", ");
+      const failedClientNames = syncResult?.results
+        .filter((result) => result.status === "failed")
+        .map((result) => result.name)
+        .join(", ");
+      const syncedMessage = syncedClientNames
+        ? t("providers.contextGuardClientsSyncedRestart", {
+            clientNames: syncedClientNames,
+            restartMessage,
+          })
+        : restartMessage;
+      const failedMessage = syncError
+        ? t("providers.contextGuardClientSyncError", {
+            message: syncError,
+            restartMessage,
+          })
+        : failedClientNames && syncedClientNames
+          ? t("providers.contextGuardClientsPartiallySyncedRestart", {
+              failedClientNames,
+              restartMessage,
+              syncedClientNames,
+            })
+          : failedClientNames
+          ? t("providers.contextGuardClientsSyncFailed", {
+              clientNames: failedClientNames,
+              restartMessage,
+            })
+          : null;
+      updateToast(toastId, {
+        action: null,
+        text: failedMessage ?? syncedMessage,
+        tone: failedMessage ? "error" : "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.contextGuardUpdateFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+    } finally {
+      setContextGuardBusy(false);
+    }
+  }
 
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
@@ -2458,8 +2600,27 @@ function OfficialDetail({
         )}
       </div>
       <ModelSection
-        contextById={gatewayContextById}
+        contextById={displayedGatewayContextById}
         disabled
+        headerControl={
+          <div className="group relative">
+            <SwitchControl
+              ariaDescribedBy="context-guard-tooltip"
+              checked={contextGuardStatus?.enabled ?? false}
+              className="h-7"
+              disabled={contextGuardBusy || !contextGuardStatus}
+              label={t("providers.contextGuard")}
+              onChange={(enabled) => void toggleContextGuard(enabled)}
+            />
+            <div
+              id="context-guard-tooltip"
+              role="tooltip"
+              className="pointer-events-none absolute bottom-full right-0 z-30 mb-2 hidden w-80 whitespace-normal rounded-inner bg-ink px-3 py-2 text-left text-xs font-medium leading-5 text-white shadow-floating group-hover:block group-focus-within:block"
+            >
+              {t("providers.contextGuardTooltip")}
+            </div>
+          </div>
+        }
         interactionDisabled={authState !== "authorized"}
         models={models}
         officialDisabledModels={officialDisabledModels}
@@ -2765,6 +2926,7 @@ function ModelSection({
   discoverBusy,
   discoverDisabled,
   discoverError,
+  headerControl,
   interactionDisabled = false,
   models,
   modelTestDisabled,
@@ -2788,6 +2950,7 @@ function ModelSection({
   discoverBusy?: boolean;
   discoverDisabled?: boolean;
   discoverError?: string | null;
+  headerControl?: React.ReactNode;
   interactionDisabled?: boolean;
   models: Model[];
   modelTestDisabled?: boolean;
@@ -2955,6 +3118,7 @@ function ModelSection({
           </p>
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+          {headerControl}
           {discoverError && (
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
               {discoverError}
@@ -2963,7 +3127,10 @@ function ModelSection({
           {onRefresh && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              className={cx(
+                "focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-slate-100 disabled:bg-slate-100",
+                headerControl ? "h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
+              )}
               disabled={interactionDisabled || refreshBusy}
               onClick={onRefresh}
             >
@@ -3363,13 +3530,17 @@ function ModelCapabilityChip({ tag }: { tag: "vision" | "thinking" }) {
 }
 
 function SwitchControl({
+  ariaDescribedBy,
   checked,
+  className,
   disabled = false,
   label,
   onChange,
   showLabel = true,
 }: {
+  ariaDescribedBy?: string;
   checked: boolean;
+  className?: string;
   disabled?: boolean;
   label: string;
   onChange: (checked: boolean) => void;
@@ -3380,7 +3551,9 @@ function SwitchControl({
       className={cx(
         "inline-flex h-6 shrink-0 items-center gap-2 whitespace-nowrap text-xs font-semibold text-slate-600",
         showLabel && "rounded-full border border-line bg-panel pl-2 pr-1",
+        className,
       )}
+      aria-describedby={ariaDescribedBy}
     >
       <span className={showLabel ? "truncate" : "sr-only"}>{label}</span>
       <span className="relative inline-flex h-5 w-9 shrink-0 items-center">

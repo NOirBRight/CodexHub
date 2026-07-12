@@ -27,6 +27,7 @@ const tailwindConfigPath = new URL("../tailwind.config.js", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 const viteConfigPath = new URL("../vite.config.ts", import.meta.url);
 const designPath = new URL("../../DESIGN.md", import.meta.url);
+const userFeedbackStandardPath = new URL("../../docs/agents/user-feedback.md", import.meta.url);
 const preparePythonRuntimePath = new URL("../../scripts/Prepare-PythonRuntime.ps1", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
@@ -1187,17 +1188,21 @@ test("gateway copy actions use inline copied state instead of success toasts", a
 });
 
 test("gateway client route switching reports completion", async () => {
-  const [gatewaySource, cardSource, segmentedSource] = await Promise.all([
+  const [gatewaySource, cardSource, segmentedSource, enSource, zhSource] = await Promise.all([
     readFile(gatewayPagePath, "utf8"),
     readFile(gatewayClientCardPath, "utf8"),
     readFile(segmentedSwitchPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
   ]);
 
   assert.match(gatewaySource, /t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
   assert.match(gatewaySource, /showToast\(t\("gateway\.switchClient", \{ clientName, routeName \}\), "loading"\)/);
   assert.match(gatewaySource, /const shouldForceTakeover = forceTakeover \|\| takeoverRequired;/);
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, shouldForceTakeover\)/);
-  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDone", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
+  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDoneRestart", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
+  assert.match(enSource, /switchClientDoneRestart: "Switched to \{\{routeName\}\}; restart \{\{clientName\}\} to apply"/);
+  assert.match(zhSource, /switchClientDoneRestart: "已切换到 \{\{routeName\}\}；请重启 \{\{clientName\}\} 使其生效"/);
   assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
   assert.match(cardSource, /const pendingRouteValue = busy && busyMode !== "takeover" \? busyMode \?\? null : null;/);
   assert.match(cardSource, /pendingValue=\{pendingRouteValue\}/);
@@ -1209,13 +1214,17 @@ test("gateway client route switching reports completion", async () => {
 });
 
 test("gateway client stale CodexHub route is shown as reapply state", async () => {
-  const cardSource = await readFile(gatewayClientCardPath, "utf8");
+  const [cardSource, zhSource] = await Promise.all([
+    readFile(gatewayClientCardPath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
 
   assert.match(cardSource, /type DisplayRouteMode = RoutingOwner \| "hub" \| "stale" \| "unknown";/);
   assert.match(cardSource, /type ClientStatusKind = "checking" \| "not_installed" \| "installed" \| "ready" \| "pending_sync" \| "unknown";/);
   assert.match(cardSource, /const routeValue = routeOwner === "official" \? "official" : "current_owner";/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*\? "pending_sync"/);
   assert.match(cardSource, /statusKind === "pending_sync"[\s\S]*t\("gateway\.routePendingSync"\)/);
+  assert.match(zhSource, /routePendingSync: "未更新"/);
   assert.match(cardSource, /statusKind === "ready"[\s\S]*t\("gateway\.routeReady"\)/);
   assert.match(cardSource, /routeMode === "stale"[\s\S]*t\("gateway\.routePendingSyncTitle"\)/);
   assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("current_owner"\)\}/);
@@ -1470,6 +1479,7 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(typesSource, /gateway_auto_retry_max_attempts: number;/);
   assert.match(typesSource, /gateway_image_proxy_enabled: boolean;/);
   assert.match(typesSource, /gateway_image_proxy_model: string;/);
+  assert.match(typesSource, /openai_context_guard_enabled: boolean;/);
   assert.match(drawerSource, /<h3 className="text-sm font-semibold text-ink">\{t\("settings\.autoRetry"\)\}<\/h3>/);
   assert.match(drawerSource, /gateway_auto_retry_enabled/);
   assert.match(drawerSource, /label=\{t\("common\.enabled"\)\}/);
@@ -1522,6 +1532,67 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(appSource, /visionModels=\{visionModels\}/);
 });
 
+test("gateway foreign-channel routes render as ready instead of unknown", async () => {
+  const [cardSource, typesSource] = await Promise.all([
+    readFile(gatewayClientCardPath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export type GatewayClientRouteMode =[\s\S]*"other_channel"[\s\S]*"unknown"/);
+  assert.match(typesSource, /route_mode: GatewayClientRouteMode;/);
+  assert.match(
+    cardSource,
+    /info\?\.route_mode === "other_channel"[\s\S]*info\.route_owner === "release" \|\| info\.route_owner === "beta"[\s\S]*return info\.route_owner/,
+  );
+});
+
+test("official model list exposes a Codex and Gateway context cost guard", async () => {
+  const [providersSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface CodexContextGuardStatus/);
+  assert.match(typesSource, /codex_enabled: boolean;/);
+  assert.match(typesSource, /gateway_enabled: boolean;/);
+  assert.match(tauriSource, /get_codex_context_guard_status/);
+  assert.match(tauriSource, /set_codex_context_guard/);
+  assert.match(providersSource, /api\.getCodexContextGuardStatus\(\)/);
+  assert.match(providersSource, /api\.setCodexContextGuard\(enabled\)/);
+  const toggleAction = providersSource.match(
+    /async function toggleContextGuard\(enabled: boolean\) \{[\s\S]*?\n  \}/,
+  )?.[0] ?? "";
+  assert.match(toggleAction, /await api\.syncGatewayClients\(\)/);
+  assert.match(toggleAction, /await onRefreshClients\?\.\(\)\.catch\(\(\) => undefined\)/);
+  assert.match(toggleAction, /result\.applied[\s\S]*result\.name/);
+  assert.match(toggleAction, /result\.status === "failed"[\s\S]*result\.name/);
+  assert.match(providersSource, /label=\{t\("providers\.contextGuard"\)\}/);
+  assert.match(providersSource, /ariaDescribedBy="context-guard-tooltip"/);
+  assert.match(providersSource, /aria-describedby=\{ariaDescribedBy\}/);
+  assert.match(providersSource, /id="context-guard-tooltip"/);
+  assert.match(providersSource, /h-7[\s\S]*rounded-full/);
+  assert.match(providersSource, /rounded-full[\s\S]*t\("common\.refresh"\)/);
+  assert.match(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
+  assert.match(providersSource, /openai_context_guard_enabled: enabled/);
+  assert.match(enSource, /contextGuard: "Long-context cost guard"/);
+  assert.match(zhSource, /contextGuard: "长上下文费用保护"/);
+  assert.match(zhSource, /contextGuardTooltip:/);
+  assert.match(zhSource, /Codex 与 Gateway/);
+  assert.match(zhSource, /272K/);
+  assert.match(zhSource, /240K/);
+  assert.match(zhSource, /高价/);
+  assert.match(zhSource, /开启客户端自动同步时/);
+  assert.match(zhSource, /请重启 \{\{clientNames\}\}/);
+  assert.match(zhSource, /Gateway 中标记为“未更新”/);
+  assert.match(zhSource, /Gateway 更改已实时生效/);
+  assert.match(zhSource, /重启 Codex App/);
+  assert.match(zhSource, /272K/);
+  assert.match(zhSource, /240K/);
+});
+
 test("settings save restarts running gateway when retry or image proxy runtime settings change", async () => {
   const appSource = await readFile(appPath, "utf8");
   const saveAction = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
@@ -1531,6 +1602,7 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.match(appSource, /gateway_auto_retry_max_attempts/);
   assert.match(appSource, /gateway_image_proxy_enabled/);
   assert.match(appSource, /gateway_image_proxy_model/);
+  assert.match(appSource, /openai_context_guard_enabled/);
   assert.match(appSource, /previous\.proxy_port !== next\.proxy_port/);
   assert.match(appSource, /previous\.gateway_request_timeout_seconds !== next\.gateway_request_timeout_seconds/);
   assert.match(appSource, /status\?\.proxy_running/);
@@ -2266,7 +2338,7 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.doesNotMatch(action, /historyHint/);
   assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
   assert.doesNotMatch(action, /reconcileAfterRouteSwitch/);
-  assert.match(action, /updateToast\(toastId,[\s\S]*reopenCodexForRoute[\s\S]*codexHubConnectionSuccessMessage\(nextMode, tr\)[\s\S]*tone: "success"/);
+  assert.match(action, /updateToast\(toastId,[\s\S]*codexRouteChangedRestart[\s\S]*codexHubConnectionSuccessMessage\(nextMode, tr\)[\s\S]*tone: "success"/);
   assert.doesNotMatch(action, /setMessage\(codexHubConnectionSuccessMessage\(nextMode\)\)/);
 });
 
@@ -2300,7 +2372,8 @@ test("Codex Hub connection failures no longer mention history sync", async () =>
   assert.doesNotMatch(providersSource, /Connection failed while syncing history/);
   assert.doesNotMatch(providersSource, /Turn off Auto-sync history/);
   assert.match(providersSource, /t\("providers\.codexHubConnectionFailed", \{ message \}\)/);
-  assert.match(pageToastSource, /toast\.action\s*\?\s*"truncate"\s*:\s*toast\.tone === "error"\s*\?\s*"max-h-32 overflow-auto whitespace-pre-wrap break-words"\s*:\s*"truncate"/);
+  assert.match(pageToastSource, /toast\.tone === "error"[\s\S]*"max-h-32 overflow-auto whitespace-pre-wrap break-words"[\s\S]*"whitespace-pre-wrap break-words leading-5"/);
+  assert.doesNotMatch(pageToastSource, /toast\.tone === "success"[\s\S]{0,160}"truncate"/);
 });
 
 test("Codex Hub connection ignores structured history sync fields from switch status", async () => {
@@ -2450,7 +2523,7 @@ test("CodexHub route switches never control Codex processes", async () => {
   assert.match(tauriSource, /"reconcile_after_route_switch"/);
   assert.doesNotMatch(providersSource, /api\.reconcileAfterRouteSwitch/);
   assert.doesNotMatch(providersSource, /codexRestartedForRoute/);
-  assert.match(providersSource, /reopenCodexForRoute/);
+  assert.match(providersSource, /codexRouteChangedRestart/);
 });
 
 test("settings drawer keeps language immediate and protects unsaved drafts", async () => {
@@ -2723,6 +2796,34 @@ test("Codex takeover uses the existing connected control and exposes ownership s
   assert.match(enSource, /connectedToHubChannel:/);
   assert.match(zhSource, /connectedToHubChannel:/);
   assert.match(zhSource, /connectedToHubChannel: "已连接到 CodexHub · \{\{channel\}\}"/);
+});
+
+test("route and context changes disclose the exact Codex restart requirement", async () => {
+  const [providersSource, enSource, zhSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(providersSource, /t\("providers\.codexRouteChangedRestart", \{[\s\S]*status:/);
+  assert.match(providersSource, /t\("providers\.contextGuardEnabledRestartCodex"\)/);
+  assert.match(providersSource, /t\("providers\.contextGuardDisabledRestartCodex"\)/);
+  assert.match(enSource, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex App to apply"/);
+  assert.match(zhSource, /codexRouteChangedRestart: "\{\{status\}\}；请重启 Codex App 使其生效"/);
+  assert.match(enSource, /Gateway changed immediately; restart Codex App/);
+  assert.match(zhSource, /Gateway 更改已实时生效；请重启 Codex App/);
+});
+
+test("persistent state changes follow the project toast and restart-disclosure standard", async () => {
+  const [agentsSource, standardSource] = await Promise.all([
+    readFile(new URL("../../AGENTS.md", import.meta.url), "utf8"),
+    readFile(userFeedbackStandardPath, "utf8"),
+  ]);
+
+  assert.match(agentsSource, /docs\/agents\/user-feedback\.md/);
+  assert.match(standardSource, /Every user-initiated persistent state change/);
+  assert.match(standardSource, /update that same Toast/);
+  assert.match(standardSource, /name the exact client or runtime the user must restart/);
 });
 
 test("gateway takeover is direct and does not add a confirmation surface", async () => {

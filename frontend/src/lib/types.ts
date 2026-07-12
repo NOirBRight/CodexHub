@@ -333,6 +333,15 @@ export interface GatewayClientConfig {
   curl_test: string;
 }
 
+export type GatewayClientRouteMode =
+  | "official"
+  | "release"
+  | "beta"
+  | "hub"
+  | "stale"
+  | "other_channel"
+  | "unknown";
+
 export interface GatewayClientInfo {
   id: string;
   name: string;
@@ -340,7 +349,7 @@ export interface GatewayClientInfo {
   installed: boolean;
   auto_apply_supported: boolean;
   config_path?: string | null;
-  route_mode: string;
+  route_mode: GatewayClientRouteMode;
   route_owner: RoutingOwner;
   route_endpoint?: string | null;
   managed_by_current_app: boolean;
@@ -452,11 +461,20 @@ export interface Settings {
   gateway_auto_retry_max_attempts: number;
   gateway_image_proxy_enabled: boolean;
   gateway_image_proxy_model: string;
+  openai_context_guard_enabled: boolean;
   gateway_fast_model_variants: string[];
   official_disabled_models: string[];
   official_model_sort_order: string[];
   official_provider_sort_order: number;
   proxy_port: number;
+}
+
+export interface CodexContextGuardStatus {
+  enabled: boolean;
+  codex_enabled: boolean;
+  gateway_enabled: boolean;
+  model_context_window?: number | null;
+  model_auto_compact_token_limit?: number | null;
 }
 
 export type TabId = "codexhub" | "gateway";
