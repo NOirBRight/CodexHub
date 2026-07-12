@@ -4,6 +4,8 @@ import re
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "audit_issue_62_runtime_artifacts.py"
@@ -19,7 +21,20 @@ def load_audit_module():
     return module
 
 
-def create_codex_log_db(path: Path) -> None:
+def run_audit(module, codex_db: Path, gateway_db: Path):
+    return module.audit_artifacts(
+        codex_log_db=codex_db,
+        gateway_db=gateway_db,
+        model="gpt-5.6-sol",
+        gateway_started_at="1970-01-01T00:03:00Z",
+        app_server_started_at="1970-01-01T00:05:00Z",
+        config_written_at="1970-01-01T00:06:00Z",
+        catalog_written_at="1970-01-01T00:02:00Z",
+        snapshot_ended_at="1970-01-01T00:10:00Z",
+    )
+
+
+def create_codex_log_db(path: Path, *, gateway_tool_choice: object = "auto") -> None:
     connection = sqlite3.connect(path)
     connection.execute(
         """
@@ -71,7 +86,7 @@ def create_codex_log_db(path: Path) -> None:
                 "output": "must not be retained",
             },
         ],
-        "tool_choice": "auto",
+        "tool_choice": gateway_tool_choice,
         "parallel_tool_calls": False,
         "stream": True,
         "client_metadata": {"session_id": "must-not-be-retained"},
@@ -113,8 +128,11 @@ def create_codex_log_db(path: Path) -> None:
 def create_gateway_db(
     path: Path,
     *,
+    prefix_available: bool = True,
     prefix_mismatch: bool = False,
+    request_hmac_pair: tuple[str, str] | None = None,
     response_fingerprint_column: bool = False,
+    response_fingerprint_pair: tuple[str | None, str | None] | None = None,
 ) -> None:
     connection = sqlite3.connect(path)
     connection.execute(
@@ -140,6 +158,27 @@ def create_gateway_db(
         connection.execute(
             "ALTER TABLE gateway_requests ADD COLUMN downstream_response_body_sha256 TEXT"
         )
+    if response_fingerprint_pair is not None:
+        connection.execute(
+            "ALTER TABLE gateway_requests ADD COLUMN upstream_response_body_sha256 TEXT"
+        )
+        connection.execute(
+            "ALTER TABLE gateway_requests ADD COLUMN downstream_response_body_sha256 TEXT"
+        )
+        connection.execute(
+            """
+            INSERT INTO gateway_requests (
+                request_id,
+                upstream_response_body_sha256,
+                downstream_response_body_sha256
+            ) VALUES (?, ?, ?)
+            """,
+            (
+                "must-not-be-retained",
+                response_fingerprint_pair[0],
+                response_fingerprint_pair[1],
+            ),
+        )
 
     request_start = {
         "event": "request_start",
@@ -152,12 +191,19 @@ def create_gateway_db(
         "codex_semantic_adapter": "none",
         "repair_policy": "none",
         "is_stream": True,
-        "caller_request_prefix_hmac": "prefix-a",
-        "upstream_request_prefix_hmac": "prefix-b" if prefix_mismatch else "prefix-a",
-        "caller_request_body_hmac_skipped": True,
-        "upstream_request_body_hmac_skipped": True,
         "request_id": "must-not-be-retained",
     }
+    if prefix_available:
+        request_start["caller_request_prefix_hmac"] = "prefix-a"
+        request_start["upstream_request_prefix_hmac"] = (
+            "prefix-b" if prefix_mismatch else "prefix-a"
+        )
+    if request_hmac_pair is None:
+        request_start["caller_request_body_hmac_skipped"] = True
+        request_start["upstream_request_body_hmac_skipped"] = True
+    else:
+        request_start["caller_request_body_hmac"] = request_hmac_pair[0]
+        request_start["upstream_request_body_hmac"] = request_hmac_pair[1]
     request_complete = {
         "event": "request_complete",
         "upstream": "official",
@@ -183,16 +229,7 @@ def test_audit_reports_only_sanitized_schema_and_gate_facts(tmp_path: Path) -> N
     create_codex_log_db(codex_db)
     create_gateway_db(gateway_db)
 
-    audit = module.audit_artifacts(
-        codex_log_db=codex_db,
-        gateway_db=gateway_db,
-        model="gpt-5.6-sol",
-        gateway_started_at="1970-01-01T00:03:00Z",
-        app_server_started_at="1970-01-01T00:05:00Z",
-        config_written_at="1970-01-01T00:06:00Z",
-        catalog_written_at="1970-01-01T00:02:00Z",
-        snapshot_ended_at="1970-01-01T00:10:00Z",
-    )
+    audit = run_audit(module, codex_db, gateway_db)
 
     assert audit["schema_version"] == 1
     planner = audit["model_visible_request_plan"]
@@ -280,16 +317,7 @@ def test_audit_surfaces_unclassified_items_and_prefix_mismatch(tmp_path: Path) -
     connection.commit()
     connection.close()
 
-    audit = module.audit_artifacts(
-        codex_log_db=codex_db,
-        gateway_db=gateway_db,
-        model="gpt-5.6-sol",
-        gateway_started_at="1970-01-01T00:03:00Z",
-        app_server_started_at="1970-01-01T00:05:00Z",
-        config_written_at="1970-01-01T00:06:00Z",
-        catalog_written_at="1970-01-01T00:02:00Z",
-        snapshot_ended_at="1970-01-01T00:10:00Z",
-    )
+    audit = run_audit(module, codex_db, gateway_db)
 
     assert audit["model_visible_request_plan"]["unclassified_item_types"] == [
         "future_item"
@@ -331,18 +359,98 @@ def test_audit_detects_generic_response_body_fingerprint_fields(tmp_path: Path) 
     create_codex_log_db(codex_db)
     create_gateway_db(gateway_db, response_fingerprint_column=True)
 
-    audit = module.audit_artifacts(
-        codex_log_db=codex_db,
-        gateway_db=gateway_db,
-        model="gpt-5.6-sol",
-        gateway_started_at="1970-01-01T00:03:00Z",
-        app_server_started_at="1970-01-01T00:05:00Z",
-        config_written_at="1970-01-01T00:06:00Z",
-        catalog_written_at="1970-01-01T00:02:00Z",
-        snapshot_ended_at="1970-01-01T00:10:00Z",
-    )
+    audit = run_audit(module, codex_db, gateway_db)
 
     assert (
         audit["gateway_identity_route"]["response_body_fingerprint_fields_present"]
         is True
     )
+
+
+def test_full_pre_post_stays_live_when_request_hmacs_differ(tmp_path: Path) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(
+        gateway_db,
+        request_hmac_pair=("caller-value", "upstream-value"),
+        response_fingerprint_column=True,
+    )
+
+    audit = run_audit(module, codex_db, gateway_db)
+
+    identity = audit["gateway_identity_route"]
+    assert identity["full_body_hmac_equal"] == 0
+    assert identity["full_body_hmac_mismatch"] == 1
+    assert identity["full_body_hmac_unavailable"] == 0
+    assert (
+        audit["gate_classification"]["full_pre_post_request_response"]
+        == "live_control_required"
+    )
+
+
+def test_full_pre_post_stays_live_when_response_fingerprints_are_empty(
+    tmp_path: Path,
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(
+        gateway_db,
+        request_hmac_pair=("same-request-value", "same-request-value"),
+        response_fingerprint_pair=(None, ""),
+    )
+
+    audit = run_audit(module, codex_db, gateway_db)
+
+    identity = audit["gateway_identity_route"]
+    assert identity["response_body_fingerprint_equal"] == 0
+    assert identity["response_body_fingerprint_mismatch"] == 0
+    assert identity["response_body_fingerprint_unavailable"] == 1
+    assert (
+        audit["gate_classification"]["full_pre_post_request_response"]
+        == "live_control_required"
+    )
+
+
+def test_zero_unclassified_identity_rejects_unavailable_prefixes(
+    tmp_path: Path,
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db, prefix_available=False)
+
+    audit = run_audit(module, codex_db, gateway_db)
+
+    assert audit["model_visible_request_plan"]["unclassified_item_types"] == []
+    assert audit["gateway_identity_route"]["prefix_equal"] == 0
+    assert audit["gateway_identity_route"]["prefix_mismatch"] == 0
+    assert audit["gateway_identity_route"]["prefix_unavailable"] == 1
+    assert audit["gate_classification"]["zero_unclassified_identity"] == "not_met"
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [True, 7, 1.5, "sometimes", {"unexpected": "shape"}],
+)
+def test_choice_controls_reject_unclassified_and_invalid_scalar_shapes(
+    tmp_path: Path,
+    tool_choice: object,
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db, gateway_tool_choice=tool_choice)
+    create_gateway_db(gateway_db)
+
+    audit = run_audit(module, codex_db, gateway_db)
+
+    assert {
+        variant["tool_choice"]
+        for variant in audit["model_visible_request_plan"]["plan_variants"]
+    } == {"unclassified"}
+    assert audit["gate_classification"]["choice_controls"] == "unclassified"

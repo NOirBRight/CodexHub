@@ -36,6 +36,7 @@ KNOWN_INPUT_ITEM_TYPES = {
     "tool_search_output",
     "web_search_call",
 }
+VALID_TOOL_CHOICE_STRINGS = {"auto", "none", "required"}
 ROUTE_FIELDS = (
     "upstream",
     "route_mode",
@@ -45,6 +46,30 @@ ROUTE_FIELDS = (
     "wire_format_adapter",
     "codex_semantic_adapter",
     "repair_policy",
+)
+# Only these pairs declare both sides of the comparison. Other response-body
+# fingerprint-shaped fields remain presence diagnostics and cannot open a gate.
+KNOWN_RESPONSE_BODY_FINGERPRINT_PAIRS = (
+    (
+        "upstream_response_body_hmac",
+        "downstream_response_body_hmac",
+        "upstream_downstream_hmac",
+    ),
+    (
+        "upstream_response_body_sha256",
+        "downstream_response_body_sha256",
+        "upstream_downstream_sha256",
+    ),
+    (
+        "pre_gateway_response_body_hmac",
+        "post_gateway_response_body_hmac",
+        "pre_post_hmac",
+    ),
+    (
+        "pre_gateway_response_body_sha256",
+        "post_gateway_response_body_sha256",
+        "pre_post_sha256",
+    ),
 )
 
 
@@ -85,19 +110,33 @@ def _endpoint_class(endpoint: str) -> str:
 
 
 def _sanitize_tool_choice(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None:
         return value
+    if isinstance(value, str):
+        return value if value in VALID_TOOL_CHOICE_STRINGS else "unclassified"
     if not isinstance(value, dict):
         return "unclassified"
-    sanitized: dict[str, Any] = {}
-    if isinstance(value.get("type"), str):
-        sanitized["type"] = value["type"]
-    if isinstance(value.get("name"), str):
-        sanitized["name"] = value["name"]
+    if value.get("type") != "function":
+        return "unclassified"
+    name = value.get("name")
     function = value.get("function")
-    if isinstance(function, dict) and isinstance(function.get("name"), str):
-        sanitized["function_name"] = function["name"]
-    return sanitized or "unclassified"
+    if not isinstance(name, str) or not name:
+        if isinstance(function, dict):
+            name = function.get("name")
+    if not isinstance(name, str) or not name:
+        return "unclassified"
+    return {"name": name, "type": "function"}
+
+
+def _is_proven_tool_choice(value: Any) -> bool:
+    if isinstance(value, str):
+        return value in VALID_TOOL_CHOICE_STRINGS
+    return (
+        isinstance(value, dict)
+        and value.get("type") == "function"
+        and isinstance(value.get("name"), str)
+        and bool(value["name"])
+    )
 
 
 def _sanitize_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +323,9 @@ def _gateway_evidence(
     prefix_equal = 0
     prefix_mismatch = 0
     prefix_unavailable = 0
+    full_body_hmac_equal = 0
+    full_body_hmac_mismatch = 0
+    full_body_hmac_unavailable = 0
     full_body_hmac_pairs = 0
     full_body_hmac_both_skipped = 0
     gateway_requests_after_app_server_start = 0
@@ -291,6 +333,11 @@ def _gateway_evidence(
     route_counts: Counter[str] = Counter()
     routes: dict[str, dict[str, Any]] = {}
     response_fingerprint_keys: set[str] = set()
+    official_request_ids: set[str] = set()
+    response_body_fingerprint_equal = 0
+    response_body_fingerprint_mismatch = 0
+    response_body_fingerprint_unavailable = 0
+    response_body_fingerprint_pair_semantics = "unavailable"
     app_server_time = _parse_iso_timestamp(app_server_started_at)
 
     connection = _read_only_connection(path)
@@ -320,6 +367,9 @@ def _gateway_evidence(
                 continue
             if event == "request_start":
                 request_starts += 1
+                request_id = payload.get("request_id")
+                if isinstance(request_id, str) and request_id:
+                    official_request_ids.add(request_id)
                 is_stream = payload.get("is_stream")
                 if is_stream is True or is_stream == 1:
                     streaming_requests += 1
@@ -336,10 +386,21 @@ def _gateway_evidence(
                 else:
                     prefix_unavailable += 1
 
-                if isinstance(payload.get("caller_request_body_hmac"), str) and isinstance(
-                    payload.get("upstream_request_body_hmac"), str
+                caller_body_hmac = payload.get("caller_request_body_hmac")
+                upstream_body_hmac = payload.get("upstream_request_body_hmac")
+                if (
+                    isinstance(caller_body_hmac, str)
+                    and caller_body_hmac.strip()
+                    and isinstance(upstream_body_hmac, str)
+                    and upstream_body_hmac.strip()
                 ):
                     full_body_hmac_pairs += 1
+                    if caller_body_hmac == upstream_body_hmac:
+                        full_body_hmac_equal += 1
+                    else:
+                        full_body_hmac_mismatch += 1
+                else:
+                    full_body_hmac_unavailable += 1
                 if (
                     payload.get("caller_request_body_hmac_skipped") is True
                     and payload.get("upstream_request_body_hmac_skipped") is True
@@ -372,6 +433,46 @@ def _gateway_evidence(
             for name in table_names
             if _is_response_body_fingerprint_field(name)
         )
+        known_pairs = [
+            pair
+            for pair in KNOWN_RESPONSE_BODY_FINGERPRINT_PAIRS
+            if pair[0] in table_names and pair[1] in table_names
+        ]
+        if len(known_pairs) == 1 and "request_id" in table_names:
+            before_field, after_field, pair_semantics = known_pairs[0]
+            response_body_fingerprint_pair_semantics = pair_semantics
+            rows_by_request_id = {
+                request_id: (before_value, after_value)
+                for request_id, before_value, after_value in connection.execute(
+                    f"SELECT request_id, {before_field}, {after_field} FROM gateway_requests"
+                )
+                if isinstance(request_id, str) and request_id in official_request_ids
+            }
+            for request_id in official_request_ids:
+                before_value, after_value = rows_by_request_id.get(
+                    request_id,
+                    (None, None),
+                )
+                if (
+                    isinstance(before_value, str)
+                    and before_value.strip()
+                    and isinstance(after_value, str)
+                    and after_value.strip()
+                ):
+                    if before_value == after_value:
+                        response_body_fingerprint_equal += 1
+                    else:
+                        response_body_fingerprint_mismatch += 1
+                else:
+                    response_body_fingerprint_unavailable += 1
+            response_body_fingerprint_unavailable += max(
+                0,
+                request_starts - len(official_request_ids),
+            )
+        else:
+            if len(known_pairs) > 1:
+                response_body_fingerprint_pair_semantics = "ambiguous"
+            response_body_fingerprint_unavailable = request_starts
     finally:
         connection.close()
 
@@ -388,7 +489,10 @@ def _gateway_evidence(
         "gateway_requests_after_app_server_start": gateway_requests_after_app_server_start,
         "gateway_identity_route": {
             "full_body_hmac_both_skipped": full_body_hmac_both_skipped,
+            "full_body_hmac_equal": full_body_hmac_equal,
+            "full_body_hmac_mismatch": full_body_hmac_mismatch,
             "full_body_hmac_pairs": full_body_hmac_pairs,
+            "full_body_hmac_unavailable": full_body_hmac_unavailable,
             "non_streaming_requests": non_streaming_requests,
             "observed_sse_event_type_counts": dict(sorted(sse_event_types.items())),
             "prefix_equal": prefix_equal,
@@ -396,6 +500,10 @@ def _gateway_evidence(
             "prefix_unavailable": prefix_unavailable,
             "request_starts": request_starts,
             "response_body_fingerprint_fields_present": bool(response_fingerprint_keys),
+            "response_body_fingerprint_equal": response_body_fingerprint_equal,
+            "response_body_fingerprint_mismatch": response_body_fingerprint_mismatch,
+            "response_body_fingerprint_pair_semantics": response_body_fingerprint_pair_semantics,
+            "response_body_fingerprint_unavailable": response_body_fingerprint_unavailable,
             "route_variants": route_variants,
             "streaming_requests": streaming_requests,
         },
@@ -442,17 +550,25 @@ def audit_artifacts(
     planner = codex["model_visible_request_plan"]
     identity = gateway["gateway_identity_route"]
     choice_observed = any(
-        variant.get("tool_choice") is not None
+        _is_proven_tool_choice(variant.get("tool_choice"))
         and isinstance(variant.get("parallel_tool_calls"), bool)
         for variant in planner["plan_variants"]
     )
     full_pre_post_met = (
         identity["request_starts"] > 0
-        and identity["full_body_hmac_pairs"] == identity["request_starts"]
-        and identity["response_body_fingerprint_fields_present"]
+        and identity["full_body_hmac_equal"] == identity["request_starts"]
+        and identity["full_body_hmac_mismatch"] == 0
+        and identity["full_body_hmac_unavailable"] == 0
+        and identity["response_body_fingerprint_equal"] == identity["request_starts"]
+        and identity["response_body_fingerprint_mismatch"] == 0
+        and identity["response_body_fingerprint_unavailable"] == 0
     )
     zero_unclassified = (
-        not planner["unclassified_item_types"] and identity["prefix_mismatch"] == 0
+        not planner["unclassified_item_types"]
+        and identity["request_starts"] > 0
+        and identity["prefix_equal"] == identity["request_starts"]
+        and identity["prefix_mismatch"] == 0
+        and identity["prefix_unavailable"] == 0
     )
 
     return {
