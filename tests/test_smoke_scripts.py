@@ -1,7 +1,56 @@
+import json
 from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the lifecycle replay")
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-LifecycleReplay",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "lifecycle_replay"
+    assert summary["passed"] is True
+    assert summary["failures"] == []
+    assert summary["tracked_child_exited"] is True
+
+
+def test_issue_108_qualification_has_no_harness_history_bridge():
+    source = (
+        ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "StructuredApplyPatchHistoryBridge" not in source
+    assert "CODEXHUB_ENABLE_APPLY_PATCH_HISTORY_BRIDGE" not in source
+    assert "apply_patch_history_bridge" not in source
 
 
 def test_codex_tool_smoke_prefers_app_cli_and_runs_ephemeral():

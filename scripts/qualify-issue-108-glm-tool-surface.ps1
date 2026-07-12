@@ -6,7 +6,7 @@ param(
     [int]$ProxyStartupSeconds = 20,
     [switch]$CaptureRequestShape,
     [switch]$UseCliSandboxBypass,
-    [switch]$StructuredApplyPatchHistoryBridge,
+    [switch]$LifecycleReplay,
     [bool]$FailFastAfterFirstPostSuccessToolChoice = $true
 )
 
@@ -89,8 +89,163 @@ function Stop-TrackedProcess {
     if ($null -eq $Tracked -or $null -eq $Tracked.Process -or $Tracked.Process.HasExited) {
         return
     }
-    $Tracked.Process.Kill($true)
-    [void]$Tracked.Process.WaitForExit(10000)
+
+    $treeKillMethod = $Tracked.Process.GetType().GetMethod('Kill', [Type[]]@([bool]))
+    if ($null -ne $treeKillMethod) {
+        [void]$treeKillMethod.Invoke($Tracked.Process, [object[]]@($true))
+    }
+    else {
+        $taskKillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        if (-not (Test-Path -LiteralPath $taskKillPath)) {
+            throw 'retained_handle_tree_stop_unavailable'
+        }
+        & $taskKillPath '/PID' ([string]$Tracked.Process.Id) '/T' '/F' 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0 -and -not $Tracked.Process.HasExited) {
+            throw 'retained_handle_tree_stop_failed'
+        }
+    }
+    if (-not $Tracked.Process.WaitForExit(10000)) {
+        throw 'retained_handle_tree_stop_timed_out'
+    }
+}
+
+function Add-SanitizedFailure {
+    param(
+        [System.Collections.Generic.List[string]]$Failures,
+        [string]$Code
+    )
+
+    if ($Failures -notcontains $Code) {
+        [void]$Failures.Add($Code)
+    }
+}
+
+function Add-SanitizedSummaryFailure {
+    param(
+        [System.Collections.IDictionary]$Summary,
+        [string]$Code
+    )
+
+    $existing = @($Summary['failures'])
+    if ($existing -notcontains $Code) {
+        $Summary['failures'] = @($existing) + @($Code)
+    }
+    $Summary['passed'] = $false
+}
+
+function Get-SanitizedQualificationFailureCode {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $message = [string]$ErrorRecord.Exception.Message
+    if ($message -like 'First tool after the successful apply_patch result*') {
+        return 'post_success_tool_choice_failed'
+    }
+    if ($message -like 'Codex CLI timed out*') {
+        return 'cli_timeout'
+    }
+    if ($message -like 'Isolated proxy did not become healthy*') {
+        return 'proxy_startup_failed'
+    }
+    return 'qualification_execution_failed'
+}
+
+function Complete-TrackedProcess {
+    param(
+        $Tracked,
+        [string]$Name,
+        [string]$StdoutPath,
+        [string]$StderrPath,
+        [System.Collections.IDictionary]$Summary,
+        [bool]$CaptureOutput = $true
+    )
+
+    if ($null -eq $Tracked -or $null -eq $Tracked.Process) {
+        return
+    }
+    try {
+        Stop-TrackedProcess $Tracked
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $Summary -Code "cleanup_${Name}_stop_failed"
+    }
+
+    try {
+        if (-not $Tracked.Process.HasExited) {
+            Add-SanitizedSummaryFailure -Summary $Summary -Code "cleanup_${Name}_child_remained"
+            return
+        }
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $Summary -Code "cleanup_${Name}_state_unavailable"
+        return
+    }
+
+    if (-not $CaptureOutput) {
+        return
+    }
+    try {
+        Save-BoundedText -Path $StdoutPath -Text $Tracked.StdoutTask.GetAwaiter().GetResult()
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $Summary -Code "cleanup_${Name}_stdout_capture_failed"
+    }
+    try {
+        Save-BoundedText -Path $StderrPath -Text $Tracked.StderrTask.GetAwaiter().GetResult()
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $Summary -Code "cleanup_${Name}_stderr_capture_failed"
+    }
+}
+
+function Invoke-LifecycleReplay {
+    param([string]$ReplayOutputDir)
+
+    $runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
+    $runRoot = Join-Path $ReplayOutputDir "run-$runId"
+    $summaryPath = Join-Path $runRoot 'summary.json'
+    $tracked = $null
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $summary = [ordered]@{
+        mode = 'lifecycle_replay'
+        passed = $false
+        failures = @()
+        tracked_child_exited = $false
+        run_root = $runRoot
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
+        $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $powershellPath)) {
+            throw 'lifecycle_powershell_not_found'
+        }
+        $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
+            '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 2'
+        ) -WorkingDirectory $runRoot
+        Stop-TrackedProcess $tracked
+    }
+    catch {
+        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
+    }
+    finally {
+        if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
+            [void]$tracked.Process.WaitForExit(5000)
+        }
+        if ($null -eq $tracked -or -not $tracked.Process.HasExited) {
+            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
+        }
+        else {
+            $summary.tracked_child_exited = $true
+        }
+        $summary.failures = @($failures)
+        $summary.passed = $failures.Count -eq 0
+        $summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    }
+
+    Get-Content -LiteralPath $summaryPath -Raw
+    if (-not $summary.passed) {
+        exit 1
+    }
 }
 
 function Save-BoundedText {
@@ -176,6 +331,11 @@ if (-not $OutputDir) {
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+if ($LifecycleReplay) {
+    Invoke-LifecycleReplay -ReplayOutputDir $OutputDir
+    exit $LASTEXITCODE
+}
+
 if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('OLLAMA_API_KEY'))) {
     throw 'OLLAMA_API_KEY is required for the isolated GLM qualification.'
 }
@@ -216,12 +376,12 @@ $authCopyPath = Join-Path $runtimeHome 'auth.json'
 $proxy = $null
 $cli = $null
 $cliExitCode = $null
+$cliOutputCaptured = $false
 $summary = [ordered]@{
     model = 'ollama-cloud/glm-5.2'
     expected_upstream = 'ollama_cloud'
     expected_route_mode = 'codexhub'
     cli_sandbox = if ($UseCliSandboxBypass) { 'isolated_bypass' } else { 'workspace_write' }
-    structured_apply_patch_history_bridge = [bool]$StructuredApplyPatchHistoryBridge
     fail_fast_after_first_post_success_tool_choice = $FailFastAfterFirstPostSuccessToolChoice
     run_root = $runRoot
     passed = $false
@@ -265,7 +425,7 @@ try {
         CODEX_PROXY_PORT = "$proxyPort"
     }
     $proxyArguments = @('-u', 'codex_proxy.py', '--port', "$proxyPort")
-    $captureProxyEnabled = $CaptureRequestShape -or $StructuredApplyPatchHistoryBridge -or $FailFastAfterFirstPostSuccessToolChoice
+    $captureProxyEnabled = $CaptureRequestShape -or $FailFastAfterFirstPostSuccessToolChoice
     if ($captureProxyEnabled) {
         $captureProxyPath = Join-Path $runRoot 'capture-proxy.py'
         $captureProxy = @'
@@ -283,14 +443,11 @@ _capture_path = Path(os.environ["CODEXHUB_REQUEST_TOOL_SHAPE_PATH"])
 _capture_count = 0
 _sse_capture_count = 0
 _apply_patch_capture_count = 0
-_bridge_enabled = os.environ.get("CODEXHUB_ENABLE_APPLY_PATCH_HISTORY_BRIDGE") == "1"
-_bridge_request_active = False
 _post_success_apply_patch_pending = False
 _post_success_tool_choice_recorded = False
 _original_compatible_request_body = codex_proxy.compatible_request_body
 _original_compatible_sse_line = codex_proxy.compatible_sse_line
 _original_apply_patch_events_for_event = codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event
-_original_function_tool_names = codex_proxy._function_tool_names
 _apply_patch_item_ids = set()
 
 
@@ -382,57 +539,6 @@ def _is_exact_apply_patch_history_pair(call, result):
         and result.get("type") == "custom_tool_call_output"
         and result.get("call_id") == call["call_id"]
     )
-
-
-def _bridge_apply_patch_history(payload):
-    input_items = payload.get("input") if isinstance(payload, dict) else None
-    if not isinstance(input_items, list):
-        return payload, 0
-    rewritten = []
-    adapted = 0
-    index = 0
-    while index < len(input_items):
-        call = input_items[index]
-        result = input_items[index + 1] if index + 1 < len(input_items) else None
-        if _is_exact_apply_patch_history_pair(call, result):
-            rewritten.append(
-                {
-                    "type": "function_call",
-                    "call_id": call["call_id"],
-                    "name": "apply_patch",
-                    "arguments": json.dumps({"patch": call["input"]}, ensure_ascii=True, separators=(",", ":")),
-                }
-            )
-            rewritten.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": result["call_id"],
-                    "output": result["output"],
-                }
-            )
-            adapted += 1
-            index += 2
-            continue
-        rewritten.append(call)
-        index += 1
-    if not adapted:
-        return payload, 0
-    rewritten_payload = dict(payload)
-    rewritten_payload["input"] = rewritten
-    return rewritten_payload, adapted
-
-
-def _function_tool_names_with_apply_patch_history_bridge(value):
-    names = _original_function_tool_names(value)
-    if _bridge_request_active and isinstance(value, list):
-        if any(
-            isinstance(tool, dict)
-            and tool.get("type") == "custom"
-            and tool.get("name") == "apply_patch"
-            for tool in value
-        ):
-            names.add("apply_patch")
-    return names
 
 
 def _note_post_success_apply_patch_history(payload):
@@ -552,7 +658,6 @@ def _capture(stage, body):
 
 
 def _compatible_request_body_with_capture(body, *args, **kwargs):
-    global _bridge_request_active
     _capture("before", body)
     payload = None
     try:
@@ -563,20 +668,7 @@ def _compatible_request_body_with_capture(body, *args, **kwargs):
         pass
     if payload is not None:
         _note_post_success_apply_patch_history(payload)
-    forwarded_body = body
-    adapted = 0
-    if _bridge_enabled and payload is not None:
-        payload, adapted = _bridge_apply_patch_history(payload)
-        if adapted:
-            forwarded_body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            _append_capture_record(
-                {"stage": "apply_patch_history_bridge", "outcome": "adapted", "count": adapted}
-            )
-    _bridge_request_active = adapted > 0
-    try:
-        rewritten = _original_compatible_request_body(forwarded_body, *args, **kwargs)
-    finally:
-        _bridge_request_active = False
+    rewritten = _original_compatible_request_body(body, *args, **kwargs)
     _capture("after", rewritten)
     return rewritten
 
@@ -683,15 +775,10 @@ def _apply_patch_events_for_event_with_capture(self, event):
 codex_proxy.compatible_request_body = _compatible_request_body_with_capture
 codex_proxy.compatible_sse_line = _compatible_sse_line_with_capture
 codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event = _apply_patch_events_for_event_with_capture
-if _bridge_enabled:
-    codex_proxy._function_tool_names = _function_tool_names_with_apply_patch_history_bridge
 raise SystemExit(codex_proxy.main())
 '@
         [System.IO.File]::WriteAllText($captureProxyPath, $captureProxy, [System.Text.UTF8Encoding]::new($false))
         $childEnvironment['CODEXHUB_REQUEST_TOOL_SHAPE_PATH'] = $requestShapePath
-        if ($StructuredApplyPatchHistoryBridge) {
-            $childEnvironment['CODEXHUB_ENABLE_APPLY_PATCH_HISTORY_BRIDGE'] = '1'
-        }
         $proxyArguments = @('-u', $captureProxyPath, '--port', "$proxyPort")
     }
     $cliConfig = @"
@@ -785,11 +872,11 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $cliStderr = $cli.StderrTask.GetAwaiter().GetResult()
     Save-BoundedText -Path $cliStdoutPath -Text $cliStdout
     Save-BoundedText -Path $cliStderrPath -Text $cliStderr
+    $cliOutputCaptured = $true
     Start-Sleep -Milliseconds 750
 
     $events = Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')
     $captureEvents = Read-JsonLines -Path $requestShapePath
-    $historyBridgeEvents = @($captureEvents | Where-Object { $_.stage -eq 'apply_patch_history_bridge' })
     $postSuccessChoiceEvents = @($captureEvents | Where-Object { $_.stage -eq 'post_success_tool_choice' })
     if ($null -eq $postSuccessToolChoice -and $postSuccessChoiceEvents.Count -gt 0) {
         $postSuccessToolChoice = [string]$postSuccessChoiceEvents[0].choice
@@ -840,15 +927,6 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     elseif ($postSuccessToolChoice -ne 'shell_command') {
         [void]$failures.Add("first post-success tool choice was $postSuccessToolChoice, not shell_command")
     }
-    $invalidHistoryBridge = $historyBridgeEvents.Count -eq 0 -or @(
-        $historyBridgeEvents | Where-Object { $_.outcome -ne 'adapted' -or $_.count -ne 1 }
-    ).Count -gt 0
-    if ($StructuredApplyPatchHistoryBridge -and $invalidHistoryBridge) {
-        [void]$failures.Add('harness-only structured apply_patch history bridge did not adapt one exact pair per continuation request')
-    }
-    elseif (-not $StructuredApplyPatchHistoryBridge -and $historyBridgeEvents.Count -ne 0) {
-        [void]$failures.Add('original qualification unexpectedly used the harness-only structured apply_patch history bridge')
-    }
     if ($requestStarts.Count -eq 0) {
         [void]$failures.Add('proxy did not record a request_start event')
     }
@@ -878,33 +956,28 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $summary.deferred_surface_event_count = $surfaceEvents.Count
     $summary.apply_patch_adapter_outcomes = @($adapterEvents | ForEach-Object { [string]$_.outcome })
     $summary.post_success_tool_choice = $postSuccessToolChoice
-    $summary.history_bridge_event_count = $historyBridgeEvents.Count
     $summary.git_status = @($statusLines)
     $summary.git_numstat = $numstat
     $summary.failures = @($failures)
     $summary.passed = $failures.Count -eq 0
 }
 catch {
-    $summary.failures = @($summary.failures) + ("line {0}: {1}" -f $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
-    $summary.passed = $false
+    Add-SanitizedSummaryFailure -Summary $summary -Code (Get-SanitizedQualificationFailureCode -ErrorRecord $_)
 }
 finally {
     if ($null -ne $cli) {
-        Stop-TrackedProcess $cli
-        $cliStdout = $cli.StdoutTask.GetAwaiter().GetResult()
-        $cliStderr = $cli.StderrTask.GetAwaiter().GetResult()
-        Save-BoundedText -Path $cliStdoutPath -Text $cliStdout
-        Save-BoundedText -Path $cliStderrPath -Text $cliStderr
+        Complete-TrackedProcess -Tracked $cli -Name 'cli' -StdoutPath $cliStdoutPath -StderrPath $cliStderrPath -Summary $summary -CaptureOutput (-not $cliOutputCaptured)
     }
     if ($null -ne $proxy) {
-        Stop-TrackedProcess $proxy
-        $proxyStdout = $proxy.StdoutTask.GetAwaiter().GetResult()
-        $proxyStderr = $proxy.StderrTask.GetAwaiter().GetResult()
-        Save-BoundedText -Path $proxyStdoutPath -Text $proxyStdout
-        Save-BoundedText -Path $proxyStderrPath -Text $proxyStderr
+        Complete-TrackedProcess -Tracked $proxy -Name 'proxy' -StdoutPath $proxyStdoutPath -StderrPath $proxyStderrPath -Summary $summary
     }
-    if (Test-Path -LiteralPath $authCopyPath) {
-        Remove-Item -LiteralPath $authCopyPath -Force
+    try {
+        if (Test-Path -LiteralPath $authCopyPath) {
+            Remove-Item -LiteralPath $authCopyPath -Force
+        }
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $summary -Code 'cleanup_auth_copy_remove_failed'
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
