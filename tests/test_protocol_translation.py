@@ -293,6 +293,57 @@ class ProtocolTranslationTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
+    def test_request_semantic_containers_reject_present_invalid_types(self):
+        cases = (
+            (
+                protocol_translation.responses_request_to_chat_completion_body,
+                {"model": "example-model", "input": {"role": "user", "content": "Hello"}},
+            ),
+            (
+                protocol_translation.responses_request_to_chat_completion_body,
+                {
+                    "model": "example-model",
+                    "input": [{"type": "message", "role": "user", "content": {"text": "Hello"}}],
+                },
+            ),
+            (
+                protocol_translation.responses_request_to_chat_completion_body,
+                {"model": "example-model", "input": "Hello", "instructions": {"text": "Be concise."}},
+            ),
+            (
+                protocol_translation.chat_completions_request_to_responses_body,
+                {"model": "example-model", "messages": {"role": "user", "content": "Hello"}},
+            ),
+            (
+                protocol_translation.chat_completions_request_to_responses_body,
+                {
+                    "model": "example-model",
+                    "messages": [{"role": "user", "content": {"text": "Hello"}}],
+                },
+            ),
+            (
+                protocol_translation.responses_request_to_chat_completion_body,
+                {"model": "example-model", "input": "Hello", "tools": {"type": "function"}},
+            ),
+            (
+                protocol_translation.chat_completions_request_to_responses_body,
+                {
+                    "model": "example-model",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": {"type": "function"},
+                },
+            ),
+        )
+
+        for convert, payload in cases:
+            with self.subTest(convert=convert.__name__, payload=payload), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                convert(json.dumps(payload).encode("utf-8"))
+
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_structured_chat_request_items_and_tools_reject_unknown_fields(self):
         chat_payloads = (
             {
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -393,6 +444,153 @@ class ProtocolTranslationTests(unittest.TestCase):
             ) as raised:
                 convert(body)
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_response_semantic_containers_reject_present_invalid_types(self):
+        chat_body = json.dumps(
+            {
+                "id": "chatcmpl_123",
+                "model": "example-model",
+                "choices": {"index": 0, "message": {"role": "assistant", "content": "Hello"}},
+            }
+        ).encode("utf-8")
+        responses_body = json.dumps(
+            {
+                "id": "resp_123",
+                "status": "completed",
+                "model": "example-model",
+                "output": {"type": "message", "role": "assistant", "content": []},
+            }
+        ).encode("utf-8")
+
+        for convert, body in (
+            (protocol_translation.chat_completion_to_response_body, chat_body),
+            (protocol_translation.chat_completion_body_to_stream_chunks, chat_body),
+            (protocol_translation.response_body_to_chat_completion_body, responses_body),
+            (protocol_translation.response_body_to_response_sse_events, responses_body),
+        ):
+            with self.subTest(convert=convert.__name__), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                convert(body)
+
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_response_message_content_rejects_present_invalid_container_types(self):
+        chat_body = json.dumps(
+            {
+                "id": "chatcmpl_123",
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": {"text": "Hello"}},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        responses_body = json.dumps(
+            {
+                "id": "resp_123",
+                "status": "completed",
+                "model": "example-model",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": {"type": "output_text", "text": "Hello"},
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        for convert, body in (
+            (protocol_translation.chat_completion_to_response_body, chat_body),
+            (protocol_translation.chat_completion_body_to_stream_chunks, chat_body),
+            (protocol_translation.response_body_to_chat_completion_body, responses_body),
+            (protocol_translation.response_body_to_response_sse_events, responses_body),
+        ):
+            with self.subTest(convert=convert.__name__), self.assertRaises(
+                protocol_translation.UnsupportedProtocolTranslationError
+            ) as raised:
+                convert(body)
+
+            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_chat_response_choice_and_message_reject_invalid_container_types(self):
+        payloads = (
+            {
+                "id": "chatcmpl_123",
+                "model": "example-model",
+                "choices": [[]],
+            },
+            {
+                "id": "chatcmpl_123",
+                "model": "example-model",
+                "choices": [{"index": 0, "message": [], "finish_reason": "stop"}],
+            },
+        )
+
+        for payload in payloads:
+            body = json.dumps(payload).encode("utf-8")
+            for convert in (
+                protocol_translation.chat_completion_to_response_body,
+                protocol_translation.chat_completion_body_to_stream_chunks,
+            ):
+                with self.subTest(convert=convert.__name__, payload=payload), self.assertRaises(
+                    protocol_translation.UnsupportedProtocolTranslationError
+                ) as raised:
+                    convert(body)
+
+                self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_valid_empty_containers_and_assistant_null_content_remain_supported(self):
+        responses_request = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps({"model": "example-model", "input": [], "tools": []}).encode("utf-8")
+            )
+        )
+        self.assertEqual(responses_request["messages"], [{"role": "user", "content": ""}])
+        self.assertNotIn("tools", responses_request)
+
+        chat_request = json.loads(
+            protocol_translation.chat_completions_request_to_responses_body(
+                json.dumps({"model": "example-model", "messages": [], "tools": []}).encode("utf-8")
+            )
+        )
+        self.assertEqual(
+            chat_request["input"],
+            [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": ""}]}],
+        )
+        self.assertNotIn("tools", chat_request)
+
+        empty_chat_body = json.loads(
+            protocol_translation.chat_completion_to_response_body(
+                json.dumps({"id": "chatcmpl_empty", "model": "example-model", "choices": []}).encode("utf-8")
+            )
+        )
+        self.assertEqual(empty_chat_body["output"], [])
+
+        empty_responses_body = json.loads(
+            protocol_translation.response_body_to_chat_completion_body(
+                json.dumps(
+                    {"id": "resp_empty", "status": "completed", "model": "example-model", "output": []}
+                ).encode("utf-8")
+            )
+        )
+        self.assertIsNone(empty_responses_body["choices"][0]["message"]["content"])
+
+        assistant_null = json.loads(
+            protocol_translation.chat_completions_request_to_responses_body(
+                json.dumps(
+                    {
+                        "model": "example-model",
+                        "messages": [{"role": "assistant", "content": None}],
+                    }
+                ).encode("utf-8")
+            )
+        )
+        self.assertEqual(assistant_null["input"][0]["role"], "assistant")
 
     def test_responses_semantic_items_without_chat_equivalents_fail_closed(self):
         payloads = {
@@ -1002,6 +1200,45 @@ class ProtocolTranslationTests(unittest.TestCase):
             self.assertFalse(converter.completed)
             self.assertEqual(converter.text_parts, [])
 
+    def test_chat_stream_rejects_semantic_chunks_after_terminal(self):
+        terminal_chunk = {
+            "choices": [{"index": 0, "delta": {"content": "A"}, "finish_reason": "stop"}]
+        }
+        late_chunk = {
+            "choices": [{"index": 0, "delta": {"content": "B"}, "finish_reason": None}]
+        }
+
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.chat_stream_chunks_to_response_events([terminal_chunk, late_chunk])
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        terminal_events = converter.events_for_chunk(terminal_chunk)
+        self.assertEqual(terminal_events[-1]["type"], "response.completed")
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            converter.events_for_chunk(late_chunk)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_chat_stream_allows_nonsemantic_framing_after_terminal(self):
+        terminal_chunk = {
+            "choices": [{"index": 0, "delta": {"content": "A"}, "finish_reason": "stop"}]
+        }
+        usage_chunk = {
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+        events = protocol_translation.chat_stream_chunks_to_response_events(
+            [terminal_chunk, usage_chunk, "[DONE]"]
+        )
+        self.assertEqual(events[-1]["type"], "response.completed")
+        self.assertEqual(events[-1]["response"]["output"][0]["content"][0]["text"], "A")
+
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        converter.events_for_chunk(terminal_chunk)
+        self.assertEqual(converter.events_for_chunk(usage_chunk), [])
+        self.assertEqual(converter.events_for_done(), [])
+
     def test_chat_stream_rejects_unknown_tool_fields_and_non_string_arguments(self):
         tool_calls = (
             {
@@ -1084,6 +1321,63 @@ class ProtocolTranslationTests(unittest.TestCase):
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant"})
         self.assertEqual(chunks[1]["choices"][0]["delta"]["content"], "Hello")
         self.assertEqual(chunks[2]["choices"][0]["delta"]["content"], " world")
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+
+    def test_responses_stream_rejects_semantic_events_after_terminal(self):
+        created = {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}}
+        terminal = {
+            "type": "response.completed",
+            "response": {"id": "resp_123", "status": "completed", "output": []},
+        }
+        late_delta = {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "msg_123",
+            "content_index": 0,
+            "delta": "late",
+        }
+
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.response_events_to_chat_stream_chunks([created, terminal, late_delta])
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        converter = protocol_translation.ResponsesToChatStreamConverter()
+        converter.chunks_for_event(created)
+        terminal_chunks = converter.chunks_for_event(terminal)
+        self.assertEqual(terminal_chunks[-1]["choices"][0]["finish_reason"], "stop")
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            converter.chunks_for_event(late_delta)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_responses_stream_rejects_invalid_terminal_output_container(self):
+        terminal = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_123",
+                "status": "completed",
+                "output": {"type": "message", "role": "assistant", "content": []},
+            },
+        }
+
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.response_events_to_chat_stream_chunks([terminal])
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        converter = protocol_translation.ResponsesToChatStreamConverter()
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            converter.chunks_for_event(terminal)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_responses_stream_allows_done_framing_after_terminal(self):
+        created = {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}}
+        terminal = {
+            "type": "response.completed",
+            "response": {"id": "resp_123", "status": "completed", "output": []},
+        }
+
+        chunks = protocol_translation.response_events_to_chat_stream_chunks(
+            [created, terminal, "[DONE]"]
+        )
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
 
     def test_responses_stream_with_function_call_missing_id_fails_closed(self):
