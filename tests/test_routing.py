@@ -11330,6 +11330,46 @@ Execution constraints:
         self.assertIn("first visible output token", transcript)
         self.assertTrue(event_context["subagent_lifecycle_complete"])
 
+    def test_external_tool_surface_eager_preserves_legacy_additional_tools_carrier(self):
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "synthetic_tool",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "max_output_tokens": 131072,
+                "input": [{"type": "additional_tools", "tools": [namespace]}],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        legacy = compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_protocol": "responses_structured"},
+            inject_codex_tools=False,
+        )
+        eager = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "eager",
+            },
+            inject_codex_tools=False,
+        )
+
+        self.assertEqual(legacy, body)
+        self.assertEqual(eager, body)
+
     def test_external_tool_surface_ab_harness_defers_large_mcp_namespace(self):
         shell_command = {
             "type": "function",

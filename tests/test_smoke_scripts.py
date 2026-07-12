@@ -40,6 +40,7 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     assert summary["mode"] == "lifecycle_replay"
     assert summary["passed"] is True
     assert summary["failures"] == []
+    assert summary["tracked_root_exited"] is True
     assert summary["tracked_child_exited"] is True
 
 
@@ -51,6 +52,16 @@ def test_issue_108_qualification_has_no_harness_history_bridge():
     assert "StructuredApplyPatchHistoryBridge" not in source
     assert "CODEXHUB_ENABLE_APPLY_PATCH_HISTORY_BRIDGE" not in source
     assert "apply_patch_history_bridge" not in source
+
+
+def test_issue_108_qualification_requires_history_adapter_evidence():
+    source = (
+        ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "third_party_apply_patch_freeform_history_adapter" in source
+    assert "apply_patch_history_adapter_outcomes" in source
+    assert "history adapter never reported adapted" in source
 
 
 def test_codex_tool_smoke_prefers_app_cli_and_runs_ephemeral():

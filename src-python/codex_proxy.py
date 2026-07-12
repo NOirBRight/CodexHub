@@ -589,7 +589,6 @@ BROWSER_CONTEXT_GUIDANCE = (
     '- In a CLI/no-browser environment, report "browser session unavailable"; do not report "browser tool not exposed".'
 )
 INTERNAL_INPUT_ITEM_TYPES = {
-    "additional_tools",
     "compaction",
     "compaction_trigger",
     "reasoning",
@@ -7160,7 +7159,7 @@ def compatible_request_body(
     if raw_provider_probe:
         pass
     else:
-        if _hoist_additional_tools_input_items(payload):
+        if tool_surface_strategy == "deferred_core" and _hoist_additional_tools_input_items(payload):
             changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
             if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):

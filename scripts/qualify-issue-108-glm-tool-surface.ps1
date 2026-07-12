@@ -203,12 +203,15 @@ function Invoke-LifecycleReplay {
     $runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
     $runRoot = Join-Path $ReplayOutputDir "run-$runId"
     $summaryPath = Join-Path $runRoot 'summary.json'
+    $childPidPath = Join-Path $runRoot 'tracked-child.pid'
     $tracked = $null
+    $childProcessId = 0
     $failures = [System.Collections.Generic.List[string]]::new()
     $summary = [ordered]@{
         mode = 'lifecycle_replay'
         passed = $false
         failures = @()
+        tracked_root_exited = $false
         tracked_child_exited = $false
         run_root = $runRoot
     }
@@ -219,23 +222,72 @@ function Invoke-LifecycleReplay {
         if (-not (Test-Path -LiteralPath $powershellPath)) {
             throw 'lifecycle_powershell_not_found'
         }
+        $lifecycleChildCommand = @'
+$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 5') -PassThru
+[System.IO.File]::WriteAllText($env:CODEXHUB_LIFECYCLE_CHILD_PID_PATH, [string]$child.Id)
+Start-Sleep -Seconds 5
+'@
         $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
-            '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 2'
-        ) -WorkingDirectory $runRoot
+            '-NoProfile', '-NonInteractive', '-Command', $lifecycleChildCommand
+        ) -WorkingDirectory $runRoot -Environment @{
+            CODEXHUB_LIFECYCLE_CHILD_PID_PATH = $childPidPath
+        }
+        $childPidDeadline = (Get-Date).AddSeconds(5)
+        while (-not (Test-Path -LiteralPath $childPidPath) -and (Get-Date) -lt $childPidDeadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not (Test-Path -LiteralPath $childPidPath)) {
+            throw 'lifecycle_child_start_timed_out'
+        }
+        $childPidText = [System.IO.File]::ReadAllText($childPidPath).Trim()
+        if (-not [int]::TryParse($childPidText, [ref]$childProcessId) -or $childProcessId -le 0) {
+            throw 'lifecycle_child_pid_invalid'
+        }
         Stop-TrackedProcess $tracked
     }
     catch {
         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
     }
     finally {
-        if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
-            [void]$tracked.Process.WaitForExit(5000)
+        try {
+            if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
+                [void]$tracked.Process.WaitForExit(7000)
+            }
+            if ($null -eq $tracked -or -not $tracked.Process.HasExited) {
+                Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_root_remained'
+            }
+            else {
+                $summary.tracked_root_exited = $true
+            }
         }
-        if ($null -eq $tracked -or -not $tracked.Process.HasExited) {
-            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
+        catch {
+            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_root_state_unavailable'
         }
-        else {
-            $summary.tracked_child_exited = $true
+        try {
+            if ($childProcessId -le 0) {
+                Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_pid_unavailable'
+            }
+            else {
+                try {
+                    $childProcess = [System.Diagnostics.Process]::GetProcessById($childProcessId)
+                    [void]$childProcess.WaitForExit(7000)
+                    if ($childProcess.HasExited) {
+                        $summary.tracked_child_exited = $true
+                    }
+                    else {
+                        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
+                    }
+                }
+                catch [System.ArgumentException] {
+                    $summary.tracked_child_exited = $true
+                }
+                catch {
+                    Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_state_unavailable'
+                }
+            }
+        }
+        catch {
+            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_state_unavailable'
         }
         $summary.failures = @($failures)
         $summary.passed = $failures.Count -eq 0
@@ -633,18 +685,37 @@ def _request_shape(body):
         return {"parseable": False}
     input_items = payload.get("input")
     input_shape = []
+    apply_patch_call_ids = set()
     if isinstance(input_items, list):
         for item in input_items:
             if not isinstance(item, dict):
                 input_shape.append({"kind": type(item).__name__})
                 continue
             entry = {"type": item.get("type"), "role": item.get("role"), "keys": sorted(item)}
+            if item.get("type") == "function_call" and item.get("name") == "apply_patch":
+                call_id = item.get("call_id")
+                if isinstance(call_id, str) and call_id:
+                    apply_patch_call_ids.add(call_id)
             if item.get("type") == "additional_tools":
                 entry["tools"] = _tool_shape(item.get("tools"))
             if item.get("type") == "custom_tool_call_output":
                 entry["output_shape"] = _tool_output_shape(item.get("output"))
             input_shape.append(entry)
-    return {"parseable": True, "input": input_shape, "tools": _tool_shape(payload.get("tools"))}
+    structured_history_pair_count = 0
+    if isinstance(input_items, list):
+        structured_history_pair_count = sum(
+            1
+            for item in input_items
+            if isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and item.get("call_id") in apply_patch_call_ids
+        )
+    return {
+        "parseable": True,
+        "input": input_shape,
+        "tools": _tool_shape(payload.get("tools")),
+        "apply_patch_structured_history_pair_count": structured_history_pair_count,
+    }
 
 
 def _capture(stage, body):
@@ -900,7 +971,35 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $requestStarts = @($events | Where-Object { $_.event -eq 'request_start' })
     $surfaceEvents = @($events | Where-Object { $_.event -eq 'external_tool_surface_prepared' })
     $adapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
+    $historyAdapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_history_adapter' })
     $requestErrors = @($events | Where-Object { $_.event -eq 'request_error' })
+    $postSuccessStructuredHistoryPairCounts = [System.Collections.Generic.List[int]]::new()
+    for ($index = 0; $index -lt $captureEvents.Count; $index++) {
+        if ($captureEvents[$index].stage -ne 'post_success_apply_patch_result') {
+            continue
+        }
+        $afterRecord = $null
+        for ($nextIndex = $index + 1; $nextIndex -lt $captureEvents.Count; $nextIndex++) {
+            $candidate = $captureEvents[$nextIndex]
+            if ($candidate.stage -eq 'after') {
+                $afterRecord = $candidate
+                break
+            }
+            if ($candidate.stage -eq 'before') {
+                break
+            }
+        }
+        $pairCount = 0
+        if ($null -ne $afterRecord) {
+            try {
+                $pairCount = [int]$afterRecord.shape.apply_patch_structured_history_pair_count
+            }
+            catch {
+                $pairCount = 0
+            }
+        }
+        [void]$postSuccessStructuredHistoryPairCounts.Add($pairCount)
+    }
     $statusLines = @(& git -C $testWorkspace status --porcelain)
     $numstat = ((& git -C $testWorkspace diff --numstat) | Out-String).Trim()
     $targetText = [System.IO.File]::ReadAllText($targetPath)
@@ -946,6 +1045,14 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     if (@($adapterEvents | Where-Object { $_.outcome -eq 'adapted' }).Count -eq 0) {
         [void]$failures.Add('the third-party apply_patch freeform adapter never reported adapted')
     }
+    if (@($historyAdapterEvents | Where-Object { $_.outcome -eq 'adapted' }).Count -eq 0) {
+        [void]$failures.Add('the third-party apply_patch freeform history adapter never reported adapted')
+    }
+    if ($postSuccessStructuredHistoryPairCounts.Count -eq 0 -or @(
+        $postSuccessStructuredHistoryPairCounts | Where-Object { $_ -ne 1 }
+    ).Count -gt 0) {
+        [void]$failures.Add('post-success apply_patch history was not preserved as exactly one structured pair')
+    }
     if ($requestErrors.Count -gt 0) {
         [void]$failures.Add('proxy recorded a request_error during qualification')
     }
@@ -955,7 +1062,9 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $summary.request_start_count = $requestStarts.Count
     $summary.deferred_surface_event_count = $surfaceEvents.Count
     $summary.apply_patch_adapter_outcomes = @($adapterEvents | ForEach-Object { [string]$_.outcome })
+    $summary.apply_patch_history_adapter_outcomes = @($historyAdapterEvents | ForEach-Object { [string]$_.outcome })
     $summary.post_success_tool_choice = $postSuccessToolChoice
+    $summary.post_success_structured_history_pair_counts = @($postSuccessStructuredHistoryPairCounts)
     $summary.git_status = @($statusLines)
     $summary.git_numstat = $numstat
     $summary.failures = @($failures)
