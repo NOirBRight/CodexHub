@@ -17,6 +17,19 @@ const pageToastPath = new URL("../src/components/PageToast.tsx", import.meta.url
 const perfMouseHookPath = new URL("./perf-mouse-hook.ps1", import.meta.url);
 const perfTabSwitchPath = new URL("./perf-tab-switch.mjs", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
+const officialOpenAIUsagePanelPath = new URL("../src/components/providers/OfficialOpenAIUsagePanel.tsx", import.meta.url);
+const providerEditorPath = new URL("../src/components/providers/ProviderEditor.tsx", import.meta.url);
+const providerFormControlsPath = new URL("../src/components/providers/ProviderFormControls.tsx", import.meta.url);
+const providerModelSectionPath = new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url);
+const providerNavigationGuardPath = new URL("../src/hooks/useProviderNavigationGuard.ts", import.meta.url);
+const providerCatalogActionsPath = new URL("../src/hooks/useProviderCatalogActions.ts", import.meta.url);
+const verticalOverflowPath = new URL("../src/hooks/useVerticalOverflow.ts", import.meta.url);
+const dateRangePath = new URL("../src/lib/dateRange.ts", import.meta.url);
+const officialModelsPath = new URL("../src/lib/officialModels.ts", import.meta.url);
+const providerEndpointPath = new URL("../src/lib/providerEndpoint.ts", import.meta.url);
+const providerLabelsPath = new URL("../src/lib/providerLabels.ts", import.meta.url);
+const providerModelPath = new URL("../src/lib/providerModel.ts", import.meta.url);
+const updateStatusPath = new URL("../src/lib/updateStatus.ts", import.meta.url);
 const runtimeBarPath = new URL("../src/components/RuntimeBar.tsx", import.meta.url);
 const settingsLibPath = new URL("../src/lib/settings.ts", import.meta.url);
 const settingsDrawerPath = new URL("../src/components/SettingsDrawer.tsx", import.meta.url);
@@ -48,6 +61,23 @@ const desktopIconAssetPaths = [
   new URL("../src/assets/pi-icon.png", import.meta.url),
   new URL("../src/assets/zcode-icon.png", import.meta.url),
 ];
+
+async function readProviderContractSource() {
+  const sources = await Promise.all([
+    providersPagePath,
+    officialOpenAIUsagePanelPath,
+    providerEditorPath,
+    providerFormControlsPath,
+    providerModelSectionPath,
+    providerNavigationGuardPath,
+    providerCatalogActionsPath,
+    verticalOverflowPath,
+    officialModelsPath,
+    providerEndpointPath,
+    providerModelPath,
+  ].map((path) => readFile(path, "utf8")));
+  return sources.join("\n");
+}
 
 async function readContract() {
   return JSON.parse(await readFile(contractPath, "utf8"));
@@ -245,11 +275,11 @@ test("tab switch performance harness uses CDP metrics without package dependenci
 test("heavy tab pages are memoized behind stable app callbacks", async () => {
   const [appSource, providersSource, gatewaySource] = await Promise.all([
     readFile(appPath, "utf8"),
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(gatewayPagePath, "utf8"),
   ]);
 
-  assert.match(providersSource, /import \{ memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState \} from "react";/);
+  assert.match(providersSource, /import \{ memo, useEffect, useMemo, useRef, useState \} from "react";/);
   assert.match(providersSource, /function ProvidersPageImpl\(/);
   assert.match(providersSource, /export const ProvidersPage = memo\(ProvidersPageImpl\);/);
   assert.match(gatewaySource, /import \{ memo, useEffect, useMemo, useRef, useState \} from "react";/);
@@ -285,6 +315,41 @@ test("runtime data uses app-level cached refreshes instead of page lifecycle rel
   assert.match(providersSource, /modelMetadata: Model\[\]/);
   assert.doesNotMatch(providersMountEffect, /api\.getSettings|api\.getProviders|api\.listModels|api\.listModelMetadata|api\.getStatus|api\.gatewayStatus/);
   assert.doesNotMatch(providersSource, /async function load\(\)/);
+});
+
+test("provider page state, editors, actions, and shared helpers stay in focused modules", async () => {
+  const [pageSource, usageSource, navigationSource, editorSource, controlsSource, modelSource, catalogActionsSource, dateSource, labelsSource, updateSource, officialModelsSource, endpointSource, formSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(officialOpenAIUsagePanelPath, "utf8"),
+    readFile(providerNavigationGuardPath, "utf8"),
+    readFile(providerEditorPath, "utf8"),
+    readFile(providerFormControlsPath, "utf8"),
+    readFile(providerModelSectionPath, "utf8"),
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(dateRangePath, "utf8"),
+    readFile(providerLabelsPath, "utf8"),
+    readFile(updateStatusPath, "utf8"),
+    readFile(officialModelsPath, "utf8"),
+    readFile(providerEndpointPath, "utf8"),
+    readFile(new URL("../src/lib/providerForm.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(pageSource, /useProviderNavigationGuard/);
+  assert.match(pageSource, /useProviderCatalogActions/);
+  assert.doesNotMatch(pageSource, /function (ProviderDetail|AddProviderPanel|ModelSection|HeaderRow)\(/);
+  assert.match(usageSource, /export function OfficialOpenAIUsagePanel/);
+  assert.match(navigationSource, /export function useProviderNavigationGuard/);
+  assert.match(editorSource, /export function ProviderDetail/);
+  assert.match(editorSource, /export function AddProviderPanel/);
+  assert.match(controlsSource, /export function HeaderRow/);
+  assert.match(modelSource, /export function ModelSection/);
+  assert.match(catalogActionsSource, /export function useProviderCatalogActions/);
+  assert.match(dateSource, /export function (startOfDay|endOfDay|addDays)/);
+  assert.match(labelsSource, /export function (providerLabel|providerFromDisplayName)/);
+  assert.match(updateSource, /export function (isUpdateInstallActive|updateInstallToastText)/);
+  assert.match(officialModelsSource, /export function (sortOfficialModels|mergeOfficialModelSources)/);
+  assert.match(endpointSource, /export function (normalizeEndpointFormats|probeDetectedEndpointFormat)/);
+  assert.match(formSource, /export const emptyProvider/);
 });
 
 test("ui contract keeps ids and paths but no localizable display copy", async () => {
@@ -568,7 +633,7 @@ test("copy buttons keep stable dimensions when copied feedback appears", async (
   const [endpointSource, gatewaySource, providersSource] = await Promise.all([
     readFile(endpointRowPath, "utf8"),
     readFile(gatewayPagePath, "utf8"),
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
   ]);
 
   assert.match(endpointSource, /inline-flex shrink-0/);
@@ -740,7 +805,7 @@ test("backend unavailable errors stay short and can render toast actions", async
   const [tauriSource, pageToastSource, providersSource, gatewaySource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
     readFile(pageToastPath, "utf8"),
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(gatewayPagePath, "utf8"),
   ]);
 
@@ -851,7 +916,7 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
 test("official OpenAI usage chart reads cached Codex account usage only on the official provider page", async () => {
   const [providersSource, tauriSource, typesSource, mainSource, webBridgeSource, openAiUsageSource, enSource, zhSource] =
     await Promise.all([
-      readFile(providersPagePath, "utf8"),
+      readProviderContractSource(),
       readFile(tauriSourcePath, "utf8"),
       readFile(typesPath, "utf8"),
       readFile(tauriMainPath, "utf8"),
@@ -888,7 +953,7 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
 
   const officialUsagePanel = providersSource.match(/function OfficialOpenAIUsagePanel[\s\S]*function OfficialOpenAIUsageTooltip/)?.[0] ?? "";
   assert.ok(officialUsagePanel, "OfficialOpenAIUsagePanel should be present");
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*function ProviderDetail/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
   assert.ok(officialDetail, "OfficialDetail should be present");
 
   assert.match(providersSource, /openaiUsageCompletions/);
@@ -1045,7 +1110,7 @@ test("Codex app-server probes time out and avoid visible Windows consoles", asyn
 });
 
 test("OpenAI primary and secondary quota names render as 5 hours and weekly", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const fiveHour = providersSource.match(/function isFiveHourUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
   const weekly = providersSource.match(/function isWeeklyUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
 
@@ -1057,7 +1122,7 @@ test("OpenAI primary and secondary quota names render as 5 hours and weekly", as
 
 test("manual OpenAI usage refresh uses a persistent toast", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -1355,7 +1420,7 @@ test("settings normalization restores default-on fields when persisted settings 
 test("official model settings normalize legacy OpenAI prefixes to bare ids", async () => {
   const [settingsSource, providersSource] = await Promise.all([
     readFile(settingsLibPath, "utf8"),
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
   ]);
 
   assert.match(settingsSource, /DEFAULT_FAST_MODEL_VARIANTS\s*=\s*\["gpt-5\.5",\s*"gpt-5\.4"\]/);
@@ -1469,10 +1534,11 @@ test("settings drawer keeps repair action and compact model select visually quie
 });
 
 test("settings drawer exposes gateway retry and image proxy controls", async () => {
-  const [drawerSource, appSource, typesSource] = await Promise.all([
+  const [drawerSource, appSource, typesSource, providerLabelsSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
     readFile(appPath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(providerLabelsPath, "utf8"),
   ]);
 
   assert.match(typesSource, /gateway_auto_retry_enabled: boolean;/);
@@ -1500,8 +1566,8 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(drawerSource, /function visionModelParts\(model: Model, providerLabels: Map<string, string>\): VisionModelParts/);
   assert.match(drawerSource, /const modelId = slashIndex > 0 \? rawId\.slice\(slashIndex \+ 1\) : rawId/);
   assert.match(drawerSource, /providerLabel\(providerFromDisplayName\(model\.display_name, modelId\), providerLabels\)/);
-  assert.match(drawerSource, /provider\.display_prefix\?\.trim\(\)/);
-  assert.match(drawerSource, /labels\.set\(displayPrefix\.toLowerCase\(\), name\)/);
+  assert.match(providerLabelsSource, /provider\.display_prefix\?\.trim\(\)/);
+  assert.match(providerLabelsSource, /labels\.set\(displayPrefix\.toLowerCase\(\), name\)/);
   assert.match(drawerSource, /function VisionModelValue/);
   assert.match(drawerSource, /w-\[min\(340px,calc\(100vw-2rem\)\)\] -translate-x-1\/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay/);
   assert.match(drawerSource, /vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1/);
@@ -1548,7 +1614,7 @@ test("gateway foreign-channel routes render as ready instead of unknown", async 
 
 test("official model list exposes a Codex and Gateway context cost guard", async () => {
   const [providersSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(tauriSourcePath, "utf8"),
     readFile(typesPath, "utf8"),
     readFile(enLocalePath, "utf8"),
@@ -1636,7 +1702,7 @@ test("gateway client card does not render a disabled fake updater", async () => 
 });
 
 test("provider model removal persists through provider save path", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /function removeModel\(modelId: string\)/);
   assert.match(providersSource, /onChange\(next, t\("providers\.modelRemoved"\)\)/);
@@ -1644,7 +1710,7 @@ test("provider model removal persists through provider save path", async () => {
 });
 
 test("providers page uses stable zero-min split columns", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /min-w-\[972px\] grid-cols-\[430px_minmax\(0,1fr\)\]/);
   assert.match(
@@ -1668,18 +1734,24 @@ test("app content region owns horizontal overflow for minimum-width pages", asyn
 });
 
 test("provider detail keeps model area tall and moves the scrollbar outside cards", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const [providersSource, providerEditorSource, controlsSource, modelSectionSource, verticalOverflowSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(providerEditorPath, "utf8"),
+    readFile(providerFormControlsPath, "utf8"),
+    readFile(providerModelSectionPath, "utf8"),
+    readFile(verticalOverflowPath, "utf8"),
+  ]);
   const codexHubProviderCard =
     providersSource.match(/function CodexHubProviderCard[\s\S]*?function gatewayStatusChip/)?.[0] ?? "";
-  const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
+  const providerDetail = providerEditorSource.match(/export function ProviderDetail[\s\S]*?export function AddProviderPanel/)?.[0] ?? "";
   const endpointSelectionPanel =
-    providersSource.match(/function EndpointSelectionPanel[\s\S]*?function EndpointFormatSelect/)?.[0] ?? "";
+    providerEditorSource.match(/function EndpointSelectionPanel[\s\S]*?function EndpointFormatSelect/)?.[0] ?? "";
   const endpointFormatSelect =
-    providersSource.match(/function EndpointFormatSelect[\s\S]*?function normalizedEndpointFormat/)?.[0] ?? "";
-  const modelIdentity = providersSource.match(/function ModelIdentity[\s\S]*?function ModelEditorOverlay/)?.[0] ?? "";
-  const modelTestStateIcon = providersSource.match(/function ModelTestStateIcon[\s\S]*?function normalizedEndpointFormat/)?.[0] ?? "";
-  const modelSection = providersSource.match(/function ModelSection[\s\S]*?function ModelIdentity/)?.[0] ?? "";
-  const headerRow = providersSource.match(/function HeaderRow[\s\S]*?function Toggle/)?.[0] ?? "";
+    providerEditorSource.match(/function EndpointFormatSelect[\s\S]*?function EndpointAvailableChip/)?.[0] ?? "";
+  const modelIdentity = modelSectionSource.match(/function ModelIdentity[\s\S]*?function ModelEditorOverlay/)?.[0] ?? "";
+  const modelTestStateIcon = modelSectionSource.match(/function ModelTestStateIcon[\s\S]*$/)?.[0] ?? "";
+  const modelSection = modelSectionSource.match(/export function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
+  const headerRow = controlsSource.match(/export function HeaderRow[\s\S]*?export function Field/)?.[0] ?? "";
 
   assert.match(providerDetail, /className="grid gap-2 border-b border-line p-4"/);
   assert.match(providerDetail, /className="grid grid-cols-2 gap-2"/);
@@ -1719,8 +1791,8 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.doesNotMatch(headerRow, /lg:grid-cols-\[minmax\(0,1fr\)_auto\]/);
   assert.doesNotMatch(headerRow, /flex-wrap/);
 
-  assert.match(providersSource, /function useVerticalOverflow/);
-  assert.match(providersSource, /scrollHeight > element\.clientHeight \+ 1/);
+  assert.match(verticalOverflowSource, /function useVerticalOverflow/);
+  assert.match(verticalOverflowSource, /scrollHeight > element\.clientHeight \+ 1/);
   assert.match(codexHubProviderCard, /ref=\{providerListRef\}/);
   assert.match(codexHubProviderCard, /providerListHasOverflow && "-mr-3 pr-1"/);
   assert.match(modelSection, /ref=\{modelListRef\}/);
@@ -1741,23 +1813,27 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
 });
 
 test("provider endpoint probe persists detected formats and selects the recommendation", async () => {
-  const [providersSource, typesSource] = await Promise.all([
+  const [providersSource, providerEditorSource, catalogActionsSource, endpointSource, typesSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
+    readFile(providerEditorPath, "utf8"),
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(providerEndpointPath, "utf8"),
     readFile(typesPath, "utf8"),
   ]);
   const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
-  const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
-  const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
+  const providerDetail = providerEditorSource.match(/export function ProviderDetail[\s\S]*?export function AddProviderPanel/)?.[0] ?? "";
+  const addProviderPanel = providerEditorSource.match(/export function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
 
   assert.match(typesSource, /available_upstream_formats\?: UpstreamFormat\[\] \| null;/);
   assert.match(typesSource, /tool_protocol\?: ToolProtocol \| null;/);
   assert.match(typesSource, /recommended_tool_protocol: ToolProtocol;/);
-  assert.match(pageSource, /async function persistProviderProbeResult\(providerId: string, result: UpstreamFormatProbeResult\)/);
-  assert.match(pageSource, /provider\.id === providerId \? applyProviderProbeResult\(provider, result\) : provider/);
-  assert.match(pageSource, /const detectedFormat = probeDetectedEndpointFormat\(result\);/);
-  assert.match(pageSource, /detectedFormat[\s\S]*t\("providers\.probeCompleted"/);
-  assert.match(pageSource, /t\("providers\.probeNoSupportedEndpoint"\)/);
-  assert.match(pageSource, /const saved = await api\.saveProviders\(nextProviders\);/);
+  assert.match(catalogActionsSource, /async function persistProviderProbeResult\(\s*providerId: string,\s*result: UpstreamFormatProbeResult,\s*toastId: string,\s*\)/);
+  assert.match(catalogActionsSource, /provider\.id === providerId \? applyProviderProbeResult\(provider, result\) : provider/);
+  assert.match(catalogActionsSource, /const detectedFormat = probeDetectedEndpointFormat\(result\);/);
+  assert.match(catalogActionsSource, /detectedFormat[\s\S]*t\("providers\.probeCompleted"/);
+  assert.match(catalogActionsSource, /t\("providers\.probeNoSupportedEndpoint"\)/);
+  assert.match(catalogActionsSource, /const saved = await api\.saveProviders\(nextProviders\);/);
+  assert.match(catalogActionsSource, /updateToast\(toastId, \{[\s\S]*providers\.probeCompleted/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
   assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
   assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
@@ -1765,29 +1841,28 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(providerDetail, /current\.id === provider\.id[\s\S]*available_upstream_formats: availableFormats/);
   assert.doesNotMatch(providerDetail, /const upstreamFormat = normalizedEndpointFormat\(provider\.upstream_format\);/);
   assert.match(addProviderPanel, /onFormChange\(applyAddProviderProbeResult\(form, result\)\);/);
-  assert.match(providersSource, /function probeDetectedEndpointFormat\([\s\S]*?normalizedProbeEndpointFormat\(result\.recommended_format\) \?\? probeAvailableFormats\(result\)\[0\] \?\? null/);
-  assert.match(providersSource, /function normalizedProbeEndpointFormat\([\s\S]*?normalized === "responses" \|\| normalized === "response"/);
-  assert.match(providersSource, /function applyProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? provider\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
-  assert.match(providersSource, /function applyProviderProbeAvailability\([\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,[\s\S]*?\};/);
-  assert.match(providersSource, /function applyAddProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? form\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
-  assert.match(providersSource, /function toolProtocolLabel\(value\?: ToolProtocol \| null\)/);
-  assert.match(providersSource, /toolProtocol=\{draft\.tool_protocol\}/);
-  assert.match(providersSource, /toolProtocol=\{form\.tool_protocol\}/);
+  assert.match(endpointSource, /function probeDetectedEndpointFormat\([\s\S]*?normalizedProbeEndpointFormat\(result\.recommended_format\) \?\? probeAvailableFormats\(result\)\[0\] \?\? null/);
+  assert.match(endpointSource, /function normalizedProbeEndpointFormat\([\s\S]*?normalized === "responses" \|\| normalized === "response"/);
+  assert.match(endpointSource, /function applyProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? provider\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
+  assert.match(endpointSource, /function applyAddProviderProbeResult(?:<[^>]+>)?\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? form\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
+  assert.match(endpointSource, /function toolProtocolLabel\(value\?: ToolProtocol \| null\)/);
+  assert.match(providerEditorSource, /toolProtocol=\{draft\.tool_protocol\}/);
+  assert.match(providerEditorSource, /toolProtocol=\{form\.tool_protocol\}/);
   assert.match(
-    providersSource,
+    endpointSource,
     /const recommendedFormat = normalizedProbeEndpointFormat\(result\.recommended_format\);[\s\S]*if \(recommendedFormat && !formats\.includes\(recommendedFormat\)\) \{[\s\S]*formats\.push\(recommendedFormat\);/,
   );
 });
 
 test("model test buttons use the selected endpoint connectivity check", async () => {
   const [providersSource, tauriSource, typesSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(tauriSourcePath, "utf8"),
     readFile(typesPath, "utf8"),
   ]);
   const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
   const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
   const modelTestBlocks = [...providersSource.matchAll(/async function testModel\(model: Model\)[\s\S]*?\r?\n  }\r?\n/g)].map(
     (match) => match[0],
   );
@@ -1816,32 +1891,37 @@ test("model test buttons use the selected endpoint connectivity check", async ()
 });
 
 test("add provider only prompts and saves when a name is present", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
-  const selectProvider = providersSource.match(/function selectProvider\(id: string\)[\s\S]*?async function savePendingProviderNavigation/)?.[0] ?? "";
+  const [providersSource, navigationSource, catalogActionsSource] = await Promise.all([
+    readFile(providersPagePath, "utf8"),
+    readFile(providerNavigationGuardPath, "utf8"),
+    readFile(providerCatalogActionsPath, "utf8"),
+  ]);
+  const selectProvider = navigationSource.match(/const selectProvider = useCallback[\s\S]*?\n  \);/)?.[0] ?? "";
   const savePending =
-    providersSource.match(/async function savePendingProviderNavigation\(\)[\s\S]*?function discardPendingProviderNavigation/)?.[0] ?? "";
+    navigationSource.match(/const savePendingProviderNavigation = useCallback[\s\S]*?const discardPendingProviderNavigation/)?.[0] ?? "";
   const discardPending =
-    providersSource.match(/function discardPendingProviderNavigation\(\)[\s\S]*?function setMessage/)?.[0] ?? "";
-  const addSave = providersSource.match(/async function saveAddProviderForm[\s\S]*?async function addProvider/)?.[0] ?? "";
+    navigationSource.match(/const discardPendingProviderNavigation = useCallback[\s\S]*?const cancelPendingProviderNavigation/)?.[0] ?? "";
+  const addSave = catalogActionsSource.match(/async function saveAddProviderForm[\s\S]*?async function addProvider/)?.[0] ?? "";
   const dirtyHelper = providersSource.match(/function isAddProviderFormDirty[\s\S]*?function pendingProviderName/)?.[0] ?? "";
 
   assert.doesNotMatch(providersSource, /Discover models before saving the provider\./);
   assert.match(providersSource, /const canAdd = Boolean\(form\.name\.trim\(\)\);/);
   assert.doesNotMatch(providersSource, /const canAdd = form\.name\.trim\(\) && form\.base_url\.trim\(\);/);
-  assert.match(selectProvider, /selectedId === ADD_ID/);
-  assert.match(selectProvider, /isAddProviderFormDirty\(form\)[\s\S]*kind: "add"/);
-  assert.match(selectProvider, /setForm\(emptyProvider\);[\s\S]*setSelectedId\(id\);/);
+  assert.match(selectProvider, /selectedId === addId/);
+  assert.match(providersSource, /addId: ADD_ID/);
+  assert.match(selectProvider, /isAddFormDirty\(form\)[\s\S]*kind: "add"/);
+  assert.match(selectProvider, /resetAddForm\(\);[\s\S]*setSelectedId\(id\);/);
   assert.match(dirtyHelper, /return Boolean\(form\.name\.trim\(\)\);/);
   assert.doesNotMatch(dirtyHelper, /base_url|api_key|models\.length/);
   assert.match(savePending, /pending\.kind === "add"/);
-  assert.match(savePending, /const addedId = await saveAddProviderForm\(pending\.form, pending\.targetId\);/);
-  assert.match(discardPending, /pending\.kind === "add"[\s\S]*setForm\(emptyProvider\)/);
+  assert.match(savePending, /const added = await saveAddForm\(pending\.form, pending\.targetId\);/);
+  assert.match(discardPending, /pending\.kind === "add"[\s\S]*resetAddForm\(\)/);
   assert.match(addSave, /base_url: nextForm\.base_url\.trim\(\)/);
   assert.match(addSave, /return null;/);
 });
 
 test("canceling a newly added model removes the temporary draft before navigation", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
   const providerDetail = providersSource.match(/function ProviderDetail[\s\S]*?function ModelSection/)?.[0] ?? "";
   const addProviderPanel = providersSource.match(/function AddProviderPanel[\s\S]*?function EndpointSelectionPanel/)?.[0] ?? "";
@@ -1855,7 +1935,7 @@ test("canceling a newly added model removes the temporary draft before navigatio
 });
 
 test("official model rows only toggle from the switch while provider rows can still open editing", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
   assert.match(modelSection, /const rowInteractable = !interactionDisabled && !disabled;/);
@@ -1891,7 +1971,7 @@ test("Gateway restart planning uses only the current Gateway running snapshot", 
 
 test("official OpenAI model edits are draft-only until the footer Save action", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -1936,7 +2016,7 @@ test("shared identity vectors drive TypeScript canonicalization", async () => {
 });
 
 test("frontend official merge canonicalizes aliases with fresh metadata winning", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const merge = providersSource.match(/function mergeOfficialModelSources[\s\S]*?function isOfficialModel/)?.[0] ?? "";
 
   assert.match(merge, /const knownOfficialIds = officialModelIdSet\(catalog, metadata\);/);
@@ -1951,7 +2031,7 @@ test("frontend official merge canonicalizes aliases with fresh metadata winning"
 });
 
 test("unrelated settings snapshots preserve unsaved official model drafts", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
   const settingsSync = pageSource.match(/useEffect\(\(\) => \{[\s\S]*?setSettings\(normalizedSettings\);[\s\S]*?\}, \[settingsSnapshot\]\);/)?.[0] ?? "";
 
@@ -1966,7 +2046,7 @@ test("unrelated settings snapshots preserve unsaved official model drafts", asyn
 
 test("official alias merge keeps all-false disabled and ORs any true", async () => {
   const [providersSource, settingsSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(settingsLibPath, "utf8"),
   ]);
   const functionNames = [
@@ -2005,11 +2085,11 @@ test("official alias merge keeps all-false disabled and ORs any true", async () 
 });
 
 test("official OpenAI controls are locked while Codex auth is missing", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const sidebar = providersSource.match(/<OfficialOpenAICard[\s\S]*?\/>/)?.[0] ?? "";
   const officialCard = providersSource.match(/function OfficialOpenAICard[\s\S]*?function HubConnectionBridge/)?.[0] ?? "";
   const providerNavButton = providersSource.match(/function ProviderNavButton[\s\S]*?function OfficialDetail/)?.[0] ?? "";
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
   const modelIdentity = providersSource.match(/function ModelIdentity[\s\S]*?function ModelEditorOverlay/)?.[0] ?? "";
   const switchControl = providersSource.match(/function SwitchControl[\s\S]*?function isOfficialModelDisabled/)?.[0] ?? "";
@@ -2036,7 +2116,7 @@ test("official OpenAI controls are locked while Codex auth is missing", async ()
 });
 
 test("official OpenAI source uses the same row card and toggle pattern as providers", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const sidebar = providersSource.match(/<OfficialOpenAICard[\s\S]*?\/>/)?.[0] ?? "";
   const officialCard = providersSource.match(/function OfficialOpenAICard[\s\S]*?function HubConnectionBridge/)?.[0] ?? "";
 
@@ -2064,11 +2144,11 @@ test("official OpenAI source uses the same row card and toggle pattern as provid
 
 test("official OpenAI source explains export-only semantics", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
 
   assert.match(providersSource, /officialIncluded=\{settings\?\.include_official_models \?\? false\}/);
   assert.match(officialDetail, /officialIncluded: boolean;/);
@@ -2089,8 +2169,8 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
-  const authPrompt = providersSource.match(/function CodexAuthPrompt[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
+  const authPrompt = providersSource.match(/function CodexAuthPrompt[\s\S]*$/)?.[0] ?? "";
 
   assert.match(providersSource, /async function openCodexAppForLogin\(\)/);
   assert.match(providersSource, /await api\.openCodexApp\(\);/);
@@ -2156,8 +2236,8 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
 });
 
 test("official include toggle is removed from the detail header", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const providersSource = await readProviderContractSource();
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
 
   assert.doesNotMatch(officialDetail, /Include in Codex Hub/);
   assert.doesNotMatch(officialDetail, /onToggleInclude/);
@@ -2165,8 +2245,8 @@ test("official include toggle is removed from the detail header", async () => {
 });
 
 test("official refresh action is placed in the Models toolbar", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const providersSource = await readProviderContractSource();
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
   assert.doesNotMatch(officialDetail, /IconButton title="Refresh official models"/);
@@ -2179,16 +2259,18 @@ test("official refresh action is placed in the Models toolbar", async () => {
 });
 
 test("startup refresh follows Codex catalog order until the user customizes it", async () => {
-  const [providersSource, settingsSource] = await Promise.all([
+  const [providersSource, catalogActionsSource, officialModelsSource, settingsSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(officialModelsPath, "utf8"),
     readFile(settingsLibPath, "utf8"),
   ]);
-  const refresh = providersSource.match(/async function refreshOfficialModels[\s\S]*?async function deleteProvider/)?.[0] ?? "";
-  const automaticOrder = providersSource.match(/function shouldFollowOfficialCatalogOrder[\s\S]*?^}/m)?.[0] ?? "";
-  const orderHelper = providersSource.match(/function refreshedOfficialModelOrder[\s\S]*?^}/m)?.[0] ?? "";
-  const sortKeys = providersSource.match(/function officialModelSortKeys[\s\S]*?^}/m)?.[0] ?? "";
+  const refresh = catalogActionsSource.match(/async function refreshOfficialModels[\s\S]*?async function discoverForForm/)?.[0] ?? "";
+  const automaticOrder = officialModelsSource.match(/export function shouldFollowOfficialCatalogOrder[\s\S]*?^}/m)?.[0] ?? "";
+  const orderHelper = officialModelsSource.match(/export function refreshedOfficialModelOrder[\s\S]*?^}/m)?.[0] ?? "";
+  const sortKeys = officialModelsSource.match(/export function officialModelSortKeys[\s\S]*?^}/m)?.[0] ?? "";
   const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
-  const legacyOrder = providersSource.match(/const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = \[[\s\S]*?\];/)?.[0] ?? "";
+  const legacyOrder = officialModelsSource.match(/export const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = \[[\s\S]*?\];/)?.[0] ?? "";
   const javascript = ts.transpileModule(
     `${normalizeSource}\n${legacyOrder}\n${automaticOrder}\n${sortKeys}\n${orderHelper}\nexport { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder };`,
     { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
@@ -2226,8 +2308,8 @@ test("startup refresh follows Codex catalog order until the user customizes it",
 });
 
 test("official model list exposes the same drag sorting as provider model lists", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
-  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function ProviderDetail/)?.[0] ?? "";
+  const providersSource = await readProviderContractSource();
+  const officialDetail = providersSource.match(/function OfficialDetail[\s\S]*?function CodexAuthPrompt/)?.[0] ?? "";
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
   assert.match(officialDetail, /onReorder=\{onReorder\}/);
@@ -2239,7 +2321,7 @@ test("official model list exposes the same drag sorting as provider model lists"
 
 test("Codex Hub connection CTA is prominent and has a connecting state", async () => {
   const [providersSource, css] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(indexCssPath, "utf8"),
   ]);
   const sidebar = providersSource.match(/<HubConnectionBridge[\s\S]*?\/>/)?.[0] ?? "";
@@ -2323,7 +2405,7 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
 });
 
 test("Codex Hub connection action reports progress immediately", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
   assert.match(providersSource, /const \[connectionPendingMode, setConnectionPendingMode\] = useState<ConnectionMode \| null>\(null\);/);
@@ -2354,7 +2436,7 @@ test("Codex Hub connection action reports progress immediately", async () => {
 
 test("connection switching delegates idempotent history reconciliation to the backend", async () => {
   const [providersSource, configSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(tauriConfigSourcePath, "utf8"),
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
@@ -2370,7 +2452,7 @@ test("connection switching delegates idempotent history reconciliation to the ba
 
 test("Codex Hub connection failures no longer mention history sync", async () => {
   const [providersSource, pageToastSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(pageToastPath, "utf8"),
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
@@ -2388,7 +2470,7 @@ test("Codex Hub connection failures no longer mention history sync", async () =>
 
 test("Codex Hub connection ignores structured history sync fields from switch status", async () => {
   const [providersSource, typesSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(typesPath, "utf8"),
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
@@ -2401,7 +2483,7 @@ test("Codex Hub connection ignores structured history sync fields from switch st
 });
 
 test("Codex Hub connection does not retry after history sync failures", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
   assert.doesNotMatch(action, /historyError/);
@@ -2411,7 +2493,7 @@ test("Codex Hub connection does not retry after history sync failures", async ()
 });
 
 test("unknown provider model metadata is not displayed as a 200K default", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /function formatContextWindow\(value\?: number \| null\)[\s\S]*return i18n\.t\("providers\.contextDynamic"\);/);
   assert.match(providersSource, /model\.max_context_window/);
@@ -2421,7 +2503,7 @@ test("unknown provider model metadata is not displayed as a 200K default", async
 });
 
 test("provider discovery updates the selected provider and reports progress", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /showToast\(t\("providers\.discoveringProviderModels", \{ name: provider\.name \}\), "loading"\)/);
   assert.match(providersSource, /const nextProvider = \{\s*\.\.\.provider,\s*models: mergeDiscoveredModels\(provider\.models, models\),\s*\}/s);
@@ -2430,7 +2512,7 @@ test("provider discovery updates the selected provider and reports progress", as
 });
 
 test("provider discovery preserves missing API key environment variable names", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /const missingEnv = message\.match/);
   assert.match(providersSource, /t\("providers\.discoveryFailedNotSet", \{ env: missingEnv\[1\] \}\)/);
@@ -2438,7 +2520,7 @@ test("provider discovery preserves missing API key environment variable names", 
 
 test("providers toast uses the shared dismissible page toast", async () => {
   const [providersSource, pageToastSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(pageToastPath, "utf8"),
   ]);
 
@@ -2454,7 +2536,7 @@ test("providers toast uses the shared dismissible page toast", async () => {
 });
 
 test("model copy uses provider-qualified identifiers", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /function providerQualifiedModelId\(providerId: string, modelId: string\)/);
   assert.match(providersSource, /navigator\.clipboard\.writeText\(copyValue\)/);
@@ -2468,7 +2550,7 @@ test("model copy uses provider-qualified identifiers", async () => {
 });
 
 test("provider write actions keep explicit success feedback", async () => {
-  const providersSource = await readFile(providersPagePath, "utf8");
+  const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /successMessage\?: string/);
   assert.match(providersSource, /t\("providers\.providerAdded", \{ name: providerName \}\)/);
@@ -2479,7 +2561,7 @@ test("provider write actions keep explicit success feedback", async () => {
 
 test("provider catalog writes trigger best-effort bound client sync", async () => {
   const [providersSource, tauriSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(tauriSourcePath, "utf8"),
   ]);
 
@@ -2525,7 +2607,7 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
 
 test("CodexHub route switches never control Codex processes", async () => {
   const [providersSource, tauriSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(tauriSourcePath, "utf8"),
   ]);
 
@@ -2574,7 +2656,10 @@ test("app owns version cache and settings drawer only receives update actions", 
 });
 
 test("app update flow separates silent automatic checks from settings checks and install state", async () => {
-  const appSource = await readFile(appPath, "utf8");
+  const [appSource, updateStatusSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(updateStatusPath, "utf8"),
+  ]);
   const installAction = appSource.match(/const startAppUpdateInstall = useCallback[\s\S]*?const checkForUpdates = useCallback/)?.[0] ?? "";
   const settingsCheck = appSource.match(/const checkForUpdates = useCallback[\s\S]*?const runAutomaticUpdateCheck = useCallback/)?.[0] ?? "";
   const automaticCheck = appSource.match(/const runAutomaticUpdateCheck = useCallback[\s\S]*?const updateUsageWindow = useCallback/)?.[0] ?? "";
@@ -2596,7 +2681,7 @@ test("app update flow separates silent automatic checks from settings checks and
   assert.match(installAction, /if \(toastId\) \{[\s\S]*dismissToast\(toastId\);[\s\S]*updateAvailableToastId\.current = null;[\s\S]*\}/);
   assert.match(installAction, /api\.startAppUpdateInstall\(\)/);
   assert.match(installAction, /settings\.downloadingUpdate/);
-  assert.match(appSource, /settings\.installingUpdateRestarting/);
+  assert.match(updateStatusSource, /settings\.installingUpdateRestarting/);
   assert.ok(
     installAction.indexOf("dismissToast(toastId)") < installAction.indexOf("api.startAppUpdateInstall()"),
     "the stale update-available toast should be removed before the install loading toast settles",
@@ -2783,7 +2868,7 @@ test("Codex takeover uses the existing connected control and exposes ownership s
   const [typesSource, tauriSource, providersSource, enSource, zhSource] = await Promise.all([
     readFile(typesPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -2810,7 +2895,7 @@ test("Codex takeover uses the existing connected control and exposes ownership s
 
 test("route and context changes disclose the exact Codex restart requirement", async () => {
   const [providersSource, enSource, zhSource] = await Promise.all([
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -2864,7 +2949,7 @@ test("legacy provider hidden capability is removed from model/provider UI state"
     readFile(new URL("../src/lib/types.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/lib/format.ts", import.meta.url), "utf8"),
     readFile(appPath, "utf8"),
-    readFile(providersPagePath, "utf8"),
+    readProviderContractSource(),
   ]);
 
   assert.doesNotMatch(typesSource, /hidden\?: boolean/);
