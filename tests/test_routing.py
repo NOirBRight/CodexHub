@@ -6251,7 +6251,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(done["item"]["arguments"], "{\"message\":\"hi\"}")
         self.assertEqual(completed["response"]["output"][0]["call_id"], "call_spawn")
 
-    def test_chat_tool_call_chunks_generate_call_id_when_upstream_omits_it(self):
+    def test_chat_tool_call_chunks_fail_closed_when_upstream_omits_id(self):
         chunks = [
             {
                 "choices": [
@@ -6286,14 +6286,10 @@ class RoutingTests(unittest.TestCase):
             "[DONE]",
         ]
 
-        events = _chat_stream_chunks_to_response_events(chunks)
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            _chat_stream_chunks_to_response_events(chunks)
 
-        done = next(event for event in events if event["type"] == "response.output_item.done")
-        completed = next(event for event in events if event["type"] == "response.completed")
-        self.assertTrue(done["item"]["call_id"].startswith("call_"))
-        self.assertEqual(done["item"]["name"], "multi_agent_v1__spawn_agent")
-        self.assertEqual(json.loads(done["item"]["arguments"])["message"], "hi")
-        self.assertEqual(completed["response"]["output"][0]["call_id"], done["item"]["call_id"])
+        self.assertEqual(raised.exception.cause.code, "unpaired_tool_call")
 
     def test_chat_tool_call_chunks_drop_text_message_when_tool_call_present(self):
         chunks = [

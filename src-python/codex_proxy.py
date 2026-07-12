@@ -50,6 +50,7 @@ import urllib3
 from protocol_translation import (
     ChatToResponsesStreamConverter,
     ResponsesToChatStreamConverter,
+    UnsupportedProtocolTranslationError,
     UpstreamStreamIncompleteError,
     chat_completion_body_to_stream_chunks,
     chat_completion_error_body,
@@ -2978,6 +2979,14 @@ def _incomplete_stream_json_error_body(upstream_name: str) -> bytes:
     )
 
 
+class UpstreamProtocolTranslationError(ValueError):
+    """Marks an unsupported upstream wire shape for the downstream error mapper."""
+
+    def __init__(self, cause: UnsupportedProtocolTranslationError):
+        self.cause = cause
+        super().__init__(str(cause))
+
+
 _responses_content_to_chat_content = responses_content_to_chat_content
 _responses_input_to_chat_messages = responses_input_to_chat_messages
 _responses_tools_to_chat_tools = responses_tools_to_chat_tools
@@ -3041,13 +3050,16 @@ def _repair_chat_completion_response_payload(payload: dict[str, Any]) -> dict[st
 
 
 def _chat_completion_to_response_body(body: bytes, *, repair: bool = True) -> bytes:
-    return chat_completion_to_response_body(
-        body,
-        repair=repair,
-        chat_content_text=_chat_content_text,
-        xmlish_tool_outputs=_xmlish_tool_call_outputs_from_text,
-        repair_response=_repair_chat_completion_response_payload,
-    )
+    try:
+        return chat_completion_to_response_body(
+            body,
+            repair=repair,
+            chat_content_text=_chat_content_text,
+            xmlish_tool_outputs=_xmlish_tool_call_outputs_from_text,
+            repair_response=_repair_chat_completion_response_payload,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _normalize_chat_function_call_name(name: str) -> str:
@@ -3062,11 +3074,14 @@ def _normalize_chat_function_call_name(name: str) -> str:
 
 
 def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]) -> list[dict[str, Any]]:
-    return chat_stream_chunks_to_response_events(
-        chunks,
-        normalize_function_name=_normalize_chat_function_call_name,
-        xmlish_tool_outputs=_xmlish_tool_call_outputs_from_text,
-    )
+    try:
+        return chat_stream_chunks_to_response_events(
+            chunks,
+            normalize_function_name=_normalize_chat_function_call_name,
+            xmlish_tool_outputs=_xmlish_tool_call_outputs_from_text,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _response_events_shape_summary(events: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -3502,15 +3517,21 @@ def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | Non
 
 
 def _response_body_to_chat_completion_body(body: bytes) -> bytes:
-    return response_body_to_chat_completion_body(
-        body,
-        function_name_from_response_item=_chat_function_name_from_response_item,
-        error_body=_chat_completion_error_body,
-    )
+    try:
+        return response_body_to_chat_completion_body(
+            body,
+            function_name_from_response_item=_chat_function_name_from_response_item,
+            error_body=_chat_completion_error_body,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
-    return chat_completion_body_to_stream_chunks(body)
+    try:
+        return chat_completion_body_to_stream_chunks(body)
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
@@ -3573,14 +3594,41 @@ def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> 
     return False
 
 
-_response_events_to_chat_stream_chunks = partial(
-    response_events_to_chat_stream_chunks,
-    function_name_from_response_item=_chat_function_name_from_response_item,
-)
+def _response_events_to_chat_stream_chunks(
+    events: list[Mapping[str, Any]],
+    *,
+    require_completed: bool = False,
+) -> list[dict[str, Any]]:
+    try:
+        return response_events_to_chat_stream_chunks(
+            events,
+            require_completed=require_completed,
+            function_name_from_response_item=_chat_function_name_from_response_item,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
-_ResponsesToChatStreamConverter = ResponsesToChatStreamConverter
-_ChatToResponsesStreamConverter = ChatToResponsesStreamConverter
+class _ResponsesToChatStreamConverter(ResponsesToChatStreamConverter):
+    def chunks_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        try:
+            return super().chunks_for_event(event)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+
+
+class _ChatToResponsesStreamConverter(ChatToResponsesStreamConverter):
+    def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
+        try:
+            return super().events_for_chunk(chunk)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+
+    def events_for_done(self) -> list[dict[str, Any]]:
+        try:
+            return super().events_for_done()
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _is_reasoning_sse_payload(payload: Mapping[str, Any] | None) -> bool:
@@ -10680,6 +10728,45 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error="image_proxy_error",
                 detail=str(exc),
                 error_type="image_proxy_error",
+            )
+        except UpstreamProtocolTranslationError as exc:
+            detail = str(exc)
+            error_code = exc.cause.code
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                upstream=upstream_name,
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                status=502,
+                error=error_code,
+                detail=detail[:300],
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **proxy_request_context,
+            )
+            if downstream_sse_started:
+                self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name or "upstream_error",
+                    status=502,
+                    exc=exc,
+                    error=error_code,
+                    detail=detail,
+                )
+                return
+            self._safe_send_downstream_json_error(
+                502,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                error=error_code,
+                detail=detail,
+                error_type=error_code,
             )
         except ValueError as exc:
             write_proxy_event(

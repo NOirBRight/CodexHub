@@ -492,13 +492,12 @@ class ChatToolChoiceTests(unittest.TestCase):
 
 
 class ChatToolsToResponsesTests(unittest.TestCase):
-    def test_filters_non_function_tools(self):
-        result = _chat_tools_to_responses_tools([
-            {"type": "function", "function": {"name": "foo"}},
-            {"type": "other"},
-        ])
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["name"], "foo")
+    def test_rejects_non_function_tools_that_cannot_cross_the_protocol_seam(self):
+        with self.assertRaises(ValueError):
+            _chat_tools_to_responses_tools([
+                {"type": "function", "function": {"name": "foo"}},
+                {"type": "other"},
+            ])
 
 
 class ResponseBodyToChatTests(unittest.TestCase):
@@ -924,6 +923,28 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi there!")
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(handler._fake.status, 200)
+
+    def test_post_chat_completions_rejects_unsupported_upstream_response_semantics(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_reasoning",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]}],
+        }).encode("utf-8")
+
+        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 502)
+        self.assertEqual(result["error"]["type"], "unsupported_protocol_semantics")
 
     def test_post_chat_completions_events_use_proxy_request_kind(self):
         body = json.dumps({
