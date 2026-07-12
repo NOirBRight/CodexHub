@@ -38,6 +38,11 @@ from codex_proxy import (
 )
 
 
+def _load_glm_apply_patch_retry_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_retry_loop.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 class FakeWFile:
     def __init__(self, fail_on_write=None):
         self.writes = []
@@ -6589,6 +6594,284 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["output"][0]["type"], "function_call")
         self.assertEqual(payload["output"][0]["call_id"], "call_spawn")
         self.assertEqual(payload["output"][0]["name"], "spawn_agent")
+
+    def test_glm_apply_patch_retry_loop_body_adapts_to_custom_freeform_call(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        converted = codex_proxy._chat_completion_to_response_body(
+            json.dumps(fixture["body_response"], ensure_ascii=True).encode("utf-8")
+        )
+
+        transformed = compatible_response_body(
+            converted,
+            "volcengine",
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        call = json.loads(transformed)["output"][0]
+        self.assertEqual(call["type"], "custom_tool_call")
+        self.assertEqual(call["id"], "fc_call_patch_fixture")
+        self.assertEqual(call["call_id"], fixture["paired_custom_tool_output"]["call_id"])
+        self.assertEqual(call["name"], "apply_patch")
+        self.assertEqual(call["input"], fixture["patch"])
+        self.assertNotIn("arguments", call)
+
+        adapter_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+        )
+        self.assertEqual(adapter_event["surface"], "body")
+        self.assertEqual(adapter_event["outcome"], "adapted")
+        self.assertEqual(adapter_event["count"], 1)
+        self.assertNotIn("arguments", adapter_event)
+        self.assertNotIn("input", adapter_event)
+        self.assertNotIn("patch", adapter_event)
+
+    def test_glm_apply_patch_retry_loop_stream_adapts_to_custom_freeform_events(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in fixture["stream_chunks"]]
+            + [b"data: [DONE]\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="<sanitized-request-id>",
+            model="<third-party-glm>",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        event_types = [payload["type"] for payload in payloads]
+        added = next(payload for payload in payloads if payload["type"] == "response.output_item.added")
+        input_done = next(
+            payload for payload in payloads if payload["type"] == "response.custom_tool_call_input.done"
+        )
+        item_done = next(payload for payload in payloads if payload["type"] == "response.output_item.done")
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("response.function_call_arguments.delta", event_types)
+        self.assertNotIn("response.function_call_arguments.done", event_types)
+        self.assertEqual(added["item"]["type"], "custom_tool_call")
+        self.assertEqual(added["item"]["id"], "fc_call_patch_fixture")
+        self.assertEqual(added["item"]["call_id"], fixture["paired_custom_tool_output"]["call_id"])
+        self.assertEqual(added["item"]["input"], "")
+        self.assertEqual(input_done["item_id"], "fc_call_patch_fixture")
+        self.assertEqual(input_done["input"], fixture["patch"])
+        self.assertEqual(item_done["item"]["type"], "custom_tool_call")
+        self.assertEqual(item_done["item"]["input"], fixture["patch"])
+        self.assertEqual(completed["response"]["output"][0]["type"], "custom_tool_call")
+        self.assertEqual(completed["response"]["output"][0]["input"], fixture["patch"])
+
+    def test_third_party_responses_sse_adapts_apply_patch_without_leaking_json_arguments(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        arguments = json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":"))
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": arguments,
+        }
+        events = [
+            {"type": "response.created", "response": {"id": "<response-id>", "model": "<third-party-glm>"}},
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**function_item, "status": "in_progress", "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_call_patch_fixture",
+                "output_index": 0,
+                "delta": arguments[:20],
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_call_patch_fixture",
+                "output_index": 0,
+                "delta": arguments[20:],
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_call_patch_fixture",
+                "output_index": 0,
+                "arguments": arguments,
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": function_item},
+            {
+                "type": "response.completed",
+                "response": {"id": "<response-id>", "status": "completed", "output": [function_item]},
+            },
+        ]
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [f"data: {json.dumps(event, ensure_ascii=True)}\n\n".encode("utf-8") for event in events] + [b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="<sanitized-request-id>",
+            model="<third-party-glm>",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        event_types = [payload["type"] for payload in payloads]
+        item_done = next(payload for payload in payloads if payload["type"] == "response.output_item.done")
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("response.function_call_arguments.delta", event_types)
+        self.assertNotIn("response.function_call_arguments.done", event_types)
+        self.assertIn("response.custom_tool_call_input.done", event_types)
+        self.assertEqual(item_done["item"]["type"], "custom_tool_call")
+        self.assertEqual(item_done["item"]["input"], fixture["patch"])
+        self.assertEqual(completed["response"]["output"][0]["type"], "custom_tool_call")
+        self.assertEqual(completed["response"]["output"][0]["input"], fixture["patch"])
+
+    def test_apply_patch_adapter_rejects_malformed_arguments_without_telemetry_content(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        malformed_arguments = {
+            "missing": None,
+            "null": json.dumps({"patch": None}),
+            "non_string": json.dumps({"patch": ["not-a-patch"]}),
+            "empty": json.dumps({"patch": ""}),
+            "nested": json.dumps({"patch": {"text": fixture["patch"]}}),
+            "duplicate": '{"patch":"one","patch":"two"}',
+            "extra": json.dumps({"patch": fixture["patch"], "extra": "unexpected"}),
+        }
+
+        for shape, arguments in malformed_arguments.items():
+            with self.subTest(shape=shape):
+                self.write_proxy_event.reset_mock()
+                item = {
+                    "id": "fc_call_patch_fixture",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": fixture["paired_custom_tool_output"]["call_id"],
+                    "name": "apply_patch",
+                }
+                if arguments is not None:
+                    item["arguments"] = arguments
+
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    compatible_response_body(
+                        json.dumps({"output": [item]}, ensure_ascii=True).encode("utf-8"),
+                        "volcengine",
+                        event_context={"request_id": "<sanitized-request-id>"},
+                    )
+
+                self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+                adapter_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+                )
+                self.assertEqual(adapter_event["outcome"], "rejected")
+                self.assertNotIn("arguments", adapter_event)
+                self.assertNotIn("input", adapter_event)
+                self.assertNotIn("patch", adapter_event)
+
+    def test_apply_patch_adapter_preserves_unrelated_and_existing_custom_calls(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        body = {
+            "output": [
+                {
+                    "id": "fc_lookup",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_lookup",
+                    "name": "lookup",
+                    "arguments": '{"q":"sanitized"}',
+                },
+                {
+                    "id": "fc_call_patch_fixture",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": fixture["paired_custom_tool_output"]["call_id"],
+                    "name": "apply_patch",
+                    "arguments": json.dumps({"patch": fixture["patch"]}),
+                },
+                {
+                    "id": "ctc_existing",
+                    "type": "custom_tool_call",
+                    "status": "completed",
+                    "call_id": "call_existing_custom",
+                    "name": "apply_patch",
+                    "input": fixture["patch"],
+                },
+            ]
+        }
+
+        transformed = compatible_response_body(
+            json.dumps(body, ensure_ascii=True).encode("utf-8"),
+            "volcengine",
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        output = json.loads(transformed)["output"]
+
+        self.assertEqual([item["id"] for item in output], ["fc_lookup", "fc_call_patch_fixture", "ctc_existing"])
+        self.assertEqual(output[0], body["output"][0])
+        self.assertEqual(output[1]["type"], "custom_tool_call")
+        self.assertEqual(output[1]["call_id"], fixture["paired_custom_tool_output"]["call_id"])
+        self.assertEqual(output[2], body["output"][2])
+
+        adapter_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+        ]
+        self.assertEqual({event["outcome"] for event in adapter_events}, {"adapted", "untouched"})
+
+    def test_apply_patch_stream_adapter_rejects_duplicate_and_post_terminal_semantics(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        events = codex_proxy._chat_stream_chunks_to_response_events(fixture["stream_chunks"])
+        added = next(event for event in events if event["type"] == "response.output_item.added")
+
+        duplicate_events = list(events)
+        duplicate_events.insert(duplicate_events.index(added) + 1, json.loads(json.dumps(added)))
+        post_terminal_events = list(events) + [json.loads(json.dumps(added))]
+
+        for shape, malformed_events in (("duplicate", duplicate_events), ("post_terminal", post_terminal_events)):
+            with self.subTest(shape=shape):
+                self.write_proxy_event.reset_mock()
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    codex_proxy._adapt_third_party_apply_patch_stream_events(
+                        malformed_events,
+                        event_context={"request_id": "<sanitized-request-id>"},
+                    )
+                self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+                adapter_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+                )
+                self.assertEqual(adapter_event["outcome"], "rejected")
+                self.assertNotIn("arguments", adapter_event)
+                self.assertNotIn("input", adapter_event)
+                self.assertNotIn("patch", adapter_event)
 
     def test_chat_completions_non_sse_relay_converts_xmlish_tool_call_text(self):
         body = json.dumps(

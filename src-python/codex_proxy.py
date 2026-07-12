@@ -4619,7 +4619,14 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
         tool_name = _multi_agent_alias_tool_name(original_name)
         namespace_alias = None
         argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
-        if argument_key is not None and _json_argument_string_needs_repair(value.get(argument_key)):
+        if (
+            argument_key is not None
+            and not (
+                value.get("type") == "custom_tool_call"
+                and original_name == APPLY_PATCH_FUNCTION_NAME
+            )
+            and _json_argument_string_needs_repair(value.get(argument_key))
+        ):
             repaired_arguments = _json_object_from_arguments(value.get(argument_key))
             if repaired_arguments is not None:
                 rewritten[argument_key] = _dump_arguments_like(value.get(argument_key), repaired_arguments)
@@ -7461,6 +7468,486 @@ def compatible_request_body(
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+APPLY_PATCH_FUNCTION_NAME = "apply_patch"
+APPLY_PATCH_ADAPTER_EVENT = "third_party_apply_patch_freeform_adapter"
+APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
+
+
+class _ApplyPatchAdapterFailure(ValueError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _apply_patch_adapter_enabled(event_context: Mapping[str, Any] | None) -> bool:
+    return not bool(event_context and event_context.get("_apply_patch_adapter_enabled") is False)
+
+
+def _write_apply_patch_adapter_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    outcome: str,
+    count: int = 1,
+    reason: str | None = None,
+) -> None:
+    fields: dict[str, Any] = {"surface": surface, "outcome": outcome, "count": count}
+    if reason is not None:
+        fields["reason"] = reason
+    _write_adapter_event(event_context, APPLY_PATCH_ADAPTER_EVENT, **fields)
+
+
+def _raise_apply_patch_adapter_failure(
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    reason: str,
+) -> None:
+    _write_apply_patch_adapter_event(
+        event_context,
+        surface=surface,
+        outcome="rejected",
+        reason=reason,
+    )
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            APPLY_PATCH_ADAPTER_ERROR_CODE,
+            "Third-party apply_patch function call is not an exact freeform patch invocation.",
+        )
+    )
+
+
+def _is_apply_patch_function_call(item: Any) -> bool:
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "function_call"
+        and item.get("name") == APPLY_PATCH_FUNCTION_NAME
+    )
+
+
+def _is_apply_patch_custom_tool_call(item: Any) -> bool:
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "custom_tool_call"
+        and item.get("name") == APPLY_PATCH_FUNCTION_NAME
+    )
+
+
+def _apply_patch_arguments_text_and_input(arguments: Any) -> tuple[str, str]:
+    def unique_object(pairs: list[tuple[Any, Any]]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if not isinstance(key, str) or key in parsed:
+                raise _ApplyPatchAdapterFailure("duplicate_argument_key")
+            parsed[key] = value
+        return parsed
+
+    def reject_json_constant(_: str) -> None:
+        raise _ApplyPatchAdapterFailure("invalid_arguments")
+
+    if isinstance(arguments, Mapping):
+        parsed = dict(arguments)
+        arguments_text = json.dumps(parsed, ensure_ascii=True, separators=(",", ":"))
+    elif isinstance(arguments, str):
+        arguments_text = arguments
+        try:
+            parsed = json.loads(
+                arguments,
+                object_pairs_hook=unique_object,
+                parse_constant=reject_json_constant,
+            )
+        except _ApplyPatchAdapterFailure:
+            raise
+        except (TypeError, ValueError):
+            raise _ApplyPatchAdapterFailure("invalid_arguments") from None
+    else:
+        raise _ApplyPatchAdapterFailure("missing_arguments")
+
+    if not isinstance(parsed, dict) or set(parsed) != {"patch"}:
+        raise _ApplyPatchAdapterFailure("arguments_not_exact")
+    patch = parsed.get("patch")
+    if not isinstance(patch, str):
+        raise _ApplyPatchAdapterFailure("patch_not_string")
+    if not patch.strip():
+        raise _ApplyPatchAdapterFailure("patch_empty")
+    return arguments_text, patch
+
+
+def _apply_patch_item_identity(item: Mapping[str, Any]) -> tuple[str, str]:
+    item_id = item.get("id")
+    call_id = item.get("call_id")
+    if not isinstance(item_id, str) or not item_id:
+        raise _ApplyPatchAdapterFailure("missing_item_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise _ApplyPatchAdapterFailure("missing_call_id")
+    return item_id, call_id
+
+
+def _custom_apply_patch_item(item: Mapping[str, Any], patch: str) -> dict[str, Any]:
+    rewritten = dict(item)
+    rewritten["type"] = "custom_tool_call"
+    rewritten["input"] = patch
+    rewritten.pop("arguments", None)
+    return rewritten
+
+
+def _adapt_third_party_apply_patch_response_body(
+    payload: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not _apply_patch_adapter_enabled(event_context) or not isinstance(payload, dict):
+        return payload, False
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return payload, False
+
+    adapted = 0
+    untouched = 0
+    seen_item_ids: set[str] = set()
+    seen_call_ids: set[str] = set()
+    seen_custom_keys: set[str] = set()
+    rewritten_output: list[Any] = []
+
+    for index, raw_item in enumerate(output):
+        if _is_apply_patch_function_call(raw_item):
+            assert isinstance(raw_item, Mapping)
+            try:
+                item_id, call_id = _apply_patch_item_identity(raw_item)
+                _, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
+                if item_id in seen_item_ids:
+                    raise _ApplyPatchAdapterFailure("duplicate_item_id")
+                if call_id in seen_call_ids:
+                    raise _ApplyPatchAdapterFailure("duplicate_call_id")
+            except _ApplyPatchAdapterFailure as exc:
+                _raise_apply_patch_adapter_failure(event_context, surface="body", reason=exc.reason)
+            seen_item_ids.add(item_id)
+            seen_call_ids.add(call_id)
+            rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
+            adapted += 1
+            continue
+
+        if _is_apply_patch_custom_tool_call(raw_item):
+            assert isinstance(raw_item, Mapping)
+            raw_item_id = raw_item.get("id")
+            raw_call_id = raw_item.get("call_id")
+            key = (
+                f"item:{raw_item_id}"
+                if isinstance(raw_item_id, str) and raw_item_id
+                else f"call:{raw_call_id}"
+                if isinstance(raw_call_id, str) and raw_call_id
+                else f"index:{index}"
+            )
+            if key not in seen_custom_keys:
+                seen_custom_keys.add(key)
+                untouched += 1
+        rewritten_output.append(raw_item)
+
+    if adapted:
+        payload = dict(payload)
+        payload["output"] = rewritten_output
+        _write_apply_patch_adapter_event(
+            event_context,
+            surface="body",
+            outcome="adapted",
+            count=adapted,
+        )
+    if untouched:
+        _write_apply_patch_adapter_event(
+            event_context,
+            surface="body",
+            outcome="untouched",
+            count=untouched,
+        )
+    return payload, bool(adapted)
+
+
+@dataclass
+class _ApplyPatchStreamState:
+    item_id: str
+    call_id: str
+    output_index: int
+    initial_arguments: str | None
+    arguments: str | None = None
+    patch: str | None = None
+    delta_arguments: str = ""
+    arguments_done: bool = False
+    item_done: bool = False
+
+
+class _ThirdPartyApplyPatchStreamAdapter:
+    def __init__(self, event_context: Mapping[str, Any] | None, *, surface: str = "stream"):
+        self._event_context = event_context
+        self._surface = surface
+        self._states: dict[str, _ApplyPatchStreamState] = {}
+        self._item_id_by_call_id: dict[str, str] = {}
+        self._adapted_item_ids: set[str] = set()
+        self._untouched_keys: set[str] = set()
+        self._terminal_seen = False
+        self._finished = False
+
+    def _fail(self, reason: str) -> None:
+        _raise_apply_patch_adapter_failure(
+            self._event_context,
+            surface=self._surface,
+            reason=reason,
+        )
+
+    def _output_index(self, event: Mapping[str, Any]) -> int:
+        output_index = event.get("output_index")
+        if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+            self._fail("missing_output_index")
+        return output_index
+
+    def _remember_untouched(self, item: Mapping[str, Any], fallback: str) -> None:
+        item_id = item.get("id")
+        call_id = item.get("call_id")
+        key = (
+            f"item:{item_id}"
+            if isinstance(item_id, str) and item_id
+            else f"call:{call_id}"
+            if isinstance(call_id, str) and call_id
+            else fallback
+        )
+        self._untouched_keys.add(key)
+
+    def _state_from_added_item(
+        self,
+        item: Mapping[str, Any],
+        output_index: int,
+    ) -> tuple[_ApplyPatchStreamState, str]:
+        try:
+            item_id, call_id = _apply_patch_item_identity(item)
+            arguments = item.get("arguments")
+            if isinstance(arguments, str) and not arguments:
+                initial_arguments = None
+            else:
+                initial_arguments, _ = _apply_patch_arguments_text_and_input(arguments)
+        except _ApplyPatchAdapterFailure as exc:
+            self._fail(exc.reason)
+        if item_id in self._states:
+            self._fail("duplicate_item_added")
+        if call_id in self._item_id_by_call_id:
+            self._fail("duplicate_call_id")
+        state = _ApplyPatchStreamState(
+            item_id=item_id,
+            call_id=call_id,
+            output_index=output_index,
+            initial_arguments=initial_arguments,
+        )
+        self._states[item_id] = state
+        self._item_id_by_call_id[call_id] = item_id
+        return state, ""
+
+    def _state_for_event(self, event: Mapping[str, Any]) -> _ApplyPatchStreamState:
+        item_id = event.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            self._fail("missing_item_id")
+        state = self._states.get(item_id)
+        if state is None:
+            self._fail("unpaired_stream_event")
+        output_index = self._output_index(event)
+        if output_index != state.output_index:
+            self._fail("conflicting_output_index")
+        return state
+
+    def _check_completed_item(
+        self,
+        item: Mapping[str, Any],
+        state: _ApplyPatchStreamState,
+    ) -> None:
+        try:
+            item_id, call_id = _apply_patch_item_identity(item)
+            arguments, patch = _apply_patch_arguments_text_and_input(item.get("arguments"))
+        except _ApplyPatchAdapterFailure as exc:
+            self._fail(exc.reason)
+        if item_id != state.item_id or call_id != state.call_id:
+            self._fail("conflicting_item_identity")
+        if not state.arguments_done or state.arguments is None or state.patch is None:
+            self._fail("missing_arguments_done")
+        if arguments != state.arguments or patch != state.patch:
+            self._fail("conflicting_arguments")
+
+    def _rewrite_terminal_response(self, event: Mapping[str, Any]) -> tuple[Mapping[str, Any], bool]:
+        response = event.get("response")
+        if not isinstance(response, Mapping):
+            return event, False
+        output = response.get("output")
+        if not isinstance(output, list):
+            return event, False
+        changed = False
+        seen_terminal_item_ids: set[str] = set()
+        rewritten_output: list[Any] = []
+        for index, raw_item in enumerate(output):
+            if _is_apply_patch_function_call(raw_item):
+                assert isinstance(raw_item, Mapping)
+                try:
+                    item_id, call_id = _apply_patch_item_identity(raw_item)
+                    arguments, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                if item_id in seen_terminal_item_ids:
+                    self._fail("duplicate_terminal_item")
+                seen_terminal_item_ids.add(item_id)
+                state = self._states.get(item_id)
+                if state is not None:
+                    if call_id != state.call_id or not state.item_done or state.arguments != arguments or state.patch != patch:
+                        self._fail("conflicting_terminal_item")
+                elif call_id in self._item_id_by_call_id:
+                    self._fail("conflicting_item_identity")
+                else:
+                    self._adapted_item_ids.add(item_id)
+                rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
+                changed = True
+                continue
+            if _is_apply_patch_custom_tool_call(raw_item):
+                assert isinstance(raw_item, Mapping)
+                self._remember_untouched(raw_item, f"terminal:{index}")
+            rewritten_output.append(raw_item)
+        if not changed:
+            return event, False
+        rewritten_response = dict(response)
+        rewritten_response["output"] = rewritten_output
+        rewritten_event = dict(event)
+        rewritten_event["response"] = rewritten_response
+        return rewritten_event, True
+
+    def _ensure_terminal_lifecycle(self) -> None:
+        for state in self._states.values():
+            if not state.item_done:
+                self._fail("incomplete_tool_lifecycle")
+
+    def events_for_event(self, event: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], bool]:
+        event_type = event.get("type")
+        if self._terminal_seen and isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
+            self._fail("post_terminal_semantic_event")
+
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if _is_apply_patch_function_call(item):
+                assert isinstance(item, Mapping)
+                output_index = self._output_index(event)
+                self._state_from_added_item(item, output_index)
+                rewritten_event = dict(event)
+                rewritten_event["item"] = _custom_apply_patch_item(item, "")
+                return [rewritten_event], True
+            if _is_apply_patch_custom_tool_call(item):
+                assert isinstance(item, Mapping)
+                self._remember_untouched(item, "added")
+            return [event], False
+
+        if event_type == "response.function_call_arguments.delta":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in self._states:
+                state = self._state_for_event(event)
+                delta = event.get("delta")
+                if state.arguments_done or state.item_done or not isinstance(delta, str):
+                    self._fail("invalid_arguments_delta")
+                # Do not expose the third-party JSON wrapper as freeform input.
+                # The validated raw patch is emitted only by the matching done event.
+                state.delta_arguments += delta
+                return [], True
+            return [event], False
+
+        if event_type == "response.function_call_arguments.done":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in self._states:
+                state = self._state_for_event(event)
+                if state.arguments_done or state.item_done:
+                    self._fail("duplicate_arguments_done")
+                try:
+                    arguments, patch = _apply_patch_arguments_text_and_input(event.get("arguments"))
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                if state.initial_arguments is not None and arguments != state.initial_arguments:
+                    self._fail("conflicting_arguments")
+                if state.delta_arguments and not arguments.startswith(state.delta_arguments):
+                    self._fail("conflicting_arguments")
+                state.arguments = arguments
+                state.patch = patch
+                state.arguments_done = True
+                self._adapted_item_ids.add(state.item_id)
+                rewritten_event = dict(event)
+                rewritten_event["type"] = "response.custom_tool_call_input.done"
+                rewritten_event["input"] = patch
+                rewritten_event.pop("arguments", None)
+                return [rewritten_event], True
+            return [event], False
+
+        if event_type == "response.output_item.done":
+            item = event.get("item")
+            if _is_apply_patch_function_call(item):
+                assert isinstance(item, Mapping)
+                try:
+                    item_id, _ = _apply_patch_item_identity(item)
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                state = self._states.get(item_id)
+                if state is None:
+                    self._fail("unpaired_stream_item")
+                if state.item_done:
+                    self._fail("duplicate_item_done")
+                if self._output_index(event) != state.output_index:
+                    self._fail("conflicting_output_index")
+                self._check_completed_item(item, state)
+                state.item_done = True
+                rewritten_event = dict(event)
+                rewritten_event["item"] = _custom_apply_patch_item(item, state.patch or "")
+                return [rewritten_event], True
+            if _is_apply_patch_custom_tool_call(item):
+                assert isinstance(item, Mapping)
+                self._remember_untouched(item, "done")
+            return [event], False
+
+        if isinstance(event_type, str) and event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+            rewritten_event, changed = self._rewrite_terminal_response(event)
+            self._ensure_terminal_lifecycle()
+            self._terminal_seen = True
+            return [rewritten_event], changed
+
+        return [event], False
+
+    def finish(self, *, allow_missing_terminal: bool = False) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        if self._states and not self._terminal_seen:
+            if not allow_missing_terminal:
+                self._fail("missing_terminal_event")
+            self._ensure_terminal_lifecycle()
+        if self._adapted_item_ids:
+            _write_apply_patch_adapter_event(
+                self._event_context,
+                surface=self._surface,
+                outcome="adapted",
+                count=len(self._adapted_item_ids),
+            )
+        if self._untouched_keys:
+            _write_apply_patch_adapter_event(
+                self._event_context,
+                surface=self._surface,
+                outcome="untouched",
+                count=len(self._untouched_keys),
+            )
+
+
+def _adapt_third_party_apply_patch_stream_events(
+    events: list[Mapping[str, Any]],
+    *,
+    event_context: Mapping[str, Any] | None = None,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    if not _apply_patch_adapter_enabled(event_context):
+        return events, False
+    adapter = _ThirdPartyApplyPatchStreamAdapter(event_context)
+    changed = False
+    rewritten: list[Mapping[str, Any]] = []
+    for event in events:
+        event_replacements, event_changed = adapter.events_for_event(event)
+        rewritten.extend(event_replacements)
+        changed = changed or event_changed
+    adapter.finish()
+    return (rewritten if changed else events), changed
+
+
 def compatible_response_body(
     body: bytes,
     upstream_name: str,
@@ -7475,6 +7962,8 @@ def compatible_response_body(
         return body
 
     changed = _hide_reasoning_text(payload)
+    payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
+    changed = changed or apply_patch_changed
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -11856,6 +12345,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # When the caller spoke Chat Completions, the response must be converted
         # back to Chat Completions format regardless of the upstream wire format.
         want_chat_output = inbound_format == "chat_completions"
+        compatibility_event_context = dict(event_context or {})
+        compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
         # When the caller asked for a non-streaming response but the upstream
         # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
         # SSE into a single JSON response body.
@@ -11973,7 +12464,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         compatible_response_body(
                             _chat_completion_to_response_body(body),
                             upstream_name,
-                            event_context=event_context,
+                            event_context=compatibility_event_context,
                         )
                     )
                 else:
@@ -11982,7 +12473,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         body = _response_body_to_chat_completion_body(body)
                     else:
                         body = _response_body_to_chat_completion_body(
-                            compatible_response_body(body, upstream_name, event_context=event_context)
+                            compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
                         )
             elif upstream_format == "chat_completions":
                 converted_body = _chat_completion_to_response_body(
@@ -11995,10 +12486,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     body = compatible_response_body(
                         converted_body,
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
             else:
-                body = compatible_response_body(body, upstream_name, event_context=event_context)
+                body = compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
             if status >= 400:
                 body = _with_codexhub_http_error(
                     body,
@@ -12539,7 +13030,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_body = compatible_response_body(
                         _events_to_responses_body(events, require_completed=True),
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
                 except UpstreamStreamIncompleteError:
                     if defer_stream_errors:
@@ -12715,7 +13206,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_body = compatible_response_body(
                         _events_to_responses_body(_chat_stream_chunks_to_response_events(chunks)),
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
                     send_downstream_response_headers_once()
                     for chunk in _chat_completion_body_to_stream_chunks(
@@ -12735,6 +13226,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **_response_events_shape_summary(events),
                     )
                     events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    events, _ = _adapt_third_party_apply_patch_stream_events(
+                        events,
+                        event_context=compatibility_event_context,
+                    )
                     events, _ = _normalize_third_party_tool_call(events)
                     _write_adapter_event(
                         event_context,
@@ -12800,6 +13295,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 downstream_output_started = False
                 buffered_lines: list[tuple[bytes, bool]] = []
                 rewritten_events: list[Mapping[str, Any]] = []
+                apply_patch_stream_adapter = (
+                    _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
+                    if (
+                        upstream_name != "official"
+                        and not want_chat_output
+                        and _apply_patch_adapter_enabled(compatibility_event_context)
+                    )
+                    else None
+                )
                 try:
                     for line in self._iter_upstream_sse_lines(
                         response,
@@ -12818,7 +13322,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             if _responses_event_starts_downstream_output(usage_payload):
                                 downstream_output_started = True
                             _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
-                        rewritten_line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                        rewritten_line = line
+                        if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
+                            replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(
+                                usage_payload
+                            )
+                            if apply_patch_changed:
+                                rewritten_line = (
+                                    _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                                    if replacement_events
+                                    else b""
+                                )
+                        rewritten_line = compatible_sse_line(
+                            rewritten_line,
+                            upstream_name,
+                            event_context=compatibility_event_context,
+                        )
                         rewritten_payload = _parse_sse_json_payload(rewritten_line) if upstream_name != "official" else usage_payload
                         _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
                         if isinstance(rewritten_payload, Mapping):
@@ -12875,6 +13394,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
+                if apply_patch_stream_adapter is not None and saw_terminal_event:
+                    apply_patch_stream_adapter.finish()
                 if status < 400 and saw_response_event and not saw_terminal_event:
                     self.close_connection = True
                     write_proxy_event(
@@ -12958,6 +13479,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             created_response: dict[str, Any] | None = None
             completed_tool_output_items: list[dict[str, Any]] = []
             last_response_event_type: str | None = None
+            apply_patch_stream_adapter = (
+                _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
+                if (
+                    upstream_name != "official"
+                    and not want_chat_output
+                    and _apply_patch_adapter_enabled(compatibility_event_context)
+                )
+                else None
+            )
 
             def write_or_queue_downstream_line(out_line: bytes, *, buffer: bool = False, force: bool = False) -> None:
                 if not out_line:
@@ -13129,7 +13659,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         and not saw_terminal_event
                     ):
                         buffer_current_line = True
-                    line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                    if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
+                        replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(usage_payload)
+                        if apply_patch_changed:
+                            if not replacement_events:
+                                line = b""
+                            else:
+                                line = _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                    line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)
                     rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     if isinstance(rewritten_payload, Mapping):
                         remember_completed_tool_event(rewritten_payload)
@@ -13212,6 +13749,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 return 502
             if status < 400 and not saw_terminal_event:
                 if synthesize_completed_tool_response():
+                    if apply_patch_stream_adapter is not None:
+                        apply_patch_stream_adapter.finish(allow_missing_terminal=True)
                     self.close_connection = True
                     _capture_usage(usage_capture, None, missing_reason="synthetic_tool_terminal")
                     return status
@@ -13242,6 +13781,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
+            if apply_patch_stream_adapter is not None:
+                apply_patch_stream_adapter.finish()
             if (
                 status < 400
                 and upstream_name != "official"

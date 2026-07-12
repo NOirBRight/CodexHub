@@ -1651,6 +1651,45 @@ class ProtocolTranslationTests(unittest.TestCase):
                 self.assertEqual(events[-1]["response"]["status"], payload["status"])
                 self.assertNotIn("response.completed", [event["type"] for event in events])
 
+    def test_response_body_to_sse_preserves_custom_tool_freeform_lifecycle(self):
+        item = {
+            "id": "ctc_patch_fixture",
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_patch_fixture",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n*** End Patch\n",
+        }
+        body = json.dumps(
+            {
+                "id": "resp_patch_fixture",
+                "object": "response",
+                "status": "completed",
+                "model": "<third-party-glm>",
+                "output": [item],
+            }
+        ).encode("utf-8")
+
+        events = protocol_translation.response_body_to_response_sse_events(body)
+        reconstructed = json.loads(protocol_translation.events_to_responses_body(events))
+
+        self.assertEqual(
+            [event["type"] for event in events],
+            [
+                "response.created",
+                "response.in_progress",
+                "response.output_item.added",
+                "response.custom_tool_call_input.delta",
+                "response.custom_tool_call_input.done",
+                "response.output_item.done",
+                "response.completed",
+            ],
+        )
+        input_done = next(event for event in events if event["type"] == "response.custom_tool_call_input.done")
+        self.assertEqual(input_done["item_id"], item["id"])
+        self.assertEqual(input_done["input"], item["input"])
+        self.assertEqual(reconstructed["output"], [item])
+
     def test_stateful_stream_converters_emit_terminal_protocol_events(self):
         chat_to_responses = protocol_translation.ChatToResponsesStreamConverter()
         events = chat_to_responses.events_for_chunk(
