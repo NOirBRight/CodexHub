@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "capture_kind": "sanitized_task_creation_ab_evidence",
+  "source": {
+    "evidence_type": "observed A/B plus read-only repository inspection",
+    "conclusion_limit": "This fixture verifies the retained structural facts. It is not a live Task-create replay and does not establish a repeated-run process-leak result."
+  },
+  "product_boundary": {
+    "codexhub_manages_global_mcp": false,
+    "codexhub_has_bounded_app_server_model_probes": true,
+    "codexhub_exposes_native_task_lifecycle": false,
+    "proven_link_from_model_probes_to_task_materialization": false,
+    "product_behavior_changed": false
+  },
+  "red_case": {
+    "classification": "half_created",
+    "client_placeholder_created": true,
+    "worktree_provisioned": true,
+    "rollout_materialized": false,
+    "native_task_listing_contains_placeholder": false,
+    "client_timeout_exceeded": true,
+    "supported_task_operations": {
+      "read": "unavailable_no_session",
+      "message": "unavailable_no_session",
+      "rename": "unavailable_no_session",
+      "archive": "rejected_no_session",
+      "delete": "rejected_no_session"
+    }
+  },
+  "green_case": {
+    "bootstrap": {
+      "global_openai_developer_docs_mcp_enabled": false,
+      "profile": "short_low_cost"
+    },
+    "materialized": true,
+    "materialization_seconds": 10.146,
+    "lifecycle": {
+      "create": "passed",
+      "read": "passed",
+      "message": "passed"
+    },
+    "permission_preflight": {
+      "filesystem": "unrestricted",
+      "network": "enabled",
+      "approval": "never"
+    },
+    "git_preflight": "passed"
+  },
+  "official_remote_control": {
+    "read_existing_materialized_task": "available",
+    "create_replay": "not_run_without_orchestrator_approval"
+  },
+  "cleanup_observation": {
+    "clean_orphan_worktrees_removed": 2,
+    "client_held_empty_directory": true,
+    "official_client_handle_release_required": true,
+    "internal_codex_database_edited": false
+  },
+  "leak_detection": {
+    "repeated_task_creation_runs": 0,
+    "app_server_processes": "not_run_without_orchestrator_approval",
+    "claim": "no_repeated_run_no_leak_claim"
+  },
+  "sanitization": {
+    "contains_credentials": false,
+    "contains_local_paths": false,
+    "contains_prompts_or_messages": false,
+    "contains_task_or_session_identifiers": false
+  }
+}
