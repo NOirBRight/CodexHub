@@ -1,0 +1,95 @@
+{
+  "fixture_schema": "codexhub-claude-messages-spike/v1",
+  "sanitized": true,
+  "source": "synthetic structural fixture; not a user-session capture",
+  "protocol": {
+    "anthropic_version": "2023-06-01",
+    "required_path": "/v1/messages",
+    "query_tolerance": "path matched even when beta=true is present"
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "x-api-key": "<redacted>",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "<redacted-open-set>",
+    "x-claude-code-session-id": "<pseudonymized>",
+    "x-claude-code-agent-id": "<pseudonymized>"
+  },
+  "text_stream": {
+    "request": {
+      "model": "<model>",
+      "max_tokens": 64,
+      "stream": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "<redacted-message-content>"
+        }
+      ]
+    },
+    "response_json": {
+      "id": "<response-id>",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "<redacted-assistant-content>"
+        }
+      ],
+      "model": "<model>",
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "usage": {
+        "input_tokens": 7,
+        "output_tokens": 3
+      }
+    },
+    "sse_event_order": [
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop"
+    ]
+  },
+  "tool_follow_up": {
+    "first_response": {
+      "stop_reason": "tool_use",
+      "tool_use": {
+        "id": "<tool-id-1>",
+        "name": "read_fixture",
+        "input": {
+          "path": "<redacted-path>"
+        }
+      }
+    },
+    "next_request": {
+      "history_contains_same_tool_id": true,
+      "first_user_content_block_type": "tool_result",
+      "tool_result": "<redacted-tool-result>"
+    },
+    "final_response": {
+      "stop_reason": "end_turn",
+      "text": "<redacted-assistant-content>"
+    }
+  },
+  "failure": {
+    "upstream_status": 529,
+    "sse_event": "error",
+    "anthropic_error_type": "overloaded_error",
+    "message": "<redacted-upstream-error>"
+  },
+  "cancellation": {
+    "attempt": "downstream close after stream start",
+    "documented_wire_mapping": "unknown",
+    "synthesizes_message_stop": false,
+    "requires_upstream_abort_propagation": true
+  },
+  "count_tokens": {
+    "route": "/v1/messages/count_tokens",
+    "availability": "optional",
+    "non_anthropic_adapter_behavior": "explicitly unsupported; client may estimate locally"
+  }
+}
