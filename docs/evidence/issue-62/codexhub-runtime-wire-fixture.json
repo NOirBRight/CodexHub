@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "fixture_kind": "sanitized_artifact_backed_replay",
+  "redaction": {"identifiers": "stable synthetic aliases", "content": "prompt, argument, output, and opaque payloads are redacted"},
+  "evidence_limit": {
+    "transport_observation": "Only a 65,536-byte caller/upstream request-prefix equality observation is retained; no full request or response body fingerprint is available.",
+    "replay_fixture": "Pre-Gateway and post-Gateway objects are sanitized replay fixtures derived from artifacts. Their equality validates replay consistency, not independent full-wire identity."
+  },
+  "route": {
+    "inbound_format": "responses",
+    "upstream_format": "responses",
+    "configured_provider_id": "custom",
+    "upstream_route": "official",
+    "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
+    "classification_basis": "upstream_route and catalog_binding; never configured_provider_id alone"
+  },
+  "exposure_state_tags": ["Direct", "DirectModelOnly", "Deferred", "Hidden", "hosted-only", "host-unavailable"],
+  "pre_gateway": {
+    "request_id": "request_001",
+    "stream": true,
+    "model": "gpt-5.6-sol",
+    "input_items": [
+      {"item_id": "item_request_tools_001", "type": "additional_tools", "content": "<redacted>"},
+      {"item_id": "item_request_message_001", "type": "message", "content": "<redacted>"}
+    ],
+    "tool_surface": {
+      "tool_search": {"type": "tool_search", "execution": "client"},
+      "namespaces": [
+        {
+          "name": "codex_app",
+          "direct_tools": ["navigate_to_codex_page", "read_thread_terminal", "load_workspace_dependencies"],
+          "deferred_tools": ["automation_update", "fork_thread", "handoff_thread", "get_handoff_status", "list_projects", "create_thread", "list_threads", "read_thread", "send_message_to_thread", "set_thread_pinned", "set_thread_archived", "set_thread_title"]
+        }
+      ]
+    },
+    "choice_controls": {"captured": false, "fixture_kind": "contract_sentinel", "tool_choice": "auto", "parallel_tool_calls": true},
+    "response": {
+      "streaming": {"response_id": "response_001", "sse_event_sequence": ["response.in_progress", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.custom_tool_call_input.done", "response.reasoning_summary_part.done", "response.output_text.done", "unknown.future_event"]},
+      "non_streaming": {"response_id": "response_nonstreaming_001", "response_item_ids": ["item_nonstreaming_message_001", "item_nonstreaming_call_001", "item_nonstreaming_output_001", "item_nonstreaming_unknown_001"]}
+    }
+  },
+  "post_gateway": {
+    "request_id": "request_001",
+    "stream": true,
+    "model": "gpt-5.6-sol",
+    "input_items": [
+      {"item_id": "item_request_tools_001", "type": "additional_tools", "content": "<redacted>"},
+      {"item_id": "item_request_message_001", "type": "message", "content": "<redacted>"}
+    ],
+    "tool_surface": {
+      "tool_search": {"type": "tool_search", "execution": "client"},
+      "namespaces": [
+        {
+          "name": "codex_app",
+          "direct_tools": ["navigate_to_codex_page", "read_thread_terminal", "load_workspace_dependencies"],
+          "deferred_tools": ["automation_update", "fork_thread", "handoff_thread", "get_handoff_status", "list_projects", "create_thread", "list_threads", "read_thread", "send_message_to_thread", "set_thread_pinned", "set_thread_archived", "set_thread_title"]
+        }
+      ]
+    },
+    "choice_controls": {"captured": false, "fixture_kind": "contract_sentinel", "tool_choice": "auto", "parallel_tool_calls": true},
+    "response": {
+      "streaming": {"response_id": "response_001", "sse_event_sequence": ["response.in_progress", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.custom_tool_call_input.done", "response.reasoning_summary_part.done", "response.output_text.done", "unknown.future_event"]},
+      "non_streaming": {"response_id": "response_nonstreaming_001", "response_item_ids": ["item_nonstreaming_message_001", "item_nonstreaming_call_001", "item_nonstreaming_output_001", "item_nonstreaming_unknown_001"]}
+    }
+  },
+  "history": {
+    "captured_source_counts": {
+      "reasoning": 716,
+      "message": 189,
+      "agent_message": 19,
+      "function_call": 356,
+      "function_call_output": 356,
+      "custom_tool_call": 177,
+      "custom_tool_call_output": 177,
+      "paired_calls": 533,
+      "unpaired_calls": 0,
+      "unpaired_outputs": 0
+    },
+    "required_call_ids": ["call_001", "call_002", "call_003"],
+    "call_links": [
+      {"call_id": "call_001", "call_item_id": "item_call_001", "output_item_id": "item_output_001", "call_type": "function_call", "output_type": "function_call_output"},
+      {"call_id": "call_002", "call_item_id": "item_call_002", "output_item_id": "item_output_002", "call_type": "custom_tool_call", "output_type": "custom_tool_call_output"},
+      {"call_id": "call_003", "call_item_id": "item_call_003", "output_item_id": "item_output_003", "call_type": "function_call", "output_type": "function_call_output"}
+    ]
+  },
+  "response": {
+    "streaming": {
+      "captured": true,
+      "observed_event_counts": [
+        {"event": "response.in_progress", "count": 37},
+        {"event": "response.function_call_arguments.delta", "count": 96},
+        {"event": "response.function_call_arguments.done", "count": 6},
+        {"event": "response.custom_tool_call_input.done", "count": 28},
+        {"event": "response.reasoning_summary_part.done", "count": 55},
+        {"event": "response.content_part.added", "count": 10},
+        {"event": "response.output_text.done", "count": 10},
+        {"event": "response.content_part.done", "count": 10},
+        {"event": "codex.response.metadata", "count": 37}
+      ],
+      "events": [
+        {"sequence": 1, "event": "response.in_progress", "response_id": "response_001"},
+        {"sequence": 2, "event": "response.function_call_arguments.delta", "item_id": "item_call_001", "call_id": "call_001", "arguments": "<redacted>"},
+        {"sequence": 3, "event": "response.function_call_arguments.done", "item_id": "item_call_001", "call_id": "call_001", "arguments": "<redacted>"},
+        {"sequence": 4, "event": "response.custom_tool_call_input.done", "item_id": "item_call_002", "call_id": "call_002", "input": "<redacted>"},
+        {"sequence": 5, "event": "response.reasoning_summary_part.done", "item_id": "item_reasoning_001", "summary": "<redacted>"},
+        {"sequence": 6, "event": "response.output_text.done", "item_id": "item_message_001", "text": "<redacted>"},
+        {"sequence": 7, "event": "unknown.future_event", "tag": "unknown", "opaque_payload": "<redacted>"}
+      ]
+    },
+    "non_streaming": {
+      "captured": false,
+      "fixture_kind": "contract_sentinel",
+      "response_id": "response_nonstreaming_001",
+      "response_items": [
+        {"item_id": "item_nonstreaming_message_001", "type": "message", "content": "<redacted>"},
+        {"item_id": "item_nonstreaming_call_001", "type": "function_call", "call_id": "call_nonstreaming_001", "arguments": "<redacted>"},
+        {"item_id": "item_nonstreaming_output_001", "type": "function_call_output", "call_id": "call_nonstreaming_001", "output": "<redacted>"},
+        {"item_id": "item_nonstreaming_unknown_001", "type": "unknown", "tag": "unknown", "opaque_payload": "<redacted>"}
+      ]
+    }
+  }
+}
