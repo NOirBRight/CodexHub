@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "record_kind": "sanitized_manual_gateway_observation",
+  "recorded_on": "2026-07-13",
+  "scope": {
+    "desktop_build": "26.707.8168.0",
+    "route": "gateway_official_auto",
+    "model": "gpt-5.6-terra",
+    "configured_proxy_mode": "auto_windows_registry",
+    "effective_proxy_mode": "auto_proxy_discovered",
+    "protocol": "official_responses_sse",
+    "websockets": "disabled"
+  },
+  "prompt": {
+    "identifier": "private_known_fault_workload",
+    "digest": "not_recorded_by_design",
+    "version": "not_recorded_by_design",
+    "reusable_as_prompt_equivalent_control": false
+  },
+  "operator_observation": {
+    "timeout_threshold_ms": 120000,
+    "initial_renderer_state": "no_visible_response_before_timeout",
+    "later_renderer_state": "visible_content_observed_after_long_thinking",
+    "exact_first_visible_time": "unknown",
+    "renderer_progression": "unknown",
+    "true_terminal_at_observation_time": "unknown"
+  },
+  "marker": {
+    "recorded_label": "completed",
+    "recorded_at_utc": "2026-07-13T14:19:35.081135Z",
+    "classification": "premature_operator_label_mismatch",
+    "terminal_evidence": false
+  },
+  "gateway_trace": {
+    "elapsed_reference": "task_owned_gateway_trace_start_not_human_send_or_renderer_visibility",
+    "trace_order_valid": true,
+    "observed_request_count": 2,
+    "completed_terminal_count": 2,
+    "duplicate_terminal_count": 0,
+    "silent_terminal_count": 0,
+    "prolonged_response": {
+      "upstream_headers_observed": true,
+      "first_sse_elapsed_ms": 74464,
+      "downstream_first_exposure_elapsed_ms": 74466,
+      "upstream_lines": 21468,
+      "upstream_bytes": 2467971,
+      "upstream_completed_terminal_elapsed_ms": 851559,
+      "terminal_forwarded_elapsed_ms": 851560,
+      "downstream_write_failure_observed": false,
+      "gateway_terminal": "request_complete"
+    }
+  },
+  "boundary_classification": {
+    "first_closing_side": "unknown",
+    "first_failure_phase": "unknown",
+    "classification_reason": "no_boundary_failure_observed",
+    "interpretation": "The observed prolonged response reached an independent upstream completed terminal that Gateway forwarded without a downstream write failure. This is not first-close evidence."
+  },
+  "cleanup": {
+    "gateway": "stopped",
+    "isolated_overlay": "disabled",
+    "shared_state_touched": false
+  },
+  "provenance": {
+    "desktop": "human_assisted_isolated_disposable_profile",
+    "gateway": "task_owned_sanitized_boundary_trace",
+    "renderer": "maintainer_observation_only",
+    "raw_artifacts_committed": false
+  },
+  "next_action": {
+    "automatic_retest": false,
+    "production_change": false,
+    "retain_for": "next_natural_desktop_disconnect_window",
+    "separate_authorization_required_for": "renderer_visibility_timing_diagnostic"
+  }
+}
