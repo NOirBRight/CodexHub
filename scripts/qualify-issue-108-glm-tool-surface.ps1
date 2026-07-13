@@ -261,6 +261,42 @@ function Add-SanitizedSummaryFailure {
     $Summary['passed'] = $false
 }
 
+function Get-SanitizedLifecycleRootFailureCode {
+    param($Tracked)
+
+    if ($null -eq $Tracked -or $null -eq $Tracked.Process -or -not $Tracked.Process.HasExited) {
+        return 'lifecycle_root_stderr_unavailable'
+    }
+    try {
+        $stderr = [string]$Tracked.StderrTask.GetAwaiter().GetResult()
+    }
+    catch {
+        return 'lifecycle_root_stderr_unavailable'
+    }
+    if ($stderr -match '(?i)running scripts is disabled') {
+        return 'lifecycle_root_execution_policy_failed'
+    }
+    if ($stderr -match '(?i)ConvertTo-Json') {
+        return 'lifecycle_root_json_command_unavailable'
+    }
+    if ($stderr -match '(?i)not recognized as the name of a cmdlet') {
+        return 'lifecycle_root_command_unavailable'
+    }
+    if ($stderr -match '(?i)cannot find path|could not find') {
+        return 'lifecycle_root_path_unavailable'
+    }
+    if ($stderr -match '(?i)access is denied|unauthorized') {
+        return 'lifecycle_root_access_denied'
+    }
+    if ($stderr -match '(?i)parsererror|unexpected token') {
+        return 'lifecycle_root_parse_failed'
+    }
+    if ([string]::IsNullOrWhiteSpace($stderr)) {
+        return 'lifecycle_root_exited_silently'
+    }
+    return 'lifecycle_root_bootstrap_failed'
+}
+
 function Get-SanitizedQualificationFailureCode {
     param([System.Management.Automation.ErrorRecord]$ErrorRecord)
 
@@ -445,7 +481,14 @@ Start-Sleep -Seconds 10
         Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
     }
     catch {
-        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
+        $failureMessage = [string]$_.Exception.Message
+        if ($failureMessage -eq 'lifecycle_child_start_timed_out') {
+            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_child_start_timed_out'
+            Add-SanitizedFailure -Failures $failures -Code (Get-SanitizedLifecycleRootFailureCode -Tracked $tracked)
+        }
+        else {
+            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
+        }
     }
     finally {
         if ($null -eq $cleanupStopwatch -and $null -ne $tracked) {
