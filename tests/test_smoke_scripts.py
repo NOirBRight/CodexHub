@@ -310,8 +310,9 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "$startInfo.Environment.Clear()" in source
     assert "$gatewayEnvironment" in source
     assert "$cliEnvironment" in source
-    assert "$cliHome = $testWorkspace" in source
-    assert "$cliTemp = $testWorkspace" in source
+    assert "$cliHome = if ($ExternalIsolationQualification)" in source
+    assert "$cliTemp = if ($ExternalIsolationQualification)" in source
+    assert "$cliSandbox = if ($ExternalIsolationQualification) { 'danger-full-access' } else { 'workspace-write' }" in source
     assert "-CodexHome $cliHome -TempRoot $cliTemp" in source
     assert "OLLAMA_API_KEY = $ollamaApiKey" in source
     assert "$cliEnvironment['OLLAMA_API_KEY']" not in source
@@ -321,7 +322,12 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "[windows]" in source
     assert 'sandbox = "elevated"' in source
     assert 'sandbox = "unelevated"' not in source
-    assert "'--sandbox', 'workspace-write'" in source
+    assert "'--sandbox', $cliSandbox" in source
+    assert "'-a', 'never'" in source
+    assert "External qualification scratch directory must be outside the repository workspace" in source
+    assert "Readiness preflight: use the accepted GLM route" in source
+    assert "ReadinessTimeoutSeconds" in source
+    assert "qualification_readiness_failed" in source
     assert "'--add-dir', $testWorkspace" not in source
     assert "Isolated Gateway did not become healthy" in source
     assert "Isolated proxy did not become healthy" not in source

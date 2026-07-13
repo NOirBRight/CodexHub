@@ -143,6 +143,21 @@ function New-QualificationChildEnvironment {
     return $environment
 }
 
+function Test-PathIsInside {
+    param(
+        [string]$CandidatePath,
+        [string]$ParentPath
+    )
+
+    $candidate = [System.IO.Path]::GetFullPath($CandidatePath).TrimEnd([char[]]@('\', '/'))
+    $parent = [System.IO.Path]::GetFullPath($ParentPath).TrimEnd([char[]]@('\', '/'))
+    if ($candidate.Equals($parent, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    $prefix = $parent + [System.IO.Path]::DirectorySeparatorChar
+    return $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-RemainingTimeoutMilliseconds {
     param(
         [datetime]$DeadlineUtc,
@@ -279,6 +294,12 @@ function Get-SanitizedQualificationFailureCode {
     if ($message -like 'Codex CLI timed out*') {
         return 'cli_timeout'
     }
+    if ($message -like 'External qualification readiness preflight*') {
+        return 'qualification_readiness_failed'
+    }
+    if ($message -like 'External qualification scratch directory*' -or $message -like 'External qualification timeout must*') {
+        return 'external_qualification_configuration_invalid'
+    }
     if ($message -like 'Isolated Gateway did not become healthy*') {
         return 'gateway_startup_failed'
     }
@@ -386,6 +407,7 @@ function Invoke-LifecycleReplay {
         }
         $pythonPath = [string]$pythonCommand.Source
         $lifecycleChildCommand = @'
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -608,6 +630,42 @@ function Get-AdaptedTelemetryCount {
         }
     }
     return $total
+}
+
+function Test-ExpectedGlmGatewayRoute {
+    param([object[]]$RequestStarts)
+
+    if ($RequestStarts.Count -eq 0) {
+        return $false
+    }
+    foreach ($request in $RequestStarts) {
+        $model = [string]$request.model
+        if ($request.upstream -ne 'ollama_cloud' -or $request.provider_id -ne 'ollama_cloud' -or $request.route_mode -ne 'codexhub' -or $model -notmatch '^(ollama-cloud/)?glm-5\.2$') {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-CompletedCliToolSequence {
+    param([string]$CliOutputPath)
+
+    $toolSequence = [System.Collections.Generic.List[string]]::new()
+    foreach ($event in (Read-JsonLines -Path $CliOutputPath)) {
+        if ($event.type -ne 'item.completed' -or $null -eq $event.item) {
+            continue
+        }
+        if ($event.item.type -eq 'command_execution') {
+            [void]$toolSequence.Add('shell_command')
+        }
+        elseif ($event.item.type -eq 'custom_tool_call' -and $event.item.name -eq 'apply_patch') {
+            [void]$toolSequence.Add('apply_patch')
+        }
+        elseif ($event.item.type -eq 'file_change') {
+            [void]$toolSequence.Add('apply_patch')
+        }
+    }
+    return $toolSequence.ToArray()
 }
 
 function Invoke-HistoryAdapterReplay {
@@ -912,6 +970,38 @@ function Invoke-EvidenceReplay {
     }
 }
 
+function Save-ValidatedEvidenceArtifact {
+    param(
+        [string]$PythonPath,
+        [string]$ReplayWorkspace,
+        [ValidateSet('qualification', 'qualification-failure')][string]$ValidationMode,
+        [System.Collections.IDictionary]$Artifact,
+        [string]$OutputPath
+    )
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($OutputPath) -or (Test-PathIsInside -CandidatePath $OutputPath -ParentPath $ReplayWorkspace)) {
+            return $false
+        }
+        $destination = [System.IO.Path]::GetFullPath($OutputPath)
+        $destinationDirectory = Split-Path -Parent $destination
+        New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+        $candidatePath = "$destination.candidate"
+        $artifactJson = $Artifact | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText($candidatePath, $artifactJson, [System.Text.UTF8Encoding]::new($false))
+        $validatorPath = Join-Path $ReplayWorkspace 'tests\validate_issue_108_evidence.py'
+        & $PythonPath $validatorPath '--mode' $ValidationMode '--fixture' $candidatePath 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        [System.IO.File]::WriteAllText($destination, $artifactJson, [System.Text.UTF8Encoding]::new($false))
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Wait-GatewayHealth {
     param(
         [string]$BaseUrl,
@@ -956,9 +1046,25 @@ function Start-TrackedCodex {
 
 $Workspace = (Resolve-Path -LiteralPath $Workspace).Path
 if (-not $OutputDir) {
-    $OutputDir = Join-Path $Workspace 'test-results\issue-108-glm-tool-surface'
+    if ($ExternalIsolationQualification) {
+        $OutputDir = Join-Path ([System.IO.Path]::GetTempPath()) ("codexhub-issue108-{0}-{1}" -f $PID, (Get-Date -Format 'yyyyMMddHHmmss'))
+    }
+    else {
+        $OutputDir = Join-Path $Workspace 'test-results\issue-108-glm-tool-surface'
+    }
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
+if ($ExternalIsolationQualification) {
+    if (Test-PathIsInside -CandidatePath $OutputDir -ParentPath $Workspace) {
+        throw 'External qualification scratch directory must be outside the repository workspace.'
+    }
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 240) {
+        throw 'External qualification timeout must be between one and 240 seconds.'
+    }
+    if ($ReadinessTimeoutSeconds -lt 1 -or $ReadinessTimeoutSeconds -gt 60) {
+        throw 'External qualification readiness timeout must be between one and 60 seconds.'
+    }
+}
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 if ($LifecycleReplay) {
@@ -1026,33 +1132,48 @@ $runRoot = Join-Path $OutputDir "run-$runId"
 $runtimeHome = Join-Path $runRoot 'runtime'
 $runtimeTemp = Join-Path $runRoot 'tmp'
 $testWorkspace = Join-Path $runRoot 'workspace'
-# Native Windows restricted-token sandboxing requires one canonical writable
-# root. The CLI home/temp are therefore the generated workspace itself; it
-# contains only ignored synthetic Gateway metadata, never real auth or keys.
-$cliHome = $testWorkspace
-$cliTemp = $testWorkspace
+# The default workspace-write replay needs one canonical writable root. The
+# externally isolated qualification instead keeps its CLI home and temporary
+# files under the disposable scratch root, outside the repository workspace.
+$cliHome = if ($ExternalIsolationQualification) { Join-Path $runRoot 'cli-home' } else { $testWorkspace }
+$cliTemp = if ($ExternalIsolationQualification) { Join-Path $runRoot 'cli-tmp' } else { $testWorkspace }
+$cliSandbox = if ($ExternalIsolationQualification) { 'danger-full-access' } else { 'workspace-write' }
 $cliStdoutPath = Join-Path $runRoot 'cli-stdout.jsonl'
 $cliStderrPath = Join-Path $runRoot 'cli-stderr.txt'
+$preflightStdoutPath = Join-Path $runRoot 'readiness-stdout.jsonl'
+$preflightStderrPath = Join-Path $runRoot 'readiness-stderr.txt'
 $gatewayStdoutPath = Join-Path $runRoot 'gateway-stdout.txt'
 $gatewayStderrPath = Join-Path $runRoot 'gateway-stderr.txt'
 $requestShapePath = Join-Path $runRoot 'request-tool-shape.jsonl'
+$requestCapturePhasePath = Join-Path $runRoot 'request-capture-phase.txt'
 $summaryPath = Join-Path $runRoot 'summary.json'
 $targetPath = Join-Path $testWorkspace 'qualification-target.txt'
 $localGatewayBearerToken = 'issue108-local-gateway-bearer'
 $gateway = $null
 $cli = $null
+$readinessCli = $null
 $cliExitCode = $null
 $cliOutputCaptured = $false
+$readinessOutputCaptured = $false
+$preflightGatewayEventCount = 0
 $expectedPostSuccessToolChoice = if ($HistoryAdapterNegativeControl) { 'apply_patch' } else { 'shell_command' }
+if ($ExternalIsolationQualification -and [string]::IsNullOrWhiteSpace($QualificationEvidenceOutput)) {
+    $QualificationEvidenceOutput = Join-Path $OutputDir 'sanitized-qualification-evidence.json'
+}
+if ($ExternalIsolationQualification -and [string]::IsNullOrWhiteSpace($QualificationFailureOutput)) {
+    $QualificationFailureOutput = Join-Path $OutputDir 'sanitized-qualification-failure.json'
+}
 $summary = [ordered]@{
-    mode = if ($HistoryAdapterNegativeControl) { 'history_adapter_disabled_negative_control' } else { 'qualification' }
+    mode = if ($HistoryAdapterNegativeControl) { 'history_adapter_disabled_negative_control' } elseif ($ExternalIsolationQualification) { 'external_isolation_qualification' } else { 'qualification' }
     model = 'ollama-cloud/glm-5.2'
     expected_upstream = 'ollama_cloud'
     expected_route_mode = 'codexhub'
-    cli_sandbox = 'workspace_write'
+    cli_sandbox = $cliSandbox
     history_adapter_mode = if ($HistoryAdapterNegativeControl) { 'disabled_negative_control' } else { 'enabled' }
     expected_post_success_tool_choice = $expectedPostSuccessToolChoice
     fail_fast_after_first_post_success_tool_choice = $FailFastAfterFirstPostSuccessToolChoice
+    readiness_preflight_required = $ExternalIsolationQualification
+    readiness_preflight_passed = $false
     run_root = $runRoot
     passed = $false
     failures = @()
@@ -1063,6 +1184,8 @@ try {
         $runtimeHome,
         $runtimeTemp,
         $testWorkspace,
+        $cliHome,
+        $cliTemp,
         (Join-Path $runtimeHome 'proxy\config'),
         (Join-Path $runtimeHome 'AppData\Roaming'),
         (Join-Path $runtimeHome 'AppData\Local'),
@@ -1070,6 +1193,8 @@ try {
         (Join-Path $cliHome 'AppData\Local')
     ) | Out-Null
     Copy-Item -LiteralPath (Join-Path $Workspace 'config\providers.toml') -Destination (Join-Path $runtimeHome 'proxy\config\providers.toml')
+    # The model catalog is metadata only; no desktop auth or credentials are
+    # copied into the isolated CLI home or any evidence output.
     $modelsCache = Get-Content -LiteralPath $SharedModelsCachePath -Raw | ConvertFrom-Json
     $templateModel = @($modelsCache.models | Where-Object { $_.slug -eq 'gpt-5.6-terra' }) | Select-Object -First 1
     if ($null -eq $templateModel) {
@@ -1116,7 +1241,7 @@ try {
         $gatewayEnvironment['CODEXHUB_HISTORY_ADAPTER_NEGATIVE_CONTROL'] = '1'
     }
     $gatewayArguments = @('-u', 'codex_proxy.py', '--port', "$gatewayPort")
-    $captureGatewayEnabled = $CaptureRequestShape -or $FailFastAfterFirstPostSuccessToolChoice -or $HistoryAdapterNegativeControl
+    $captureGatewayEnabled = $CaptureRequestShape -or $FailFastAfterFirstPostSuccessToolChoice -or $HistoryAdapterNegativeControl -or $ExternalIsolationQualification
     if ($captureGatewayEnabled) {
         $captureGatewayPath = Join-Path $runRoot 'capture-gateway.py'
         $captureGateway = @'
@@ -1131,6 +1256,7 @@ import codex_proxy
 
 
 _capture_path = Path(os.environ["CODEXHUB_REQUEST_TOOL_SHAPE_PATH"])
+_capture_phase_path = Path(os.environ["CODEXHUB_REQUEST_CAPTURE_PHASE_PATH"])
 _capture_count = 0
 _sse_capture_count = 0
 _apply_patch_capture_count = 0
@@ -1162,6 +1288,28 @@ def _tool_shape(tools):
     return result
 
 
+def _capture_phase():
+    try:
+        phase = _capture_phase_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "acceptance"
+    return phase if phase in {"preflight", "acceptance"} else "acceptance"
+
+
+def _surface_summary(payload):
+    tools = payload.get("tools") if isinstance(payload, dict) else []
+    if not isinstance(tools, list):
+        tools = []
+    names = [tool.get("name") for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
+    digest_bytes = json.dumps(tools, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return {
+        "sha256": "sha256:" + hashlib.sha256(digest_bytes).hexdigest(),
+        "tool_count": len(tools),
+        "namespace_flattened_count": sum(name.startswith("mcp__") for name in names),
+        "tool_search_visible": "tool_search" in names,
+    }
+
+
 def _tool_output_shape(value):
     text_parts = []
 
@@ -1189,6 +1337,8 @@ def _tool_output_shape(value):
 
 
 def _append_capture_record(record):
+    if "phase" not in record:
+        record["phase"] = _capture_phase()
     with _capture_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
 
@@ -1411,17 +1561,16 @@ def _request_shape(body):
             if isinstance(tool, dict) and isinstance(tool.get("name"), str)
         ),
         "apply_patch_structured_history_pair_count": structured_history_pair_count,
+        "tool_surface": _surface_summary(payload),
     }
 
 
 def _capture(stage, body):
     global _capture_count
-    if _capture_count >= 8:
+    if _capture_count >= 16:
         return
     _capture_count += 1
-    record = {"stage": stage, "shape": _request_shape(body)}
-    with _capture_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+    _append_capture_record({"stage": stage, "shape": _request_shape(body)})
 
 
 def _compatible_request_body_with_capture(body, *args, **kwargs):
@@ -1498,8 +1647,7 @@ def _compatible_sse_line_with_capture(line, *args, **kwargs):
     if shape is not None and _sse_capture_count < 8:
         _sse_capture_count += 1
         record = {"stage": "sse_before", "shape": shape}
-        with _capture_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+        _append_capture_record(record)
     return _original_compatible_sse_line(line, *args, **kwargs)
 
 
@@ -1543,8 +1691,7 @@ def _apply_patch_events_for_event_with_capture(self, event):
         if _apply_patch_capture_count < 20:
             _apply_patch_capture_count += 1
             record = {"stage": "apply_patch_event_before", "shape": shape}
-            with _capture_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+            _append_capture_record(record)
     return _original_apply_patch_events_for_event(self, event)
 
 
@@ -1562,7 +1709,19 @@ raise SystemExit(codex_proxy.main())
 '@
         [System.IO.File]::WriteAllText($captureGatewayPath, $captureGateway, [System.Text.UTF8Encoding]::new($false))
         $gatewayEnvironment['CODEXHUB_REQUEST_TOOL_SHAPE_PATH'] = $requestShapePath
+        $gatewayEnvironment['CODEXHUB_REQUEST_CAPTURE_PHASE_PATH'] = $requestCapturePhasePath
+        $initialCapturePhase = if ($ExternalIsolationQualification) { 'preflight' } else { 'acceptance' }
+        [System.IO.File]::WriteAllText($requestCapturePhasePath, $initialCapturePhase, [System.Text.UTF8Encoding]::new($false))
         $gatewayArguments = @('-u', $captureGatewayPath, '--port', "$gatewayPort")
+    }
+    $windowsSandboxConfiguration = if ($ExternalIsolationQualification) {
+        ''
+    }
+    else {
+        @"
+[windows]
+sandbox = "elevated"
+"@
     }
     $cliConfig = @"
 model_provider = "custom"
@@ -1574,13 +1733,57 @@ base_url = "$gatewayBaseUrl/v1"
 wire_api = "responses"
 requires_openai_auth = true
 experimental_bearer_token = "$localGatewayBearerToken"
-
-[windows]
-sandbox = "elevated"
+$windowsSandboxConfiguration
 "@
     [System.IO.File]::WriteAllText((Join-Path $cliHome 'config.toml'), $cliConfig, [System.Text.UTF8Encoding]::new($false))
     $gateway = Start-TrackedProcess -FileName $PythonCommand -Arguments $gatewayArguments -WorkingDirectory (Join-Path $Workspace 'src-python') -Environment $gatewayEnvironment
     Wait-GatewayHealth -BaseUrl $gatewayBaseUrl -StartupSeconds $GatewayStartupSeconds
+
+    $cliArguments = @(
+        '-a', 'never',
+        'exec', '--strict-config', '--ephemeral', '--json',
+        '--sandbox', $cliSandbox,
+        '-C', $testWorkspace,
+        '-m', 'ollama-cloud/glm-5.2',
+        '-'
+    )
+    if ($ExternalIsolationQualification) {
+        $readinessPrompt = @'
+Readiness preflight: use the accepted GLM route and call shell_command exactly once to read only qualification-target.txt. Do not call apply_patch or any other tool. Do not change any file. Finish with exactly: SENTINEL:issue108-readiness-shell-ok
+'@
+        $readinessCli = Start-TrackedCodex -CommandPath $CodexCommand -Arguments $cliArguments -WorkingDirectory $testWorkspace -Environment $cliEnvironment
+        $readinessCli.Process.StandardInput.Write($readinessPrompt)
+        $readinessCli.Process.StandardInput.Close()
+        $readinessDeadline = (Get-Date).AddSeconds($ReadinessTimeoutSeconds)
+        while (-not $readinessCli.Process.HasExited -and (Get-Date) -lt $readinessDeadline) {
+            [void]$readinessCli.Process.WaitForExit(50)
+        }
+        if (-not $readinessCli.Process.HasExited) {
+            Stop-TrackedProcess $readinessCli
+            throw 'External qualification readiness preflight timed out.'
+        }
+        $readinessExitCode = $readinessCli.Process.ExitCode
+        $readinessStdout = $readinessCli.StdoutTask.GetAwaiter().GetResult()
+        $readinessStderr = $readinessCli.StderrTask.GetAwaiter().GetResult()
+        Save-BoundedText -Path $preflightStdoutPath -Text $readinessStdout
+        Save-BoundedText -Path $preflightStderrPath -Text $readinessStderr
+        $readinessOutputCaptured = $true
+        if ($readinessExitCode -ne 0) {
+            throw 'External qualification readiness preflight exited unsuccessfully.'
+        }
+        $preflightRequests = @(Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl') | Where-Object { $_.event -eq 'request_start' })
+        $preflightToolSequence = Get-CompletedCliToolSequence -CliOutputPath $preflightStdoutPath
+        if (-not (Test-ExpectedGlmGatewayRoute -RequestStarts $preflightRequests)) {
+            throw 'External qualification readiness preflight did not reach the expected Gateway route.'
+        }
+        if ($preflightToolSequence.Count -ne 1 -or $preflightToolSequence[0] -ne 'shell_command') {
+            throw 'External qualification readiness preflight did not complete exactly one shell_command.'
+        }
+        $summary.readiness_preflight_passed = $true
+        $summary.readiness_preflight_request_count = $preflightRequests.Count
+        $preflightGatewayEventCount = (Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')).Count
+        [System.IO.File]::WriteAllText($requestCapturePhasePath, 'acceptance', [System.Text.UTF8Encoding]::new($false))
+    }
 
     $prompt = @'
 Automated qualification: follow this exact tool sequence and use no other tools.
@@ -1598,14 +1801,6 @@ For the apply_patch action, emit exactly one upstream function-call argument nam
 Do not use an empty argument name or additional arguments.
 Do not call tool_search, collaboration tools, namespaces, or any other tool. Do not edit or create any other file. Finish with exactly: SENTINEL:issue108-shell-apply-shell
 '@
-    $cliArguments = @(
-        '-a', 'never',
-        'exec', '--strict-config', '--ephemeral', '--json',
-        '--sandbox', 'workspace-write',
-        '-C', $testWorkspace,
-        '-m', 'ollama-cloud/glm-5.2',
-        '-'
-    )
     $cli = Start-TrackedCodex -CommandPath $CodexCommand -Arguments $cliArguments -WorkingDirectory $testWorkspace -Environment $cliEnvironment
     $cli.Process.StandardInput.Write($prompt)
     $cli.Process.StandardInput.Close()
@@ -1672,8 +1867,20 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $cliOutputCaptured = $true
     Start-Sleep -Milliseconds 750
 
-    $events = Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')
-    $captureEvents = Read-JsonLines -Path $requestShapePath
+    $allGatewayEvents = Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')
+    $events = if ($ExternalIsolationQualification) {
+        @($allGatewayEvents | Select-Object -Skip $preflightGatewayEventCount)
+    }
+    else {
+        $allGatewayEvents
+    }
+    $allCaptureEvents = Read-JsonLines -Path $requestShapePath
+    $captureEvents = if ($ExternalIsolationQualification) {
+        @($allCaptureEvents | Where-Object { $_.phase -eq 'acceptance' })
+    }
+    else {
+        $allCaptureEvents
+    }
     $postSuccessChoiceEvents = @($captureEvents | Where-Object { $_.stage -eq 'post_success_tool_choice' })
     if ($null -eq $postSuccessToolChoice -and $postSuccessChoiceEvents.Count -gt 0) {
         $postSuccessToolChoice = [string]$postSuccessChoiceEvents[0].choice
@@ -1688,23 +1895,8 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
             $_.stage -eq 'after' -and $null -ne $_.shape -and @($_.shape.tool_names) -contains 'tool_search'
         }
     )
-    $historyAdapterModeEvents = @($captureEvents | Where-Object { $_.stage -eq 'history_adapter_mode' })
-    $cliEvents = Read-JsonLines -Path $cliStdoutPath
-    $toolSequence = [System.Collections.Generic.List[string]]::new()
-    foreach ($event in $cliEvents) {
-        if ($event.type -ne 'item.completed' -or $null -eq $event.item) {
-            continue
-        }
-        if ($event.item.type -eq 'command_execution') {
-            [void]$toolSequence.Add('shell_command')
-        }
-        elseif ($event.item.type -eq 'custom_tool_call' -and $event.item.name -eq 'apply_patch') {
-            [void]$toolSequence.Add('apply_patch')
-        }
-        elseif ($event.item.type -eq 'file_change') {
-            [void]$toolSequence.Add('apply_patch')
-        }
-    }
+    $historyAdapterModeEvents = @($allCaptureEvents | Where-Object { $_.stage -eq 'history_adapter_mode' })
+    $toolSequence = Get-CompletedCliToolSequence -CliOutputPath $cliStdoutPath
     $requestStarts = @($events | Where-Object { $_.event -eq 'request_start' })
     $surfaceEvents = @($events | Where-Object { $_.event -eq 'external_tool_surface_prepared' })
     $adapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
@@ -1860,8 +2052,158 @@ finally {
     if ($null -ne $cli) {
         Complete-TrackedProcess -Tracked $cli -Name 'cli' -StdoutPath $cliStdoutPath -StderrPath $cliStderrPath -Summary $summary -CaptureOutput (-not $cliOutputCaptured)
     }
+    if ($null -ne $readinessCli) {
+        Complete-TrackedProcess -Tracked $readinessCli -Name 'readiness' -StdoutPath $preflightStdoutPath -StderrPath $preflightStderrPath -Summary $summary -CaptureOutput (-not $readinessOutputCaptured)
+    }
     if ($null -ne $gateway) {
         Complete-TrackedProcess -Tracked $gateway -Name 'gateway' -StdoutPath $gatewayStdoutPath -StderrPath $gatewayStderrPath -Summary $summary
+    }
+    if ($ExternalIsolationQualification) {
+        $allArtifactGatewayEvents = @(Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl'))
+        $artifactGatewayEvents = @($allArtifactGatewayEvents | Select-Object -Skip $preflightGatewayEventCount)
+        $allArtifactCaptureEvents = @(Read-JsonLines -Path $requestShapePath)
+        $artifactCaptureEvents = @($allArtifactCaptureEvents | Where-Object { $_.phase -eq 'acceptance' })
+        $artifactRequestStarts = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_start' })
+        $artifactRequestErrors = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_error' })
+        $artifactAdapterEvents = @($artifactGatewayEvents | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
+        $artifactHistoryAdapterEvents = @($artifactGatewayEvents | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_history_adapter' })
+        $artifactApplyPatchAdapterCount = Get-AdaptedTelemetryCount -Events $artifactAdapterEvents
+        $artifactHistoryAdapterCount = Get-AdaptedTelemetryCount -Events $artifactHistoryAdapterEvents
+
+        if ($summary.passed) {
+            $surfaceRecords = @(
+                $artifactCaptureEvents | Where-Object {
+                    $_.stage -eq 'after' -and $null -ne $_.shape -and $null -ne $_.shape.tool_surface
+                }
+            )
+            $surfaceDigests = @($surfaceRecords | ForEach-Object { [string]$_.shape.tool_surface.sha256 } | Select-Object -Unique)
+            $surfaceEvidenceValid = (
+                (Test-ExpectedGlmGatewayRoute -RequestStarts $artifactRequestStarts) -and
+                $artifactRequestStarts.Count -gt 0 -and
+                $surfaceRecords.Count -eq $artifactRequestStarts.Count -and
+                $surfaceDigests.Count -eq 1 -and
+                $surfaceDigests[0] -match '^sha256:[0-9a-f]{64}$' -and
+                @($surfaceRecords | Where-Object {
+                    $_.shape.tool_surface.namespace_flattened_count -ne 0 -or $_.shape.tool_surface.tool_search_visible -ne $true
+                }).Count -eq 0
+            )
+            if (-not $surfaceEvidenceValid) {
+                Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_evidence_surface_invalid'
+            }
+            else {
+                $qualificationArtifact = [ordered]@{
+                    schema = 'codexhub.issue108.qualification-evidence.v1'
+                    sanitized = $true
+                    route_identity = [ordered]@{
+                        model = 'glm-5.2'
+                        upstream = 'ollama_cloud'
+                        route_mode = 'codexhub'
+                    }
+                    tool_surface_strategy = 'deferred_core'
+                    tool_sequence = @('shell_command', 'apply_patch', 'shell_command')
+                    mutation = [ordered]@{
+                        file_count = 1
+                        hunk_count = 1
+                        line_replacement_count = 1
+                    }
+                    termination = 'completed'
+                    request_count = $artifactRequestStarts.Count
+                    request_error_count = 0
+                    fallback_counts = [ordered]@{
+                        luna = 0
+                        terra = 0
+                    }
+                    adapter_counts = [ordered]@{
+                        apply_patch = $artifactApplyPatchAdapterCount
+                        history = $artifactHistoryAdapterCount
+                    }
+                    deferred_payload = [ordered]@{
+                        sha256 = $surfaceDigests[0]
+                        equivalent_request_count = $artifactRequestStarts.Count
+                        namespace_flattened_count = 0
+                        tool_search_visible = $true
+                    }
+                }
+                if (Save-ValidatedEvidenceArtifact -PythonPath $PythonCommand -ReplayWorkspace $Workspace -ValidationMode 'qualification' -Artifact $qualificationArtifact -OutputPath $QualificationEvidenceOutput) {
+                    $summary.qualification_evidence_validated = $true
+                    $summary.deferred_payload_digest = $surfaceDigests[0]
+                }
+                else {
+                    Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_evidence_validation_failed'
+                }
+            }
+        }
+
+        if (-not $summary.passed) {
+            $failureCodes = [System.Collections.Generic.List[string]]::new()
+            foreach ($failure in @($summary.failures)) {
+                $candidateCode = [string]$failure
+                if ($candidateCode -match '^[a-z0-9_]+$') {
+                    if ($failureCodes -notcontains $candidateCode) {
+                        [void]$failureCodes.Add($candidateCode)
+                    }
+                }
+                elseif ($failureCodes -notcontains 'qualification_assertion_failed') {
+                    [void]$failureCodes.Add('qualification_assertion_failed')
+                }
+            }
+            if ($failureCodes.Count -eq 0) {
+                [void]$failureCodes.Add('qualification_execution_failed')
+            }
+            $completedTools = @(Get-CompletedCliToolSequence -CliOutputPath $cliStdoutPath)
+            $lastSuccessfulTool = if ($completedTools.Count -gt 0) { [string]$completedTools[$completedTools.Count - 1] } else { 'none' }
+            $responseTermination = if (@($failureCodes | Where-Object { $_ -like 'cleanup_*' }).Count -gt 0) {
+                'process_tail_cleanup'
+            }
+            elseif ($failureCodes -contains 'workspace_write_sandbox_rejected') {
+                'sandbox_rejected'
+            }
+            elseif ($artifactRequestErrors.Count -gt 0) {
+                'transport_error'
+            }
+            elseif ($failureCodes -contains 'cli_timeout') {
+                'harness_timeout'
+            }
+            elseif ($failureCodes -contains 'qualification_readiness_failed') {
+                'readiness_failed'
+            }
+            elseif ($cliExitCode -eq 0) {
+                'completed'
+            }
+            else {
+                'response_error'
+            }
+            $timeoutClassification = switch ($responseTermination) {
+                'process_tail_cleanup' { 'process_tail_cleanup' }
+                'sandbox_rejected' { 'sandbox' }
+                'transport_error' { 'transport' }
+                'harness_timeout' { 'model_idle' }
+                'readiness_failed' { 'readiness' }
+                default { 'not_timeout' }
+            }
+            $failureArtifact = [ordered]@{
+                schema = 'codexhub.issue108.qualification-failure.v1'
+                sanitized = $true
+                route_identity = [ordered]@{
+                    model = 'glm-5.2'
+                    upstream = 'ollama_cloud'
+                    route_mode = 'codexhub'
+                }
+                last_successful_tool = $lastSuccessfulTool
+                response_termination = $responseTermination
+                request_count = $artifactRequestStarts.Count
+                adapter_counts = [ordered]@{
+                    apply_patch = $artifactApplyPatchAdapterCount
+                    history = $artifactHistoryAdapterCount
+                }
+                timeout_classification = $timeoutClassification
+                failure_codes = @($failureCodes.ToArray())
+            }
+            $summary.sanitized_failure_timeout_classification = $timeoutClassification
+            if (-not (Save-ValidatedEvidenceArtifact -PythonPath $PythonCommand -ReplayWorkspace $Workspace -ValidationMode 'qualification-failure' -Artifact $failureArtifact -OutputPath $QualificationFailureOutput)) {
+                Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_failure_evidence_validation_failed'
+            }
+        }
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
