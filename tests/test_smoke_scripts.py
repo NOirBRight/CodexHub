@@ -135,6 +135,130 @@ def test_issue_108_history_adapter_negative_control_replay_is_bounded_and_saniti
     assert summary["adapted_patch_argument_key_count"] == 1
 
 
+def test_issue_108_tool_surface_evidence_replay_has_semantic_three_case_ab(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the tool-surface replay")
+
+    started_at = time.monotonic()
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-ToolSurfaceEvidenceReplay",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    elapsed_seconds = time.monotonic() - started_at
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "tool_surface_evidence_replay"
+    assert summary["passed"] is True
+    assert summary["failures"] == []
+    assert summary["case_outcomes"] == {
+        "minimal_core": "green",
+        "namespace_200_eager": "red",
+        "namespace_200_deferred_core": "green",
+    }
+    assert summary["direct_tool_counts"] == {
+        "minimal_core": 7,
+        "namespace_200_eager": 207,
+        "namespace_200_deferred_core": 8,
+    }
+    assert summary["same_200_source_payload"] is True
+    assert summary["deferred_payload_digest"].startswith("sha256:")
+    assert "timeout" not in json.dumps(summary).lower()
+
+
+def test_issue_108_evidence_replay_rejects_unknown_fixture_fields(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the evidence replay")
+
+    fixture = json.loads(
+        (ROOT / "tests" / "fixtures" / "issue_108_tool_surface_replay.json").read_text(encoding="utf-8")
+    )
+    fixture["unexpected"] = True
+    invalid_fixture = tmp_path / "invalid-evidence.json"
+    invalid_fixture.write_text(json.dumps(fixture), encoding="utf-8")
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-ToolSurfaceEvidenceReplay",
+            "-EvidenceFixture",
+            str(invalid_fixture),
+            "-OutputDir",
+            str(tmp_path / "result"),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode != 0
+    summaries = list((tmp_path / "result").glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["passed"] is False
+    assert summary["failures"] == ["evidence_fixture_invalid"]
+    assert "unexpected" not in result.stdout
+
+
+def test_issue_108_qualification_evidence_replay_fails_closed_without_live_fixture(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the evidence replay")
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-QualificationEvidenceReplay",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode != 0
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "qualification_evidence_replay"
+    assert summary["passed"] is False
+    assert summary["failures"] == ["qualification_evidence_fixture_missing"]
+    assert not (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
+
+
 def test_issue_108_qualification_has_no_harness_history_bridge():
     source = (
         ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
@@ -184,14 +308,14 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "authCopyPath" not in source
     assert ".codex\\auth.json" not in source
     assert "$startInfo.Environment.Clear()" in source
-    assert "$proxyEnvironment" in source
+    assert "$gatewayEnvironment" in source
     assert "$cliEnvironment" in source
     assert "$cliHome = $testWorkspace" in source
     assert "$cliTemp = $testWorkspace" in source
     assert "-CodexHome $cliHome -TempRoot $cliTemp" in source
     assert "OLLAMA_API_KEY = $ollamaApiKey" in source
     assert "$cliEnvironment['OLLAMA_API_KEY']" not in source
-    assert "-Environment $proxyEnvironment" in source
+    assert "-Environment $gatewayEnvironment" in source
     assert "-Environment $cliEnvironment" in source
     assert "experimental_bearer_token" in source
     assert "[windows]" in source
@@ -201,6 +325,11 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "'--add-dir', $testWorkspace" not in source
     assert "Isolated Gateway did not become healthy" in source
     assert "Isolated proxy did not become healthy" not in source
+    assert "Wait-GatewayHealth" in source
+    assert "Gateway did not record a request_start event" in source
+    assert "Gateway recorded a request_error during qualification" in source
+    assert "proxy did not record a request_start event" not in source
+    assert "proxy recorded a request_error during qualification" not in source
     assert "gateway_startup_failed" in source
     assert "proxy_startup_failed" not in source
     assert "workspace_write_sandbox_rejected" in source

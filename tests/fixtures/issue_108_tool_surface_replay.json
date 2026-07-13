@@ -1,0 +1,90 @@
+{
+  "schema": "codexhub.issue108.tool-surface-replay.v1",
+  "sanitized": true,
+  "evidence_kind": "deterministic_semantic_replay",
+  "route_identity": {
+    "model": "glm-5.2",
+    "upstream": "ollama_cloud",
+    "route_mode": "codexhub"
+  },
+  "cases": [
+    {
+      "id": "minimal_core",
+      "tool_surface_strategy": "eager",
+      "namespace_tool_count": 0,
+      "source_payload_sha256": "sha256:acb0bc4f028dcb8a6095496bb30e8b40e8972e23f887544efa928f85a578b6a2",
+      "prepared_surface_sha256": "sha256:43843603558dbbf16681c2960154235df0c59e5ddd887a884177c004881ab56d",
+      "direct_tool_count": 7,
+      "namespace_flattened_count": 0,
+      "tool_search_visible": false,
+      "outcome": {
+        "status": "green",
+        "termination": "completed",
+        "tool_sequence": ["shell_command", "apply_patch", "shell_command"],
+        "mutation": {
+          "file_count": 1,
+          "hunk_count": 1,
+          "line_replacement_count": 1
+        },
+        "adapter_counts": {
+          "apply_patch": 1,
+          "history": 1
+        },
+        "request_error_count": 0,
+        "fallback_count": 0
+      }
+    },
+    {
+      "id": "namespace_200_eager",
+      "tool_surface_strategy": "eager",
+      "namespace_tool_count": 200,
+      "source_payload_sha256": "sha256:8f5d9c18a8541c1c2ebeac166a91333a0fdf1fefb0dfc3617733f55ba8b70fd2",
+      "prepared_surface_sha256": "sha256:e8885a979d821fcc087af4d7d4075c508b78f53a937f979181ca2261c39e7c2e",
+      "direct_tool_count": 207,
+      "namespace_flattened_count": 200,
+      "tool_search_visible": false,
+      "outcome": {
+        "status": "red",
+        "termination": "core_tool_chain_not_started",
+        "tool_sequence": [],
+        "mutation": {
+          "file_count": 0,
+          "hunk_count": 0,
+          "line_replacement_count": 0
+        },
+        "adapter_counts": {
+          "apply_patch": 0,
+          "history": 0
+        },
+        "request_error_count": 0,
+        "fallback_count": 0
+      }
+    },
+    {
+      "id": "namespace_200_deferred_core",
+      "tool_surface_strategy": "deferred_core",
+      "namespace_tool_count": 200,
+      "source_payload_sha256": "sha256:8f5d9c18a8541c1c2ebeac166a91333a0fdf1fefb0dfc3617733f55ba8b70fd2",
+      "prepared_surface_sha256": "sha256:871c5ef9f34c7315d79e9b95c39ea1ce2be8ec061e732ed15abe31265653fc7b",
+      "direct_tool_count": 8,
+      "namespace_flattened_count": 0,
+      "tool_search_visible": true,
+      "outcome": {
+        "status": "green",
+        "termination": "completed",
+        "tool_sequence": ["shell_command", "apply_patch", "shell_command"],
+        "mutation": {
+          "file_count": 1,
+          "hunk_count": 1,
+          "line_replacement_count": 1
+        },
+        "adapter_counts": {
+          "apply_patch": 1,
+          "history": 1
+        },
+        "request_error_count": 0,
+        "fallback_count": 0
+      }
+    }
+  ]
+}

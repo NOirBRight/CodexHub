@@ -3,11 +3,18 @@ param(
     [string]$OutputDir = '',
     [string]$CodexCommand = '',
     [int]$TimeoutSeconds = 240,
-    [int]$ProxyStartupSeconds = 20,
+    [int]$GatewayStartupSeconds = 20,
     [switch]$CaptureRequestShape,
     [switch]$LifecycleReplay,
     [switch]$EnvironmentIsolationReplay,
     [switch]$HistoryAdapterReplay,
+    [switch]$ToolSurfaceEvidenceReplay,
+    [switch]$QualificationEvidenceReplay,
+    [string]$EvidenceFixture = '',
+    [switch]$ExternalIsolationQualification,
+    [int]$ReadinessTimeoutSeconds = 60,
+    [string]$QualificationEvidenceOutput = '',
+    [string]$QualificationFailureOutput = '',
     [switch]$HistoryAdapterNegativeControl,
     [bool]$FailFastAfterFirstPostSuccessToolChoice = $true
 )
@@ -18,6 +25,7 @@ $TaskkillTimeoutMilliseconds = 1500
 $TrackedProcessStopTimeoutMilliseconds = 3000
 $LifecycleReplayCleanupTimeoutMilliseconds = 6000
 $LifecycleReplayExitProbeMilliseconds = 250
+$EvidenceReplayTimeoutMilliseconds = 10000
 
 function ConvertTo-ProcessArgument {
     param([AllowNull()][string]$Argument)
@@ -802,7 +810,109 @@ raise SystemExit(0 if report["passed"] else 1)
     }
 }
 
-function Wait-ProxyHealth {
+function Invoke-EvidenceReplay {
+    param(
+        [string]$ReplayOutputDir,
+        [string]$ReplayWorkspace,
+        [ValidateSet('tool-surface', 'qualification', 'qualification-failure')][string]$ReplayKind,
+        [string]$FixturePath
+    )
+
+    $runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
+    $runRoot = Join-Path $ReplayOutputDir "run-$runId"
+    $summaryPath = Join-Path $runRoot 'summary.json'
+    $stdoutPath = Join-Path $runRoot 'stdout.json'
+    $stderrPath = Join-Path $runRoot 'stderr.txt'
+    $replayHome = Join-Path $runRoot 'home'
+    $replayTemp = Join-Path $runRoot 'tmp'
+    $tracked = $null
+    $expectedMode = @{
+        'tool-surface' = 'tool_surface_evidence_replay'
+        'qualification' = 'qualification_evidence_replay'
+        'qualification-failure' = 'qualification_failure_evidence_replay'
+    }[$ReplayKind]
+    $summary = [ordered]@{
+        mode = $expectedMode
+        passed = $false
+        failures = @()
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path $runRoot, $replayHome, $replayTemp | Out-Null
+        if (-not (Test-Path -LiteralPath $FixturePath -PathType Leaf)) {
+            Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_evidence_fixture_missing'
+        }
+        else {
+            $pythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+            $validatorPath = Join-Path $ReplayWorkspace 'tests\validate_issue_108_evidence.py'
+            if (-not (Test-Path -LiteralPath $validatorPath -PathType Leaf)) {
+                throw 'evidence_validator_missing'
+            }
+            $validatorArguments = @($validatorPath, '--mode', $ReplayKind, '--fixture', $FixturePath)
+            if ($ReplayKind -eq 'tool-surface') {
+                $validatorArguments += @('--workspace', $ReplayWorkspace)
+            }
+            $environment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($pythonCommand)
+            $tracked = Start-TrackedProcess -FileName $pythonCommand -Arguments $validatorArguments -WorkingDirectory $ReplayWorkspace -Environment $environment
+            if (-not $tracked.Process.WaitForExit($EvidenceReplayTimeoutMilliseconds)) {
+                Stop-TrackedProcess $tracked
+                throw 'evidence_validator_timed_out'
+            }
+            $stdout = $tracked.StdoutTask.GetAwaiter().GetResult()
+            $stderr = $tracked.StderrTask.GetAwaiter().GetResult()
+            Save-BoundedText -Path $stdoutPath -Text $stdout
+            Save-BoundedText -Path $stderrPath -Text $stderr
+            $reportLine = @($stdout -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+            if ($reportLine.Count -ne 1) {
+                throw 'evidence_validator_report_missing'
+            }
+            try {
+                $report = $reportLine[0] | ConvertFrom-Json
+            }
+            catch {
+                throw 'evidence_validator_report_invalid'
+            }
+            if ($report.mode -ne $expectedMode -or -not [bool]$report.passed) {
+                Add-SanitizedSummaryFailure -Summary $summary -Code 'evidence_fixture_invalid'
+            }
+            elseif ($tracked.Process.ExitCode -ne 0) {
+                throw 'evidence_validator_child_failed'
+            }
+            else {
+                foreach ($field in @(
+                    'case_outcomes',
+                    'direct_tool_counts',
+                    'same_200_source_payload',
+                    'deferred_payload_digest',
+                    'request_count',
+                    'timeout_classification'
+                )) {
+                    $property = $report.PSObject.Properties | Where-Object { $_.Name -eq $field } | Select-Object -First 1
+                    if ($null -ne $property) {
+                        $summary[$field] = $property.Value
+                    }
+                }
+                $summary.passed = $true
+            }
+        }
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $summary -Code 'evidence_replay_execution_failed'
+    }
+    finally {
+        if ($null -ne $tracked) {
+            Complete-TrackedProcess -Tracked $tracked -Name 'evidence_replay' -StdoutPath $stdoutPath -StderrPath $stderrPath -Summary $summary -CaptureOutput $false
+        }
+        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    }
+
+    Get-Content -LiteralPath $summaryPath -Raw
+    if (-not $summary.passed) {
+        exit 1
+    }
+}
+
+function Wait-GatewayHealth {
     param(
         [string]$BaseUrl,
         [int]$StartupSeconds
@@ -863,6 +973,26 @@ if ($HistoryAdapterReplay) {
     Invoke-HistoryAdapterReplay -ReplayOutputDir $OutputDir -ReplayWorkspace $Workspace
     exit $LASTEXITCODE
 }
+if ($ToolSurfaceEvidenceReplay) {
+    $toolSurfaceFixture = if ([string]::IsNullOrWhiteSpace($EvidenceFixture)) {
+        Join-Path $Workspace 'tests\fixtures\issue_108_tool_surface_replay.json'
+    }
+    else {
+        $EvidenceFixture
+    }
+    Invoke-EvidenceReplay -ReplayOutputDir $OutputDir -ReplayWorkspace $Workspace -ReplayKind 'tool-surface' -FixturePath $toolSurfaceFixture
+    exit $LASTEXITCODE
+}
+if ($QualificationEvidenceReplay) {
+    $qualificationFixture = if ([string]::IsNullOrWhiteSpace($EvidenceFixture)) {
+        Join-Path $Workspace 'tests\fixtures\issue_108_glm_qualification_evidence.json'
+    }
+    else {
+        $EvidenceFixture
+    }
+    Invoke-EvidenceReplay -ReplayOutputDir $OutputDir -ReplayWorkspace $Workspace -ReplayKind 'qualification' -FixturePath $qualificationFixture
+    exit $LASTEXITCODE
+}
 if ($HistoryAdapterNegativeControl -and -not $FailFastAfterFirstPostSuccessToolChoice) {
     throw 'The history-adapter negative control requires fail-fast tool-choice stopping.'
 }
@@ -903,13 +1033,13 @@ $cliHome = $testWorkspace
 $cliTemp = $testWorkspace
 $cliStdoutPath = Join-Path $runRoot 'cli-stdout.jsonl'
 $cliStderrPath = Join-Path $runRoot 'cli-stderr.txt'
-$proxyStdoutPath = Join-Path $runRoot 'proxy-stdout.txt'
-$proxyStderrPath = Join-Path $runRoot 'proxy-stderr.txt'
+$gatewayStdoutPath = Join-Path $runRoot 'gateway-stdout.txt'
+$gatewayStderrPath = Join-Path $runRoot 'gateway-stderr.txt'
 $requestShapePath = Join-Path $runRoot 'request-tool-shape.jsonl'
 $summaryPath = Join-Path $runRoot 'summary.json'
 $targetPath = Join-Path $testWorkspace 'qualification-target.txt'
 $localGatewayBearerToken = 'issue108-local-gateway-bearer'
-$proxy = $null
+$gateway = $null
 $cli = $null
 $cliExitCode = $null
 $cliOutputCaptured = $false
@@ -953,7 +1083,7 @@ try {
     $modelsCache.models = @($modelsCache.models) + @($glmModel)
     $modelCatalogJson = [pscustomobject]@{ models = @($modelsCache.models) } | ConvertTo-Json -Depth 100 -Compress
     # Keep every CLI-writable path under its one generated workspace root.
-    # The proxy's runtime remains separate and is the only child with the
+    # The Gateway runtime remains separate and is the only child with the
     # actual upstream credential.
     $modelCatalogPath = Join-Path $cliHome 'model-catalog.json'
     [System.IO.File]::WriteAllText($modelCatalogPath, $modelCatalogJson, [System.Text.UTF8Encoding]::new($false))
@@ -973,23 +1103,23 @@ try {
 
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
-    $proxyPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $gatewayPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
     $listener.Stop()
-    $proxyBaseUrl = "http://127.0.0.1:$proxyPort"
+    $gatewayBaseUrl = "http://127.0.0.1:$gatewayPort"
     $childExecutablePaths = @($PythonCommand, $CodexCommand, $NodeCommand, $GitCommand)
-    $proxyEnvironment = New-QualificationChildEnvironment -CodexHome $runtimeHome -TempRoot $runtimeTemp -ExecutablePaths $childExecutablePaths -Additional @{
-        CODEX_PROXY_PORT = "$proxyPort"
+    $gatewayEnvironment = New-QualificationChildEnvironment -CodexHome $runtimeHome -TempRoot $runtimeTemp -ExecutablePaths $childExecutablePaths -Additional @{
+        CODEX_PROXY_PORT = "$gatewayPort"
         OLLAMA_API_KEY = $ollamaApiKey
     }
     $cliEnvironment = New-QualificationChildEnvironment -CodexHome $cliHome -TempRoot $cliTemp -ExecutablePaths $childExecutablePaths
     if ($HistoryAdapterNegativeControl) {
-        $proxyEnvironment['CODEXHUB_HISTORY_ADAPTER_NEGATIVE_CONTROL'] = '1'
+        $gatewayEnvironment['CODEXHUB_HISTORY_ADAPTER_NEGATIVE_CONTROL'] = '1'
     }
-    $proxyArguments = @('-u', 'codex_proxy.py', '--port', "$proxyPort")
-    $captureProxyEnabled = $CaptureRequestShape -or $FailFastAfterFirstPostSuccessToolChoice -or $HistoryAdapterNegativeControl
-    if ($captureProxyEnabled) {
-        $captureProxyPath = Join-Path $runRoot 'capture-proxy.py'
-        $captureProxy = @'
+    $gatewayArguments = @('-u', 'codex_proxy.py', '--port', "$gatewayPort")
+    $captureGatewayEnabled = $CaptureRequestShape -or $FailFastAfterFirstPostSuccessToolChoice -or $HistoryAdapterNegativeControl
+    if ($captureGatewayEnabled) {
+        $captureGatewayPath = Join-Path $runRoot 'capture-gateway.py'
+        $captureGateway = @'
 import json
 import os
 import re
@@ -1430,9 +1560,9 @@ _append_capture_record(
 )
 raise SystemExit(codex_proxy.main())
 '@
-        [System.IO.File]::WriteAllText($captureProxyPath, $captureProxy, [System.Text.UTF8Encoding]::new($false))
-        $proxyEnvironment['CODEXHUB_REQUEST_TOOL_SHAPE_PATH'] = $requestShapePath
-        $proxyArguments = @('-u', $captureProxyPath, '--port', "$proxyPort")
+        [System.IO.File]::WriteAllText($captureGatewayPath, $captureGateway, [System.Text.UTF8Encoding]::new($false))
+        $gatewayEnvironment['CODEXHUB_REQUEST_TOOL_SHAPE_PATH'] = $requestShapePath
+        $gatewayArguments = @('-u', $captureGatewayPath, '--port', "$gatewayPort")
     }
     $cliConfig = @"
 model_provider = "custom"
@@ -1440,7 +1570,7 @@ model_catalog_json = "$modelCatalogConfigPath"
 
 [model_providers.custom]
 name = "Issue108"
-base_url = "$proxyBaseUrl/v1"
+base_url = "$gatewayBaseUrl/v1"
 wire_api = "responses"
 requires_openai_auth = true
 experimental_bearer_token = "$localGatewayBearerToken"
@@ -1449,8 +1579,8 @@ experimental_bearer_token = "$localGatewayBearerToken"
 sandbox = "elevated"
 "@
     [System.IO.File]::WriteAllText((Join-Path $cliHome 'config.toml'), $cliConfig, [System.Text.UTF8Encoding]::new($false))
-    $proxy = Start-TrackedProcess -FileName $PythonCommand -Arguments $proxyArguments -WorkingDirectory (Join-Path $Workspace 'src-python') -Environment $proxyEnvironment
-    Wait-ProxyHealth -BaseUrl $proxyBaseUrl -StartupSeconds $ProxyStartupSeconds
+    $gateway = Start-TrackedProcess -FileName $PythonCommand -Arguments $gatewayArguments -WorkingDirectory (Join-Path $Workspace 'src-python') -Environment $gatewayEnvironment
+    Wait-GatewayHealth -BaseUrl $gatewayBaseUrl -StartupSeconds $GatewayStartupSeconds
 
     $prompt = @'
 Automated qualification: follow this exact tool sequence and use no other tools.
@@ -1646,7 +1776,7 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
         [void]$failures.Add("first post-success tool choice was $postSuccessToolChoice, not $expectedPostSuccessToolChoice")
     }
     if ($requestStarts.Count -eq 0) {
-        [void]$failures.Add('proxy did not record a request_start event')
+        [void]$failures.Add('Gateway did not record a request_start event')
     }
     foreach ($request in $requestStarts) {
         $model = [string]$request.model
@@ -1694,7 +1824,7 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
         }
     }
     if ($requestErrors.Count -gt 0) {
-        [void]$failures.Add('proxy recorded a request_error during qualification')
+        [void]$failures.Add('Gateway recorded a request_error during qualification')
     }
     if ($upstreamRetryEvents.Count -gt 0) {
         [void]$failures.Add('qualification recorded an upstream retry')
@@ -1730,8 +1860,8 @@ finally {
     if ($null -ne $cli) {
         Complete-TrackedProcess -Tracked $cli -Name 'cli' -StdoutPath $cliStdoutPath -StderrPath $cliStderrPath -Summary $summary -CaptureOutput (-not $cliOutputCaptured)
     }
-    if ($null -ne $proxy) {
-        Complete-TrackedProcess -Tracked $proxy -Name 'proxy' -StdoutPath $proxyStdoutPath -StderrPath $proxyStderrPath -Summary $summary
+    if ($null -ne $gateway) {
+        Complete-TrackedProcess -Tracked $gateway -Name 'gateway' -StdoutPath $gatewayStdoutPath -StderrPath $gatewayStderrPath -Summary $summary
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
