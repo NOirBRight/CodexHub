@@ -185,6 +185,45 @@ def test_issue_108_tool_surface_evidence_replay_has_semantic_three_case_ab(tmp_p
     assert "timeout" not in json.dumps(summary).lower()
 
 
+def test_issue_108_capture_gateway_digest_replay_executes_generated_capture_path(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the capture Gateway replay")
+
+    started_at = time.monotonic()
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-CaptureGatewayDigestReplay",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    elapsed_seconds = time.monotonic() - started_at
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "capture_gateway_digest_replay"
+    assert summary["passed"] is True
+    assert summary["failures"] == []
+    assert summary["capture_harness_error_count"] == 0
+    assert {"before", "after"}.issubset(summary["capture_stages"])
+    assert summary["tool_surface_digest"].startswith("sha256:")
+
+
 def test_issue_108_evidence_replay_rejects_unknown_fixture_fields(tmp_path):
     powershell = shutil.which("powershell.exe")
     if powershell is None:
@@ -260,7 +299,28 @@ def test_issue_108_qualification_evidence_replay_fails_closed_without_live_fixtu
     assert not (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
 
 
-def test_issue_108_sanitized_failure_fixture_replays_without_raw_capture():
+def test_issue_108_failure_validator_preserves_sanitized_harness_error_details(tmp_path):
+    fixture = {
+        "schema": "codexhub.issue108.qualification-failure.v1",
+        "sanitized": True,
+        "phase": "readiness_preflight",
+        "route_identity": {
+            "model": "glm-5.2",
+            "upstream": "ollama_cloud",
+            "route_mode": "codexhub",
+        },
+        "last_successful_tool": "shell_command",
+        "response_termination": "harness_error",
+        "failure_classification": "harness_error",
+        "request_count": 18,
+        "adapter_counts": {"apply_patch": 0, "history": 0},
+        "timeout_classification": "harness_error",
+        "error_class": "NameError",
+        "http_status": 500,
+        "failure_codes": ["capture_gateway_harness_error", "qualification_readiness_failed"],
+    }
+    fixture_path = tmp_path / "harness-error.json"
+    fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
     result = subprocess.run(
         [
             sys.executable,
@@ -268,7 +328,7 @@ def test_issue_108_sanitized_failure_fixture_replays_without_raw_capture():
             "--mode",
             "qualification-failure",
             "--fixture",
-            str(ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_failure.json"),
+            str(fixture_path),
         ],
         cwd=ROOT,
         text=True,
@@ -282,8 +342,9 @@ def test_issue_108_sanitized_failure_fixture_replays_without_raw_capture():
         "mode": "qualification_failure_evidence_replay",
         "passed": True,
         "failures": [],
-        "request_count": 2,
-        "timeout_classification": "transport",
+        "request_count": 18,
+        "timeout_classification": "harness_error",
+        "failure_classification": "harness_error",
     }
 
 

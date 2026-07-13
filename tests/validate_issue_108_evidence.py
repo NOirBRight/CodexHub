@@ -360,23 +360,28 @@ def validate_failure_fixture(payload: dict[str, Any]) -> dict[str, Any]:
         {
             "schema",
             "sanitized",
+            "phase",
             "route_identity",
             "last_successful_tool",
             "response_termination",
+            "failure_classification",
             "request_count",
             "adapter_counts",
             "timeout_classification",
+            "error_class",
+            "http_status",
             "failure_codes",
         },
         "qualification_failure_fixture_schema_invalid",
     )
     _require(root["schema"] == FAILURE_SCHEMA, "qualification_failure_fixture_schema_invalid")
     _require(root["sanitized"] is True, "qualification_failure_fixture_not_sanitized")
+    _require(root["phase"] in {"readiness_preflight", "acceptance"}, "qualification_failure_phase_invalid")
     _route_identity(root["route_identity"])
     _require(root["last_successful_tool"] in {"none", "shell_command", "apply_patch"}, "qualification_failure_last_tool_invalid")
     _require(
         root["response_termination"]
-        in {"completed", "harness_timeout", "sandbox_rejected", "transport_error", "process_tail_cleanup", "response_error", "readiness_failed"},
+        in {"completed", "harness_error", "harness_timeout", "sandbox_rejected", "transport_error", "process_tail_cleanup", "response_error", "readiness_failed"},
         "qualification_failure_termination_invalid",
     )
     _require_int(root["request_count"], "qualification_failure_request_count_invalid")
@@ -384,9 +389,26 @@ def validate_failure_fixture(payload: dict[str, Any]) -> dict[str, Any]:
     _require_int(adapter_counts["apply_patch"], "qualification_failure_adapter_counts_invalid")
     _require_int(adapter_counts["history"], "qualification_failure_adapter_counts_invalid")
     _require(
-        root["timeout_classification"] in {"model_idle", "transport", "sandbox", "process_tail_cleanup", "not_timeout", "readiness"},
+        root["timeout_classification"] in {"harness_error", "model_idle", "transport", "sandbox", "process_tail_cleanup", "not_timeout", "readiness"},
         "qualification_failure_timeout_classification_invalid",
     )
+    _require(
+        root["failure_classification"] == root["timeout_classification"],
+        "qualification_failure_classification_invalid",
+    )
+    _require(
+        isinstance(root["error_class"], str)
+        and (root["error_class"] == "none" or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", root["error_class"])),
+        "qualification_failure_error_class_invalid",
+    )
+    _require_int(root["http_status"], "qualification_failure_http_status_invalid")
+    _require(root["http_status"] <= 599, "qualification_failure_http_status_invalid")
+    if root["failure_classification"] == "harness_error":
+        _require(root["response_termination"] == "harness_error", "qualification_failure_harness_termination_invalid")
+        _require(root["error_class"] != "none", "qualification_failure_harness_error_class_missing")
+        _require(root["http_status"] == 500, "qualification_failure_harness_http_status_invalid")
+    else:
+        _require(root["error_class"] == "none" and root["http_status"] == 0, "qualification_failure_unexpected_harness_detail")
     failure_codes = _require_list(root["failure_codes"], "qualification_failure_codes_invalid")
     _require(failure_codes and all(isinstance(code, str) and re.fullmatch(r"[a-z0-9_]+", code) for code in failure_codes), "qualification_failure_codes_invalid")
     return {
@@ -395,6 +417,7 @@ def validate_failure_fixture(payload: dict[str, Any]) -> dict[str, Any]:
         "failures": [],
         "request_count": root["request_count"],
         "timeout_classification": root["timeout_classification"],
+        "failure_classification": root["failure_classification"],
     }
 
 

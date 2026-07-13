@@ -10,6 +10,7 @@ param(
     [switch]$HistoryAdapterReplay,
     [switch]$ToolSurfaceEvidenceReplay,
     [switch]$QualificationEvidenceReplay,
+    [switch]$CaptureGatewayDigestReplay,
     [string]$EvidenceFixture = '',
     [switch]$ExternalIsolationQualification,
     [int]$ReadinessTimeoutSeconds = 60,
@@ -970,6 +971,148 @@ function Invoke-EvidenceReplay {
     }
 }
 
+function Invoke-CaptureGatewayDigestReplay {
+    param(
+        [string]$ReplayOutputDir,
+        [string]$ReplayWorkspace
+    )
+
+    $runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
+    $runRoot = Join-Path $ReplayOutputDir "run-$runId"
+    $summaryPath = Join-Path $runRoot 'summary.json'
+    $stdoutPath = Join-Path $runRoot 'stdout.txt'
+    $stderrPath = Join-Path $runRoot 'stderr.txt'
+    $capturePath = Join-Path $runRoot 'request-tool-shape.jsonl'
+    $capturePhasePath = Join-Path $runRoot 'request-capture-phase.txt'
+    $replayHome = Join-Path $runRoot 'home'
+    $replayTemp = Join-Path $runRoot 'tmp'
+    $tracked = $null
+    $summary = [ordered]@{
+        mode = 'capture_gateway_digest_replay'
+        passed = $false
+        failures = @()
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path @(
+            $runRoot,
+            $replayHome,
+            $replayTemp,
+            (Join-Path $replayHome 'AppData\Roaming'),
+            (Join-Path $replayHome 'AppData\Local')
+        ) | Out-Null
+        $captureGatewaySource = [System.IO.File]::ReadAllText($PSCommandPath)
+        $captureGatewayMatch = [regex]::Match(
+            $captureGatewaySource,
+            '(?s)\$captureGateway = @''\r?\n(?<program>.*?)\r?\n''@'
+        )
+        if (-not $captureGatewayMatch.Success) {
+            throw 'capture_gateway_program_missing'
+        }
+        $captureGatewayPath = Join-Path $runRoot 'capture-gateway.py'
+        [System.IO.File]::WriteAllText(
+            $captureGatewayPath,
+            $captureGatewayMatch.Groups['program'].Value,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $gatewayStubPath = Join-Path $runRoot 'codex_proxy.py'
+        $gatewayStub = @'
+import json
+
+
+def compatible_request_body(body, *args, **kwargs):
+    return body
+
+
+def compatible_sse_line(line, *args, **kwargs):
+    return line
+
+
+class _ThirdPartyApplyPatchStreamAdapter:
+    def events_for_event(self, event):
+        return []
+
+
+def _adapt_apply_patch_custom_tool_history(input_items, *, event_context):
+    return input_items, set(), False
+
+
+def main():
+    payload = {
+        "model": "glm-5.2",
+        "input": [],
+        "tools": [
+            {
+                "type": "function",
+                "name": "shell_command",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    }
+    body = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return 0 if compatible_request_body(body, {"name": "ollama_cloud"}) == body else 2
+'@
+        [System.IO.File]::WriteAllText($gatewayStubPath, $gatewayStub, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($capturePhasePath, 'acceptance', [System.Text.UTF8Encoding]::new($false))
+
+        $pythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+        $environment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($pythonCommand) -Additional @{
+            CODEXHUB_REQUEST_TOOL_SHAPE_PATH = $capturePath
+            CODEXHUB_REQUEST_CAPTURE_PHASE_PATH = $capturePhasePath
+        }
+        $tracked = Start-TrackedProcess -FileName $pythonCommand -Arguments @('-u', $captureGatewayPath) -WorkingDirectory $runRoot -Environment $environment
+        if (-not $tracked.Process.WaitForExit($EvidenceReplayTimeoutMilliseconds)) {
+            Stop-TrackedProcess $tracked
+            throw 'capture_gateway_digest_replay_timed_out'
+        }
+        $stdout = $tracked.StdoutTask.GetAwaiter().GetResult()
+        $stderr = $tracked.StderrTask.GetAwaiter().GetResult()
+        Save-BoundedText -Path $stdoutPath -Text $stdout
+        Save-BoundedText -Path $stderrPath -Text $stderr
+        if ($tracked.Process.ExitCode -ne 0) {
+            throw 'capture_gateway_digest_replay_child_failed'
+        }
+
+        $captureEvents = @(Read-JsonLines -Path $capturePath)
+        $beforeRecords = @($captureEvents | Where-Object { $_.stage -eq 'before' })
+        $afterRecords = @($captureEvents | Where-Object { $_.stage -eq 'after' })
+        $harnessErrorRecords = @($captureEvents | Where-Object { $_.stage -eq 'capture_harness_exception' })
+        $surfaceRecords = @($beforeRecords) + @($afterRecords)
+        $surfaceDigests = @(
+            $surfaceRecords |
+                ForEach-Object {
+                    if ($null -ne $_.shape -and $null -ne $_.shape.tool_surface) {
+                        [string]$_.shape.tool_surface.sha256
+                    }
+                } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+        if ($beforeRecords.Count -ne 1 -or $afterRecords.Count -ne 1 -or $harnessErrorRecords.Count -ne 0 -or $surfaceDigests.Count -ne 1 -or $surfaceDigests[0] -notmatch '^sha256:[0-9a-f]{64}$') {
+            throw 'capture_gateway_digest_replay_evidence_invalid'
+        }
+        $summary.capture_record_count = $captureEvents.Count
+        $summary.capture_harness_error_count = $harnessErrorRecords.Count
+        $summary.capture_stages = @($captureEvents | ForEach-Object { [string]$_.stage })
+        $summary.tool_surface_digest = $surfaceDigests[0]
+        $summary.passed = $true
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $summary -Code 'capture_gateway_digest_replay_failed'
+    }
+    finally {
+        if ($null -ne $tracked) {
+            Complete-TrackedProcess -Tracked $tracked -Name 'capture_gateway_digest_replay' -StdoutPath $stdoutPath -StderrPath $stderrPath -Summary $summary -CaptureOutput $false
+        }
+        $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    }
+
+    Get-Content -LiteralPath $summaryPath -Raw
+    if (-not $summary.passed) {
+        exit 1
+    }
+}
+
 function Save-ValidatedEvidenceArtifact {
     param(
         [string]$PythonPath,
@@ -1097,6 +1240,10 @@ if ($QualificationEvidenceReplay) {
         $EvidenceFixture
     }
     Invoke-EvidenceReplay -ReplayOutputDir $OutputDir -ReplayWorkspace $Workspace -ReplayKind 'qualification' -FixturePath $qualificationFixture
+    exit $LASTEXITCODE
+}
+if ($CaptureGatewayDigestReplay) {
+    Invoke-CaptureGatewayDigestReplay -ReplayOutputDir $OutputDir -ReplayWorkspace $Workspace
     exit $LASTEXITCODE
 }
 if ($HistoryAdapterNegativeControl -and -not $FailFastAfterFirstPostSuccessToolChoice) {
@@ -1245,6 +1392,7 @@ try {
     if ($captureGatewayEnabled) {
         $captureGatewayPath = Join-Path $runRoot 'capture-gateway.py'
         $captureGateway = @'
+import hashlib
 import json
 import os
 import re
@@ -1573,22 +1721,36 @@ def _capture(stage, body):
     _append_capture_record({"stage": stage, "shape": _request_shape(body)})
 
 
+def _record_capture_harness_exception(error):
+    _append_capture_record(
+        {
+            "stage": "capture_harness_exception",
+            "error_class": type(error).__name__,
+            "http_status": 500,
+        }
+    )
+
+
 def _compatible_request_body_with_capture(body, *args, **kwargs):
-    _capture("before", body)
-    payload = None
     try:
-        candidate = json.loads(body.decode("utf-8-sig"))
-        if isinstance(candidate, dict):
-            payload = candidate
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        pass
-    if payload is not None:
-        _note_post_success_apply_patch_history(payload)
-        _note_sandbox_write_rejection(payload)
-        _note_apply_patch_failure(payload)
-    rewritten = _original_compatible_request_body(body, *args, **kwargs)
-    _capture("after", rewritten)
-    return rewritten
+        _capture("before", body)
+        payload = None
+        try:
+            candidate = json.loads(body.decode("utf-8-sig"))
+            if isinstance(candidate, dict):
+                payload = candidate
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        if payload is not None:
+            _note_post_success_apply_patch_history(payload)
+            _note_sandbox_write_rejection(payload)
+            _note_apply_patch_failure(payload)
+        rewritten = _original_compatible_request_body(body, *args, **kwargs)
+        _capture("after", rewritten)
+        return rewritten
+    except Exception as error:
+        _record_capture_harness_exception(error)
+        raise
 
 
 def _adapt_apply_patch_history_with_negative_control(input_items, *, event_context):
@@ -2060,13 +2222,21 @@ finally {
     }
     if ($ExternalIsolationQualification) {
         $allArtifactGatewayEvents = @(Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl'))
-        $artifactGatewayEvents = @($allArtifactGatewayEvents | Select-Object -Skip $preflightGatewayEventCount)
         $allArtifactCaptureEvents = @(Read-JsonLines -Path $requestShapePath)
-        $artifactCaptureEvents = @($allArtifactCaptureEvents | Where-Object { $_.phase -eq 'acceptance' })
+        $artifactCapturePhase = if ($summary.readiness_preflight_passed) { 'acceptance' } else { 'preflight' }
+        $artifactEvidencePhase = if ($summary.readiness_preflight_passed) { 'acceptance' } else { 'readiness_preflight' }
+        $artifactGatewayEvents = if ($summary.readiness_preflight_passed) {
+            @($allArtifactGatewayEvents | Select-Object -Skip $preflightGatewayEventCount)
+        }
+        else {
+            $allArtifactGatewayEvents
+        }
+        $artifactCaptureEvents = @($allArtifactCaptureEvents | Where-Object { $_.phase -eq $artifactCapturePhase })
         $artifactRequestStarts = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_start' })
         $artifactRequestErrors = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_error' })
         $artifactAdapterEvents = @($artifactGatewayEvents | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
         $artifactHistoryAdapterEvents = @($artifactGatewayEvents | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_history_adapter' })
+        $captureHarnessErrorEvents = @($artifactCaptureEvents | Where-Object { $_.stage -eq 'capture_harness_exception' })
         $artifactApplyPatchAdapterCount = Get-AdaptedTelemetryCount -Events $artifactAdapterEvents
         $artifactHistoryAdapterCount = Get-AdaptedTelemetryCount -Events $artifactHistoryAdapterEvents
 
@@ -2150,9 +2320,36 @@ finally {
             if ($failureCodes.Count -eq 0) {
                 [void]$failureCodes.Add('qualification_execution_failed')
             }
-            $completedTools = @(Get-CompletedCliToolSequence -CliOutputPath $cliStdoutPath)
+            if ($captureHarnessErrorEvents.Count -gt 0 -and $failureCodes -notcontains 'capture_gateway_harness_error') {
+                [void]$failureCodes.Add('capture_gateway_harness_error')
+            }
+            $completedToolOutputPath = if ($summary.readiness_preflight_passed) { $cliStdoutPath } else { $preflightStdoutPath }
+            $completedTools = @(Get-CompletedCliToolSequence -CliOutputPath $completedToolOutputPath)
             $lastSuccessfulTool = if ($completedTools.Count -gt 0) { [string]$completedTools[$completedTools.Count - 1] } else { 'none' }
-            $responseTermination = if (@($failureCodes | Where-Object { $_ -like 'cleanup_*' }).Count -gt 0) {
+            $sanitizedErrorClass = 'none'
+            $sanitizedHttpStatus = 0
+            if ($captureHarnessErrorEvents.Count -gt 0) {
+                $candidateErrorClass = [string]$captureHarnessErrorEvents[0].error_class
+                if ($candidateErrorClass -match '^[A-Za-z][A-Za-z0-9_]{0,63}$') {
+                    $sanitizedErrorClass = $candidateErrorClass
+                }
+                else {
+                    $sanitizedErrorClass = 'unknown'
+                }
+                try {
+                    $sanitizedHttpStatus = [int]$captureHarnessErrorEvents[0].http_status
+                }
+                catch {
+                    $sanitizedHttpStatus = 500
+                }
+                if ($sanitizedHttpStatus -lt 400 -or $sanitizedHttpStatus -gt 599) {
+                    $sanitizedHttpStatus = 500
+                }
+            }
+            $responseTermination = if ($captureHarnessErrorEvents.Count -gt 0) {
+                'harness_error'
+            }
+            elseif (@($failureCodes | Where-Object { $_ -like 'cleanup_*' }).Count -gt 0) {
                 'process_tail_cleanup'
             }
             elseif ($failureCodes -contains 'workspace_write_sandbox_rejected') {
@@ -2174,6 +2371,7 @@ finally {
                 'response_error'
             }
             $timeoutClassification = switch ($responseTermination) {
+                'harness_error' { 'harness_error' }
                 'process_tail_cleanup' { 'process_tail_cleanup' }
                 'sandbox_rejected' { 'sandbox' }
                 'transport_error' { 'transport' }
@@ -2184,6 +2382,7 @@ finally {
             $failureArtifact = [ordered]@{
                 schema = 'codexhub.issue108.qualification-failure.v1'
                 sanitized = $true
+                phase = $artifactEvidencePhase
                 route_identity = [ordered]@{
                     model = 'glm-5.2'
                     upstream = 'ollama_cloud'
@@ -2191,14 +2390,21 @@ finally {
                 }
                 last_successful_tool = $lastSuccessfulTool
                 response_termination = $responseTermination
+                failure_classification = $timeoutClassification
                 request_count = $artifactRequestStarts.Count
                 adapter_counts = [ordered]@{
                     apply_patch = $artifactApplyPatchAdapterCount
                     history = $artifactHistoryAdapterCount
                 }
                 timeout_classification = $timeoutClassification
+                error_class = $sanitizedErrorClass
+                http_status = $sanitizedHttpStatus
                 failure_codes = @($failureCodes.ToArray())
             }
+            $summary.sanitized_failure_phase = $artifactEvidencePhase
+            $summary.sanitized_failure_classification = $timeoutClassification
+            $summary.sanitized_failure_error_class = $sanitizedErrorClass
+            $summary.sanitized_failure_http_status = $sanitizedHttpStatus
             $summary.sanitized_failure_timeout_classification = $timeoutClassification
             if (-not (Save-ValidatedEvidenceArtifact -PythonPath $PythonCommand -ReplayWorkspace $Workspace -ValidationMode 'qualification-failure' -Artifact $failureArtifact -OutputPath $QualificationFailureOutput)) {
                 Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_failure_evidence_validation_failed'
