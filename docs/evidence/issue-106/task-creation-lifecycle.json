@@ -8,7 +8,7 @@
       "repository_inspection": "read_only",
       "live_task_creation": "not_authorized"
     },
-    "conclusion_limit": "This fixture verifies the retained structural facts. It is not a live Task-create replay and does not establish a repeated-run process-leak result."
+    "conclusion_limit": "This fixture only verifies retained historical structural facts. It is not a live Task-create, active-Task-list, or official remote lifecycle replay, and it does not establish access, remote-control, worktree/placeholder, or repeated-run leak coverage."
   },
   "product_boundary": {
     "codexhub_manages_global_mcp": false,

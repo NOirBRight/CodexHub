@@ -42,15 +42,19 @@ worktrees.
 
 ## Scope and safety boundary
 
-The A/B isolated the startup delay to an optional global MCP server; disabling
-that server made a short bootstrap materialize in about ten seconds and pass
-the requested full-access preflight. CodexHub does run bounded external
-app-server probes for model and usage reads, but no committed path proves that
-those probes start or break this MCP, or that they control native Task
-persistence. CodexHub does not manage this MCP server or the native Task
-persistence lifecycle. No credentials, system proxy, official binary, global
-configuration (beyond the reversible diagnostic A/B), protocol translation, or
-internal Codex database should be changed to work around this defect.
+This is a retained historical incident report, not a current live-control
+replay. Its fixture verifier validates only sanitized structural facts; it does
+not create a live Task or establish active Task listing, remote-control
+enrollment, worktree/placeholder cleanup, or repeated-run leak coverage. The
+historical A/B isolated the startup delay to an optional global MCP server; the
+reported full-access preflight was policy metadata, not a filesystem or network
+access exercise. CodexHub does run bounded external app-server probes for model
+and usage reads, but no committed path proves that those probes start or break
+this MCP, or that they control native Task persistence. CodexHub does not manage
+this MCP server or the native Task persistence lifecycle. No credentials, system
+proxy, official binary, global configuration (beyond the reversible diagnostic
+A/B), protocol translation, or internal Codex database should be changed to
+work around this defect.
 
 ## Requested fix
 

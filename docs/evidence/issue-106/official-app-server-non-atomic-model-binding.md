@@ -3,9 +3,10 @@
 ## Summary
 
 The App-managed `app-server` accepts `thread/start` and `turn/start` for a
-model absent from its own `model/list` result. It then persists an input-only,
-no-output turn instead of rejecting the unavailable binding atomically. A
-normal continuation without a model override has no usable rollout.
+model absent from the connected isolated catalog returned by its own
+`model/list` result. It then persists an input-only, no-output turn instead of
+rejecting the unavailable binding atomically. A normal continuation without a
+model override has no usable rollout.
 
 ## Safe reproduction
 
@@ -43,6 +44,24 @@ python scripts/run_issue_106_task_lifecycle.py --scenario red
 Model binding validation should happen before any persistent Task/turn state is
 created. An unavailable model must produce a deterministic `thread/start` or
 `turn/start` error with no rollout, input-only turn, or continuation target.
+
+## Rejection classification
+
+The runner does not assume that every request rejection is atomic. It reports
+`atomic_rejection` only when a numeric JSON-RPC error code is captured and a
+subsequent `thread/read` shows zero persisted turns. A rejected create with no
+readable Task, a nonempty readback, or an error without a numeric code is an
+`unverified_rejection`. The observed residual described above is the accepted,
+non-atomic path rather than a rejection path.
+
+## Scope limits
+
+This reproduction covers the connected isolated custom-provider catalog path.
+It does not establish an official remote full lifecycle A/B, a low-cost
+bootstrap followed by a different explicit Worker model/reasoning binding, a
+filesystem or network access exercise, or a Desktop presentation label. The
+separate `compare` control is account/catalog/model-list only and leaves the
+official remote full-lifecycle control unrun.
 
 ## Product boundary
 

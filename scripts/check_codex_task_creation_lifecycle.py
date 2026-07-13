@@ -1,8 +1,9 @@
-"""Replay the sanitized Issue #106 task-creation A/B lifecycle contract.
+"""Verify the retained sanitized Issue #106 historical fixture.
 
 This is deliberately a fixture verifier, not a Task creator. It must never
 create a Codex Task, modify global Codex configuration, or inspect internal
-Codex databases. A live create replay requires explicit Orchestrator approval.
+Codex databases. The separate isolated lifecycle runner owns the authorized
+live controls; this fixture does not establish their coverage.
 """
 
 from __future__ import annotations
@@ -63,8 +64,9 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
             "live_task_creation": "not_authorized",
         },
         "conclusion_limit": (
-            "This fixture verifies the retained structural facts. It is not a live Task-create replay "
-            "and does not establish a repeated-run process-leak result."
+            "This fixture only verifies retained historical structural facts. It is not a live Task-create, "
+            "active-Task-list, or official remote lifecycle replay, and it does not establish access, "
+            "remote-control, worktree/placeholder, or repeated-run leak coverage."
         ),
     },
     "product_boundary": {

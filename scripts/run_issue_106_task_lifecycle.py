@@ -177,7 +177,17 @@ class JsonRpcClient:
 
 def response_result(response: dict[str, Any], operation: str) -> dict[str, Any]:
     if "error" in response:
-        raise AppServerRequestRejected(operation)
+        error = response["error"]
+        details: dict[str, Any] = {"errorKind": "json_rpc"}
+        if isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, int) and not isinstance(code, bool):
+                details["errorCode"] = code
+            else:
+                details["errorKind"] = "json_rpc_without_numeric_code"
+        else:
+            details["errorKind"] = "invalid_json_rpc_error"
+        raise AppServerRequestRejected(operation, details)
     result = response.get("result")
     if not isinstance(result, dict):
         raise AppServerFailure(f"{operation}_invalid_result")
@@ -593,6 +603,27 @@ def thread_list_contains(
     return any(isinstance(thread, dict) and thread.get("id") == thread_id for thread in threads)
 
 
+def rejection_summary(rejection: AppServerRequestRejected) -> dict[str, Any]:
+    summary: dict[str, Any] = {"operation": rejection.operation}
+    if rejection.details is not None:
+        summary.update(rejection.details)
+    return summary
+
+
+def verified_atomic_turn_rejection(
+    rejection: AppServerRequestRejected, snapshot: dict[str, Any]
+) -> bool:
+    return (
+        isinstance(rejection.details, dict)
+        and isinstance(rejection.details.get("errorCode"), int)
+        and not isinstance(rejection.details.get("errorCode"), bool)
+        and snapshot["turnCount"] == 0
+        and snapshot["turnStatuses"] == []
+        and snapshot["turnItemCounts"] == []
+        and snapshot["assistantOutputTurns"] == 0
+    )
+
+
 def start_issue106_custom_thread(
     client: JsonRpcClient,
     workspace: Path,
@@ -661,6 +692,11 @@ def assert_green_snapshot(snapshot: dict[str, Any], expected_turn_count: int) ->
         raise AppServerFailure("thread_replay_missing_assistant_output")
 
 
+def assert_live_task_for_list(snapshot: dict[str, Any]) -> None:
+    if snapshot["threadStatus"] not in {"active", "idle"}:
+        raise AppServerFailure("thread_not_live_for_list")
+
+
 def run_green_lifecycle(
     client: JsonRpcClient,
     home: Path,
@@ -668,7 +704,7 @@ def run_green_lifecycle(
     external_model: str,
     requested_official_model: str,
 ) -> dict[str, Any]:
-    stages: list[str] = ["list"]
+    stages: list[str] = ["catalog_list"]
     models = read_issue106_model_list(client, timeout)
     model_ids = {model_id(model) for model in models}
     if external_model not in model_ids:
@@ -704,6 +740,11 @@ def run_green_lifecycle(
         stages.append("read")
         bootstrap_snapshot = thread_snapshot(client, thread_id, timeout)
         assert_green_snapshot(bootstrap_snapshot, 1)
+        assert_live_task_for_list(bootstrap_snapshot)
+
+        stages.append("list_active")
+        if not thread_list_contains(client, thread_id, timeout):
+            raise AppServerFailure("active_thread_missing_from_list")
 
         stages.append("rename")
         response_result(
@@ -715,7 +756,7 @@ def run_green_lifecycle(
             "thread_name_set",
         )
 
-        stages.append("full_binding_permission_preflight")
+        stages.append("same_model_max_metadata_preflight")
         full_turn = turn_started(
             client,
             thread_id,
@@ -735,6 +776,7 @@ def run_green_lifecycle(
         binding = binding_summary(resumed)
         if (
             binding["model"] != external_model
+            or binding["modelProvider"] != "custom"
             or binding["reasoningEffort"] != "max"
             or binding["approvalPolicy"] != "never"
             or not is_danger_full_access(binding["sandbox"])
@@ -755,6 +797,16 @@ def run_green_lifecycle(
             "stages": stages,
             "catalog": catalog,
             "binding": binding,
+            "bindingTransition": {
+                "bootstrapAndFullModelSame": True,
+                "bootstrapEffort": "low",
+                "fullEffort": "max",
+            },
+            "activeTaskListControl": {
+                "outcome": "passed",
+                "threadStatus": bootstrap_snapshot["threadStatus"],
+            },
+            "preflightClassification": "metadata_only",
             "bootstrap": bootstrap_snapshot,
             "replay": replay_snapshot,
         }
@@ -832,10 +884,12 @@ def run_red_missing_model(
             thread_id = start_issue106_custom_thread(
                 client, workspace, red_model, timeout, "red_thread_start"
             )
-        except AppServerRequestRejected:
+        except AppServerRequestRejected as rejection:
             result = {
-                "outcome": "atomic_rejection",
-                "stages": ["list", "create_rejected"],
+                "outcome": "unverified_rejection",
+                "stages": ["catalog_list", "create_rejected"],
+                "rejection": rejection_summary(rejection),
+                "rejectionClassification": "thread_read_unavailable_without_thread_id",
             }
             native_cleanup = "not_needed"
         else:
@@ -850,10 +904,28 @@ def run_red_missing_model(
                     model=red_model,
                     effort="low",
                 )
-            except AppServerRequestRejected:
+            except AppServerRequestRejected as rejection:
+                rejected_snapshot = thread_snapshot(client, thread_id, timeout)
+                atomic_rejection = verified_atomic_turn_rejection(
+                    rejection, rejected_snapshot
+                )
                 result = {
-                    "outcome": "atomic_rejection",
-                    "stages": ["list", "create", "turn_start_rejected"],
+                    "outcome": "atomic_rejection"
+                    if atomic_rejection
+                    else "unverified_rejection",
+                    "stages": [
+                        "catalog_list",
+                        "create",
+                        "turn_start_rejected",
+                        "read_rejection",
+                    ],
+                    "rejection": rejection_summary(rejection),
+                    "rejectionClassification": (
+                        "thread_read_empty_with_json_rpc_error"
+                        if atomic_rejection
+                        else "thread_read_not_empty_or_error_not_precise"
+                    ),
+                    "threadRead": rejected_snapshot,
                 }
             else:
                 try:
@@ -877,7 +949,7 @@ def run_red_missing_model(
                 result = {
                     "outcome": outcome,
                     "stages": [
-                        "list",
+                        "catalog_list",
                         "create",
                         "turn_start",
                         "bounded_wait",
@@ -992,6 +1064,8 @@ def run_catalog_comparison(
     assert_catalog_comparison(official_disconnected, codexhub_connected)
     return {
         "outcome": "passed",
+        "controlScope": "catalog_and_account_only",
+        "officialRemoteLifecycle": "unrun_external_gate",
         "officialDisconnected": official_disconnected,
         "codexHubConnected": codexhub_connected,
     }
