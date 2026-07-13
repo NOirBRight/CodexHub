@@ -56,6 +56,42 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertNotIn("private launcher detail", str(summary))
         self.assertEqual(sink["prefix"], bytearray())
 
+    def test_disposable_launcher_cleanup_retries_only_its_verified_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parent = Path(temporary_directory)
+            root = parent / f"{capture.SESSION_PREFIX}-launcher-test"
+            root.mkdir()
+            with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
+                capture.shutil,
+                "rmtree",
+                side_effect=[OSError("transient"), None],
+            ) as remove_tree, patch.object(capture.time, "sleep") as sleep:
+                result = capture._remove_disposable_launcher_profile(root)
+
+        self.assertEqual(result, "removed_disposable_profile")
+        self.assertEqual(remove_tree.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+    def test_disposable_launcher_cleanup_uses_verified_windows_fallback_after_retry_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parent = Path(temporary_directory)
+            root = parent / f"{capture.SESSION_PREFIX}-launcher-test"
+            root.mkdir()
+            completed = Mock(returncode=0)
+            with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
+                capture.shutil,
+                "rmtree",
+                side_effect=OSError("locked"),
+            ) as remove_tree, patch.object(capture.subprocess, "run", return_value=completed) as run, patch.object(
+                capture.time, "sleep"
+            ):
+                result = capture._remove_disposable_launcher_profile(root)
+
+        self.assertEqual(result, "removed_disposable_profile")
+        self.assertEqual(remove_tree.call_count, 3)
+        self.assertEqual(run.call_args.args[0][:3], ["powershell.exe", "-NoProfile", "-NonInteractive"])
+        self.assertNotIn(str(root), run.call_args.args[0][-1])
+
     def test_launch_readiness_recommends_only_a_verified_strategy(self) -> None:
         def probe(strategy: str, _duration: float) -> dict[str, object]:
             return {"strategy": strategy, "status": "ready" if strategy == "explicit_user_data_arg" else "not_ready"}

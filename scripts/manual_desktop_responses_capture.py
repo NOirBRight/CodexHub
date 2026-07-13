@@ -415,11 +415,43 @@ def _remove_disposable_launcher_profile(root: Path) -> str:
     resolved_root = root.resolve()
     if resolved_root.parent != temporary_parent or not resolved_root.name.startswith(f"{SESSION_PREFIX}-launcher-"):
         return "removal_skipped_unexpected_location"
-    try:
-        shutil.rmtree(resolved_root)
-    except OSError:
+    for attempt in range(3):
+        try:
+            shutil.rmtree(resolved_root)
+        except OSError:
+            if attempt == 2:
+                break
+            time.sleep(0.25)
+        else:
+            return "removed_disposable_profile"
+    if os.name != "nt":
         return "removal_failed"
-    return "removed_disposable_profile"
+    environment = os.environ.copy()
+    environment["CODEXHUB_DISPOSABLE_LAUNCHER_ROOT"] = str(resolved_root)
+    command = "\n".join(
+        (
+            "$target = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('CODEXHUB_DISPOSABLE_LAUNCHER_ROOT'))",
+            "$parent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\\')",
+            f"$prefix = '{SESSION_PREFIX}-launcher-'",
+            "$insideParent = $target.StartsWith($parent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)",
+            "$nameMatches = [IO.Path]::GetFileName($target).StartsWith($prefix, [StringComparison]::Ordinal)",
+            "if (-not ($insideParent -and $nameMatches)) { exit 3 }",
+            "if (-not [IO.Directory]::Exists($target)) { exit 0 }",
+            "Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop",
+        )
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "removal_failed"
+    return "removed_disposable_profile" if completed.returncode == 0 else "removal_failed"
 
 
 def _stop_owned_desktop_tree(root_pid: int) -> str:
