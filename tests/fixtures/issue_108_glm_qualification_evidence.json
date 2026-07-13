@@ -1,37 +1,146 @@
 {
-  "schema": "codexhub.issue108.qualification-evidence.v1",
+  "schema": "codexhub.issue108.qualification-evidence.v2",
   "sanitized": true,
-  "route_identity": {
-    "model": "glm-5.2",
-    "upstream": "ollama_cloud",
-    "route_mode": "codexhub"
+  "provenance": {
+    "capture_kind": "isolated_responses_acceptance",
+    "capture_format": "sanitized_gateway_capture.v1"
   },
-  "tool_surface_strategy": "deferred_core",
-  "tool_sequence": [
-    "shell_command",
-    "apply_patch",
-    "shell_command"
-  ],
-  "mutation": {
-    "file_count": 1,
-    "hunk_count": 1,
-    "line_replacement_count": 1
-  },
-  "termination": "completed",
-  "request_count": 4,
-  "request_error_count": 0,
-  "fallback_counts": {
-    "luna": 0,
-    "terra": 0
-  },
-  "adapter_counts": {
-    "apply_patch": 1,
-    "history": 2
-  },
-  "deferred_payload": {
-    "sha256": "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294",
-    "equivalent_request_count": 4,
-    "namespace_flattened_count": 0,
-    "tool_search_visible": true
+  "acceptance_capture": {
+    "tool_surface_strategy": "deferred_core",
+    "gateway_events": [
+      {
+        "event": "request_start",
+        "route_identity": {
+          "model": "glm-5.2",
+          "upstream": "ollama_cloud",
+          "route_mode": "codexhub"
+        }
+      },
+      {
+        "event": "request_complete",
+        "status": 200
+      },
+      {
+        "event": "request_start",
+        "route_identity": {
+          "model": "glm-5.2",
+          "upstream": "ollama_cloud",
+          "route_mode": "codexhub"
+        }
+      },
+      {
+        "event": "apply_patch_adapter",
+        "outcome": "adapted"
+      },
+      {
+        "event": "history_adapter",
+        "outcome": "adapted"
+      },
+      {
+        "event": "request_start",
+        "route_identity": {
+          "model": "glm-5.2",
+          "upstream": "ollama_cloud",
+          "route_mode": "codexhub"
+        }
+      },
+      {
+        "event": "request_complete",
+        "status": 200
+      },
+      {
+        "event": "request_complete",
+        "status": 200
+      },
+      {
+        "event": "history_adapter",
+        "outcome": "adapted"
+      },
+      {
+        "event": "request_start",
+        "route_identity": {
+          "model": "glm-5.2",
+          "upstream": "ollama_cloud",
+          "route_mode": "codexhub"
+        }
+      },
+      {
+        "event": "request_complete",
+        "status": 200
+      }
+    ],
+    "request_surfaces": [
+      {
+        "raw_tools_sha256": "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294",
+        "canonical_shape_sha256": "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f",
+        "namespace_flattened_count": 0,
+        "tool_search_visible": true
+      },
+      {
+        "raw_tools_sha256": "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294",
+        "canonical_shape_sha256": "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f",
+        "namespace_flattened_count": 0,
+        "tool_search_visible": true
+      },
+      {
+        "raw_tools_sha256": "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294",
+        "canonical_shape_sha256": "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f",
+        "namespace_flattened_count": 0,
+        "tool_search_visible": true
+      },
+      {
+        "raw_tools_sha256": "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294",
+        "canonical_shape_sha256": "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f",
+        "namespace_flattened_count": 0,
+        "tool_search_visible": true
+      }
+    ],
+    "canonical_tool_shape": [
+      {
+        "type": "function",
+        "name": "shell_command",
+        "keys": ["description", "name", "parameters", "strict", "type"]
+      },
+      {
+        "type": "function",
+        "name": "update_plan",
+        "keys": ["description", "name", "parameters", "strict", "type"]
+      },
+      {
+        "type": "function",
+        "name": "request_user_input",
+        "keys": ["description", "name", "parameters", "strict", "type"]
+      },
+      {
+        "type": "custom",
+        "name": "apply_patch",
+        "keys": ["description", "format", "name", "type"]
+      },
+      {
+        "type": "function",
+        "name": "view_image",
+        "keys": ["description", "name", "parameters", "strict", "type"]
+      },
+      {
+        "type": "function",
+        "name": "tool_search",
+        "keys": ["description", "name", "parameters", "type"]
+      },
+      {
+        "type": "function",
+        "name": "multi_agent_v1__spawn_agent",
+        "keys": ["description", "name", "parameters", "type"]
+      }
+    ],
+    "cli": {
+      "completed_tool_sequence": ["shell_command", "apply_patch", "shell_command"],
+      "terminal_event": "turn.completed"
+    },
+    "mutation": {
+      "file_count": 1,
+      "hunk_count": 1,
+      "line_replacement_count": 1
+    },
+    "tool_search_call_count": 0
   }
 }

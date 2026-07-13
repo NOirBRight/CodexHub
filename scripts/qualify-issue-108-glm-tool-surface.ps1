@@ -1054,10 +1054,16 @@ function Invoke-EvidenceReplay {
             else {
                 foreach ($field in @(
                     'case_outcomes',
+                    'case_decisions',
                     'direct_tool_counts',
+                    'direct_tool_budget',
                     'same_200_source_payload',
                     'deferred_payload_digest',
                     'request_count',
+                    'adapter_counts',
+                    'request_error_count',
+                    'fallback_counts',
+                    'canonical_tool_shape_digest',
                     'timeout_classification'
                 )) {
                     $property = $report.PSObject.Properties | Where-Object { $_.Name -eq $field } | Select-Object -First 1
@@ -1275,13 +1281,34 @@ def main():
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
                 Select-Object -Unique
         )
-        if ($beforeRecords.Count -ne 1 -or $afterRecords.Count -ne 1 -or $harnessErrorRecords.Count -ne 0 -or $surfaceDigests.Count -ne 1 -or $surfaceDigests[0] -notmatch '^sha256:[0-9a-f]{64}$') {
+        $canonicalShapeDigests = @(
+            $surfaceRecords |
+                ForEach-Object {
+                    if ($null -ne $_.shape -and $null -ne $_.shape.tool_surface) {
+                        [string]$_.shape.tool_surface.canonical_shape_sha256
+                    }
+                } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+        $canonicalShapeJsons = @(
+            $surfaceRecords |
+                ForEach-Object {
+                    if ($null -ne $_.shape -and $null -ne $_.shape.tool_surface) {
+                        $_.shape.tool_surface.canonical_tool_shape | ConvertTo-Json -Depth 10 -Compress
+                    }
+                } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+        if ($beforeRecords.Count -ne 1 -or $afterRecords.Count -ne 1 -or $harnessErrorRecords.Count -ne 0 -or $surfaceDigests.Count -ne 1 -or $surfaceDigests[0] -notmatch '^sha256:[0-9a-f]{64}$' -or $canonicalShapeDigests.Count -ne 1 -or $canonicalShapeDigests[0] -notmatch '^sha256:[0-9a-f]{64}$' -or $canonicalShapeJsons.Count -ne 1) {
             throw 'capture_gateway_digest_replay_evidence_invalid'
         }
         $summary.capture_record_count = $captureEvents.Count
         $summary.capture_harness_error_count = $harnessErrorRecords.Count
         $summary.capture_stages = @($captureEvents | ForEach-Object { [string]$_.stage })
         $summary.tool_surface_digest = $surfaceDigests[0]
+        $summary.canonical_tool_shape_digest = $canonicalShapeDigests[0]
         $summary.passed = $true
     }
     catch {
@@ -1641,8 +1668,17 @@ def _surface_summary(payload):
         tools = []
     names = [tool.get("name") for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
     digest_bytes = json.dumps(tools, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    canonical_tool_shape = _tool_shape(tools)
+    canonical_shape_bytes = json.dumps(
+        canonical_tool_shape,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
     return {
         "sha256": "sha256:" + hashlib.sha256(digest_bytes).hexdigest(),
+        "canonical_tool_shape": canonical_tool_shape,
+        "canonical_shape_sha256": "sha256:" + hashlib.sha256(canonical_shape_bytes).hexdigest(),
         "tool_count": len(tools),
         "namespace_flattened_count": sum(name.startswith("mcp__") for name in names),
         "tool_search_visible": "tool_search" in names,
@@ -2262,6 +2298,8 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     )
     $historyAdapterModeEvents = @($allCaptureEvents | Where-Object { $_.stage -eq 'history_adapter_mode' })
     $toolSequence = Get-CompletedCliToolSequence -CliOutputPath $cliStdoutPath
+    $cliEvents = @(Read-JsonLines -Path $cliStdoutPath)
+    $acceptanceTurnCompletedCount = @($cliEvents | Where-Object { $_.type -eq 'turn.completed' }).Count
     $requestStarts = @($events | Where-Object { $_.event -eq 'request_start' })
     $surfaceEvents = @($events | Where-Object { $_.event -eq 'external_tool_surface_prepared' })
     $adapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
@@ -2305,6 +2343,9 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $failures = [System.Collections.Generic.List[string]]::new()
     if (-not $HistoryAdapterNegativeControl -and $cliExitCode -ne 0) {
         [void]$failures.Add("Codex CLI exited with code $cliExitCode")
+    }
+    if (-not $HistoryAdapterNegativeControl -and $acceptanceTurnCompletedCount -ne 1) {
+        [void]$failures.Add('qualification did not record exactly one turn.completed event')
     }
     if ($HistoryAdapterNegativeControl -and -not $stoppedForPostSuccessToolChoice) {
         [void]$failures.Add('history-adapter negative control did not stop at the first post-success tool choice')
@@ -2392,6 +2433,7 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
 
     $summary.cli_exit_code = $cliExitCode
     $summary.tool_sequence = @($toolSequence)
+    $summary.acceptance_turn_completed_observed = $acceptanceTurnCompletedCount -eq 1
     $summary.request_start_count = $requestStarts.Count
     $summary.deferred_surface_event_count = $surfaceEvents.Count
     $summary.apply_patch_adapter_outcomes = @($adapterEvents | ForEach-Object { [string]$_.outcome })
@@ -2436,7 +2478,10 @@ finally {
         }
         $artifactCaptureEvents = @($allArtifactCaptureEvents | Where-Object { $_.phase -eq $artifactCapturePhase })
         $artifactRequestStarts = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_start' })
+        $artifactRequestCompletes = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_complete' })
         $artifactRequestErrors = @($artifactGatewayEvents | Where-Object { $_.event -eq 'request_error' })
+        $artifactUpstreamRetries = @($artifactGatewayEvents | Where-Object { $_.event -eq 'upstream_retry' })
+        $artifactProtocolFallbacks = @($artifactGatewayEvents | Where-Object { $_.event -eq 'upstream_protocol_fallback' })
         $artifactAdapterEvents = @($artifactGatewayEvents | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
         $artifactHistoryAdapterEvents = @($artifactGatewayEvents | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_history_adapter' })
         $captureHarnessErrorEvents = @($artifactCaptureEvents | Where-Object { $_.stage -eq 'capture_harness_exception' })
@@ -2450,12 +2495,26 @@ finally {
                 }
             )
             $surfaceDigests = @($surfaceRecords | ForEach-Object { [string]$_.shape.tool_surface.sha256 } | Select-Object -Unique)
+            $surfaceCanonicalShapeDigests = @($surfaceRecords | ForEach-Object { [string]$_.shape.tool_surface.canonical_shape_sha256 } | Select-Object -Unique)
+            $surfaceCanonicalShapeJsons = @(
+                $surfaceRecords |
+                    ForEach-Object { $_.shape.tool_surface.canonical_tool_shape | ConvertTo-Json -Depth 10 -Compress } |
+                    Select-Object -Unique
+            )
             $surfaceEvidenceValid = (
                 (Test-ExpectedGlmGatewayRoute -RequestStarts $artifactRequestStarts) -and
                 $artifactRequestStarts.Count -gt 0 -and
+                $artifactRequestCompletes.Count -eq $artifactRequestStarts.Count -and
+                @($artifactRequestCompletes | Where-Object { $_.status -ne 200 }).Count -eq 0 -and
+                $artifactRequestErrors.Count -eq 0 -and
+                $artifactUpstreamRetries.Count -eq 0 -and
+                $artifactProtocolFallbacks.Count -eq 0 -and
                 $surfaceRecords.Count -eq $artifactRequestStarts.Count -and
                 $surfaceDigests.Count -eq 1 -and
                 $surfaceDigests[0] -match '^sha256:[0-9a-f]{64}$' -and
+                $surfaceCanonicalShapeDigests.Count -eq 1 -and
+                $surfaceCanonicalShapeDigests[0] -match '^sha256:[0-9a-f]{64}$' -and
+                $surfaceCanonicalShapeJsons.Count -eq 1 -and
                 @($surfaceRecords | Where-Object {
                     $_.shape.tool_surface.namespace_flattened_count -ne 0 -or $_.shape.tool_surface.tool_search_visible -ne $true
                 }).Count -eq 0
@@ -2464,42 +2523,81 @@ finally {
                 Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_evidence_surface_invalid'
             }
             else {
+                $sanitizedGatewayEvents = [System.Collections.Generic.List[object]]::new()
+                foreach ($gatewayEvent in $artifactGatewayEvents) {
+                    switch ([string]$gatewayEvent.event) {
+                        'request_start' {
+                            [void]$sanitizedGatewayEvents.Add([ordered]@{
+                                event = 'request_start'
+                                route_identity = [ordered]@{
+                                    model = 'glm-5.2'
+                                    upstream = 'ollama_cloud'
+                                    route_mode = 'codexhub'
+                                }
+                            })
+                        }
+                        'request_complete' {
+                            [void]$sanitizedGatewayEvents.Add([ordered]@{
+                                event = 'request_complete'
+                                status = [int]$gatewayEvent.status
+                            })
+                        }
+                        'third_party_apply_patch_freeform_adapter' {
+                            if ([string]$gatewayEvent.outcome -eq 'adapted') {
+                                [void]$sanitizedGatewayEvents.Add([ordered]@{
+                                    event = 'apply_patch_adapter'
+                                    outcome = 'adapted'
+                                })
+                            }
+                        }
+                        'third_party_apply_patch_freeform_history_adapter' {
+                            if ([string]$gatewayEvent.outcome -eq 'adapted') {
+                                [void]$sanitizedGatewayEvents.Add([ordered]@{
+                                    event = 'history_adapter'
+                                    outcome = 'adapted'
+                                })
+                            }
+                        }
+                    }
+                }
+                $sanitizedRequestSurfaces = [System.Collections.Generic.List[object]]::new()
+                foreach ($surfaceRecord in $surfaceRecords) {
+                    $toolSurface = $surfaceRecord.shape.tool_surface
+                    [void]$sanitizedRequestSurfaces.Add([ordered]@{
+                        raw_tools_sha256 = [string]$toolSurface.sha256
+                        canonical_shape_sha256 = [string]$toolSurface.canonical_shape_sha256
+                        namespace_flattened_count = [int]$toolSurface.namespace_flattened_count
+                        tool_search_visible = [bool]$toolSurface.tool_search_visible
+                    })
+                }
                 $qualificationArtifact = [ordered]@{
-                    schema = 'codexhub.issue108.qualification-evidence.v1'
+                    schema = 'codexhub.issue108.qualification-evidence.v2'
                     sanitized = $true
-                    route_identity = [ordered]@{
-                        model = 'glm-5.2'
-                        upstream = 'ollama_cloud'
-                        route_mode = 'codexhub'
+                    provenance = [ordered]@{
+                        capture_kind = 'isolated_responses_acceptance'
+                        capture_format = 'sanitized_gateway_capture.v1'
                     }
-                    tool_surface_strategy = 'deferred_core'
-                    tool_sequence = @('shell_command', 'apply_patch', 'shell_command')
-                    mutation = [ordered]@{
-                        file_count = 1
-                        hunk_count = 1
-                        line_replacement_count = 1
-                    }
-                    termination = 'completed'
-                    request_count = $artifactRequestStarts.Count
-                    request_error_count = 0
-                    fallback_counts = [ordered]@{
-                        luna = 0
-                        terra = 0
-                    }
-                    adapter_counts = [ordered]@{
-                        apply_patch = $artifactApplyPatchAdapterCount
-                        history = $artifactHistoryAdapterCount
-                    }
-                    deferred_payload = [ordered]@{
-                        sha256 = $surfaceDigests[0]
-                        equivalent_request_count = $artifactRequestStarts.Count
-                        namespace_flattened_count = 0
-                        tool_search_visible = $true
+                    acceptance_capture = [ordered]@{
+                        tool_surface_strategy = 'deferred_core'
+                        gateway_events = @($sanitizedGatewayEvents)
+                        request_surfaces = @($sanitizedRequestSurfaces)
+                        canonical_tool_shape = @($surfaceRecords[0].shape.tool_surface.canonical_tool_shape)
+                        cli = [ordered]@{
+                            completed_tool_sequence = @($toolSequence)
+                            terminal_event = 'turn.completed'
+                        }
+                        mutation = [ordered]@{
+                            file_count = 1
+                            hunk_count = 1
+                            line_replacement_count = 1
+                        }
+                        tool_search_call_count = $toolSearchChoiceEvents.Count
                     }
                 }
                 if (Save-ValidatedEvidenceArtifact -PythonPath $PythonCommand -ReplayWorkspace $Workspace -ValidationMode 'qualification' -Artifact $qualificationArtifact -OutputPath $QualificationEvidenceOutput) {
                     $summary.qualification_evidence_validated = $true
                     $summary.deferred_payload_digest = $surfaceDigests[0]
+                    $summary.canonical_tool_shape_digest = $surfaceCanonicalShapeDigests[0]
                 }
                 else {
                     Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_evidence_validation_failed'

@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,19 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY_SUBPROCESS_TIMEOUT_SECONDS = 12
 REPLAY_COMPLETION_BOUND_SECONDS = 8
+
+
+def _load_issue_108_evidence_validator():
+    module_name = "issue_108_evidence_validator_for_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        ROOT / "tests" / "validate_issue_108_evidence.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_path):
@@ -175,14 +189,38 @@ def test_issue_108_tool_surface_evidence_replay_has_semantic_three_case_ab(tmp_p
         "namespace_200_eager": "red",
         "namespace_200_deferred_core": "green",
     }
+    assert summary["case_decisions"] == {
+        "minimal_core": "within_direct_tool_budget",
+        "namespace_200_eager": "direct_tool_surface_budget_exceeded",
+        "namespace_200_deferred_core": "within_direct_tool_budget",
+    }
     assert summary["direct_tool_counts"] == {
         "minimal_core": 7,
         "namespace_200_eager": 207,
         "namespace_200_deferred_core": 8,
     }
+    assert summary["direct_tool_budget"] == 64
     assert summary["same_200_source_payload"] is True
     assert summary["deferred_payload_digest"].startswith("sha256:")
     assert "timeout" not in json.dumps(summary).lower()
+
+
+def test_issue_108_tool_surface_semantic_budget_derives_from_prepared_surfaces():
+    validator = _load_issue_108_evidence_validator()
+
+    eager_surface = validator._prepared_surface(ROOT, 200, "eager")
+    deferred_surface = validator._prepared_surface(ROOT, 200, "deferred_core")
+
+    assert eager_surface["direct_tool_count"] > validator.DIRECT_TOOL_SURFACE_BUDGET
+    assert deferred_surface["direct_tool_count"] <= validator.DIRECT_TOOL_SURFACE_BUDGET
+    assert validator._derive_tool_surface_outcome(eager_surface) == {
+        "status": "red",
+        "decision": "direct_tool_surface_budget_exceeded",
+    }
+    assert validator._derive_tool_surface_outcome(deferred_surface) == {
+        "status": "green",
+        "decision": "within_direct_tool_budget",
+    }
 
 
 def test_issue_108_capture_gateway_digest_replay_executes_generated_capture_path(tmp_path):
@@ -222,6 +260,7 @@ def test_issue_108_capture_gateway_digest_replay_executes_generated_capture_path
     assert summary["capture_harness_error_count"] == 0
     assert {"before", "after"}.issubset(summary["capture_stages"])
     assert summary["tool_surface_digest"].startswith("sha256:")
+    assert summary["canonical_tool_shape_digest"].startswith("sha256:")
 
 
 def test_issue_108_readiness_evidence_replay_preserves_singleton_tool_sequence(tmp_path):
@@ -435,10 +474,65 @@ def test_issue_108_qualification_evidence_replay_validates_committed_live_fixtur
     assert summary["passed"] is True
     assert summary["failures"] == []
     assert summary["request_count"] == 4
+    assert summary["adapter_counts"] == {"apply_patch": 1, "history": 2}
+    assert summary["request_error_count"] == 0
+    assert summary["fallback_counts"] == {"luna": 0, "terra": 0}
     assert summary["deferred_payload_digest"] == (
         "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294"
     )
+    assert summary["canonical_tool_shape_digest"] == (
+        "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f"
+    )
     assert (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
+
+
+def test_issue_108_qualification_evidence_replay_rejects_digest_and_equivalence_tampering(tmp_path):
+    fixture_path = ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    validator_path = ROOT / "tests" / "validate_issue_108_evidence.py"
+
+    digest_tampered = json.loads(json.dumps(fixture))
+    digest_tampered["acceptance_capture"]["request_surfaces"][0]["canonical_shape_sha256"] = "sha256:" + "0" * 64
+    digest_path = tmp_path / "digest-tampered.json"
+    digest_path.write_text(json.dumps(digest_tampered), encoding="utf-8")
+    digest_result = subprocess.run(
+        [sys.executable, str(validator_path), "--mode", "qualification", "--fixture", str(digest_path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    assert digest_result.returncode != 0
+    assert json.loads(digest_result.stdout)["failures"] == ["evidence_fixture_invalid"]
+
+    equivalence_tampered = json.loads(json.dumps(fixture))
+    equivalence_tampered["acceptance_capture"]["request_surfaces"][0]["raw_tools_sha256"] = "sha256:" + "f" * 64
+    equivalence_path = tmp_path / "equivalence-tampered.json"
+    equivalence_path.write_text(json.dumps(equivalence_tampered), encoding="utf-8")
+    equivalence_result = subprocess.run(
+        [sys.executable, str(validator_path), "--mode", "qualification", "--fixture", str(equivalence_path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    assert equivalence_result.returncode != 0
+    assert json.loads(equivalence_result.stdout)["failures"] == ["evidence_fixture_invalid"]
+
+    accepted_digest_tampered = json.loads(json.dumps(fixture))
+    for surface in accepted_digest_tampered["acceptance_capture"]["request_surfaces"]:
+        surface["raw_tools_sha256"] = "sha256:" + "0" * 64
+    accepted_digest_path = tmp_path / "accepted-digest-tampered.json"
+    accepted_digest_path.write_text(json.dumps(accepted_digest_tampered), encoding="utf-8")
+    accepted_digest_result = subprocess.run(
+        [sys.executable, str(validator_path), "--mode", "qualification", "--fixture", str(accepted_digest_path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    assert accepted_digest_result.returncode != 0
+    assert json.loads(accepted_digest_result.stdout)["failures"] == ["evidence_fixture_invalid"]
 
 
 def test_issue_108_failure_validator_preserves_sanitized_harness_error_details(tmp_path):

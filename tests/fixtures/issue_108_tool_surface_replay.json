@@ -16,23 +16,7 @@
       "prepared_surface_sha256": "sha256:43843603558dbbf16681c2960154235df0c59e5ddd887a884177c004881ab56d",
       "direct_tool_count": 7,
       "namespace_flattened_count": 0,
-      "tool_search_visible": false,
-      "outcome": {
-        "status": "green",
-        "termination": "completed",
-        "tool_sequence": ["shell_command", "apply_patch", "shell_command"],
-        "mutation": {
-          "file_count": 1,
-          "hunk_count": 1,
-          "line_replacement_count": 1
-        },
-        "adapter_counts": {
-          "apply_patch": 1,
-          "history": 1
-        },
-        "request_error_count": 0,
-        "fallback_count": 0
-      }
+      "tool_search_visible": false
     },
     {
       "id": "namespace_200_eager",
@@ -42,23 +26,7 @@
       "prepared_surface_sha256": "sha256:e8885a979d821fcc087af4d7d4075c508b78f53a937f979181ca2261c39e7c2e",
       "direct_tool_count": 207,
       "namespace_flattened_count": 200,
-      "tool_search_visible": false,
-      "outcome": {
-        "status": "red",
-        "termination": "core_tool_chain_not_started",
-        "tool_sequence": [],
-        "mutation": {
-          "file_count": 0,
-          "hunk_count": 0,
-          "line_replacement_count": 0
-        },
-        "adapter_counts": {
-          "apply_patch": 0,
-          "history": 0
-        },
-        "request_error_count": 0,
-        "fallback_count": 0
-      }
+      "tool_search_visible": false
     },
     {
       "id": "namespace_200_deferred_core",
@@ -68,23 +36,7 @@
       "prepared_surface_sha256": "sha256:871c5ef9f34c7315d79e9b95c39ea1ce2be8ec061e732ed15abe31265653fc7b",
       "direct_tool_count": 8,
       "namespace_flattened_count": 0,
-      "tool_search_visible": true,
-      "outcome": {
-        "status": "green",
-        "termination": "completed",
-        "tool_sequence": ["shell_command", "apply_patch", "shell_command"],
-        "mutation": {
-          "file_count": 1,
-          "hunk_count": 1,
-          "line_replacement_count": 1
-        },
-        "adapter_counts": {
-          "apply_patch": 1,
-          "history": 1
-        },
-        "request_error_count": 0,
-        "fallback_count": 0
-      }
+      "tool_search_visible": true
     }
   ]
 }
