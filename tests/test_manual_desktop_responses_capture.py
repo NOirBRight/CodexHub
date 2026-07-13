@@ -553,6 +553,38 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertEqual(summary["first_closing_side"], "unknown")
         self.assertEqual(summary["first_failure_phase"], "unknown")
 
+    def test_boundary_trace_does_not_override_an_earlier_unresolved_upstream_boundary(self) -> None:
+        summary = capture._summarize_gateway_boundary_trace(
+            [
+                {
+                    "sequence": 1,
+                    "elapsed_ms": 0,
+                    "event": "upstream_sse_read_failed",
+                    "request": "request-1",
+                    "failure_phase": "sse_read",
+                    "error": "IncompleteRead",
+                },
+                {
+                    "sequence": 2,
+                    "elapsed_ms": 2,
+                    "event": "upstream_sse_read_failed",
+                    "request": "request-2",
+                    "failure_phase": "sse_read",
+                    "error": "IncompleteRead",
+                },
+                {
+                    "sequence": 3,
+                    "elapsed_ms": 3,
+                    "event": "downstream_write_after_upstream_failure_succeeded",
+                    "request": "request-2",
+                    "bytes": 32,
+                },
+            ]
+        )
+
+        self.assertEqual(summary["first_closing_side"], "unknown")
+        self.assertEqual(summary["first_failure_phase"], "unknown")
+
     def test_boundary_writer_excludes_headers_from_downstream_body_exposure(self) -> None:
         class _Stats:
             terminal_event_seen = False

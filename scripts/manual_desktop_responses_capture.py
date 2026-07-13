@@ -1559,6 +1559,8 @@ def _first_supported_boundary_candidate(events: Iterable[dict[str, Any]]) -> tup
                 for later in ordered[index + 1 :]
             )
             if downstream_writable:
+                if unresolved_upstream_boundary_seen:
+                    return None
                 return row, "upstream_transport", _boundary_phase(row.get("failure_phase"))
             unresolved_upstream_boundary_seen = True
             continue
