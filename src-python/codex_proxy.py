@@ -7198,11 +7198,17 @@ def compatible_request_body(
             if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
     input_items = payload.get("input")
-    include_tool_search = False
     subagent_worker_context = (
         not raw_provider_probe
         and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         and is_worker_subagent_request(input_items)
+    )
+    # deferred_core intentionally keeps Codex's bounded, explicit discovery
+    # entry point. It does not flatten namespace declarations or introduce a
+    # broader discovery service; eager remains the #105-compatible surface.
+    # Worker subagents retain their established restricted surface.
+    include_tool_search = (
+        tool_surface_strategy == "deferred_core" and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
@@ -7485,6 +7491,11 @@ def compatible_request_body(
                 and subagent_state is not None
                 and bool(getattr(subagent_state, "workflow_intent", False))
             )
+            # Coordinator and worker restrictions deliberately remain narrower
+            # than the normal deferred-core surface.
+            effective_include_tool_search = (
+                include_tool_search and not restrict_to_subagent_coordinator_tools
+            )
             include_node_repl_for_subagent_workflow = (
                 restrict_to_subagent_coordinator_tools
                 and not node_repl_single_step_complete
@@ -7516,7 +7527,7 @@ def compatible_request_body(
             tool_surface_counts: dict[str, int] = {}
             explicit_tools_injected = _inject_explicit_codex_tools(
                 payload,
-                include_tool_search=include_tool_search,
+                include_tool_search=effective_include_tool_search,
                 include_multi_agent_tools=not subagent_worker_context,
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,

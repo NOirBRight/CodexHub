@@ -9285,6 +9285,25 @@ Do not modify any other files. Do not create any other files. Use a shell comman
         self.assertIn("worker_subagent_finalization_required", transcript)
         self.assertIn("ordinary assistant message content", transcript)
 
+        deferred_worker = json.loads(
+            compatible_request_body(
+                body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                    "tool_surface_strategy": "deferred_core",
+                },
+                event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
+            )
+        )
+        deferred_worker_names = {
+            tool["name"]
+            for tool in deferred_worker["tools"]
+            if tool.get("type") == "function"
+        }
+        self.assertNotIn("tool_search", deferred_worker_names)
+
     def test_responses_structured_exact_line_child_prompt_is_worker_context(self):
         worker_prompt = "Return exactly this line: SENTINEL:level1-single-glm52-responses"
         body = json.dumps(
@@ -11436,7 +11455,9 @@ Execution constraints:
         self.assertEqual(eager_body, legacy_body)
         self.assertEqual(eager, legacy)
         self.assertEqual(deferred["tools"][:2], [shell_command, apply_patch])
-        self.assertEqual(len(eager_names) - len(deferred_names), 200)
+        # deferred_core omits the 200 flattened namespace functions but keeps
+        # the bounded explicit tool_search entry point.
+        self.assertEqual(len(eager_names) - len(deferred_names), 199)
         self.assertTrue(
             all(f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" in eager_names for index in range(200))
         )
@@ -11456,9 +11477,73 @@ Execution constraints:
         self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
         self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
         self.assertNotIn("tool_search", eager_names)
-        self.assertNotIn("tool_search", deferred_names)
+        self.assertIn("tool_search", deferred_names)
         for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
             self.assertIn(f"multi_agent_v1__{tool_name}", deferred_names)
+
+    def test_deferred_tool_surface_retains_bounded_caller_tool_search_without_changing_eager(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        caller_tool_search = dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [{"type": "function", "name": "deferred", "parameters": {"type": "object"}}],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use only the bounded visible tools.",
+                "tools": [shell_command, caller_tool_search, namespace],
+            }
+        ).encode("utf-8")
+
+        legacy_body = compatible_request_body(body, {"name": "ollama_cloud"})
+        eager_body = compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+        )
+        deferred = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        deferred_tools = [tool for tool in deferred["tools"] if isinstance(tool, dict)]
+
+        self.assertEqual(eager_body, legacy_body)
+        self.assertNotIn(
+            "tool_search",
+            {tool.get("name") for tool in json.loads(eager_body)["tools"] if isinstance(tool, dict)},
+        )
+        self.assertEqual(
+            [tool for tool in deferred_tools if tool.get("name") == "tool_search"],
+            [caller_tool_search],
+        )
+        injected_deferred = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": "Keep the bounded explicit tool surface.",
+                        "tools": [shell_command, namespace],
+                    }
+                ).encode("utf-8"),
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        self.assertEqual(
+            [tool for tool in injected_deferred["tools"] if tool.get("name") == "tool_search"],
+            [codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL],
+        )
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred_tools))
+        self.assertNotIn(
+            "mcp__synthetic_namespace__deferred",
+            {tool.get("name") for tool in deferred_tools},
+        )
 
     def test_external_tool_surface_keeps_caller_order_and_deduplicates_flattened_names(self):
         caller_alias = {

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -45,6 +46,82 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     assert summary["tracked_child_exit_before_natural_timeout"] is True
 
 
+def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the environment isolation replay")
+
+    environment = dict(os.environ)
+    environment["OLLAMA_API_KEY"] = "ambient-test-key-must-not-reach-cli"
+    environment["CODEXHUB_TEST_SECRET"] = "ambient-test-secret-must-not-reach-cli"
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-EnvironmentIsolationReplay",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "environment_isolation_replay"
+    assert summary["passed"] is True
+    assert summary["cli_has_ollama_api_key"] is False
+    assert summary["cli_has_test_secret"] is False
+    assert summary["cli_home_is_isolated"] is True
+
+
+def test_issue_108_history_adapter_negative_control_replay_is_bounded_and_sanitized(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the history-adapter replay")
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-HistoryAdapterReplay",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "history_adapter_replay"
+    assert summary["passed"] is True
+    assert summary["disabled_structured_history_pair_count"] == 0
+    assert summary["disabled_developer_item_count"] == 2
+    assert summary["adapted_structured_history_pair_count"] == 1
+    assert summary["adapted_developer_item_count"] == 0
+    assert summary["adapted_patch_argument_key_count"] == 1
+
+
 def test_issue_108_qualification_has_no_harness_history_bridge():
     source = (
         ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
@@ -65,6 +142,57 @@ def test_issue_108_qualification_requires_history_adapter_evidence():
     assert "apply_patch_adapter_adapted_count" in source
     assert "apply_patch_history_adapter_adapted_count" in source
     assert "history adapter never reported adapted" in source
+    assert "HistoryAdapterNegativeControl" in source
+    assert "CODEXHUB_HISTORY_ADAPTER_NEGATIVE_CONTROL" in source
+    assert "post_success_tool_choice_failed" in source
+
+
+def test_issue_108_qualification_rejects_retry_and_protocol_fallback_evidence():
+    source = (
+        ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "upstream_retry" in source
+    assert "upstream_protocol_fallback" in source
+    assert "upstream_retry_event_count" in source
+    assert "upstream_protocol_fallback_event_count" in source
+    assert "qualification recorded an upstream retry" in source
+    assert "qualification recorded an upstream protocol fallback" in source
+
+
+def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_children():
+    source = (
+        ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "UseCliSandboxBypass" not in source
+    assert "dangerously-bypass-approvals-and-sandbox" not in source
+    assert "SharedAuthPath" not in source
+    assert "authCopyPath" not in source
+    assert ".codex\\auth.json" not in source
+    assert "$startInfo.Environment.Clear()" in source
+    assert "$proxyEnvironment" in source
+    assert "$cliEnvironment" in source
+    assert "$cliHome = $testWorkspace" in source
+    assert "$cliTemp = $testWorkspace" in source
+    assert "-CodexHome $cliHome -TempRoot $cliTemp" in source
+    assert "OLLAMA_API_KEY = $ollamaApiKey" in source
+    assert "$cliEnvironment['OLLAMA_API_KEY']" not in source
+    assert "-Environment $proxyEnvironment" in source
+    assert "-Environment $cliEnvironment" in source
+    assert "experimental_bearer_token" in source
+    assert "[windows]" in source
+    assert 'sandbox = "elevated"' in source
+    assert 'sandbox = "unelevated"' not in source
+    assert "'--sandbox', 'workspace-write'" in source
+    assert "'--add-dir', $testWorkspace" not in source
+    assert "Isolated Gateway did not become healthy" in source
+    assert "Isolated proxy did not become healthy" not in source
+    assert "gateway_startup_failed" in source
+    assert "proxy_startup_failed" not in source
+    assert "workspace_write_sandbox_rejected" in source
+    assert "writing is blocked by read-only sandbox" in source
+    assert "apply_patch_execution_failed" in source
 
 
 def test_codex_tool_smoke_prefers_app_cli_and_runs_ephemeral():
