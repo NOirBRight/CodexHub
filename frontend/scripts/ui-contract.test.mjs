@@ -482,7 +482,7 @@ test("Windows release build vendors a pinned Python runtime", async () => {
   assert.match(prepareScript, /src-python\\codex_proxy\.py/);
 });
 
-test("release build scripts support stable and beta flavor configuration", async () => {
+test("release build scripts support normal and debug flavor configuration", async () => {
   const [buildScript, packageSource, viteSource] = await Promise.all([
     readFile(buildWindowsReleasePath, "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -491,36 +491,42 @@ test("release build scripts support stable and beta flavor configuration", async
   const packageJson = JSON.parse(packageSource);
   const flavorManifest = JSON.parse(await readFile(new URL("../../config/build-flavors.json", import.meta.url), "utf8"));
 
-  assert.deepEqual(Object.keys(flavorManifest).sort(), ["beta", "stable"]);
-  assert.equal(flavorManifest.stable.productName, "CodexHub");
-  assert.equal(flavorManifest.stable.identifier, "com.codexhub.app");
-  assert.equal(flavorManifest.stable.frontendPort, 1420);
-  assert.equal(flavorManifest.stable.bridgePort, 1421);
-  assert.equal(flavorManifest.stable.gatewayPort, 9099);
-  assert.equal(flavorManifest.stable.routingOwner, "release");
-  assert.equal(flavorManifest.beta.productName, "CodexHub Beta");
-  assert.equal(flavorManifest.beta.identifier, "com.codexhub.beta");
-  assert.equal(flavorManifest.beta.frontendPort, 1430);
-  assert.equal(flavorManifest.beta.bridgePort, 1431);
-  assert.equal(flavorManifest.beta.gatewayPort, 9109);
-  assert.equal(flavorManifest.beta.routingOwner, "beta");
-  assert.equal(flavorManifest.beta.updaterManifestName, "latest-beta.json");
-  assert.match(buildScript, /ValidateSet\("stable",\s*"beta"\)/);
+  assert.deepEqual(Object.keys(flavorManifest).sort(), ["debug", "normal"]);
+  assert.equal(flavorManifest.normal.productName, "CodexHub");
+  assert.equal(flavorManifest.normal.identifier, "com.codexhub.app");
+  assert.equal(flavorManifest.normal.frontendPort, 1420);
+  assert.equal(flavorManifest.normal.bridgePort, 1421);
+  assert.equal(flavorManifest.normal.gatewayPort, 9099);
+  assert.equal(flavorManifest.normal.routingOwner, "release");
+  assert.equal(flavorManifest.debug.productName, flavorManifest.normal.productName);
+  assert.equal(flavorManifest.debug.identifier, flavorManifest.normal.identifier);
+  assert.equal(flavorManifest.debug.frontendPort, flavorManifest.normal.frontendPort);
+  assert.equal(flavorManifest.debug.bridgePort, flavorManifest.normal.bridgePort);
+  assert.equal(flavorManifest.debug.gatewayPort, flavorManifest.normal.gatewayPort);
+  assert.equal(flavorManifest.debug.routingOwner, flavorManifest.normal.routingOwner);
+  assert.equal(flavorManifest.normal.updaterManifestName, "latest.json");
+  assert.equal(flavorManifest.debug.updaterManifestName, "latest-debug.json");
+  assert.equal(flavorManifest.normal.releaseAssetSuffix, "");
+  assert.equal(flavorManifest.debug.releaseAssetSuffix, "_debug");
+  assert.match(buildScript, /ValidateSet\("normal",\s*"debug"\)/);
   assert.match(buildScript, /Build-TauriConfig\.ps1/);
   assert.match(buildScript, /CODEXHUB_BUILD_FLAVOR/);
+  assert.match(buildScript, /debug-diagnostics/);
+  assert.match(buildScript, /CARGO_TARGET_DIR/);
   assert.match(buildScript, /CODEXHUB_FRONTEND_PORT/);
-  assert.match(buildScript, /cargo tauri build --config \$generatedTauriConfigPath --bundles nsis --ci/);
+  assert.match(buildScript, /cargo @tauriBuildArgs/);
   assert.match(buildScript, /releaseAssetPrefix/);
+  assert.match(buildScript, /Get-ReleaseArtifactName/);
+  assert.match(buildScript, /Get-ReleaseManifestName/);
   assert.match(buildScript, /\$installerNameCandidates = \[System\.Collections\.Generic\.List\[string\]\]::new\(\)/);
   assert.match(buildScript, /foreach \(\$nameCandidate in @\(\s*\$assetPrefix,\s*\$productName,\s*\(\$productName -replace "\\s\+", ""\),\s*\(\$productName -replace "\\s\+", "_"\)\s*\)\)/s);
-  assert.match(buildScript, /\$installerName = "\{0\}_\{1\}_x64-setup\.exe" -f \$nameCandidate, \$version/);
   assert.match(buildScript, /Remove-Item -LiteralPath \$artifactPath -Force -ErrorAction SilentlyContinue/);
   assert.match(buildScript, /Remove-Item -LiteralPath "\$artifactPath\.sig" -Force -ErrorAction SilentlyContinue/);
   assert.match(buildScript, /\$expectedCandidateList = \(\$installerNameCandidates \| ForEach-Object \{ "\$_ \(\+ \.sig\)" \}\) -join ", "/);
   assert.match(buildScript, /\$resolvedInstaller = foreach \(\$installerName in \$installerNameCandidates\)/);
   assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.InstallerPath -Destination \$installerPath -Force/);
   assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.SignaturePath -Destination \$signaturePath -Force/);
-  assert.match(buildScript, /throw "Expected NSIS installer\/signature pair was not generated for flavor '\$Flavor'\. Looked for: \$expectedCandidateList"/);
+  assert.match(buildScript, /Expected NSIS installer\/signature pair was not generated for flavor/);
   assert.match(buildScript, /\$manifestName = \[System\.IO\.Path\]::GetFileName\(\$manifestPath\)/);
   assert.match(buildScript, /throw "Generated \$manifestName failed validation: \$manifestPath"/);
   assert.doesNotMatch(buildScript, /if \(\(-not \(Test-Path -LiteralPath \$installerPath -PathType Leaf\)\) -or \(-not \(Test-Path -LiteralPath \$signaturePath -PathType Leaf\)\)\) \{/);
@@ -716,16 +722,25 @@ test("gateway empty states are localized outside the static contract", async () 
   assert.match(usageSource, /t\("usage\.pendingData"\)/);
 });
 
-test("Beta empty usage state explains isolated Gateway telemetry", async () => {
-  const [gatewaySource, enSource, zhSource] = await Promise.all([
+test("debug builds expose a localized diagnostics badge without changing Gateway telemetry", async () => {
+  const [gatewaySource, runtimeSource, typesSource, enSource, zhSource] = await Promise.all([
     readFile(gatewayPagePath, "utf8"),
+    readFile(runtimeBarPath, "utf8"),
+    readFile(typesPath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /appFlavor\?\.flavor === "beta"[\s\S]*t\("gateway\.betaUsageIsolated"\)/);
-  assert.match(enSource, /betaUsageIsolated: "Beta uses isolated Gateway usage data/);
-  assert.match(zhSource, /betaUsageIsolated: "Beta 使用独立的 Gateway 用量数据/);
+  assert.match(typesSource, /export type BuildFlavor = "normal" \| "debug"/);
+  assert.match(typesSource, /export interface BuildInfo/);
+  assert.match(typesSource, /diagnostics_enabled: boolean/);
+  assert.match(runtimeSource, /appFlavor\?\.build\.flavor === "debug"/);
+  assert.match(runtimeSource, /appFlavor\.build\.diagnostics_enabled/);
+  assert.match(runtimeSource, /t\("runtime\.debugDiagnostics"\)/);
+  assert.match(enSource, /debugDiagnostics: "Debug diagnostics"/);
+  assert.match(zhSource, /debugDiagnostics: "调试诊断"/);
+  assert.doesNotMatch(gatewaySource, /appFlavor\?\.flavor === "beta"/);
+  assert.doesNotMatch(gatewaySource, /gateway\.betaUsageIsolated/);
 });
 
 test("gateway page is wired to real usage and client backend APIs", async () => {
@@ -2615,7 +2630,8 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
   const portableScript = await readFile(buildWindowsPortablePath, "utf8");
 
   assert.match(portableScript, /Prepare-PythonRuntime\.ps1/);
-  assert.match(portableScript, /cargo tauri build --config \$generatedTauriConfigPath --no-bundle --ci/);
+  assert.match(portableScript, /\$tauriBuildArgs = @\("tauri", "build", "--config", \$generatedTauriConfigPath, "--no-bundle", "--ci"\)/);
+  assert.match(portableScript, /& cargo @tauriBuildArgs/);
   assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
@@ -2809,19 +2825,27 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(script, /windows-x86_64-nsis/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_ENDPOINT/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_SKIP_INSTALL/);
+  assert.match(appUpdatesSource, /configured_updater_endpoints/);
+  assert.match(appUpdatesSource, /validate_checked_update/);
+  assert.match(appUpdatesSource, /update\.raw_json/);
+  assert.doesNotMatch(appUpdatesSource, /validate_configured_flavor_manifest/);
+  assert.match(appUpdatesSource, /validate_flavor_manifest/);
+  assert.match(appUpdatesSource, /codexhub_flavor/);
   assert.match(appUpdatesSource, /app\.updater_builder\(\)/);
-  assert.match(appUpdatesSource, /builder[\s\S]*\.endpoints\(vec!\[endpoint\]\)/);
+  assert.match(appUpdatesSource, /\.endpoints\(endpoints\)/);
   assert.match(appUpdatesSource, /cfg\(debug_assertions\)/);
 });
 
-test("app update e2e script supports beta manifest and bridge ports", async () => {
+test("app update e2e script supports normal and debug manifests", async () => {
   const script = await readFile(appUpdateE2ePath, "utf8");
 
-  assert.match(script, /ValidateSet\("stable",\s*"beta"\)/);
-  assert.match(script, /latest-beta\.json/);
-  assert.match(script, /CodexHubBeta_/);
-  assert.match(script, /1421/);
-  assert.match(script, /1431/);
+  assert.match(script, /ValidateSet\("normal",\s*"debug"\)/);
+  assert.match(script, /Get-ReleaseManifestName/);
+  assert.match(script, /Get-ReleaseArtifactName/);
+  assert.match(script, /Get-FlavorTargetRoot/);
+  assert.match(script, /codexhub_flavor = \$Flavor/);
+  assert.match(script, /flavorConfig\.bridgePort/);
+  assert.doesNotMatch(script, /latest-beta\.json/);
 });
 
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {

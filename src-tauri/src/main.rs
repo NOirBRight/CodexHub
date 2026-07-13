@@ -3,6 +3,7 @@
 mod app_flavor;
 mod app_updates;
 mod autostart;
+mod build_info;
 mod catalog;
 mod cli;
 mod config;

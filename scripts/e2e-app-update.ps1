@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("stable", "beta")]
-    [string]$Flavor = "stable",
+    [ValidateSet("normal", "debug")]
+    [string]$Flavor = "normal",
     [int]$Port = 18765,
     [string]$BridgeUrl = "",
     [string]$AppExe = "",
@@ -11,6 +11,8 @@ param(
     [string]$CurrentVersion = "",
     [string]$NextVersion = "",
     [switch]$Launch,
+    [switch]$BuildApp,
+    [switch]$ShowAppBuildPlan,
     [switch]$Install,
     [switch]$DownloadOnly,
     [switch]$KeepAlive,
@@ -20,17 +22,55 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+if ($BuildApp -and -not $Launch) {
+    throw "-BuildApp requires -Launch."
+}
+if ($BuildApp -and -not [string]::IsNullOrWhiteSpace($AppExe)) {
+    throw "-BuildApp uses the default flavor executable path; omit -AppExe."
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
+$preparePythonRuntimePath = Join-Path $PSScriptRoot "Prepare-PythonRuntime.ps1"
 $flavorManifest = Get-Content -Raw -LiteralPath (Join-Path $repoRoot "config\build-flavors.json") | ConvertFrom-Json
 $flavorConfig = $flavorManifest.$Flavor
-# Stable defaults remain latest.json / CodexHub_ / 1421; beta defaults remain latest-beta.json / CodexHubBeta_ / 1431.
 if ($null -eq $flavorConfig) {
     throw "Unknown update E2E flavor: $Flavor"
 }
+$targetRoot = Get-FlavorTargetRoot -TauriDir (Join-Path $repoRoot "src-tauri") -Flavor $Flavor
 if ([string]::IsNullOrWhiteSpace($BridgeUrl)) {
     $BridgeUrl = "http://127.0.0.1:$($flavorConfig.bridgePort)/api/invoke"
 }
 $tauriConfigPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
+
+function Get-AppBuildPlan {
+    $cargoArgs = [System.Collections.Generic.List[string]]@("build", "--locked")
+    if ($Flavor -eq "debug") {
+        $cargoArgs.Add("--features")
+        $cargoArgs.Add("debug-diagnostics")
+    }
+
+    $appExecutable = Join-Path $targetRoot "debug\codexhub.exe"
+    return [pscustomobject][ordered]@{
+        flavor = $Flavor
+        working_directory = Join-Path $repoRoot "src-tauri"
+        target_root = $targetRoot
+        app_executable = $appExecutable
+        prepare_python_runtime = $preparePythonRuntimePath
+        environment = [ordered]@{
+            CODEXHUB_BUILD_FLAVOR = $Flavor
+            CARGO_TARGET_DIR = $targetRoot
+        }
+        cargo_args = $cargoArgs.ToArray()
+        command = "cargo $($cargoArgs -join ' ')"
+    }
+}
+
+$script:AppBuildPlan = Get-AppBuildPlan
+if ($ShowAppBuildPlan) {
+    $script:AppBuildPlan | ConvertTo-Json -Depth 8 -Compress
+    exit 0
+}
 
 function Get-TauriVersion {
     $config = Get-Content -Raw -LiteralPath $tauriConfigPath | ConvertFrom-Json
@@ -53,18 +93,15 @@ function Get-ReleaseAsset {
         return (Resolve-Path -LiteralPath $InstallerPath).Path
     }
 
-    $bundleDir = Join-Path $repoRoot "src-tauri\target\release\bundle\nsis"
-    $assetPrefix = [string]$flavorConfig.releaseAssetPrefix
-    $candidate = Get-ChildItem -LiteralPath $bundleDir -Filter "${assetPrefix}_*_x64-setup.exe" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime |
-        Select-Object -Last 1
-
-    if ($null -ne $candidate) {
-        return $candidate.FullName
+    $bundleDir = Join-Path $targetRoot "release\bundle\nsis"
+    $expectedInstallerName = Get-ReleaseArtifactName -Flavor $Flavor -Version $NextVersion
+    $candidate = Join-Path $bundleDir $expectedInstallerName
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        return $candidate
     }
 
     if ($AllowDummy) {
-        $dummy = Join-Path $ReleaseRoot "${assetPrefix}_${NextVersion}_x64-setup.exe"
+        $dummy = Join-Path $ReleaseRoot (Get-ReleaseArtifactName -Flavor $Flavor -Version $NextVersion)
         [System.IO.File]::WriteAllText($dummy, "virtual CodexHub update asset")
         return $dummy
     }
@@ -99,6 +136,7 @@ function Write-VirtualRelease {
 
     $manifest = [ordered]@{
         version = $NextVersion
+        codexhub_flavor = $Flavor
         notes = "virtual CodexHub update`n- E2E detection path`n- E2E install path"
         pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
         platforms = [ordered]@{
@@ -113,7 +151,7 @@ function Write-VirtualRelease {
         }
     }
 
-    $manifestName = [string]$flavorConfig.updaterManifestName
+    $manifestName = Get-ReleaseManifestName -Flavor $Flavor
     $manifestPath = Join-Path $ReleaseRoot $manifestName
     $json = $manifest | ConvertTo-Json -Depth 8
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -223,11 +261,14 @@ function Wait-InstallStatusPhase {
 }
 
 function Start-AppForE2E([string]$Endpoint) {
+    if ($BuildApp) {
+        Build-AppForE2E -Plan $script:AppBuildPlan
+    }
     if ([string]::IsNullOrWhiteSpace($AppExe)) {
-        $script:AppExe = Join-Path $repoRoot "src-tauri\target\debug\codexhub.exe"
+        $script:AppExe = $script:AppBuildPlan.app_executable
     }
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) {
-        throw "App executable not found: $AppExe. Build a debug app first with 'cargo build' in src-tauri."
+        throw "App executable not found: $AppExe. Run this script with -Launch -BuildApp, or inspect -ShowAppBuildPlan for the exact flavor build command."
     }
 
     $info = [System.Diagnostics.ProcessStartInfo]::new()
@@ -240,6 +281,50 @@ function Start-AppForE2E([string]$Endpoint) {
     [System.Diagnostics.Process]::Start($info)
 }
 
+function Build-AppForE2E {
+    param([Parameter(Mandatory = $true)]$Plan)
+
+    & $Plan.prepare_python_runtime -RepoRoot $repoRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python runtime preparation failed with exit code $LASTEXITCODE."
+    }
+
+    $previousBuildFlavor = $env:CODEXHUB_BUILD_FLAVOR
+    $previousCargoTarget = $env:CARGO_TARGET_DIR
+    try {
+        $env:CODEXHUB_BUILD_FLAVOR = [string]$Plan.environment.CODEXHUB_BUILD_FLAVOR
+        $env:CARGO_TARGET_DIR = [string]$Plan.environment.CARGO_TARGET_DIR
+        Push-Location $Plan.working_directory
+        try {
+            & cargo @($Plan.cargo_args)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Flavor E2E app build failed with exit code $LASTEXITCODE."
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    finally {
+        if ($null -eq $previousBuildFlavor) {
+            Remove-Item Env:\CODEXHUB_BUILD_FLAVOR -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:CODEXHUB_BUILD_FLAVOR = $previousBuildFlavor
+        }
+        if ($null -eq $previousCargoTarget) {
+            Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:CARGO_TARGET_DIR = $previousCargoTarget
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $Plan.app_executable -PathType Leaf)) {
+        throw "Flavor E2E app build did not produce the expected executable: $($Plan.app_executable)"
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($CurrentVersion)) {
     $CurrentVersion = Get-TauriVersion
 }
@@ -248,7 +333,7 @@ if ([string]::IsNullOrWhiteSpace($NextVersion)) {
 }
 
 $manifestPath = Write-VirtualRelease
-$manifestName = [string]$flavorConfig.updaterManifestName
+$manifestName = Get-ReleaseManifestName -Flavor $Flavor
 $manifestUrl = "http://127.0.0.1:$Port/$manifestName"
 Write-Host "Virtual release manifest: $manifestPath"
 Write-Host "Virtual release endpoint: $manifestUrl"
