@@ -136,6 +136,27 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
                 launch_desktop.assert_not_called()
                 shutil.rmtree(capture._session_root(prepared["session"]))
 
+    def test_gateway_capture_allows_only_one_gateway_leg_per_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
+                capture,
+                "_require_desktop_seams",
+                return_value=(Path("desktop-package"), "test-build"),
+            ):
+                prepared = capture.prepare("gpt-5.6-terra")
+                root = capture._session_root(prepared["session"])
+                paths = capture._runtime_paths(root)
+                (paths["codex_home"] / "auth.json").write_text("{}", encoding="utf-8")
+                readiness = {"status": "ready", "readiness_indicator": "main_window", "exit_code": None}
+                with patch.object(capture, "_start_gateway"), patch.object(
+                    capture, "_launch_desktop", return_value=readiness
+                ):
+                    capture.launch(prepared["session"], "gateway_official_auto")
+                    with self.assertRaisesRegex(capture.CaptureError, "gateway_capture_single_run_only"):
+                        capture.launch(prepared["session"], "gateway_official_auto")
+
+                shutil.rmtree(root)
+
     def test_auth_bootstrap_is_not_a_direct_control_or_renderer_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
@@ -506,6 +527,31 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertEqual(upstream_reader_exception["first_failure_phase"], "unknown")
         self.assertEqual(service_error_headers["first_closing_side"], "unknown")
         self.assertEqual(service_error_headers["first_failure_phase"], "unknown")
+
+    def test_boundary_trace_fails_closed_when_an_earlier_request_is_unresolved(self) -> None:
+        summary = capture._summarize_gateway_boundary_trace(
+            [
+                {
+                    "sequence": 1,
+                    "elapsed_ms": 0,
+                    "event": "upstream_sse_read_failed",
+                    "request": "request-1",
+                    "failure_phase": "sse_read",
+                    "error": "IncompleteRead",
+                },
+                {
+                    "sequence": 2,
+                    "elapsed_ms": 2,
+                    "event": "downstream_write_failed",
+                    "request": "request-2",
+                    "failure_phase": "downstream_write",
+                    "error": "ConnectionResetError",
+                },
+            ]
+        )
+
+        self.assertEqual(summary["first_closing_side"], "unknown")
+        self.assertEqual(summary["first_failure_phase"], "unknown")
 
     def test_boundary_writer_excludes_headers_from_downstream_body_exposure(self) -> None:
         class _Stats:

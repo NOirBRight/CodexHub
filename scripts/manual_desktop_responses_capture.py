@@ -945,6 +945,7 @@ def prepare(model: str) -> dict[str, Any]:
         "gateway_pid": None,
         "gateway_port": None,
         "gateway_key": None,
+        "gateway_capture_started": False,
         "desktop_route_mode": "disposable_auth_bootstrap",
         "current_app_pid": None,
         "current_leg": None,
@@ -1108,6 +1109,9 @@ def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCH
         paths = _runtime_paths(root)
         if not (paths["codex_home"] / "auth.json").is_file():
             raise CaptureError("manual_login_required_in_disposable_profile")
+        if state.get("gateway_capture_started") is True:
+            raise CaptureError("gateway_capture_single_run_only")
+        state["gateway_capture_started"] = True
         state["desktop_route_mode"] = "isolated_gateway_loopback"
         _write_state(root, state)
         _start_gateway(root, state)
@@ -1544,7 +1548,7 @@ def _first_supported_boundary_candidate(events: Iterable[dict[str, Any]]) -> tup
     """
 
     ordered = list(events)
-    unresolved_upstream_requests: set[str | None] = set()
+    unresolved_upstream_boundary_seen = False
     for index, row in enumerate(ordered):
         event = row.get("event")
         if event in UPSTREAM_TRANSPORT_BOUNDARY_EVENTS:
@@ -1556,13 +1560,12 @@ def _first_supported_boundary_candidate(events: Iterable[dict[str, Any]]) -> tup
             )
             if downstream_writable:
                 return row, "upstream_transport", _boundary_phase(row.get("failure_phase"))
-            unresolved_upstream_requests.add(request if isinstance(request, str) else None)
+            unresolved_upstream_boundary_seen = True
             continue
         candidate = _boundary_candidate(row)
         if candidate is None:
             continue
-        request = row.get("request")
-        if (request if isinstance(request, str) else None) in unresolved_upstream_requests:
+        if unresolved_upstream_boundary_seen:
             return None
         return row, *candidate
     return None
