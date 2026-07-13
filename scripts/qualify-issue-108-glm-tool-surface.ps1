@@ -386,15 +386,24 @@ $environmentSnapshot = [ordered]@{
 )
 # Keep the nested child out of Start-TrackedProcess's redirected streams so
 # the outer replay can observe EOF as soon as the retained root is stopped.
-$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 10') -RedirectStandardOutput $env:CODEXHUB_LIFECYCLE_CHILD_STDOUT_PATH -RedirectStandardError $env:CODEXHUB_LIFECYCLE_CHILD_STDERR_PATH -PassThru
+$childStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$childStartInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$childStartInfo.Arguments = '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 10"'
+$childStartInfo.UseShellExecute = $false
+$childStartInfo.CreateNoWindow = $true
+$childStartInfo.RedirectStandardOutput = $true
+$childStartInfo.RedirectStandardError = $true
+$child = [System.Diagnostics.Process]::new()
+$child.StartInfo = $childStartInfo
+if (-not $child.Start()) {
+    throw 'lifecycle_nested_child_start_failed'
+}
 [System.IO.File]::WriteAllText($env:CODEXHUB_LIFECYCLE_CHILD_PID_PATH, [string]$child.Id)
 Start-Sleep -Seconds 10
 '@
         $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($powershellPath) -Additional @{
             CODEXHUB_LIFECYCLE_CHILD_PID_PATH = $childPidPath
             CODEXHUB_LIFECYCLE_ENV_PATH = $environmentSnapshotPath
-            CODEXHUB_LIFECYCLE_CHILD_STDOUT_PATH = Join-Path $runRoot 'tracked-child.stdout.log'
-            CODEXHUB_LIFECYCLE_CHILD_STDERR_PATH = Join-Path $runRoot 'tracked-child.stderr.log'
         }
         $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
             '-NoProfile', '-NonInteractive', '-Command', $lifecycleChildCommand
