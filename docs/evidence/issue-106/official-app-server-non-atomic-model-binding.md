@@ -50,9 +50,10 @@ created. An unavailable model must produce a deterministic `thread/start` or
 The runner does not assume that every request rejection is atomic. It reports
 `atomic_rejection` only when a numeric JSON-RPC error code is captured and a
 subsequent `thread/read` shows zero persisted turns. A rejected create with no
-readable Task, a nonempty readback, or an error without a numeric code is an
-`unverified_rejection`. The observed residual described above is the accepted,
-non-atomic path rather than a rejection path.
+readable Task, a rejected turn with unavailable Task readback, a nonempty
+readback, or an error without a numeric code is an `unverified_rejection`. The
+observed residual described above is the accepted, non-atomic path rather than
+a rejection path.
 
 ## Scope limits
 

@@ -127,7 +127,7 @@ def run_green_fixture(
 def run_red_turn_rejection_fixture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    rejected_snapshot: dict[str, object],
+    rejected_snapshot: dict[str, object] | BaseException,
     rejection_details: dict[str, object],
 ) -> dict[str, object]:
     monkeypatch.setattr(RUNNER, "read_issue106_model_list", lambda *_args: [])
@@ -141,7 +141,12 @@ def run_red_turn_rejection_fixture(
         raise RUNNER.AppServerRequestRejected("turn_start", rejection_details)
 
     monkeypatch.setattr(RUNNER, "turn_started", reject_turn)
-    monkeypatch.setattr(RUNNER, "thread_snapshot", lambda *_args: rejected_snapshot)
+    def read_rejection(*_args: object) -> dict[str, object]:
+        if isinstance(rejected_snapshot, BaseException):
+            raise rejected_snapshot
+        return rejected_snapshot
+
+    monkeypatch.setattr(RUNNER, "thread_snapshot", read_rejection)
     monkeypatch.setattr(RUNNER, "cleanup_issue106_thread", lambda *_args: "passed")
 
     return RUNNER.run_red_missing_model(
@@ -492,6 +497,24 @@ def test_turn_rejection_with_a_persisted_turn_is_unverified(
 
     assert result["outcome"] == "unverified_rejection"
     assert result["rejectionClassification"] == "thread_read_not_empty_or_error_not_precise"
+
+
+def test_turn_rejection_with_an_unreadable_task_is_unverified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = run_red_turn_rejection_fixture(
+        monkeypatch,
+        tmp_path,
+        RUNNER.AppServerFailure("thread_read_failed"),
+        {"errorKind": "json_rpc", "errorCode": -32602},
+    )
+
+    assert result["outcome"] == "unverified_rejection"
+    assert (
+        result["rejectionClassification"]
+        == "thread_read_unavailable_after_turn_rejection"
+    )
+    assert "threadRead" not in result
 
 
 def test_create_rejection_without_a_task_read_is_unverified(

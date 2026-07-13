@@ -905,28 +905,42 @@ def run_red_missing_model(
                     effort="low",
                 )
             except AppServerRequestRejected as rejection:
-                rejected_snapshot = thread_snapshot(client, thread_id, timeout)
-                atomic_rejection = verified_atomic_turn_rejection(
-                    rejection, rejected_snapshot
-                )
-                result = {
-                    "outcome": "atomic_rejection"
-                    if atomic_rejection
-                    else "unverified_rejection",
-                    "stages": [
-                        "catalog_list",
-                        "create",
-                        "turn_start_rejected",
-                        "read_rejection",
-                    ],
-                    "rejection": rejection_summary(rejection),
-                    "rejectionClassification": (
-                        "thread_read_empty_with_json_rpc_error"
+                try:
+                    rejected_snapshot = thread_snapshot(client, thread_id, timeout)
+                except (AppServerFailure, TimeoutError):
+                    result = {
+                        "outcome": "unverified_rejection",
+                        "stages": [
+                            "catalog_list",
+                            "create",
+                            "turn_start_rejected",
+                            "read_rejection_failed",
+                        ],
+                        "rejection": rejection_summary(rejection),
+                        "rejectionClassification": "thread_read_unavailable_after_turn_rejection",
+                    }
+                else:
+                    atomic_rejection = verified_atomic_turn_rejection(
+                        rejection, rejected_snapshot
+                    )
+                    result = {
+                        "outcome": "atomic_rejection"
                         if atomic_rejection
-                        else "thread_read_not_empty_or_error_not_precise"
-                    ),
-                    "threadRead": rejected_snapshot,
-                }
+                        else "unverified_rejection",
+                        "stages": [
+                            "catalog_list",
+                            "create",
+                            "turn_start_rejected",
+                            "read_rejection",
+                        ],
+                        "rejection": rejection_summary(rejection),
+                        "rejectionClassification": (
+                            "thread_read_empty_with_json_rpc_error"
+                            if atomic_rejection
+                            else "thread_read_not_empty_or_error_not_precise"
+                        ),
+                        "threadRead": rejected_snapshot,
+                    }
             else:
                 try:
                     wait_for_turn(client, thread_id, turn_id, red_timeout)

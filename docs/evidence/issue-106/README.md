@@ -58,7 +58,8 @@ residual is documented in
 If a create or turn request instead rejects, the runner calls it
 `atomic_rejection` only when it retains a numeric JSON-RPC error code and a
 subsequent `thread/read` proves zero persisted turns. A rejected create without
-a readable Task, or any nonempty/error-imprecise readback, is
+a readable Task, a rejected turn without readable Task state, or any
+nonempty/error-imprecise readback is
 `unverified_rejection`.
 
 | Contract area | Status | Exact evidence boundary |
