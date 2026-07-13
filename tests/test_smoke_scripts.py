@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -257,6 +258,33 @@ def test_issue_108_qualification_evidence_replay_fails_closed_without_live_fixtu
     assert summary["passed"] is False
     assert summary["failures"] == ["qualification_evidence_fixture_missing"]
     assert not (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
+
+
+def test_issue_108_sanitized_failure_fixture_replays_without_raw_capture():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tests" / "validate_issue_108_evidence.py"),
+            "--mode",
+            "qualification-failure",
+            "--fixture",
+            str(ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_failure.json"),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report == {
+        "mode": "qualification_failure_evidence_replay",
+        "passed": True,
+        "failures": [],
+        "request_count": 2,
+        "timeout_classification": "transport",
+    }
 
 
 def test_issue_108_qualification_has_no_harness_history_bridge():

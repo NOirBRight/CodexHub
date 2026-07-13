@@ -1,0 +1,20 @@
+{
+  "schema": "codexhub.issue108.qualification-failure.v1",
+  "sanitized": true,
+  "route_identity": {
+    "model": "glm-5.2",
+    "upstream": "ollama_cloud",
+    "route_mode": "codexhub"
+  },
+  "last_successful_tool": "none",
+  "response_termination": "transport_error",
+  "request_count": 2,
+  "adapter_counts": {
+    "apply_patch": 0,
+    "history": 0
+  },
+  "timeout_classification": "transport",
+  "failure_codes": [
+    "qualification_readiness_failed"
+  ]
+}
