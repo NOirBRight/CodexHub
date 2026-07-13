@@ -342,6 +342,7 @@ function Invoke-LifecycleReplay {
     $summaryPath = Join-Path $runRoot 'summary.json'
     $childPidPath = Join-Path $runRoot 'tracked-child.pid'
     $environmentSnapshotPath = Join-Path $runRoot 'child-environment.json'
+    $lifecycleScriptPath = Join-Path $runRoot 'lifecycle-root.ps1'
     $replayHome = Join-Path $runRoot 'home'
     $replayTemp = Join-Path $runRoot 'tmp'
     $tracked = $null
@@ -401,12 +402,13 @@ if (-not $child.Start()) {
 [System.IO.File]::WriteAllText($env:CODEXHUB_LIFECYCLE_CHILD_PID_PATH, [string]$child.Id)
 Start-Sleep -Seconds 10
 '@
+        [System.IO.File]::WriteAllText($lifecycleScriptPath, $lifecycleChildCommand, [System.Text.UTF8Encoding]::new($false))
         $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($powershellPath) -Additional @{
             CODEXHUB_LIFECYCLE_CHILD_PID_PATH = $childPidPath
             CODEXHUB_LIFECYCLE_ENV_PATH = $environmentSnapshotPath
         }
         $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
-            '-NoProfile', '-NonInteractive', '-Command', $lifecycleChildCommand
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $lifecycleScriptPath
         ) -WorkingDirectory $runRoot -Environment $lifecycleEnvironment
         $childPidDeadline = (Get-Date).AddSeconds(5)
         while ((-not (Test-Path -LiteralPath $childPidPath) -or -not (Test-Path -LiteralPath $environmentSnapshotPath)) -and (Get-Date) -lt $childPidDeadline) {
