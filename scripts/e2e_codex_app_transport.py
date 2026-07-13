@@ -1,4 +1,9 @@
-"""Drive the App-managed codex app-server through a local CodexHub Gateway."""
+"""Drive the App-bundled CLI app-server as a transport negative control.
+
+This script does not exercise the Codex Desktop renderer, its stream consumer,
+or its continuation lifecycle.  It must not be used to qualify a Desktop-App
+transport diagnosis; Issue #114 uses it only as a contemporaneous CLI control.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,17 @@ def main() -> int:
     parser.add_argument("--session-jsonl", type=Path)
     parser.add_argument("--tool-calls", type=int, default=0)
     parser.add_argument("--pause-between-turns", type=float, default=0.0)
+    parser.add_argument("--model", default="gpt-5.6-sol")
+    parser.add_argument("--model-provider", default="custom")
+    parser.add_argument(
+        "--input-bytes",
+        type=int,
+        default=0,
+        help="append a deterministic synthetic payload of this UTF-8 byte length to every probe turn",
+    )
     args = parser.parse_args()
+    if args.input_bytes < 0:
+        parser.error("--input-bytes must not be negative")
 
     env = os.environ.copy()
     env["CODEX_HOME"] = str(args.home.resolve())
@@ -145,8 +160,8 @@ def main() -> int:
 
         thread_params: dict[str, object] = {
             "cwd": str(args.cwd.resolve()),
-            "model": "gpt-5.6-sol",
-            "modelProvider": "custom",
+            "model": args.model,
+            "modelProvider": args.model_provider,
             "approvalPolicy": "never",
             "sandbox": "read-only",
             "ephemeral": True,
@@ -186,6 +201,12 @@ def main() -> int:
                 )
             else:
                 prompt = f"Transport probe {index}/{args.turns}. Reply with exactly OK. Do not call tools."
+            if args.input_bytes:
+                marker = "\nSynthetic transport payload; ignore its contents and follow the final instruction.\n"
+                unit = " the"
+                repetitions = (args.input_bytes + len(unit) - 1) // len(unit)
+                payload = (unit * repetitions)[: args.input_bytes]
+                prompt = marker + payload + "\nReply with exactly OK. Do not call tools."
             turn_request = send(
                 "turn/start",
                 {
