@@ -7098,9 +7098,10 @@ def compatible_request_body(
     behavior_profile: str = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
 ) -> bytes:
     upstream_name = upstream.get("name")
+    official_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
     validated_tool_surface_strategy: str | None = None
     if (
-        behavior_profile != BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+        not official_passthrough
         and upstream_name != "official"
     ):
         # Reject malformed configuration before an unparsable external body can
@@ -7110,6 +7111,8 @@ def compatible_request_body(
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
+        if official_passthrough:
+            return body
         upstream_model = upstream.get("upstream_model")
         if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
             return _replace_embedded_model(body, model_id, upstream_model)
@@ -7121,7 +7124,7 @@ def compatible_request_body(
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
     changed = False
-    if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+    if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
     changed = _normalize_responses_message_input_items(payload)

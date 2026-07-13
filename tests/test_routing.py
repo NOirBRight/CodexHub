@@ -11720,12 +11720,18 @@ Execution constraints:
             "upstream_model": "gpt-5.5",
             "tool_surface_strategy": "not-a-strategy",
         }
-        for shape, body in {"non_object": b"[]", "malformed": b"{not-json"}.items():
+        bodies = {
+            "non_object": (b"[]", None),
+            "malformed": (b"{not-json", None),
+            "malformed_embedded_model": (b'{"model":"caller",oops', "caller"),
+        }
+        for shape, (body, model_id) in bodies.items():
             with self.subTest(shape=shape):
                 self.assertEqual(
                     compatible_request_body(
                         body,
                         upstream,
+                        model_id=model_id,
                         behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
                     ),
                     body,
