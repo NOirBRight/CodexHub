@@ -481,6 +481,24 @@ class CatalogSyncTests(unittest.TestCase):
             ):
                 self.assertIn(required_key, by_slug[model_id])
 
+    def test_policy_fallback_lists_current_official_bindings_without_a_runtime_seed(self):
+        policy = catalog_sync.load_policy(catalog_sync.POLICY_PATH)
+
+        catalog = build_codex_catalog([], [], policy, "0.144.0")
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+
+        self.assertEqual(
+            [model_id for model_id in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna") if model_id in by_slug],
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+        )
+        self.assertEqual(by_slug["gpt-5.6-terra"]["display_name"], "5.6 Terra")
+        self.assertEqual(by_slug["gpt-5.6-terra"]["context_window"], 353400)
+        self.assertEqual(by_slug["gpt-5.6-terra"]["max_context_window"], 1050000)
+        self.assertIn(
+            "max",
+            [entry["effort"] for entry in by_slug["gpt-5.6-terra"]["supported_reasoning_levels"]],
+        )
+
     def test_build_catalog_preserves_fallback_metadata_for_ollama_models(self):
         fallback_models = [
             {
