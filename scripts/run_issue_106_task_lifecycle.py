@@ -166,9 +166,13 @@ class JsonRpcClient:
             self._responses[message_id] = message
 
     def close(self) -> None:
-        if self._process.stdin is not None:
-            self._process.stdin.close()
-        self._reader.join(timeout=1)
+        try:
+            if self._process.stdin is not None and not self._process.stdin.closed:
+                self._process.stdin.close()
+        except OSError as error:
+            raise AppServerFailure("app_server_client_close_failed") from error
+        finally:
+            self._reader.join(timeout=1)
 
 
 def response_result(response: dict[str, Any], operation: str) -> dict[str, Any]:
@@ -180,7 +184,7 @@ def response_result(response: dict[str, Any], operation: str) -> dict[str, Any]:
     return result
 
 
-def resolve_app_codex(explicit: str | None) -> Path:
+def resolve_issue106_app_codex(explicit: str | None) -> Path:
     if explicit:
         candidate = Path(explicit).expanduser().resolve()
         if candidate.is_file():
@@ -248,7 +252,7 @@ def isolated_environment(home: Path) -> dict[str, str]:
     return environment
 
 
-def run_checked(command: list[str], environment: dict[str, str]) -> None:
+def run_issue106_setup_command(command: list[str], environment: dict[str, str]) -> None:
     try:
         completed = subprocess.run(
             command,
@@ -271,7 +275,7 @@ def prepare_connected_home(
     gateway_base_url: str,
     gateway_key: str | None,
 ) -> None:
-    run_checked(
+    run_issue106_setup_command(
         [sys.executable, str(REPO_ROOT / "src-python" / "catalog_sync.py"), "--sync"],
         environment,
     )
@@ -292,10 +296,10 @@ def prepare_connected_home(
     ]
     if gateway_key:
         overlay_command.extend(("--gateway-key", gateway_key))
-    run_checked(overlay_command, environment)
+    run_issue106_setup_command(overlay_command, environment)
 
 
-def start_app_server(
+def start_issue106_app_server(
     codex_command: Path, home: Path, environment: dict[str, str]
 ) -> subprocess.Popen[str]:
     command = [str(codex_command), "app-server"]
@@ -321,20 +325,55 @@ def start_app_server(
         raise AppServerFailure("app_server_start_failed") from error
 
 
-def stop_app_server(process: subprocess.Popen[str]) -> None:
-    if process.stdin is not None and not process.stdin.closed:
-        process.stdin.close()
+def stop_issue106_app_server(process: subprocess.Popen[str]) -> None:
+    pipe_close_failed = False
+    process_stopped = False
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.terminate()
+        if process.stdin is not None and not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except OSError:
+                pipe_close_failed = True
         try:
             process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-    if process.stdout is not None:
-        process.stdout.close()
+            process_stopped = True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if not process_stopped:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+                process_stopped = True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if not process_stopped:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+                process_stopped = True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if not process_stopped:
+            try:
+                process_stopped = process.poll() is not None
+            except OSError:
+                process_stopped = False
+    finally:
+        if process.stdout is not None:
+            try:
+                process.stdout.close()
+            except OSError:
+                pipe_close_failed = True
+    if not process_stopped:
+        raise AppServerFailure("app_server_cleanup_failed")
+    if pipe_close_failed:
+        raise AppServerFailure("app_server_pipe_close_failed")
 
 
 def initialize(client: JsonRpcClient, timeout: float) -> None:
@@ -359,7 +398,9 @@ def initialize(client: JsonRpcClient, timeout: float) -> None:
     client.notify("initialized")
 
 
-def read_model_list(client: JsonRpcClient, timeout: float) -> list[dict[str, Any]]:
+def read_issue106_model_list(
+    client: JsonRpcClient, timeout: float
+) -> list[dict[str, Any]]:
     result = response_result(client.request("model/list", {"limit": 100}, timeout), "model_list")
     models = result.get("data")
     if not isinstance(models, list):
@@ -386,20 +427,48 @@ def model_efforts(model: dict[str, Any]) -> set[str]:
 
 
 def catalog_summary(
-    models: list[dict[str, Any]], requested_official_model: str
+    models: list[dict[str, Any]],
+    requested_official_model: str,
+    external_model: str | None = None,
 ) -> dict[str, Any]:
     ids = {model_id(model) for model in models}
     requested = next(
         (model for model in models if model_id(model) == requested_official_model),
         None,
     )
-    return {
+    summary: dict[str, Any] = {
         "modelCount": len(models),
         "requestedOfficialModelListed": requested_official_model in ids,
         "requestedOfficialModelSupportsMax": bool(
             requested is not None and "max" in model_efforts(requested)
         ),
     }
+    if external_model is not None:
+        summary["externalModelListed"] = external_model in ids
+    return summary
+
+
+def assert_catalog_comparison(
+    official_disconnected: dict[str, Any], codexhub_connected: dict[str, Any]
+) -> None:
+    for snapshot in (official_disconnected, codexhub_connected):
+        if snapshot.get("account") != {
+            "authenticated": False,
+            "requiresOpenaiAuth": True,
+        }:
+            raise AppServerFailure("isolated_catalog_control_not_disconnected")
+        catalog = snapshot.get("catalog")
+        if not isinstance(catalog, dict) or not (
+            catalog.get("requestedOfficialModelListed") is True
+            and catalog.get("requestedOfficialModelSupportsMax") is True
+        ):
+            raise AppServerFailure("requested_official_binding_not_listed")
+    official_catalog = official_disconnected["catalog"]
+    connected_catalog = codexhub_connected["catalog"]
+    if official_catalog.get("externalModelListed") is not False:
+        raise AppServerFailure("external_model_present_in_official_catalog")
+    if connected_catalog.get("externalModelListed") is not True:
+        raise AppServerFailure("external_model_missing_from_connected_catalog")
 
 
 def read_account_summary(client: JsonRpcClient, timeout: float) -> dict[str, bool]:
@@ -524,6 +593,44 @@ def thread_list_contains(
     return any(isinstance(thread, dict) and thread.get("id") == thread_id for thread in threads)
 
 
+def start_issue106_custom_thread(
+    client: JsonRpcClient,
+    workspace: Path,
+    model: str,
+    timeout: float,
+    operation: str,
+) -> str:
+    started = response_result(
+        client.request(
+            "thread/start",
+            {
+                "cwd": str(workspace),
+                "model": model,
+                "modelProvider": "custom",
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access",
+                "ephemeral": False,
+            },
+            timeout,
+        ),
+        operation,
+    )
+    return get_thread_id(get_thread(started, operation), operation)
+
+
+def cleanup_issue106_thread(
+    client: JsonRpcClient, thread_id: str, timeout: float
+) -> str:
+    try:
+        response_result(
+            client.request("thread/delete", {"threadId": thread_id}, timeout),
+            "thread_delete",
+        )
+        return "failed" if thread_list_contains(client, thread_id, timeout) else "passed"
+    except (AppServerFailure, TimeoutError):
+        return "failed"
+
+
 def binding_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": result.get("model"),
@@ -562,7 +669,7 @@ def run_green_lifecycle(
     requested_official_model: str,
 ) -> dict[str, Any]:
     stages: list[str] = ["list"]
-    models = read_model_list(client, timeout)
+    models = read_issue106_model_list(client, timeout)
     model_ids = {model_id(model) for model in models}
     if external_model not in model_ids:
         raise AppServerFailure("external_model_not_listed")
@@ -579,22 +686,9 @@ def run_green_lifecycle(
     result: dict[str, Any] | None = None
     try:
         stages.append("create")
-        started = response_result(
-            client.request(
-                "thread/start",
-                {
-                    "cwd": str(workspace),
-                    "model": external_model,
-                    "modelProvider": "custom",
-                    "approvalPolicy": "never",
-                    "sandbox": "danger-full-access",
-                    "ephemeral": False,
-                },
-                timeout,
-            ),
-            "thread_start",
+        thread_id = start_issue106_custom_thread(
+            client, workspace, external_model, timeout, "thread_start"
         )
-        thread_id = get_thread_id(get_thread(started, "thread_start"), "thread_start")
 
         stages.append("bootstrap")
         bootstrap_turn = turn_started(
@@ -666,18 +760,7 @@ def run_green_lifecycle(
         }
     finally:
         if thread_id is not None:
-            try:
-                response_result(
-                    client.request("thread/delete", {"threadId": thread_id}, 10),
-                    "thread_delete",
-                )
-                native_cleanup = (
-                    "failed"
-                    if thread_list_contains(client, thread_id, 10)
-                    else "passed"
-                )
-            except (AppServerFailure, TimeoutError):
-                native_cleanup = "failed"
+            native_cleanup = cleanup_issue106_thread(client, thread_id, 10)
         if result is not None:
             result["nativeCleanup"] = native_cleanup
     if native_cleanup != "passed":
@@ -722,11 +805,11 @@ def red_continuation(
     try:
         wait_for_turn(client, thread_id, turn_id, timeout)
     except (AppServerFailure, TimeoutError):
-        snapshot = thread_snapshot(client, thread_id, timeout)
-        if snapshot["assistantOutputTurns"] == 0:
-            return {"status": "no_usable_rollout", "snapshot": snapshot}
-        return {"status": "unexpected_output", "snapshot": snapshot}
-    return {"status": "unexpected_turn_completion"}
+        pass
+    snapshot = thread_snapshot(client, thread_id, timeout)
+    if snapshot["assistantOutputTurns"] == 0:
+        return {"status": "no_usable_rollout", "snapshot": snapshot}
+    return {"status": "unexpected_output", "snapshot": snapshot}
 
 
 def run_red_missing_model(
@@ -736,7 +819,7 @@ def run_red_missing_model(
     red_timeout: float,
     red_model: str,
 ) -> dict[str, Any]:
-    models = read_model_list(client, timeout)
+    models = read_issue106_model_list(client, timeout)
     if red_model in {model_id(model) for model in models}:
         raise AppServerFailure("red_model_is_listed")
     workspace = home / "red-workspace"
@@ -746,20 +829,8 @@ def run_red_missing_model(
     result: dict[str, Any] | None = None
     try:
         try:
-            started = response_result(
-                client.request(
-                    "thread/start",
-                    {
-                        "cwd": str(workspace),
-                        "model": red_model,
-                        "modelProvider": "custom",
-                        "approvalPolicy": "never",
-                        "sandbox": "danger-full-access",
-                        "ephemeral": False,
-                    },
-                    timeout,
-                ),
-                "red_thread_start",
+            thread_id = start_issue106_custom_thread(
+                client, workspace, red_model, timeout, "red_thread_start"
             )
         except AppServerRequestRejected:
             result = {
@@ -767,72 +838,66 @@ def run_red_missing_model(
                 "stages": ["list", "create_rejected"],
             }
             native_cleanup = "not_needed"
-            return result
-        thread_id = get_thread_id(get_thread(started, "red_thread_start"), "red_thread_start")
-        try:
-            turn_id = turn_started(
-                client,
-                thread_id,
-                BOOTSTRAP_INPUT,
-                timeout,
-                model=red_model,
-                effort="low",
-            )
-        except AppServerRequestRejected:
-            result = {
-                "outcome": "atomic_rejection",
-                "stages": ["list", "create", "turn_start_rejected"],
-            }
-            return result
-        try:
-            wait_for_turn(client, thread_id, turn_id, red_timeout)
-        except (AppServerFailure, TimeoutError):
-            snapshot = thread_snapshot(client, thread_id, timeout)
-            initial_state = classify_red_snapshot(snapshot)
-            continuation = red_continuation(
-                client, thread_id, min(red_timeout, 20.0)
-            )
-            if (
-                initial_state
-                in {"in_progress_without_output", "failed_without_output"}
-                and continuation["status"]
-                in {"resume_rejected", "turn_rejected", "no_usable_rollout"}
-            ):
-                outcome = "non_atomic_missing_model"
+        else:
+            if thread_id is None:
+                raise AppServerFailure("red_thread_start_missing_thread_id")
+            try:
+                turn_id = turn_started(
+                    client,
+                    thread_id,
+                    BOOTSTRAP_INPUT,
+                    timeout,
+                    model=red_model,
+                    effort="low",
+                )
+            except AppServerRequestRejected:
+                result = {
+                    "outcome": "atomic_rejection",
+                    "stages": ["list", "create", "turn_start_rejected"],
+                }
             else:
-                outcome = "unexpected_missing_model_state"
-            result = {
-                "outcome": outcome,
-                "stages": [
-                    "list",
-                    "create",
-                    "turn_start",
-                    "bounded_wait",
-                    "read",
-                    "continue_without_binding_override",
-                ],
-                "initialState": initial_state,
-                "snapshot": snapshot,
-                "continuation": continuation,
-            }
-            return result
-        result = {
-            "outcome": "unexpected_turn_completion",
-            "stages": ["list", "create", "turn_start", "turn_completed"],
-        }
-        return result
+                try:
+                    wait_for_turn(client, thread_id, turn_id, red_timeout)
+                except (AppServerFailure, TimeoutError):
+                    pass
+                snapshot = thread_snapshot(client, thread_id, timeout)
+                initial_state = classify_red_snapshot(snapshot)
+                continuation = red_continuation(
+                    client, thread_id, min(red_timeout, 20.0)
+                )
+                if (
+                    initial_state
+                    in {"in_progress_without_output", "failed_without_output"}
+                    and continuation["status"]
+                    in {"resume_rejected", "turn_rejected", "no_usable_rollout"}
+                ):
+                    outcome = "non_atomic_missing_model"
+                else:
+                    outcome = "unexpected_missing_model_state"
+                result = {
+                    "outcome": outcome,
+                    "stages": [
+                        "list",
+                        "create",
+                        "turn_start",
+                        "bounded_wait",
+                        "read",
+                        "continue_without_binding_override",
+                    ],
+                    "initialState": initial_state,
+                    "snapshot": snapshot,
+                    "continuation": continuation,
+                }
     finally:
         if thread_id is not None:
-            try:
-                response_result(
-                    client.request("thread/delete", {"threadId": thread_id}, 10),
-                    "thread_delete",
-                )
-                native_cleanup = "passed"
-            except (AppServerFailure, TimeoutError):
-                native_cleanup = "failed"
+            native_cleanup = cleanup_issue106_thread(client, thread_id, 10)
         if result is not None:
             result["nativeCleanup"] = native_cleanup
+    if native_cleanup not in {"passed", "not_needed"}:
+        raise AppServerFailure("native_cleanup_failed")
+    if result is None:
+        raise AppServerFailure("red_lifecycle_missing_result")
+    return result
 
 
 def with_isolated_client(
@@ -847,26 +912,46 @@ def with_isolated_client(
     environment = isolated_environment(home)
     process: subprocess.Popen[str] | None = None
     client: JsonRpcClient | None = None
+    client_close_cleanup = "not_started"
+    app_server_cleanup = "not_started"
     temporary_cleanup = "not_started"
     result: dict[str, Any] | None = None
     try:
         if connected:
             prepare_connected_home(home, environment, gateway_base_url, gateway_key)
-        process = start_app_server(codex_command, home, environment)
+        process = start_issue106_app_server(codex_command, home, environment)
         client = JsonRpcClient(process)
         result = action(client, home)
     finally:
-        if client is not None:
-            client.close()
-        if process is not None:
-            stop_app_server(process)
         try:
-            remove_temporary_home(home)
-            temporary_cleanup = "passed"
-        except AppServerFailure:
-            temporary_cleanup = "failed"
+            if client is not None:
+                try:
+                    client.close()
+                    client_close_cleanup = "passed"
+                except AppServerFailure:
+                    client_close_cleanup = "failed"
+        finally:
+            try:
+                if process is not None:
+                    try:
+                        stop_issue106_app_server(process)
+                        app_server_cleanup = "passed"
+                    except AppServerFailure:
+                        app_server_cleanup = "failed"
+            finally:
+                try:
+                    remove_temporary_home(home)
+                    temporary_cleanup = "passed"
+                except AppServerFailure:
+                    temporary_cleanup = "failed"
         if result is not None:
+            result["clientClose"] = client_close_cleanup
+            result["appServerCleanup"] = app_server_cleanup
             result["temporaryHomeCleanup"] = temporary_cleanup
+    if client_close_cleanup != "passed":
+        raise AppServerFailure("app_server_client_close_failed")
+    if app_server_cleanup != "passed":
+        raise AppServerFailure("app_server_cleanup_failed")
     if temporary_cleanup != "passed":
         raise AppServerFailure("temporary_home_cleanup_failed")
     if result is None:
@@ -880,6 +965,7 @@ def run_catalog_comparison(
     gateway_key: str | None,
     timeout: float,
     requested_official_model: str,
+    external_model: str,
 ) -> dict[str, Any]:
     def inspect(connected: bool) -> dict[str, Any]:
         def action(client: JsonRpcClient, _home: Path) -> dict[str, Any]:
@@ -887,7 +973,9 @@ def run_catalog_comparison(
             return {
                 "account": read_account_summary(client, timeout),
                 "catalog": catalog_summary(
-                    read_model_list(client, timeout), requested_official_model
+                    read_issue106_model_list(client, timeout),
+                    requested_official_model,
+                    external_model,
                 ),
             }
 
@@ -899,7 +987,24 @@ def run_catalog_comparison(
             action=action,
         )
 
-    return {"officialDisconnected": inspect(False), "codexHubConnected": inspect(True)}
+    official_disconnected = inspect(False)
+    codexhub_connected = inspect(True)
+    assert_catalog_comparison(official_disconnected, codexhub_connected)
+    return {
+        "outcome": "passed",
+        "officialDisconnected": official_disconnected,
+        "codexHubConnected": codexhub_connected,
+    }
+
+
+def is_clean_issue106_green_run(run: dict[str, Any]) -> bool:
+    return (
+        run.get("outcome") == "passed"
+        and run.get("nativeCleanup") == "passed"
+        and run.get("clientClose") == "passed"
+        and run.get("appServerCleanup") == "passed"
+        and run.get("temporaryHomeCleanup") == "passed"
+    )
 
 
 def run_repeated_green_lifecycle(
@@ -911,6 +1016,8 @@ def run_repeated_green_lifecycle(
     requested_official_model: str,
     repeat: int,
 ) -> dict[str, Any]:
+    if repeat < 2:
+        raise AppServerFailure("repeated_green_runs_required")
     runs: list[dict[str, Any]] = []
     for _ in range(repeat):
         def action(client: JsonRpcClient, home: Path) -> dict[str, Any]:
@@ -928,8 +1035,12 @@ def run_repeated_green_lifecycle(
                 action=action,
             )
         )
+    repeated_cleanup = (
+        "passed" if all(is_clean_issue106_green_run(run) for run in runs) else "failed"
+    )
     return {
-        "outcome": "passed" if all(run.get("outcome") == "passed" for run in runs) else "failed",
+        "outcome": "passed" if repeated_cleanup == "passed" else "failed",
+        "repeatedRunCleanup": repeated_cleanup,
         "runs": runs,
     }
 
@@ -970,17 +1081,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--external-model", default="glm-5.2")
     parser.add_argument("--requested-official-model", default="gpt-5.6-terra")
     parser.add_argument("--red-model", default="codexhub-issue106-missing-model")
-    parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--repeat", type=int, default=2)
     args = parser.parse_args(argv)
     if args.timeout <= 0 or args.red_timeout <= 0 or args.repeat < 1:
         parser.error("timeout values must be positive and repeat must be at least one")
+    if args.scenario == "green" and args.repeat < 2:
+        parser.error("green requires at least two isolated runs")
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        codex_command = resolve_app_codex(args.codex)
+        codex_command = resolve_issue106_app_codex(args.codex)
         if args.scenario == "compare":
             result = run_catalog_comparison(
                 codex_command,
@@ -988,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.gateway_key,
                 args.timeout,
                 args.requested_official_model,
+                args.external_model,
             )
         elif args.scenario == "green":
             result = run_repeated_green_lifecycle(

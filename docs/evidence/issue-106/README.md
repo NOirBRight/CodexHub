@@ -18,7 +18,8 @@ python scripts/run_issue_106_task_lifecycle.py --scenario red
 The runner creates a fresh task-owned `CODEX_HOME` for each run, writes its
 catalog and overlay only there, disables nonessential plugin services, removes
 provider-key environment variables from its child process, and uses native
-`thread/delete` before removing that temporary home. It emits only sanitized
+`thread/delete`, client-pipe close, and app-server shutdown before removing
+that temporary home. It emits only sanitized
 counts, states, and binding fields: no local paths, prompts, task identifiers,
 session identifiers, credentials, or gateway token values.
 
@@ -37,9 +38,10 @@ about a visual `Custom` or `Light` label.
 
 `green` exercises create, list, bootstrap, read, rename, explicit full binding
 and permission preflight, resume, normal continuation without a binding
-override, read replay, native delete, and temporary-home cleanup against a
-catalog-listed external model. `--repeat 2` is the supported repeated-run leak
-check.
+override, read replay, native delete, client-pipe close, task-owned app-server
+shutdown, and temporary-home cleanup against a catalog-listed external model.
+It defaults to,
+and requires, at least two runs for the repeated-run leak check.
 
 `red` uses a deliberately unlisted model identifier. The current App CLI
 accepts both create and message requests, persists input-only no-output turns,
