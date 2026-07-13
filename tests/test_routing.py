@@ -11511,7 +11511,7 @@ Execution constraints:
         self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
         self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
 
-    def test_external_tool_surface_strips_raw_ineligible_namespaces_without_deferring_them(self):
+    def test_external_tool_surface_preserves_opaque_namespaces_for_eager_compatibility(self):
         shell_command = {
             "type": "function",
             "name": "shell_command",
@@ -11522,24 +11522,20 @@ Execution constraints:
             "name": "mcp__synthetic_namespace",
             "tools": [{"type": "function", "name": "visible", "parameters": {"type": "object"}}],
         }
-        collaboration_namespace = {
+        opaque_namespace = {
             "type": "namespace",
-            "name": "collaboration",
-            "tools": [{"type": "function", "name": "spawn_agent", "parameters": {"type": "object"}}],
-        }
-        image_namespace = {
-            "type": "namespace",
-            "name": "image_gen",
-            "tools": [{"type": "function", "name": "imagegen", "parameters": {"type": "object"}}],
+            "name": "opaque_vendor",
+            "tools": [{"type": "function", "name": "opaque_tool", "parameters": {"type": "object"}}],
         }
         body = json.dumps(
             {
                 "model": "glm-5.2",
                 "input": "Use the visible core tools only.",
-                "tools": [shell_command, eligible_namespace, collaboration_namespace, image_namespace],
+                "tools": [shell_command, eligible_namespace, opaque_namespace],
             }
         ).encode("utf-8")
 
+        legacy_body = compatible_request_body(body, {"name": "ollama_cloud"})
         eager = json.loads(
             compatible_request_body(
                 body,
@@ -11555,12 +11551,20 @@ Execution constraints:
         eager_names = {tool.get("name") for tool in eager["tools"] if isinstance(tool, dict)}
         deferred_names = {tool.get("name") for tool in deferred["tools"] if isinstance(tool, dict)}
 
-        self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
+        self.assertEqual(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            ),
+            legacy_body,
+        )
+        self.assertEqual(
+            [tool for tool in eager["tools"] if tool.get("type") == "namespace"],
+            [opaque_namespace],
+        )
         self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
         self.assertIn("mcp__synthetic_namespace__visible", eager_names)
         self.assertNotIn("mcp__synthetic_namespace__visible", deferred_names)
-        self.assertNotIn("collaboration__spawn_agent", eager_names)
-        self.assertNotIn("image_gen__imagegen", eager_names)
 
     def test_external_tool_surface_hoists_cli_additional_tools_without_losing_freeform_apply_patch(self):
         shell_command = {
@@ -11634,8 +11638,17 @@ Execution constraints:
                 {"type": "function", "name": "second", "parameters": {"type": "object"}},
             ],
         }
+        opaque_namespace = {
+            "type": "namespace",
+            "name": "opaque_vendor",
+            "tools": [{"type": "function", "name": "opaque_tool", "parameters": {"type": "object"}}],
+        }
         body = json.dumps(
-            {"model": "glm-5.2", "input": "Use tools.", "tools": [shell_command, apply_patch, namespace]}
+            {
+                "model": "glm-5.2",
+                "input": "Use tools.",
+                "tools": [shell_command, apply_patch, namespace, opaque_namespace],
+            }
         ).encode("utf-8")
 
         compatible_request_body(
@@ -11675,24 +11688,48 @@ Execution constraints:
         )
 
     def test_external_tool_surface_rejects_invalid_internal_capability_before_any_upstream_io(self):
-        body = json.dumps({"model": "glm-5.2", "input": "Use core tools."}).encode("utf-8")
+        bodies = {
+            "object": json.dumps({"model": "glm-5.2", "input": "Use core tools."}).encode("utf-8"),
+            "non_object": b"[]",
+            "malformed": b"{not-json",
+        }
 
         with patch("codex_proxy.urlopen") as mock_urlopen:
-            with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
-                compatible_request_body(
-                    body,
-                    {"name": "ollama_cloud", "tool_surface_strategy": "not-a-strategy"},
-                    event_context={"request_id": "must-not-be-logged"},
-                )
+            for shape, body in bodies.items():
+                with self.subTest(shape=shape):
+                    with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                        compatible_request_body(
+                            body,
+                            {"name": "ollama_cloud", "tool_surface_strategy": "not-a-strategy"},
+                            event_context={"request_id": "must-not-be-logged"},
+                        )
 
-        self.assertEqual(raised.exception.cause.code, "invalid_external_tool_surface_strategy")
+                    self.assertEqual(raised.exception.cause.code, "invalid_external_tool_surface_strategy")
+
         mock_urlopen.assert_not_called()
         rejected = [
             call.kwargs
             for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "external_tool_surface_rejected"
         ]
-        self.assertEqual(rejected, [{"reason": "invalid_tool_surface_strategy"}])
+        self.assertEqual(rejected, [{"reason": "invalid_tool_surface_strategy"}] * len(bodies))
+
+    def test_official_passthrough_keeps_malformed_and_non_object_bodies_byte_identical(self):
+        upstream = {
+            "name": "official",
+            "upstream_model": "gpt-5.5",
+            "tool_surface_strategy": "not-a-strategy",
+        }
+        for shape, body in {"non_object": b"[]", "malformed": b"{not-json"}.items():
+            with self.subTest(shape=shape):
+                self.assertEqual(
+                    compatible_request_body(
+                        body,
+                        upstream,
+                        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    ),
+                    body,
+                )
 
     def test_external_request_flattens_mcp_node_repl_namespace_without_tool_search(self):
         body = json.dumps(

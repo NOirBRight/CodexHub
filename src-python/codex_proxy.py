@@ -4300,6 +4300,7 @@ def _inject_explicit_codex_tools(
     include_node_repl_tools: bool = True,
     include_local_tool_gateway_tools: bool = True,
     strip_namespace_tools: bool = True,
+    strip_all_namespace_tools: bool = False,
     include_flattened_namespace_tools: bool = True,
     tool_surface_counts: dict[str, int] | None = None,
     open_agent_ids: list[str] | None = None,
@@ -4331,10 +4332,13 @@ def _inject_explicit_codex_tools(
     namespace_declaration_count = sum(1 for tool in tools if _is_flattened_namespace_schema(tool))
     flattened_namespace_tools = _flatten_namespace_function_tools(tools)
     if strip_namespace_tools:
-        # Namespaces are an internal Codex declaration form.  Only the existing
-        # eligible subset is flattened and counted; every raw declaration stays
-        # out of the third-party request.
-        filtered_tools = [tool for tool in tools if not _is_raw_namespace_schema(tool)]
+        # Eager preserves the #105 compatibility surface: only declarations the
+        # existing flattener understands are removed. deferred_core is the
+        # explicit normalized surface and drops every raw namespace declaration.
+        namespace_to_strip = (
+            _is_raw_namespace_schema if strip_all_namespace_tools else _is_flattened_namespace_schema
+        )
+        filtered_tools = [tool for tool in tools if not namespace_to_strip(tool)]
         if len(filtered_tools) != len(tools):
             tools[:] = filtered_tools
             changed = True
@@ -7093,6 +7097,16 @@ def compatible_request_body(
     inject_codex_tools: bool = True,
     behavior_profile: str = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
 ) -> bytes:
+    upstream_name = upstream.get("name")
+    validated_tool_surface_strategy: str | None = None
+    if (
+        behavior_profile != BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+        and upstream_name != "official"
+    ):
+        # Reject malformed configuration before an unparsable external body can
+        # bypass the third-party compatibility boundary. Official passthrough
+        # never consults the external capability.
+        validated_tool_surface_strategy = _external_tool_surface_strategy(upstream)
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -7104,7 +7118,6 @@ def compatible_request_body(
     if not isinstance(payload, dict):
         return body
 
-    upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
     changed = False
@@ -7151,7 +7164,11 @@ def compatible_request_body(
 
     raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = _external_tool_protocol(upstream)
-    tool_surface_strategy = _external_tool_surface_strategy(upstream)
+    tool_surface_strategy = (
+        validated_tool_surface_strategy
+        if validated_tool_surface_strategy is not None
+        else _external_tool_surface_strategy(upstream)
+    )
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
@@ -7511,6 +7528,7 @@ def compatible_request_body(
                     else not node_repl_single_step_complete
                 ),
                 include_local_tool_gateway_tools=not subagent_worker_context,
+                strip_all_namespace_tools=tool_surface_strategy == "deferred_core",
                 include_flattened_namespace_tools=tool_surface_strategy == "eager",
                 tool_surface_counts=tool_surface_counts,
                 open_agent_ids=open_agent_ids,
