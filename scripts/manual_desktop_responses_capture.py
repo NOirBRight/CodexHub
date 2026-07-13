@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -63,6 +64,16 @@ APP_RESULTS = (
     "aborted",
 )
 PROXY_ENV_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+LAUNCH_READINESS_STRATEGIES = (
+    "baseline",
+    "explicit_user_data_arg",
+    "empty_codex_home",
+    "disable_gpu",
+    "electron_logging",
+)
+DEFAULT_LAUNCHER_STRATEGY = "explicit_user_data_arg"
+DEFAULT_LAUNCH_READINESS_SECONDS = 8.0
+MAX_LAUNCH_DIAGNOSTIC_BYTES = 4096
 GATEWAY_EVENT_FIELDS = (
     "status",
     "failure_phase",
@@ -188,6 +199,348 @@ def _manual_child_environment(root: Path, *, gateway_key: str | None = None) -> 
     else:
         environment.pop("CODEX_PROXY_GATEWAY_CLIENT_KEY", None)
     return environment
+
+
+def _desktop_command(executable: Path, root: Path, launcher_strategy: str) -> list[str]:
+    """Build one isolated Desktop command, changing one variable per strategy."""
+
+    if launcher_strategy not in LAUNCH_READINESS_STRATEGIES:
+        raise CaptureError("unsupported_launcher_strategy")
+    command = [str(executable)]
+    paths = _runtime_paths(root)
+    if launcher_strategy == "explicit_user_data_arg":
+        command.append(f"--user-data-dir={paths['electron_user_data']}")
+    elif launcher_strategy == "disable_gpu":
+        command.append("--disable-gpu")
+    elif launcher_strategy == "electron_logging":
+        command.append("--enable-logging=stderr")
+    return command
+
+
+def _launcher_probe_environment(root: Path, launcher_strategy: str) -> dict[str, str]:
+    """Return a disposable environment for a launch-readiness probe."""
+
+    environment = _manual_child_environment(root)
+    if launcher_strategy == "empty_codex_home":
+        # The empty directory is still isolated; only the baseline config file
+        # changes so this tests whether the minimal CODEX_HOME config is causal.
+        _runtime_paths(root)["config"].unlink(missing_ok=True)
+    return environment
+
+
+def _new_diagnostic_sink() -> dict[str, Any]:
+    return {"bytes": 0, "prefix": bytearray()}
+
+
+def _drain_diagnostic_stream(stream: Any, sink: dict[str, Any]) -> None:
+    """Drain a process pipe without persisting raw Desktop diagnostics."""
+
+    try:
+        while True:
+            chunk = stream.read(1024)
+            if not chunk:
+                return
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8", "replace")
+            sink["bytes"] = int(sink["bytes"]) + len(chunk)
+            prefix = sink["prefix"]
+            if isinstance(prefix, bytearray) and len(prefix) < MAX_LAUNCH_DIAGNOSTIC_BYTES:
+                remaining = MAX_LAUNCH_DIAGNOSTIC_BYTES - len(prefix)
+                prefix.extend(chunk[:remaining])
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _start_diagnostic_drains(process: subprocess.Popen[bytes]) -> tuple[dict[str, Any], dict[str, Any], list[threading.Thread]]:
+    stdout = _new_diagnostic_sink()
+    stderr = _new_diagnostic_sink()
+    threads: list[threading.Thread] = []
+    for stream, sink, name in ((process.stdout, stdout, "stdout"), (process.stderr, stderr, "stderr")):
+        if stream is None:
+            continue
+        thread = threading.Thread(target=_drain_diagnostic_stream, args=(stream, sink), name=f"launcher-{name}", daemon=True)
+        thread.start()
+        threads.append(thread)
+    return stdout, stderr, threads
+
+
+def _launcher_diagnostic_summary(sink: dict[str, Any]) -> dict[str, int | str]:
+    """Classify a bounded diagnostic prefix and discard it before reporting."""
+
+    prefix = sink.get("prefix")
+    rendered = bytes(prefix).decode("utf-8", "replace").casefold() if isinstance(prefix, bytearray) else ""
+    categories = (
+        ("permission_denied", ("access is denied", "permission denied", "eacces")),
+        ("missing_dependency", ("module not found", "could not load", "dll", "enoent")),
+        ("sandbox_or_gpu", ("sandbox", "gpu", "angle", "d3d", "direct3d")),
+        ("packaged_activation", ("appmodel", "package activation", "appx")),
+    )
+    category = "empty" if not rendered else "nonempty_unclassified"
+    for candidate, needles in categories:
+        if any(needle in rendered for needle in needles):
+            category = candidate
+            break
+    if isinstance(prefix, bytearray):
+        prefix.clear()
+    return {"bytes": int(sink.get("bytes", 0)), "category": category}
+
+
+def _process_has_main_window(pid: int) -> bool:
+    if os.name != "nt" or pid <= 0:
+        return False
+    command = (
+        f"$process = Get-Process -Id {pid} -ErrorAction SilentlyContinue; "
+        "if ($null -ne $process -and $process.MainWindowHandle -ne 0) { exit 0 } else { exit 1 }"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return completed.returncode == 0
+
+
+def _desktop_process_snapshot(root_pid: int) -> dict[str, bool | int]:
+    """Observe only lifecycle aggregates for the exact launch tree."""
+
+    known: dict[int, str] = {root_pid: "desktop"}
+    pending = [root_pid]
+    while pending:
+        parent_pid = pending.pop()
+        for child_pid, name in _process_children(parent_pid):
+            if child_pid in known:
+                continue
+            folded = name.casefold()
+            role = "app_server" if "codex" in folded else "desktop_child" if "chatgpt" in folded else "helper"
+            known[child_pid] = role
+            pending.append(child_pid)
+    live = {pid for pid in known if _pid_alive(pid)}
+    return {
+        "root_observed": root_pid in live,
+        "tree_alive": bool(live),
+        "main_window_seen": any(_process_has_main_window(pid) for pid in live),
+        "app_server_seen": any(known[pid] == "app_server" for pid in live),
+        "desktop_child_count": sum(1 for pid in live if known[pid] == "desktop_child"),
+        "helper_count": sum(1 for pid in live if known[pid] == "helper"),
+    }
+
+
+def _await_desktop_launch_readiness(
+    process: subprocess.Popen[Any], duration_seconds: float = DEFAULT_LAUNCH_READINESS_SECONDS
+) -> dict[str, bool | int | str | None]:
+    """Wait for a window or app-server, without driving the Desktop UI."""
+
+    deadline = time.monotonic() + duration_seconds
+    root_observed = False
+    while time.monotonic() < deadline:
+        snapshot = _desktop_process_snapshot(process.pid)
+        root_observed = root_observed or bool(snapshot["root_observed"])
+        if bool(snapshot["main_window_seen"]):
+            return {
+                "status": "ready",
+                "readiness_indicator": "main_window",
+                "root_observed": root_observed,
+                "exit_code": process.poll(),
+            }
+        if bool(snapshot["app_server_seen"]):
+            return {
+                "status": "ready",
+                "readiness_indicator": "app_server",
+                "root_observed": root_observed,
+                "exit_code": process.poll(),
+            }
+        if not bool(snapshot["tree_alive"]):
+            return {
+                "status": "not_ready",
+                "classification": "process_tree_ended_before_readiness",
+                "root_observed": root_observed,
+                "exit_code": process.poll(),
+            }
+        time.sleep(0.25)
+    return {
+        "status": "not_ready",
+        "classification": "alive_without_window_or_app_server",
+        "root_observed": root_observed,
+        "exit_code": process.poll(),
+    }
+
+
+def _remove_disposable_launcher_profile(root: Path) -> str:
+    """Delete only the temp profile allocated by this probe invocation."""
+
+    temporary_parent = Path(tempfile.gettempdir()).resolve()
+    resolved_root = root.resolve()
+    if resolved_root.parent != temporary_parent or not resolved_root.name.startswith(f"{SESSION_PREFIX}-launcher-"):
+        return "removal_skipped_unexpected_location"
+    try:
+        shutil.rmtree(resolved_root)
+    except OSError:
+        return "removal_failed"
+    return "removed_disposable_profile"
+
+
+def _stop_owned_desktop_tree(root_pid: int) -> str:
+    """Stop only the exact freshly-launched ChatGPT tree after identity checking."""
+
+    if not _pid_alive(root_pid):
+        return "not_needed"
+    if os.name != "nt":
+        return "unsupported_platform"
+    command = (
+        f"$process = Get-Process -Id {root_pid} -ErrorAction SilentlyContinue; "
+        "if ($null -eq $process -or $process.ProcessName -ne 'ChatGPT') { exit 3 }; "
+        f"& taskkill.exe /PID {root_pid} /T /F | Out-Null; "
+        "$deadline = [DateTime]::UtcNow.AddSeconds(5); "
+        f"while ((Get-Process -Id {root_pid} -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) "
+        "{ Start-Sleep -Milliseconds 100 }; "
+        f"if (Get-Process -Id {root_pid} -ErrorAction SilentlyContinue) {{ exit 2 }}; exit 0"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if completed.returncode == 0:
+        return "stopped_task_owned_tree"
+    if completed.returncode == 3:
+        return "cleanup_skipped_identity_mismatch"
+    return "cleanup_failed"
+
+
+def _launch_readiness_probe(launcher_strategy: str, duration_seconds: float) -> dict[str, Any]:
+    """Run one clean, unattended isolated Desktop start/stop observation."""
+
+    if launcher_strategy not in LAUNCH_READINESS_STRATEGIES:
+        raise CaptureError("unsupported_launcher_strategy")
+    install_root, version = _require_desktop_seams()
+    root = Path(tempfile.mkdtemp(prefix=f"{SESSION_PREFIX}-launcher-"))
+    paths = _runtime_paths(root)
+    paths["codex_home"].mkdir(parents=True)
+    paths["electron_user_data"].mkdir(parents=True)
+    paths["config"].write_text(_base_config(DEFAULT_MODEL), encoding="utf-8")
+    executable = install_root / APP_RELATIVE_PATH
+    process: subprocess.Popen[bytes] | None = None
+    cleanup = "not_needed"
+    storage_cleanup = "not_attempted"
+    result: dict[str, Any] = {}
+    try:
+        environment = _launcher_probe_environment(root, launcher_strategy)
+        try:
+            process = subprocess.Popen(
+                _desktop_command(executable, root, launcher_strategy),
+                cwd=executable.parent,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            result = {
+                "strategy": launcher_strategy,
+                "status": "not_ready",
+                "classification": "launch_os_error",
+                "error_category": type(exc).__name__,
+                "desktop_build_version": version,
+                "shared_state_touched": False,
+            }
+        else:
+            stdout, stderr, drains = _start_diagnostic_drains(process)
+            deadline = time.monotonic() + duration_seconds
+            root_observed = False
+            main_window_seen = False
+            app_server_seen = False
+            tree_ended_before_deadline = False
+            indicator = "none"
+            while time.monotonic() < deadline:
+                snapshot = _desktop_process_snapshot(process.pid)
+                root_observed = root_observed or bool(snapshot["root_observed"])
+                main_window_seen = main_window_seen or bool(snapshot["main_window_seen"])
+                app_server_seen = app_server_seen or bool(snapshot["app_server_seen"])
+                if main_window_seen:
+                    indicator = "main_window"
+                elif app_server_seen:
+                    indicator = "app_server"
+                if not bool(snapshot["tree_alive"]):
+                    tree_ended_before_deadline = True
+                    break
+                time.sleep(0.25)
+            exit_code = process.poll()
+            survived_observation_window = not tree_ended_before_deadline
+            if main_window_seen or app_server_seen:
+                status = "ready"
+                classification = "isolated_lifecycle_ready"
+            elif tree_ended_before_deadline:
+                status = "not_ready"
+                classification = "process_tree_ended_before_readiness"
+            else:
+                status = "not_ready"
+                classification = "alive_without_window_or_app_server"
+            cleanup = _stop_owned_desktop_tree(process.pid)
+            for thread in drains:
+                thread.join(timeout=2)
+            result = {
+                "strategy": launcher_strategy,
+                "status": status,
+                "classification": classification,
+                "desktop_build_version": version,
+                "exit_code_before_cleanup": exit_code,
+                "lifecycle": {
+                    "root_observed": root_observed,
+                    "main_window_seen": main_window_seen,
+                    "app_server_seen": app_server_seen,
+                    "readiness_indicator": indicator,
+                    "tree_ended_before_deadline": tree_ended_before_deadline,
+                    "survived_observation_window": survived_observation_window,
+                },
+                "diagnostics": {
+                    "stdout": _launcher_diagnostic_summary(stdout),
+                    "stderr": _launcher_diagnostic_summary(stderr),
+                },
+                "cleanup": cleanup,
+                "shared_state_touched": False,
+            }
+    finally:
+        if process is not None and _pid_alive(process.pid):
+            cleanup = _stop_owned_desktop_tree(process.pid)
+        if cleanup in {"not_needed", "stopped_task_owned_tree"}:
+            storage_cleanup = _remove_disposable_launcher_profile(root)
+        else:
+            storage_cleanup = "preserved_for_safe_cleanup"
+        if result:
+            result["disposable_profile_cleanup"] = storage_cleanup
+            result["cleanup"] = cleanup
+    return result
+
+
+def launch_readiness(launcher_strategy: str = "all", duration_seconds: float = DEFAULT_LAUNCH_READINESS_SECONDS) -> dict[str, Any]:
+    """Exercise the bounded launch hypotheses without touching a human session."""
+
+    if launcher_strategy != "all" and launcher_strategy not in LAUNCH_READINESS_STRATEGIES:
+        raise CaptureError("unsupported_launcher_strategy")
+    if not 3.0 <= duration_seconds <= 20.0:
+        raise CaptureError("launch_readiness_duration_out_of_range")
+    strategies = LAUNCH_READINESS_STRATEGIES if launcher_strategy == "all" else (launcher_strategy,)
+    results = [_launch_readiness_probe(strategy, duration_seconds) for strategy in strategies]
+    ready = [item["strategy"] for item in results if item.get("status") == "ready"]
+    return {
+        "status": "ready" if ready else "not_ready",
+        "probe_count": len(results),
+        "recommended_launcher_strategy": ready[0] if ready else None,
+        "results": results,
+        "guardrails": [
+            "fresh_disposable_profile_per_probe",
+            "no_shared_profile_credentials_or_database",
+            "no_shell_activation_or_global_proxy_changes",
+            "only_identity_checked_task_owned_process_tree_is_stopped",
+        ],
+    }
 
 
 def _manual_reserve_loopback_port() -> int:
@@ -333,14 +686,14 @@ def _start_gateway(root: Path, state: dict[str, Any]) -> None:
     )
 
 
-def _launch_desktop(root: Path, state: dict[str, Any], leg: str) -> None:
+def _launch_desktop(root: Path, state: dict[str, Any], leg: str, launcher_strategy: str) -> dict[str, bool | int | str | None]:
     if _pid_alive(state.get("current_app_pid")):
         raise CaptureError("previous_isolated_desktop_instance_is_still_running")
     install_root, version = _require_desktop_seams()
     executable = install_root / APP_RELATIVE_PATH
     environment = _manual_child_environment(root, gateway_key=state.get("gateway_key"))
     process = subprocess.Popen(
-        [str(executable)],
+        _desktop_command(executable, root, launcher_strategy),
         cwd=executable.parent,
         env=environment,
         stdin=subprocess.DEVNULL,
@@ -359,6 +712,7 @@ def _launch_desktop(root: Path, state: dict[str, Any], leg: str) -> None:
             "started_at": _utc_now(),
             "desktop_label": f"desktop-{launch_index}",
             "build_version": version,
+            "launcher_strategy": launcher_strategy,
         }
     )
     _write_state(root, state)
@@ -370,7 +724,30 @@ def _launch_desktop(root: Path, state: dict[str, Any], leg: str) -> None:
             "leg": leg,
             "desktop_label": f"desktop-{launch_index}",
             "build_version": version,
+            "launcher_strategy": launcher_strategy,
         },
+    )
+    readiness = _await_desktop_launch_readiness(process)
+    state["last_launcher_readiness"] = readiness
+    _write_state(root, state)
+    readiness_event = {
+        "at": _utc_now(),
+        "leg": leg,
+        "desktop_label": f"desktop-{launch_index}",
+        "launcher_strategy": launcher_strategy,
+        "readiness_indicator": readiness.get("readiness_indicator"),
+        "classification": readiness.get("classification"),
+        "exit_code": readiness.get("exit_code"),
+    }
+    if readiness.get("status") != "ready":
+        _append_jsonl(
+            _capture_path(root, "app-lifecycle.jsonl"),
+            {"event": "desktop_launch_not_ready", **readiness_event},
+        )
+        raise CaptureError(f"isolated_desktop_{readiness.get('classification', 'launch_not_ready')}")
+    _append_jsonl(
+        _capture_path(root, "app-lifecycle.jsonl"),
+        {"event": "desktop_launch_ready", **readiness_event},
     )
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     watcher = subprocess.Popen(
@@ -385,6 +762,7 @@ def _launch_desktop(root: Path, state: dict[str, Any], leg: str) -> None:
     )
     state["watcher_pid"] = watcher.pid
     _write_state(root, state)
+    return readiness
 
 
 def prepare(model: str) -> dict[str, Any]:
@@ -435,9 +813,11 @@ def prepare(model: str) -> dict[str, Any]:
     }
 
 
-def launch(session_id: str, leg: str) -> dict[str, Any]:
+def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCHER_STRATEGY) -> dict[str, Any]:
     if leg not in LEGS:
         raise CaptureError("unsupported_leg")
+    if launcher_strategy not in LAUNCH_READINESS_STRATEGIES:
+        raise CaptureError("unsupported_launcher_strategy")
     root = _session_root(session_id)
     state = _load_state(session_id)
     if _pid_alive(state.get("current_app_pid")):
@@ -448,7 +828,15 @@ def launch(session_id: str, leg: str) -> dict[str, Any]:
             raise CaptureError("manual_login_required_in_disposable_profile")
         _start_gateway(root, state)
         state = _load_state(session_id)
-    _launch_desktop(root, state, leg)
+    try:
+        readiness = _launch_desktop(root, state, leg, launcher_strategy)
+    except CaptureError:
+        if leg == "gateway_official_auto":
+            failed_state = _load_state(session_id)
+            failed_state["gateway_stop_after_launch_failure"] = _manual_stop_gateway(root, failed_state)
+            failed_state["overlay_restore_after_launch_failure"] = _restore_isolated_overlay(root, failed_state)
+            _write_state(root, failed_state)
+        raise
     return {
         "status": "desktop_launched",
         "session": session_id,
@@ -457,6 +845,8 @@ def launch(session_id: str, leg: str) -> dict[str, Any]:
         "test_gateway": "connected" if leg == "gateway_official_auto" else "disconnected",
         "route": "gateway_official_auto" if leg == "gateway_official_auto" else "direct_official",
         "proxy_mode": "auto_windows_registry",
+        "launcher_strategy": launcher_strategy,
+        "startup_readiness": readiness,
     }
 
 
@@ -955,6 +1345,12 @@ def dry_run() -> dict[str, Any]:
             "gateway_failure_phase_and_terminal_outcome",
             "first_closing_side_classification",
         ],
+        "launcher_readiness": {
+            "command": "launch-readiness",
+            "strategies": list(LAUNCH_READINESS_STRATEGIES),
+            "default_launcher_strategy": DEFAULT_LAUNCHER_STRATEGY,
+            "probe_output": "sanitized_exit_category_and_lifecycle_only",
+        },
         "guardrails": [
             "no_computer_use_or_ui_automation",
             "no_shared_profile_or_database_edits",
@@ -978,6 +1374,14 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("--session", required=True)
     launch_parser.add_argument("--leg", choices=LEGS, required=True)
+    launch_parser.add_argument(
+        "--launcher-strategy",
+        choices=LAUNCH_READINESS_STRATEGIES,
+        default=DEFAULT_LAUNCHER_STRATEGY,
+    )
+    readiness_parser = subparsers.add_parser("launch-readiness")
+    readiness_parser.add_argument("--strategy", choices=("all", *LAUNCH_READINESS_STRATEGIES), default="all")
+    readiness_parser.add_argument("--duration-seconds", type=float, default=DEFAULT_LAUNCH_READINESS_SECONDS)
     mark_parser = subparsers.add_parser("mark")
     mark_parser.add_argument("--session", required=True)
     mark_parser.add_argument("--result", choices=APP_RESULTS, required=True)
@@ -1000,7 +1404,10 @@ def main(argv: list[str] | None = None) -> int:
             _render(prepare(args.model))
             return 0
         if args.command == "launch":
-            _render(launch(args.session, args.leg))
+            _render(launch(args.session, args.leg, launcher_strategy=args.launcher_strategy))
+            return 0
+        if args.command == "launch-readiness":
+            _render(launch_readiness(args.strategy, args.duration_seconds))
             return 0
         if args.command == "mark":
             _render(mark(args.session, args.result))
