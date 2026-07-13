@@ -14,6 +14,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$TaskkillTimeoutMilliseconds = 1500
+$TrackedProcessStopTimeoutMilliseconds = 3000
+$LifecycleReplayCleanupTimeoutMilliseconds = 6000
+$LifecycleReplayExitProbeMilliseconds = 250
+
 function ConvertTo-ProcessArgument {
     param([AllowNull()][string]$Argument)
 
@@ -130,11 +135,78 @@ function New-QualificationChildEnvironment {
     return $environment
 }
 
+function Get-RemainingTimeoutMilliseconds {
+    param(
+        [datetime]$DeadlineUtc,
+        [int]$MaximumMilliseconds
+    )
+
+    $remainingMilliseconds = [int][Math]::Floor(($DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds)
+    if ($remainingMilliseconds -le 0) {
+        return 0
+    }
+    return [Math]::Min($MaximumMilliseconds, $remainingMilliseconds)
+}
+
+function Invoke-TrackedTreeKill {
+    param(
+        [int]$ProcessId,
+        [datetime]$DeadlineUtc
+    )
+
+    $taskKillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    if (-not (Test-Path -LiteralPath $taskKillPath)) {
+        throw 'retained_handle_tree_stop_unavailable'
+    }
+    $timeoutMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $DeadlineUtc -MaximumMilliseconds $TaskkillTimeoutMilliseconds
+    if ($timeoutMilliseconds -le 0) {
+        throw 'retained_handle_tree_stop_timed_out'
+    }
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $taskKillPath
+    $startInfo.Arguments = '/PID {0} /T /F' -f $ProcessId
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $taskKill = [System.Diagnostics.Process]::new()
+    $taskKill.StartInfo = $startInfo
+
+    try {
+        if (-not $taskKill.Start()) {
+            throw 'retained_handle_tree_stop_failed'
+        }
+        if (-not $taskKill.WaitForExit($timeoutMilliseconds)) {
+            try {
+                if (-not $taskKill.HasExited) {
+                    $taskKill.Kill()
+                }
+            }
+            catch {
+            }
+            throw 'retained_handle_tree_stop_timed_out'
+        }
+        if ($taskKill.ExitCode -ne 0) {
+            throw 'retained_handle_tree_stop_failed'
+        }
+    }
+    finally {
+        $taskKill.Dispose()
+    }
+}
+
 function Stop-TrackedProcess {
-    param($Tracked)
+    param(
+        $Tracked,
+        [datetime]$DeadlineUtc = [datetime]::MinValue
+    )
 
     if ($null -eq $Tracked -or $null -eq $Tracked.Process -or $Tracked.Process.HasExited) {
         return
+    }
+    if ($DeadlineUtc -eq [datetime]::MinValue) {
+        $DeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($TrackedProcessStopTimeoutMilliseconds)
     }
 
     $treeKillMethod = $Tracked.Process.GetType().GetMethod('Kill', [Type[]]@([bool]))
@@ -142,16 +214,22 @@ function Stop-TrackedProcess {
         [void]$treeKillMethod.Invoke($Tracked.Process, [object[]]@($true))
     }
     else {
-        $taskKillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-        if (-not (Test-Path -LiteralPath $taskKillPath)) {
-            throw 'retained_handle_tree_stop_unavailable'
+        try {
+            Invoke-TrackedTreeKill -ProcessId $Tracked.Process.Id -DeadlineUtc $DeadlineUtc
         }
-        & $taskKillPath '/PID' ([string]$Tracked.Process.Id) '/T' '/F' 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0 -and -not $Tracked.Process.HasExited) {
-            throw 'retained_handle_tree_stop_failed'
+        catch {
+            try {
+                if (-not $Tracked.Process.HasExited) {
+                    $Tracked.Process.Kill()
+                }
+            }
+            catch {
+            }
+            throw
         }
     }
-    if (-not $Tracked.Process.WaitForExit(10000)) {
+    $exitTimeoutMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $DeadlineUtc -MaximumMilliseconds $TrackedProcessStopTimeoutMilliseconds
+    if ($exitTimeoutMilliseconds -le 0 -or -not $Tracked.Process.WaitForExit($exitTimeoutMilliseconds)) {
         throw 'retained_handle_tree_stop_timed_out'
     }
 }
@@ -266,6 +344,8 @@ function Invoke-LifecycleReplay {
     $tracked = $null
     $childProcessId = 0
     $childProcess = $null
+    $cleanupStopwatch = $null
+    $cleanupDeadlineUtc = [datetime]::MinValue
     $failures = [System.Collections.Generic.List[string]]::new()
     $summary = [ordered]@{
         mode = $Mode
@@ -277,6 +357,9 @@ function Invoke-LifecycleReplay {
         cli_has_ollama_api_key = $true
         cli_has_test_secret = $true
         cli_home_is_isolated = $false
+        cleanup_budget_milliseconds = $LifecycleReplayCleanupTimeoutMilliseconds
+        cleanup_elapsed_milliseconds = 0
+        cleanup_within_budget = $false
         run_root = $runRoot
     }
 
@@ -298,13 +381,17 @@ $environmentSnapshot = [ordered]@{
     ($environmentSnapshot | ConvertTo-Json -Compress),
     [System.Text.UTF8Encoding]::new($false)
 )
-$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 10') -PassThru
+# Keep the nested child out of Start-TrackedProcess's redirected streams so
+# the outer replay can observe EOF as soon as the retained root is stopped.
+$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 10') -RedirectStandardOutput $env:CODEXHUB_LIFECYCLE_CHILD_STDOUT_PATH -RedirectStandardError $env:CODEXHUB_LIFECYCLE_CHILD_STDERR_PATH -PassThru
 [System.IO.File]::WriteAllText($env:CODEXHUB_LIFECYCLE_CHILD_PID_PATH, [string]$child.Id)
 Start-Sleep -Seconds 10
 '@
         $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($powershellPath) -Additional @{
             CODEXHUB_LIFECYCLE_CHILD_PID_PATH = $childPidPath
             CODEXHUB_LIFECYCLE_ENV_PATH = $environmentSnapshotPath
+            CODEXHUB_LIFECYCLE_CHILD_STDOUT_PATH = Join-Path $runRoot 'tracked-child.stdout.log'
+            CODEXHUB_LIFECYCLE_CHILD_STDERR_PATH = Join-Path $runRoot 'tracked-child.stderr.log'
         }
         $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
             '-NoProfile', '-NonInteractive', '-Command', $lifecycleChildCommand
@@ -339,15 +426,32 @@ Start-Sleep -Seconds 10
         if (-not $summary.cli_home_is_isolated) {
             Add-SanitizedFailure -Failures $failures -Code 'lifecycle_cli_home_not_isolated'
         }
-        Stop-TrackedProcess $tracked
+        $cleanupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $cleanupDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($LifecycleReplayCleanupTimeoutMilliseconds)
+        Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc
     }
     catch {
         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
     }
     finally {
+        if ($null -eq $cleanupStopwatch -and $null -ne $tracked) {
+            $cleanupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $cleanupDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($LifecycleReplayCleanupTimeoutMilliseconds)
+        }
         try {
             if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
-                [void]$tracked.Process.WaitForExit(12000)
+                try {
+                    Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc
+                }
+                catch {
+                    Add-SanitizedFailure -Failures $failures -Code 'lifecycle_root_cleanup_failed'
+                }
+            }
+            if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
+                $rootExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
+                if ($rootExitProbeMilliseconds -gt 0) {
+                    [void]$tracked.Process.WaitForExit($rootExitProbeMilliseconds)
+                }
             }
             if ($null -eq $tracked -or -not $tracked.Process.HasExited) {
                 Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_root_remained'
@@ -366,9 +470,10 @@ Start-Sleep -Seconds 10
             else {
                 try {
                     $childProcess = [System.Diagnostics.Process]::GetProcessById($childProcessId)
-                    # The child sleeps for ten seconds. A two-second bound makes a
-                    # green replay evidence of retained-tree cleanup, not natural exit.
-                    $childExitedWithinBound = $childProcess.WaitForExit(2000)
+                    # The child sleeps for ten seconds. This short probe proves the
+                    # retained tree was stopped rather than waiting for natural exit.
+                    $childExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
+                    $childExitedWithinBound = $childExitProbeMilliseconds -gt 0 -and $childProcess.WaitForExit($childExitProbeMilliseconds)
                     if ($childExitedWithinBound -or $childProcess.HasExited) {
                         $summary.tracked_child_exited = $true
                         $summary.tracked_child_exit_before_natural_timeout = $true
@@ -376,8 +481,11 @@ Start-Sleep -Seconds 10
                     else {
                         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
                         try {
-                            Stop-TrackedProcess ([pscustomobject]@{ Process = $childProcess })
-                            [void]$childProcess.WaitForExit(2000)
+                            Stop-TrackedProcess ([pscustomobject]@{ Process = $childProcess }) -DeadlineUtc $cleanupDeadlineUtc
+                            $childExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
+                            if (-not $childProcess.HasExited -and $childExitProbeMilliseconds -gt 0) {
+                                [void]$childProcess.WaitForExit($childExitProbeMilliseconds)
+                            }
                         }
                         catch {
                             Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_cleanup_failed'
@@ -401,6 +509,14 @@ Start-Sleep -Seconds 10
         }
         catch {
             Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_state_unavailable'
+        }
+        if ($null -ne $cleanupStopwatch) {
+            $cleanupStopwatch.Stop()
+            $summary.cleanup_elapsed_milliseconds = [int][Math]::Ceiling($cleanupStopwatch.Elapsed.TotalMilliseconds)
+            $summary.cleanup_within_budget = $summary.cleanup_elapsed_milliseconds -le $summary.cleanup_budget_milliseconds
+            if (-not $summary.cleanup_within_budget) {
+                Add-SanitizedFailure -Failures $failures -Code 'lifecycle_cleanup_budget_exceeded'
+            }
         }
         $summary.failures = @($failures)
         $summary.passed = $failures.Count -eq 0

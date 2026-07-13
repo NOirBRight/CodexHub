@@ -3,11 +3,14 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPLAY_SUBPROCESS_TIMEOUT_SECONDS = 12
+REPLAY_COMPLETION_BOUND_SECONDS = 8
 
 
 def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_path):
@@ -15,6 +18,7 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     if powershell is None:
         pytest.skip("Windows PowerShell is required for the lifecycle replay")
 
+    started_at = time.monotonic()
     result = subprocess.run(
         [
             powershell,
@@ -31,10 +35,12 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=20,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
     )
+    elapsed_seconds = time.monotonic() - started_at
 
     assert result.returncode == 0, result.stderr
+    assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
     summaries = list(tmp_path.glob("run-*/summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
@@ -44,6 +50,8 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     assert summary["tracked_root_exited"] is True
     assert summary["tracked_child_exited"] is True
     assert summary["tracked_child_exit_before_natural_timeout"] is True
+    assert summary["cleanup_within_budget"] is True
+    assert summary["cleanup_elapsed_milliseconds"] <= summary["cleanup_budget_milliseconds"]
 
 
 def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(tmp_path):
@@ -54,6 +62,7 @@ def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(t
     environment = dict(os.environ)
     environment["OLLAMA_API_KEY"] = "ambient-test-key-must-not-reach-cli"
     environment["CODEXHUB_TEST_SECRET"] = "ambient-test-secret-must-not-reach-cli"
+    started_at = time.monotonic()
     result = subprocess.run(
         [
             powershell,
@@ -71,10 +80,12 @@ def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(t
         env=environment,
         text=True,
         capture_output=True,
-        timeout=20,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
     )
+    elapsed_seconds = time.monotonic() - started_at
 
     assert result.returncode == 0, result.stderr
+    assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
     summaries = list(tmp_path.glob("run-*/summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
@@ -83,6 +94,8 @@ def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(t
     assert summary["cli_has_ollama_api_key"] is False
     assert summary["cli_has_test_secret"] is False
     assert summary["cli_home_is_isolated"] is True
+    assert summary["cleanup_within_budget"] is True
+    assert summary["cleanup_elapsed_milliseconds"] <= summary["cleanup_budget_milliseconds"]
 
 
 def test_issue_108_history_adapter_negative_control_replay_is_bounded_and_sanitized(tmp_path):
