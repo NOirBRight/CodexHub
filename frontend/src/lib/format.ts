@@ -47,6 +47,7 @@ export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
       ...model,
       display_name: previous?.display_name ?? model.display_name ?? null,
       upstream_model: previous?.upstream_model ?? model.upstream_model ?? null,
+      tool_surface_strategy: previous?.tool_surface_strategy ?? model.tool_surface_strategy ?? null,
       input_modalities: previous?.input_modalities ?? model.input_modalities ?? null,
       supported_reasoning_levels:
         previous?.supported_reasoning_levels ?? model.supported_reasoning_levels ?? null,

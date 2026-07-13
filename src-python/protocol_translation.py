@@ -2707,6 +2707,10 @@ def events_to_responses_body(
             arguments = event.get("arguments")
             if current_item and isinstance(arguments, str):
                 current_item["arguments"] = arguments
+        elif event_type == "response.custom_tool_call_input.done":
+            tool_input = event.get("input")
+            if current_item and isinstance(tool_input, str):
+                current_item["input"] = tool_input
         elif event_type == "response.completed":
             response = event.get("response")
             if isinstance(response, Mapping):
@@ -2786,6 +2790,67 @@ def response_body_to_response_sse_events(
                 "Cannot synthesize Responses stream events for a non-object output item.",
             )
         item = dict(raw_item)
+        if item.get("type") == "custom_tool_call":
+            _require_supported_fields(
+                item,
+                {"id", "type", "status", "call_id", "name", "input"},
+                "Responses stream custom-tool item",
+            )
+            call_id = item.get("call_id")
+            name = item.get("name")
+            tool_input = item.get("input")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedProtocolTranslationError(
+                    "unpaired_tool_call",
+                    "Cannot synthesize a custom-tool stream item without a non-empty call_id.",
+                )
+            if not isinstance(name, str) or not name:
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot synthesize a custom-tool stream item without a non-empty name.",
+                )
+            if not isinstance(tool_input, str):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot synthesize a custom-tool stream item without string input.",
+                )
+            item_id = item.get("id") if isinstance(item.get("id"), str) else f"item_{output_index}"
+            item["id"] = item_id
+            in_progress_item = dict(item)
+            in_progress_item["status"] = "in_progress"
+            in_progress_item["input"] = ""
+            events.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": in_progress_item,
+                }
+            )
+            if tool_input:
+                events.append(
+                    {
+                        "type": "response.custom_tool_call_input.delta",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "delta": tool_input,
+                    }
+                )
+            events.extend(
+                [
+                    {
+                        "type": "response.custom_tool_call_input.done",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "input": tool_input,
+                    },
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": item,
+                    },
+                ]
+            )
+            continue
         item_type, _, _, arguments = _validated_responses_stream_output_item(item)
         item_id = item.get("id") if isinstance(item.get("id"), str) else f"item_{output_index}"
         item["id"] = item_id

@@ -23,6 +23,20 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_bundled_ollama_glm_uses_the_only_deferred_core_model_override(self):
+        providers = load_providers(DEFAULT_PROVIDERS_PATH)
+        ollama = next(provider for provider in providers if provider.id == "ollama-cloud")
+        configured_models = [
+            model.id for provider in providers for model in provider.models if model.tool_surface_strategy is not None
+        ]
+
+        self.assertEqual(ollama.tool_surface_strategy, "eager")
+        self.assertEqual(
+            next(model.tool_surface_strategy for model in ollama.models if model.id == "glm-5.2"),
+            "deferred_core",
+        )
+        self.assertEqual(configured_models, ["glm-5.2"])
+
     def test_discover_official_models_fetches_gpt_models_sorted_with_limits(self):
         payload = {
             "data": [
@@ -258,6 +272,92 @@ enabled = true
         self.assertEqual(minimax["max_output_tokens"], 524288)
         self.assertEqual(minimax["priority_base"], 300)
 
+    def test_tool_surface_strategy_resolves_provider_default_and_model_override_in_both_indexes(self):
+        generic = build_external_model_index(
+            [
+                ProviderConfig(
+                    id="volc",
+                    name="Volcengine",
+                    base_url="https://volc.example/v1",
+                    api_key="volc-secret",
+                    tool_surface_strategy="deferred_core",
+                    models=[
+                        ModelConfig(id="provider-default"),
+                        ModelConfig(id="model-override", tool_surface_strategy="eager"),
+                    ],
+                ),
+                ProviderConfig(
+                    id="minimax-cn",
+                    name="MiniMax",
+                    base_url="https://minimax.example/v1",
+                    api_key="minimax-secret",
+                    models=[ModelConfig(id="implicit-default")],
+                ),
+            ],
+            require_api_key=False,
+        )
+        configured, ollama = build_ollama_cloud_model_index(
+            [
+                ProviderConfig(
+                    id="ollama-cloud",
+                    name="Ollama Cloud",
+                    base_url="https://ollama.example/v1",
+                    api_key="ollama-secret",
+                    tool_surface_strategy="eager",
+                    models=[
+                        ModelConfig(id="glm-5.2", tool_surface_strategy="deferred_core"),
+                        ModelConfig(id="minimax-m3"),
+                    ],
+                )
+            ],
+            require_api_key=False,
+        )
+
+        self.assertEqual(generic["volc/provider-default"]["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(generic["volc/model-override"]["tool_surface_strategy"], "eager")
+        self.assertEqual(generic["minimax-cn/implicit-default"]["tool_surface_strategy"], "eager")
+        self.assertTrue(configured)
+        self.assertEqual(ollama["glm-5.2"]["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(ollama["ollama-cloud/glm-5.2"]["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(ollama["minimax-m3"]["tool_surface_strategy"], "eager")
+
+    def test_tool_surface_strategy_rejects_invalid_provider_and_model_configuration(self):
+        for provider_strategy, model_strategy in (("unknown", None), ("eager", "unknown")):
+            with self.subTest(provider_strategy=provider_strategy, model_strategy=model_strategy):
+                with self.assertRaisesRegex(ValueError, "tool_surface_strategy"):
+                    build_external_model_index(
+                        [
+                            ProviderConfig(
+                                id="invalid",
+                                name="Invalid",
+                                base_url="https://invalid.example/v1",
+                                api_key="test-secret",
+                                tool_surface_strategy=provider_strategy,
+                                models=[ModelConfig(id="invalid-model", tool_surface_strategy=model_strategy)],
+                            )
+                        ],
+                        require_api_key=False,
+                    )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "invalid"
+name = "Invalid"
+base_url = "https://invalid.example/v1"
+api_key = "test-secret"
+
+  [[providers.models]]
+  id = "invalid-model"
+  tool_surface_strategy = "unknown"
+""".lstrip(),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "tool_surface_strategy"):
+                load_providers(path)
+
     def test_upstream_model_load_save_and_index_preserve_live_case(self):
         providers = [
             ProviderConfig(
@@ -268,6 +368,7 @@ enabled = true
                 upstream_format="chat_completions",
                 available_upstream_formats=("responses", "chat_completions"),
                 tool_protocol="chat_tools",
+                tool_surface_strategy="deferred_core",
                 models=[
                     ModelConfig(
                         id="alias-model",
@@ -276,6 +377,7 @@ enabled = true
                         input_modalities=("text", "image"),
                         supported_reasoning_levels=("low", "high", "xhigh"),
                         default_reasoning_level="high",
+                        tool_surface_strategy="eager",
                         sort_order=1,
                     ),
                     ModelConfig(
@@ -299,6 +401,8 @@ enabled = true
         self.assertEqual(loaded[0].upstream_format, "chat_completions")
         self.assertEqual(loaded[0].available_upstream_formats, ("responses", "chat_completions"))
         self.assertEqual(loaded[0].tool_protocol, "chat_tools")
+        self.assertEqual(loaded[0].tool_surface_strategy, "deferred_core")
+        self.assertEqual(loaded[0].models[0].tool_surface_strategy, "eager")
         self.assertIsNone(loaded[0].models[1].upstream_model)
         self.assertIn('upstream_model = "Live-Case-Model"', raw_toml)
         self.assertIn('aliases = ["legacy-case-model"]', raw_toml)
@@ -308,15 +412,19 @@ enabled = true
         self.assertIn('upstream_format = "chat_completions"', raw_toml)
         self.assertIn('available_upstream_formats = ["responses", "chat_completions"]', raw_toml)
         self.assertIn('tool_protocol = "chat_tools"', raw_toml)
+        self.assertIn('tool_surface_strategy = "deferred_core"', raw_toml)
+        self.assertIn('  tool_surface_strategy = "eager"', raw_toml)
 
         index = build_external_model_index(loaded)
         self.assertEqual(index["case-provider/alias-model"]["upstream_model"], "Live-Case-Model")
         self.assertEqual(index["case-provider/alias-model"]["upstream_format"], "chat_completions")
         self.assertEqual(index["case-provider/alias-model"]["tool_protocol"], "chat_tools")
+        self.assertEqual(index["case-provider/alias-model"]["tool_surface_strategy"], "eager")
         self.assertEqual(index["case-provider/alias-model"]["input_modalities"], ("text", "image"))
         self.assertEqual(index["case-provider/alias-model"]["supported_reasoning_levels"], ("low", "high", "xhigh"))
         self.assertEqual(index["case-provider/alias-model"]["default_reasoning_level"], "high")
         self.assertEqual(index["case-provider/Fallback-Model"]["upstream_model"], "Fallback-Model")
+        self.assertEqual(index["case-provider/Fallback-Model"]["tool_surface_strategy"], "deferred_core")
 
     def test_save_providers_uses_atomic_writer(self):
         providers = [

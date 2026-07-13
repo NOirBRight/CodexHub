@@ -554,6 +554,8 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
 ]
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
+TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
+TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -1879,6 +1881,7 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
         "upstream_model": upstream_model,
         "upstream_format": runtime_model.get("upstream_format", "responses"),
         "tool_protocol": runtime_model.get("tool_protocol", "auto"),
+        "tool_surface_strategy": runtime_model.get("tool_surface_strategy", "eager"),
         "reports_cached_input_tokens": False,
         "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
     }
@@ -1979,6 +1982,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),
+            "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
@@ -4065,6 +4069,10 @@ def _is_flattened_namespace_schema(value: Any) -> bool:
     )
 
 
+def _is_raw_namespace_schema(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("type") == "namespace"
+
+
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for namespace in tools:
@@ -4130,6 +4138,19 @@ def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
     return "text_compat"
 
 
+def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
+    configured = upstream.get("tool_surface_strategy", "eager")
+    if isinstance(configured, str) and configured in TOOL_SURFACE_STRATEGIES:
+        return configured
+    write_proxy_event("external_tool_surface_rejected", reason="invalid_tool_surface_strategy")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            TOOL_SURFACE_STRATEGY_ERROR_CODE,
+            "External tool surface strategy is invalid.",
+        )
+    )
+
+
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if item.get("type") != "function_call":
         return None
@@ -4151,6 +4172,40 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
     return dict(item)
 
 
+def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
+    """Promote Codex's internal tool carrier to the standard Responses field."""
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    promoted_tools: list[Any] = []
+    rewritten_items: list[Any] = []
+    changed = False
+    for item in input_items:
+        if not isinstance(item, Mapping) or item.get("type") != "additional_tools":
+            rewritten_items.append(item)
+            continue
+        item_tools = item.get("tools")
+        if isinstance(item_tools, list):
+            promoted_tools.extend(item_tools)
+        changed = True
+
+    if not changed:
+        return False
+
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        tools.extend(promoted_tools)
+    elif tools is None:
+        payload["tools"] = promoted_tools
+    else:
+        # The caller's top-level tools are already malformed; remove the
+        # internal-only item so it cannot be forwarded to a third party.
+        payload["tools"] = promoted_tools
+    payload["input"] = rewritten_items
+    return True
+
+
 def _rewrite_structured_tool_input_items(
     payload: dict[str, Any],
     event_context: Mapping[str, Any] | None = None,
@@ -4160,9 +4215,14 @@ def _rewrite_structured_tool_input_items(
     if not isinstance(input_items, list):
         return False
 
-    changed = False
+    input_items, adapted_apply_patch_call_ids, changed = _adapt_apply_patch_custom_tool_history(
+        input_items,
+        event_context=event_context,
+    )
+    if changed:
+        payload["input"] = input_items
     rewritten_items: list[Any] = []
-    preserved_structured_call_ids: set[str] = set()
+    preserved_structured_call_ids: set[str] = set(adapted_apply_patch_call_ids)
     available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
@@ -4170,15 +4230,21 @@ def _rewrite_structured_tool_input_items(
             continue
         if item.get("type") == "function_call":
             function_name = item.get("name")
+            call_id = item.get("call_id")
+            preserve_apply_patch_history = (
+                function_name == APPLY_PATCH_FUNCTION_NAME
+                and isinstance(call_id, str)
+                and call_id in adapted_apply_patch_call_ids
+            )
             preserve_available_function = (
                 isinstance(function_name, str) and function_name in available_function_names
             )
             if (
                 preserve_available_function
+                or preserve_apply_patch_history
                 or _multi_agent_function_call_name(item) is not None
                 or _node_repl_function_call_name(item) is not None
             ):
-                call_id = item.get("call_id")
                 if isinstance(call_id, str):
                     preserved_structured_call_ids.add(call_id)
                 rewritten = _structured_tool_function_call_item(item)
@@ -4234,10 +4300,22 @@ def _inject_explicit_codex_tools(
     include_node_repl_tools: bool = True,
     include_local_tool_gateway_tools: bool = True,
     strip_namespace_tools: bool = True,
+    strip_all_namespace_tools: bool = False,
+    include_flattened_namespace_tools: bool = True,
+    tool_surface_counts: dict[str, int] | None = None,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
 ) -> bool:
+    if tool_surface_counts is not None:
+        tool_surface_counts.update(
+            {
+                "namespace_declaration_count": 0,
+                "eager_tool_count": 0,
+                "retained_core_count": 0,
+                "deferred_tool_count": 0,
+            }
+        )
     tools = payload.get("tools")
     if tools is None:
         tools = []
@@ -4246,9 +4324,21 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
+    caller_non_namespace_tools = tuple(
+        tool
+        for tool in tools
+        if not (isinstance(tool, Mapping) and tool.get("type") == "namespace")
+    )
+    namespace_declaration_count = sum(1 for tool in tools if _is_flattened_namespace_schema(tool))
     flattened_namespace_tools = _flatten_namespace_function_tools(tools)
     if strip_namespace_tools:
-        filtered_tools = [tool for tool in tools if not _is_flattened_namespace_schema(tool)]
+        # Eager preserves the #105 compatibility surface: only declarations the
+        # existing flattener understands are removed. deferred_core is the
+        # explicit normalized surface and drops every raw namespace declaration.
+        namespace_to_strip = (
+            _is_raw_namespace_schema if strip_all_namespace_tools else _is_flattened_namespace_schema
+        )
+        filtered_tools = [tool for tool in tools if not namespace_to_strip(tool)]
         if len(filtered_tools) != len(tools):
             tools[:] = filtered_tools
             changed = True
@@ -4305,11 +4395,11 @@ def _inject_explicit_codex_tools(
 
     existing_names = {_tool_schema_name(tool) for tool in tools}
     existing_names.discard(None)
-    additions = []
+    core_additions = []
     if include_tool_search:
-        additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
+        core_additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
     if include_multi_agent_tools:
-        additions.extend(
+        core_additions.extend(
             _multi_agent_explicit_function_tools(
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,
@@ -4321,15 +4411,29 @@ def _inject_explicit_codex_tools(
                 close_agent_ids=close_agent_ids,
             )
         )
-    additions.extend(flattened_namespace_tools)
     if not include_multi_agent_tools:
-        additions = [tool for tool in additions if not _is_multi_agent_tool_schema(tool)]
+        core_additions = [tool for tool in core_additions if not _is_multi_agent_tool_schema(tool)]
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_multi_agent_tool_schema(tool)
+        ]
     if not include_node_repl_tools:
-        additions = [tool for tool in additions if not _is_node_repl_tool_schema(tool)]
+        core_additions = [tool for tool in core_additions if not _is_node_repl_tool_schema(tool)]
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_node_repl_tool_schema(tool)
+        ]
     if excluded_tool_names:
-        additions = [
+        core_additions = [
             tool
-            for tool in additions
+            for tool in core_additions
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("type") == "function"
+                and tool.get("name") in excluded_tool_names
+            )
+        ]
+        flattened_namespace_tools = [
+            tool
+            for tool in flattened_namespace_tools
             if not (
                 isinstance(tool, Mapping)
                 and tool.get("type") == "function"
@@ -4337,6 +4441,24 @@ def _inject_explicit_codex_tools(
             )
         ]
 
+    potential_names = set(existing_names)
+    for tool in core_additions:
+        name = _tool_schema_name(tool)
+        if name:
+            potential_names.add(name)
+    deferred_tool_count = 0
+    for tool in flattened_namespace_tools:
+        name = _tool_schema_name(tool)
+        if name and name not in potential_names:
+            potential_names.add(name)
+            deferred_tool_count += 1
+
+    flattened_tool_ids = {id(tool) for tool in flattened_namespace_tools}
+    additions = list(core_additions)
+    if include_flattened_namespace_tools:
+        additions.extend(flattened_namespace_tools)
+
+    eager_tool_count = 0
     for tool in additions:
         name = _tool_schema_name(tool)
         if not name:
@@ -4355,7 +4477,21 @@ def _inject_explicit_codex_tools(
             continue
         tools.append(tool)
         existing_names.add(name)
+        if id(tool) in flattened_tool_ids:
+            eager_tool_count += 1
         changed = True
+    if tool_surface_counts is not None:
+        surviving_tool_ids = {id(tool) for tool in tools}
+        tool_surface_counts.update(
+            {
+                "namespace_declaration_count": namespace_declaration_count,
+                "eager_tool_count": eager_tool_count if include_flattened_namespace_tools else 0,
+                "retained_core_count": sum(
+                    1 for tool in caller_non_namespace_tools if id(tool) in surviving_tool_ids
+                ),
+                "deferred_tool_count": deferred_tool_count if not include_flattened_namespace_tools else 0,
+            }
+        )
     return changed
 
 
@@ -4619,7 +4755,14 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
         tool_name = _multi_agent_alias_tool_name(original_name)
         namespace_alias = None
         argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
-        if argument_key is not None and _json_argument_string_needs_repair(value.get(argument_key)):
+        if (
+            argument_key is not None
+            and not (
+                value.get("type") == "custom_tool_call"
+                and original_name == APPLY_PATCH_FUNCTION_NAME
+            )
+            and _json_argument_string_needs_repair(value.get(argument_key))
+        ):
             repaired_arguments = _json_object_from_arguments(value.get(argument_key))
             if repaired_arguments is not None:
                 rewritten[argument_key] = _dump_arguments_like(value.get(argument_key), repaired_arguments)
@@ -6843,9 +6986,7 @@ def official_passthrough_request_body(
     model_id: str | None = None,
 ) -> bytes:
     if not isinstance(payload, Mapping):
-        upstream_model = upstream.get("upstream_model")
-        if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
-            return _replace_embedded_model(body, model_id, upstream_model)
+        # Strict official passthrough has no parsed shape to safely rewrite.
         return body
 
     next_payload = dict(payload)
@@ -6954,9 +7095,22 @@ def compatible_request_body(
     inject_codex_tools: bool = True,
     behavior_profile: str = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
 ) -> bytes:
+    upstream_name = upstream.get("name")
+    official_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+    validated_tool_surface_strategy: str | None = None
+    if (
+        not official_passthrough
+        and upstream_name != "official"
+    ):
+        # Reject malformed configuration before an unparsable external body can
+        # bypass the third-party compatibility boundary. Official passthrough
+        # never consults the external capability.
+        validated_tool_surface_strategy = _external_tool_surface_strategy(upstream)
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
+        if official_passthrough:
+            return body
         upstream_model = upstream.get("upstream_model")
         if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
             return _replace_embedded_model(body, model_id, upstream_model)
@@ -6965,11 +7119,10 @@ def compatible_request_body(
     if not isinstance(payload, dict):
         return body
 
-    upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
     changed = False
-    if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+    if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
     changed = _normalize_responses_message_input_items(payload)
@@ -7012,6 +7165,11 @@ def compatible_request_body(
 
     raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = _external_tool_protocol(upstream)
+    tool_surface_strategy = (
+        validated_tool_surface_strategy
+        if validated_tool_surface_strategy is not None
+        else _external_tool_surface_strategy(upstream)
+    )
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
@@ -7019,6 +7177,11 @@ def compatible_request_body(
     if raw_provider_probe:
         pass
     else:
+        # ``additional_tools`` is a legacy Codex input carrier. Preserve it
+        # byte-for-byte for eager providers; deferred_core alone promotes it
+        # so the selected external surface policy can inspect namespaces.
+        if tool_surface_strategy == "deferred_core" and _hoist_additional_tools_input_items(payload):
+            changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
             if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
@@ -7035,11 +7198,17 @@ def compatible_request_body(
             if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
     input_items = payload.get("input")
-    include_tool_search = False
     subagent_worker_context = (
         not raw_provider_probe
         and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         and is_worker_subagent_request(input_items)
+    )
+    # deferred_core intentionally keeps Codex's bounded, explicit discovery
+    # entry point. It does not flatten namespace declarations or introduce a
+    # broader discovery service; eager remains the #105-compatible surface.
+    # Worker subagents retain their established restricted surface.
+    include_tool_search = (
+        tool_surface_strategy == "deferred_core" and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
@@ -7322,6 +7491,11 @@ def compatible_request_body(
                 and subagent_state is not None
                 and bool(getattr(subagent_state, "workflow_intent", False))
             )
+            # Coordinator and worker restrictions deliberately remain narrower
+            # than the normal deferred-core surface.
+            effective_include_tool_search = (
+                include_tool_search and not restrict_to_subagent_coordinator_tools
+            )
             include_node_repl_for_subagent_workflow = (
                 restrict_to_subagent_coordinator_tools
                 and not node_repl_single_step_complete
@@ -7350,9 +7524,10 @@ def compatible_request_body(
                 )
                 changed = True
             tool_names_before = _function_tool_names(payload.get("tools"))
-            if _inject_explicit_codex_tools(
+            tool_surface_counts: dict[str, int] = {}
+            explicit_tools_injected = _inject_explicit_codex_tools(
                 payload,
-                include_tool_search=include_tool_search,
+                include_tool_search=effective_include_tool_search,
                 include_multi_agent_tools=not subagent_worker_context,
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,
@@ -7365,10 +7540,19 @@ def compatible_request_body(
                     else not node_repl_single_step_complete
                 ),
                 include_local_tool_gateway_tools=not subagent_worker_context,
+                strip_all_namespace_tools=tool_surface_strategy == "deferred_core",
+                include_flattened_namespace_tools=tool_surface_strategy == "eager",
+                tool_surface_counts=tool_surface_counts,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
-            ):
+            )
+            write_proxy_event(
+                "external_tool_surface_prepared",
+                tool_surface_strategy=tool_surface_strategy,
+                **tool_surface_counts,
+            )
+            if explicit_tools_injected:
                 added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
                 _write_adapter_event(
                     event_context,
@@ -7461,6 +7645,672 @@ def compatible_request_body(
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+APPLY_PATCH_FUNCTION_NAME = "apply_patch"
+APPLY_PATCH_ADAPTER_EVENT = "third_party_apply_patch_freeform_adapter"
+APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
+APPLY_PATCH_FUNCTION_CALL_FIELDS = frozenset(
+    {"id", "type", "status", "call_id", "name", "arguments"}
+)
+APPLY_PATCH_HISTORY_ADAPTER_EVENT = "third_party_apply_patch_freeform_history_adapter"
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS = frozenset(
+    {"type", "status", "call_id", "name", "input"}
+)
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS = frozenset(
+    {"type", "call_id", "output"}
+)
+
+
+class _ApplyPatchAdapterFailure(ValueError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _apply_patch_adapter_enabled(event_context: Mapping[str, Any] | None) -> bool:
+    return not bool(event_context and event_context.get("_apply_patch_adapter_enabled") is False)
+
+
+def _write_apply_patch_adapter_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    outcome: str,
+    count: int = 1,
+    reason: str | None = None,
+) -> None:
+    fields: dict[str, Any] = {"surface": surface, "outcome": outcome, "count": count}
+    if reason is not None:
+        fields["reason"] = reason
+    _write_adapter_event(event_context, APPLY_PATCH_ADAPTER_EVENT, **fields)
+
+
+def _raise_apply_patch_adapter_failure(
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    reason: str,
+) -> None:
+    _write_apply_patch_adapter_event(
+        event_context,
+        surface=surface,
+        outcome="rejected",
+        reason=reason,
+    )
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            APPLY_PATCH_ADAPTER_ERROR_CODE,
+            "Third-party apply_patch function call is not an exact freeform patch invocation.",
+        )
+    )
+
+
+def _is_apply_patch_function_call(item: Any) -> bool:
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "function_call"
+        and item.get("name") == APPLY_PATCH_FUNCTION_NAME
+    )
+
+
+def _is_apply_patch_custom_tool_call(item: Any) -> bool:
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "custom_tool_call"
+        and item.get("name") == APPLY_PATCH_FUNCTION_NAME
+    )
+
+
+def _require_exact_apply_patch_function_call_fields(item: Mapping[str, Any]) -> None:
+    if set(item) != APPLY_PATCH_FUNCTION_CALL_FIELDS:
+        raise _ApplyPatchAdapterFailure("function_call_fields_not_exact")
+
+
+def _apply_patch_arguments_text_and_input(arguments: Any) -> tuple[str, str]:
+    def unique_object(pairs: list[tuple[Any, Any]]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if not isinstance(key, str) or key in parsed:
+                raise _ApplyPatchAdapterFailure("duplicate_argument_key")
+            parsed[key] = value
+        return parsed
+
+    def reject_json_constant(_: str) -> None:
+        raise _ApplyPatchAdapterFailure("invalid_arguments")
+
+    if isinstance(arguments, Mapping):
+        parsed = dict(arguments)
+        arguments_text = json.dumps(parsed, ensure_ascii=True, separators=(",", ":"))
+    elif isinstance(arguments, str):
+        arguments_text = arguments
+        try:
+            parsed = json.loads(
+                arguments,
+                object_pairs_hook=unique_object,
+                parse_constant=reject_json_constant,
+            )
+        except _ApplyPatchAdapterFailure:
+            raise
+        except (TypeError, ValueError):
+            raise _ApplyPatchAdapterFailure("invalid_arguments") from None
+    else:
+        raise _ApplyPatchAdapterFailure("missing_arguments")
+
+    if not isinstance(parsed, dict) or set(parsed) != {"patch"}:
+        raise _ApplyPatchAdapterFailure("arguments_not_exact")
+    patch = parsed.get("patch")
+    if not isinstance(patch, str):
+        raise _ApplyPatchAdapterFailure("patch_not_string")
+    if not patch.strip():
+        raise _ApplyPatchAdapterFailure("patch_empty")
+    return arguments_text, patch
+
+
+def _apply_patch_item_identity(item: Mapping[str, Any]) -> tuple[str, str]:
+    item_id = item.get("id")
+    call_id = item.get("call_id")
+    if not isinstance(item_id, str) or not item_id:
+        raise _ApplyPatchAdapterFailure("missing_item_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise _ApplyPatchAdapterFailure("missing_call_id")
+    return item_id, call_id
+
+
+def _custom_apply_patch_item(item: Mapping[str, Any], patch: str) -> dict[str, Any]:
+    rewritten = dict(item)
+    rewritten["type"] = "custom_tool_call"
+    rewritten["input"] = patch
+    rewritten.pop("arguments", None)
+    return rewritten
+
+
+def _write_apply_patch_history_adapter_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    outcome: str,
+    count: int = 1,
+) -> None:
+    """Emit count-only telemetry for the request-history inverse adapter."""
+    _write_adapter_event(
+        event_context,
+        APPLY_PATCH_HISTORY_ADAPTER_EVENT,
+        outcome=outcome,
+        count=count,
+    )
+
+
+def _raise_apply_patch_history_adapter_failure(
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    _write_apply_patch_history_adapter_event(event_context, outcome="rejected")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            APPLY_PATCH_ADAPTER_ERROR_CODE,
+            "Third-party apply_patch custom-tool history is not an exact completed pair.",
+        )
+    )
+
+
+def _adapt_apply_patch_custom_tool_history(
+    input_items: list[Any],
+    *,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[list[Any], set[str], bool]:
+    """Reconstruct exact structured apply_patch history for third-party tools.
+
+    The downstream Codex client represents freeform ``apply_patch`` calls as a
+    custom-tool call/result pair.  Structured third-party Responses providers
+    need that one completed pair in function-call form to retain the call/result
+    relationship.  All other custom-tool history stays on the pre-existing
+    compatibility path.
+    """
+    if not _apply_patch_adapter_enabled(event_context):
+        return input_items, set(), False
+
+    rewritten_items: list[Any] = []
+    pending_call_ids: set[str] = set()
+    adapted_call_ids: set[str] = set()
+    foreign_call_ids: set[str] = set()
+    unmatched_custom_output_ids: set[str] = set()
+    adapted = 0
+    untouched = 0
+
+    for raw_item in input_items:
+        if not isinstance(raw_item, Mapping):
+            rewritten_items.append(raw_item)
+            continue
+
+        item_type = raw_item.get("type")
+        call_id = raw_item.get("call_id")
+        if _is_apply_patch_custom_tool_call(raw_item):
+            if (
+                set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS
+                or raw_item.get("status") != "completed"
+                or not isinstance(call_id, str)
+                or not call_id
+                or not isinstance(raw_item.get("input"), str)
+                or not raw_item["input"].strip()
+                or call_id in pending_call_ids
+                or call_id in adapted_call_ids
+                or call_id in foreign_call_ids
+                or call_id in unmatched_custom_output_ids
+            ):
+                _raise_apply_patch_history_adapter_failure(event_context)
+
+            patch = raw_item["input"]
+            pending_call_ids.add(call_id)
+            adapted_call_ids.add(call_id)
+            rewritten_items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": APPLY_PATCH_FUNCTION_NAME,
+                    "arguments": json.dumps(
+                        {"patch": patch},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+            adapted += 1
+            continue
+
+        if item_type == "custom_tool_call_output":
+            if isinstance(call_id, str) and call_id in pending_call_ids:
+                if set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS:
+                    _raise_apply_patch_history_adapter_failure(event_context)
+                pending_call_ids.remove(call_id)
+                rewritten_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": raw_item["output"],
+                    }
+                )
+                continue
+            if isinstance(call_id, str):
+                if call_id in adapted_call_ids:
+                    _raise_apply_patch_history_adapter_failure(event_context)
+                unmatched_custom_output_ids.add(call_id)
+            rewritten_items.append(raw_item)
+            continue
+
+        if isinstance(call_id, str) and call_id in adapted_call_ids:
+            _raise_apply_patch_history_adapter_failure(event_context)
+
+        if item_type in {"function_call", "function_call_output"}:
+            if isinstance(call_id, str) and call_id:
+                foreign_call_ids.add(call_id)
+        elif item_type == "custom_tool_call":
+            if isinstance(call_id, str) and call_id:
+                foreign_call_ids.add(call_id)
+            untouched += 1
+        rewritten_items.append(raw_item)
+
+    if pending_call_ids:
+        _raise_apply_patch_history_adapter_failure(event_context)
+
+    if adapted:
+        _write_apply_patch_history_adapter_event(
+            event_context,
+            outcome="adapted",
+            count=adapted,
+        )
+    if untouched:
+        _write_apply_patch_history_adapter_event(
+            event_context,
+            outcome="untouched",
+            count=untouched,
+        )
+    return rewritten_items, adapted_call_ids, bool(adapted)
+
+
+def _adapt_third_party_apply_patch_response_body(
+    payload: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not _apply_patch_adapter_enabled(event_context) or not isinstance(payload, dict):
+        return payload, False
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return payload, False
+
+    adapted = 0
+    untouched = 0
+    seen_item_ids: set[str] = set()
+    seen_call_ids: set[str] = set()
+    seen_custom_item_ids: set[str] = set()
+    seen_custom_call_ids: set[str] = set()
+    seen_custom_keys: set[str] = set()
+    rewritten_output: list[Any] = []
+
+    for index, raw_item in enumerate(output):
+        if _is_apply_patch_function_call(raw_item):
+            assert isinstance(raw_item, Mapping)
+            try:
+                _require_exact_apply_patch_function_call_fields(raw_item)
+                item_id, call_id = _apply_patch_item_identity(raw_item)
+                _, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
+                if item_id in seen_item_ids or item_id in seen_custom_item_ids:
+                    raise _ApplyPatchAdapterFailure("duplicate_item_id")
+                if call_id in seen_call_ids or call_id in seen_custom_call_ids:
+                    raise _ApplyPatchAdapterFailure("duplicate_call_id")
+            except _ApplyPatchAdapterFailure as exc:
+                _raise_apply_patch_adapter_failure(event_context, surface="body", reason=exc.reason)
+            seen_item_ids.add(item_id)
+            seen_call_ids.add(call_id)
+            rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
+            adapted += 1
+            continue
+
+        if _is_apply_patch_custom_tool_call(raw_item):
+            assert isinstance(raw_item, Mapping)
+            raw_item_id = raw_item.get("id")
+            raw_call_id = raw_item.get("call_id")
+            if isinstance(raw_item_id, str) and raw_item_id:
+                if raw_item_id in seen_item_ids:
+                    _raise_apply_patch_adapter_failure(
+                        event_context,
+                        surface="body",
+                        reason="duplicate_item_id",
+                    )
+                seen_custom_item_ids.add(raw_item_id)
+            if isinstance(raw_call_id, str) and raw_call_id:
+                if raw_call_id in seen_call_ids:
+                    _raise_apply_patch_adapter_failure(
+                        event_context,
+                        surface="body",
+                        reason="duplicate_call_id",
+                    )
+                seen_custom_call_ids.add(raw_call_id)
+            key = (
+                f"item:{raw_item_id}"
+                if isinstance(raw_item_id, str) and raw_item_id
+                else f"call:{raw_call_id}"
+                if isinstance(raw_call_id, str) and raw_call_id
+                else f"index:{index}"
+            )
+            if key not in seen_custom_keys:
+                seen_custom_keys.add(key)
+                untouched += 1
+        rewritten_output.append(raw_item)
+
+    if adapted:
+        payload = dict(payload)
+        payload["output"] = rewritten_output
+        _write_apply_patch_adapter_event(
+            event_context,
+            surface="body",
+            outcome="adapted",
+            count=adapted,
+        )
+    if untouched:
+        _write_apply_patch_adapter_event(
+            event_context,
+            surface="body",
+            outcome="untouched",
+            count=untouched,
+        )
+    return payload, bool(adapted)
+
+
+@dataclass
+class _ApplyPatchStreamState:
+    item_id: str
+    call_id: str
+    output_index: int
+    initial_arguments: str | None
+    arguments: str | None = None
+    patch: str | None = None
+    delta_arguments: str = ""
+    arguments_done: bool = False
+    item_done: bool = False
+
+
+class _ThirdPartyApplyPatchStreamAdapter:
+    def __init__(self, event_context: Mapping[str, Any] | None, *, surface: str = "stream"):
+        self._event_context = event_context
+        self._surface = surface
+        self._states: dict[str, _ApplyPatchStreamState] = {}
+        self._item_id_by_call_id: dict[str, str] = {}
+        self._adapted_item_ids: set[str] = set()
+        self._custom_item_ids: set[str] = set()
+        self._custom_call_ids: set[str] = set()
+        self._untouched_keys: set[str] = set()
+        self._terminal_seen = False
+        self._finished = False
+
+    def _fail(self, reason: str) -> None:
+        _raise_apply_patch_adapter_failure(
+            self._event_context,
+            surface=self._surface,
+            reason=reason,
+        )
+
+    def _output_index(self, event: Mapping[str, Any]) -> int:
+        output_index = event.get("output_index")
+        if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+            self._fail("missing_output_index")
+        return output_index
+
+    def _remember_untouched(self, item: Mapping[str, Any], fallback: str) -> None:
+        item_id = item.get("id")
+        call_id = item.get("call_id")
+        if isinstance(item_id, str) and item_id:
+            if item_id in self._states:
+                self._fail("duplicate_item_id")
+            self._custom_item_ids.add(item_id)
+        if isinstance(call_id, str) and call_id:
+            if call_id in self._item_id_by_call_id:
+                self._fail("duplicate_call_id")
+            self._custom_call_ids.add(call_id)
+        key = (
+            f"item:{item_id}"
+            if isinstance(item_id, str) and item_id
+            else f"call:{call_id}"
+            if isinstance(call_id, str) and call_id
+            else fallback
+        )
+        self._untouched_keys.add(key)
+
+    def _state_from_added_item(
+        self,
+        item: Mapping[str, Any],
+        output_index: int,
+    ) -> tuple[_ApplyPatchStreamState, str]:
+        try:
+            _require_exact_apply_patch_function_call_fields(item)
+            item_id, call_id = _apply_patch_item_identity(item)
+            arguments = item.get("arguments")
+            if isinstance(arguments, str) and not arguments:
+                initial_arguments = None
+            else:
+                initial_arguments, _ = _apply_patch_arguments_text_and_input(arguments)
+        except _ApplyPatchAdapterFailure as exc:
+            self._fail(exc.reason)
+        if item_id in self._states or item_id in self._custom_item_ids:
+            self._fail("duplicate_item_added")
+        if call_id in self._item_id_by_call_id or call_id in self._custom_call_ids:
+            self._fail("duplicate_call_id")
+        state = _ApplyPatchStreamState(
+            item_id=item_id,
+            call_id=call_id,
+            output_index=output_index,
+            initial_arguments=initial_arguments,
+        )
+        self._states[item_id] = state
+        self._item_id_by_call_id[call_id] = item_id
+        return state, ""
+
+    def _state_for_event(self, event: Mapping[str, Any]) -> _ApplyPatchStreamState:
+        item_id = event.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            self._fail("missing_item_id")
+        state = self._states.get(item_id)
+        if state is None:
+            self._fail("unpaired_stream_event")
+        output_index = self._output_index(event)
+        if output_index != state.output_index:
+            self._fail("conflicting_output_index")
+        return state
+
+    def _check_completed_item(
+        self,
+        item: Mapping[str, Any],
+        state: _ApplyPatchStreamState,
+    ) -> None:
+        try:
+            _require_exact_apply_patch_function_call_fields(item)
+            item_id, call_id = _apply_patch_item_identity(item)
+            arguments, patch = _apply_patch_arguments_text_and_input(item.get("arguments"))
+        except _ApplyPatchAdapterFailure as exc:
+            self._fail(exc.reason)
+        if item_id != state.item_id or call_id != state.call_id:
+            self._fail("conflicting_item_identity")
+        if not state.arguments_done or state.arguments is None or state.patch is None:
+            self._fail("missing_arguments_done")
+        if arguments != state.arguments or patch != state.patch:
+            self._fail("conflicting_arguments")
+
+    def _rewrite_terminal_response(self, event: Mapping[str, Any]) -> tuple[Mapping[str, Any], bool]:
+        response = event.get("response")
+        if not isinstance(response, Mapping):
+            return event, False
+        output = response.get("output")
+        if not isinstance(output, list):
+            return event, False
+        changed = False
+        seen_terminal_item_ids: set[str] = set()
+        rewritten_output: list[Any] = []
+        for index, raw_item in enumerate(output):
+            if _is_apply_patch_function_call(raw_item):
+                assert isinstance(raw_item, Mapping)
+                try:
+                    _require_exact_apply_patch_function_call_fields(raw_item)
+                    item_id, call_id = _apply_patch_item_identity(raw_item)
+                    arguments, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                if item_id in seen_terminal_item_ids:
+                    self._fail("duplicate_terminal_item")
+                seen_terminal_item_ids.add(item_id)
+                state = self._states.get(item_id)
+                if state is None:
+                    self._fail("unpaired_terminal_item")
+                if call_id != state.call_id or not state.item_done or state.arguments != arguments or state.patch != patch:
+                    self._fail("conflicting_terminal_item")
+                rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
+                changed = True
+                continue
+            if _is_apply_patch_custom_tool_call(raw_item):
+                assert isinstance(raw_item, Mapping)
+                self._remember_untouched(raw_item, f"terminal:{index}")
+            rewritten_output.append(raw_item)
+        if not changed:
+            return event, False
+        rewritten_response = dict(response)
+        rewritten_response["output"] = rewritten_output
+        rewritten_event = dict(event)
+        rewritten_event["response"] = rewritten_response
+        return rewritten_event, True
+
+    def _ensure_terminal_lifecycle(self) -> None:
+        for state in self._states.values():
+            if not state.item_done:
+                self._fail("incomplete_tool_lifecycle")
+
+    def events_for_event(self, event: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], bool]:
+        event_type = event.get("type")
+        if self._terminal_seen and isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
+            self._fail("post_terminal_semantic_event")
+
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if _is_apply_patch_function_call(item):
+                assert isinstance(item, Mapping)
+                output_index = self._output_index(event)
+                self._state_from_added_item(item, output_index)
+                rewritten_event = dict(event)
+                rewritten_event["item"] = _custom_apply_patch_item(item, "")
+                return [rewritten_event], True
+            if _is_apply_patch_custom_tool_call(item):
+                assert isinstance(item, Mapping)
+                self._remember_untouched(item, "added")
+            return [event], False
+
+        if event_type == "response.function_call_arguments.delta":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in self._states:
+                state = self._state_for_event(event)
+                delta = event.get("delta")
+                if state.arguments_done or state.item_done or not isinstance(delta, str):
+                    self._fail("invalid_arguments_delta")
+                # Do not expose the third-party JSON wrapper as freeform input.
+                # The validated raw patch is emitted only by the matching done event.
+                state.delta_arguments += delta
+                return [], True
+            return [event], False
+
+        if event_type == "response.function_call_arguments.done":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in self._states:
+                state = self._state_for_event(event)
+                if state.arguments_done or state.item_done:
+                    self._fail("duplicate_arguments_done")
+                try:
+                    arguments, patch = _apply_patch_arguments_text_and_input(event.get("arguments"))
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                if state.initial_arguments is not None and arguments != state.initial_arguments:
+                    self._fail("conflicting_arguments")
+                if state.delta_arguments and arguments != state.delta_arguments:
+                    self._fail("conflicting_arguments")
+                state.arguments = arguments
+                state.patch = patch
+                state.arguments_done = True
+                self._adapted_item_ids.add(state.item_id)
+                rewritten_event = dict(event)
+                rewritten_event["type"] = "response.custom_tool_call_input.done"
+                rewritten_event["input"] = patch
+                rewritten_event.pop("arguments", None)
+                return [rewritten_event], True
+            return [event], False
+
+        if event_type == "response.output_item.done":
+            item = event.get("item")
+            if _is_apply_patch_function_call(item):
+                assert isinstance(item, Mapping)
+                try:
+                    _require_exact_apply_patch_function_call_fields(item)
+                    item_id, _ = _apply_patch_item_identity(item)
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                state = self._states.get(item_id)
+                if state is None:
+                    self._fail("unpaired_stream_item")
+                if state.item_done:
+                    self._fail("duplicate_item_done")
+                if self._output_index(event) != state.output_index:
+                    self._fail("conflicting_output_index")
+                self._check_completed_item(item, state)
+                state.item_done = True
+                rewritten_event = dict(event)
+                rewritten_event["item"] = _custom_apply_patch_item(item, state.patch or "")
+                return [rewritten_event], True
+            if _is_apply_patch_custom_tool_call(item):
+                assert isinstance(item, Mapping)
+                self._remember_untouched(item, "done")
+            return [event], False
+
+        if isinstance(event_type, str) and event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+            rewritten_event, changed = self._rewrite_terminal_response(event)
+            self._ensure_terminal_lifecycle()
+            self._terminal_seen = True
+            return [rewritten_event], changed
+
+        return [event], False
+
+    def finish(self, *, allow_missing_terminal: bool = False) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        if self._states and not self._terminal_seen:
+            if not allow_missing_terminal:
+                self._fail("missing_terminal_event")
+            self._ensure_terminal_lifecycle()
+        if self._adapted_item_ids:
+            _write_apply_patch_adapter_event(
+                self._event_context,
+                surface=self._surface,
+                outcome="adapted",
+                count=len(self._adapted_item_ids),
+            )
+        if self._untouched_keys:
+            _write_apply_patch_adapter_event(
+                self._event_context,
+                surface=self._surface,
+                outcome="untouched",
+                count=len(self._untouched_keys),
+            )
+
+
+def _adapt_third_party_apply_patch_stream_events(
+    events: list[Mapping[str, Any]],
+    *,
+    event_context: Mapping[str, Any] | None = None,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    if not _apply_patch_adapter_enabled(event_context):
+        return events, False
+    adapter = _ThirdPartyApplyPatchStreamAdapter(event_context)
+    changed = False
+    rewritten: list[Mapping[str, Any]] = []
+    for event in events:
+        event_replacements, event_changed = adapter.events_for_event(event)
+        rewritten.extend(event_replacements)
+        changed = changed or event_changed
+    adapter.finish()
+    return (rewritten if changed else events), changed
+
+
 def compatible_response_body(
     body: bytes,
     upstream_name: str,
@@ -7475,6 +8325,8 @@ def compatible_response_body(
         return body
 
     changed = _hide_reasoning_text(payload)
+    payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
+    changed = changed or apply_patch_changed
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -11856,6 +12708,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # When the caller spoke Chat Completions, the response must be converted
         # back to Chat Completions format regardless of the upstream wire format.
         want_chat_output = inbound_format == "chat_completions"
+        compatibility_event_context = dict(event_context or {})
+        compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
         # When the caller asked for a non-streaming response but the upstream
         # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
         # SSE into a single JSON response body.
@@ -11973,7 +12827,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         compatible_response_body(
                             _chat_completion_to_response_body(body),
                             upstream_name,
-                            event_context=event_context,
+                            event_context=compatibility_event_context,
                         )
                     )
                 else:
@@ -11982,7 +12836,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         body = _response_body_to_chat_completion_body(body)
                     else:
                         body = _response_body_to_chat_completion_body(
-                            compatible_response_body(body, upstream_name, event_context=event_context)
+                            compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
                         )
             elif upstream_format == "chat_completions":
                 converted_body = _chat_completion_to_response_body(
@@ -11995,10 +12849,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     body = compatible_response_body(
                         converted_body,
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
             else:
-                body = compatible_response_body(body, upstream_name, event_context=event_context)
+                body = compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
             if status >= 400:
                 body = _with_codexhub_http_error(
                     body,
@@ -12539,7 +13393,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_body = compatible_response_body(
                         _events_to_responses_body(events, require_completed=True),
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
                 except UpstreamStreamIncompleteError:
                     if defer_stream_errors:
@@ -12715,7 +13569,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_body = compatible_response_body(
                         _events_to_responses_body(_chat_stream_chunks_to_response_events(chunks)),
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
                     send_downstream_response_headers_once()
                     for chunk in _chat_completion_body_to_stream_chunks(
@@ -12735,6 +13589,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **_response_events_shape_summary(events),
                     )
                     events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    events, _ = _adapt_third_party_apply_patch_stream_events(
+                        events,
+                        event_context=compatibility_event_context,
+                    )
                     events, _ = _normalize_third_party_tool_call(events)
                     _write_adapter_event(
                         event_context,
@@ -12800,6 +13658,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 downstream_output_started = False
                 buffered_lines: list[tuple[bytes, bool]] = []
                 rewritten_events: list[Mapping[str, Any]] = []
+                apply_patch_stream_adapter = (
+                    _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
+                    if (
+                        upstream_name != "official"
+                        and not want_chat_output
+                        and _apply_patch_adapter_enabled(compatibility_event_context)
+                    )
+                    else None
+                )
                 try:
                     for line in self._iter_upstream_sse_lines(
                         response,
@@ -12818,7 +13685,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             if _responses_event_starts_downstream_output(usage_payload):
                                 downstream_output_started = True
                             _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
-                        rewritten_line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                        rewritten_line = line
+                        if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
+                            replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(
+                                usage_payload
+                            )
+                            if apply_patch_changed:
+                                rewritten_line = (
+                                    _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                                    if replacement_events
+                                    else b""
+                                )
+                        rewritten_line = compatible_sse_line(
+                            rewritten_line,
+                            upstream_name,
+                            event_context=compatibility_event_context,
+                        )
                         rewritten_payload = _parse_sse_json_payload(rewritten_line) if upstream_name != "official" else usage_payload
                         _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
                         if isinstance(rewritten_payload, Mapping):
@@ -12875,6 +13757,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
+                if apply_patch_stream_adapter is not None and saw_terminal_event:
+                    apply_patch_stream_adapter.finish()
                 if status < 400 and saw_response_event and not saw_terminal_event:
                     self.close_connection = True
                     write_proxy_event(
@@ -12958,6 +13842,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             created_response: dict[str, Any] | None = None
             completed_tool_output_items: list[dict[str, Any]] = []
             last_response_event_type: str | None = None
+            apply_patch_stream_adapter = (
+                _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
+                if (
+                    upstream_name != "official"
+                    and not want_chat_output
+                    and _apply_patch_adapter_enabled(compatibility_event_context)
+                )
+                else None
+            )
 
             def write_or_queue_downstream_line(out_line: bytes, *, buffer: bool = False, force: bool = False) -> None:
                 if not out_line:
@@ -13129,7 +14022,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         and not saw_terminal_event
                     ):
                         buffer_current_line = True
-                    line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                    if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
+                        replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(usage_payload)
+                        if apply_patch_changed:
+                            if not replacement_events:
+                                line = b""
+                            else:
+                                line = _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                    line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)
                     rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     if isinstance(rewritten_payload, Mapping):
                         remember_completed_tool_event(rewritten_payload)
@@ -13212,6 +14112,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 return 502
             if status < 400 and not saw_terminal_event:
                 if synthesize_completed_tool_response():
+                    if apply_patch_stream_adapter is not None:
+                        apply_patch_stream_adapter.finish(allow_missing_terminal=True)
                     self.close_connection = True
                     _capture_usage(usage_capture, None, missing_reason="synthetic_tool_terminal")
                     return status
@@ -13242,6 +14144,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
+            if apply_patch_stream_adapter is not None:
+                apply_patch_stream_adapter.finish()
             if (
                 status < 400
                 and upstream_name != "official"

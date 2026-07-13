@@ -38,6 +38,8 @@ pub struct Model {
     pub id: String,
     pub display_name: Option<String>,
     pub upstream_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_surface_strategy: Option<ToolSurfaceStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     pub source_kind: Option<String>,
@@ -75,6 +77,7 @@ impl Default for Model {
             id: String::new(),
             display_name: None,
             upstream_model: None,
+            tool_surface_strategy: None,
             aliases: Vec::new(),
             source_kind: None,
             locked: false,
@@ -128,6 +131,8 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_protocol: Option<ToolProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_surface_strategy: Option<ToolSurfaceStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports_cached_input_tokens: Option<bool>,
     pub display_prefix: Option<String>,
     pub sort_order: Option<i32>,
@@ -156,6 +161,13 @@ pub enum ToolProtocol {
     ChatTools,
     TextCompat,
     None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSurfaceStrategy {
+    Eager,
+    DeferredCore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

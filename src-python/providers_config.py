@@ -47,6 +47,7 @@ EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
 EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
 UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages"}
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
+TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
 
 
 @dataclass
@@ -60,6 +61,7 @@ class ModelConfig:
     input_modalities: tuple[str, ...] = ("text",)
     supported_reasoning_levels: tuple[str, ...] = ()
     default_reasoning_level: str | None = None
+    tool_surface_strategy: str | None = None
     sort_order: int = 0
     enabled: bool = True
     codex_enabled: bool = True
@@ -75,6 +77,7 @@ class ProviderConfig:
     upstream_format: str = "auto"
     available_upstream_formats: tuple[str, ...] = ()
     tool_protocol: str = "auto"
+    tool_surface_strategy: str = "eager"
     reports_cached_input_tokens: bool = False
     display_prefix: str | None = None
     sort_order: int = 0
@@ -195,6 +198,7 @@ def build_external_model_index(
                 continue
 
             alias = canonical_model_id(f"{provider_id}/{model_id}")
+            tool_surface_strategy = _resolved_tool_surface_strategy(provider, model)
             entry = {
                 "alias": alias,
                 "provider_alias": provider_id,
@@ -204,6 +208,7 @@ def build_external_model_index(
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
                 "tool_protocol": provider.tool_protocol,
+                "tool_surface_strategy": tool_surface_strategy,
                 "reports_cached_input_tokens": provider.reports_cached_input_tokens,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
@@ -272,6 +277,7 @@ def build_ollama_cloud_model_index(
                 continue
 
             qualified_alias = canonical_model_id(f"{provider_id}/{model_id}")
+            tool_surface_strategy = _resolved_tool_surface_strategy(provider, model)
             entry = {
                 "alias": qualified_alias,
                 "provider_alias": provider_id,
@@ -281,6 +287,7 @@ def build_ollama_cloud_model_index(
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
                 "tool_protocol": provider.tool_protocol,
+                "tool_surface_strategy": tool_surface_strategy,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -377,6 +384,9 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
                 input_modalities=_string_tuple_field(raw_model.get("input_modalities"), ("text",)),
                 supported_reasoning_levels=_string_tuple_field(raw_model.get("supported_reasoning_levels"), ()),
                 default_reasoning_level=_optional_string_field(raw_model.get("default_reasoning_level")),
+                tool_surface_strategy=_tool_surface_strategy_field(
+                    raw_model.get("tool_surface_strategy"), default=None
+                ),
                 sort_order=_int_field(raw_model.get("sort_order"), 0),
                 enabled=_bool_field(raw_model.get("enabled"), True),
                 codex_enabled=_bool_field(raw_model.get("codex_enabled"), True),
@@ -392,6 +402,9 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
             available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
             tool_protocol=_tool_protocol_field(raw_provider.get("tool_protocol")),
+            tool_surface_strategy=_tool_surface_strategy_field(
+                raw_provider.get("tool_surface_strategy"), default="eager"
+            ),
             reports_cached_input_tokens=_bool_field(raw_provider.get("reports_cached_input_tokens"), False),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
@@ -428,6 +441,11 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             chunks.append(_toml_string_list_line("available_upstream_formats", provider.available_upstream_formats))
         if provider.tool_protocol and provider.tool_protocol != "auto":
             chunks.append(_toml_string_line("tool_protocol", provider.tool_protocol))
+        provider_tool_surface_strategy = _tool_surface_strategy_field(
+            provider.tool_surface_strategy, default="eager"
+        )
+        if provider_tool_surface_strategy != "eager":
+            chunks.append(_toml_string_line("tool_surface_strategy", provider_tool_surface_strategy))
         if provider.reports_cached_input_tokens:
             chunks.append(_toml_bool_line("reports_cached_input_tokens", provider.reports_cached_input_tokens))
         chunks.extend(
@@ -462,6 +480,13 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                 chunks.append(_toml_string_list_line("supported_reasoning_levels", model.supported_reasoning_levels, indent="  "))
             if model.default_reasoning_level is not None:
                 chunks.append(_toml_string_line("default_reasoning_level", model.default_reasoning_level, indent="  "))
+            model_tool_surface_strategy = _tool_surface_strategy_field(
+                model.tool_surface_strategy, default=None
+            )
+            if model_tool_surface_strategy is not None:
+                chunks.append(
+                    _toml_string_line("tool_surface_strategy", model_tool_surface_strategy, indent="  ")
+                )
             chunks.extend(
                 [
                     _toml_int_line("sort_order", model.sort_order, indent="  "),
@@ -594,6 +619,26 @@ def _upstream_formats_field(value: Any) -> tuple[str, ...]:
 def _tool_protocol_field(value: Any) -> str:
     tool_protocol = _string_field(value, "auto").strip().lower()
     return tool_protocol if tool_protocol in TOOL_PROTOCOLS else "auto"
+
+
+def _tool_surface_strategy_field(value: Any, *, default: str | None) -> str | None:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError("tool_surface_strategy must be eager or deferred_core")
+    strategy = value.strip().lower()
+    if strategy not in TOOL_SURFACE_STRATEGIES:
+        raise ValueError("tool_surface_strategy must be eager or deferred_core")
+    return strategy
+
+
+def _resolved_tool_surface_strategy(provider: ProviderConfig, model: ModelConfig) -> str:
+    model_strategy = _tool_surface_strategy_field(model.tool_surface_strategy, default=None)
+    if model_strategy is not None:
+        return model_strategy
+    provider_strategy = _tool_surface_strategy_field(provider.tool_surface_strategy, default="eager")
+    assert provider_strategy is not None
+    return provider_strategy
 
 
 def _int_field(value: Any, default: int) -> int:
