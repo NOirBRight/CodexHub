@@ -261,42 +261,6 @@ function Add-SanitizedSummaryFailure {
     $Summary['passed'] = $false
 }
 
-function Get-SanitizedLifecycleRootFailureCode {
-    param($Tracked)
-
-    if ($null -eq $Tracked -or $null -eq $Tracked.Process -or -not $Tracked.Process.HasExited) {
-        return 'lifecycle_root_stderr_unavailable'
-    }
-    try {
-        $stderr = [string]$Tracked.StderrTask.GetAwaiter().GetResult()
-    }
-    catch {
-        return 'lifecycle_root_stderr_unavailable'
-    }
-    if ($stderr -match '(?i)running scripts is disabled') {
-        return 'lifecycle_root_execution_policy_failed'
-    }
-    if ($stderr -match '(?i)ConvertTo-Json') {
-        return 'lifecycle_root_json_command_unavailable'
-    }
-    if ($stderr -match '(?i)not recognized as the name of a cmdlet') {
-        return 'lifecycle_root_command_unavailable'
-    }
-    if ($stderr -match '(?i)cannot find path|could not find') {
-        return 'lifecycle_root_path_unavailable'
-    }
-    if ($stderr -match '(?i)access is denied|unauthorized') {
-        return 'lifecycle_root_access_denied'
-    }
-    if ($stderr -match '(?i)parsererror|unexpected token') {
-        return 'lifecycle_root_parse_failed'
-    }
-    if ([string]::IsNullOrWhiteSpace($stderr)) {
-        return 'lifecycle_root_exited_silently'
-    }
-    return 'lifecycle_root_bootstrap_failed'
-}
-
 function Get-SanitizedQualificationFailureCode {
     param([System.Management.Automation.ErrorRecord]$ErrorRecord)
 
@@ -410,6 +374,11 @@ function Invoke-LifecycleReplay {
             throw 'lifecycle_powershell_not_found'
         }
         $lifecycleChildCommand = @'
+param(
+    [string]$ChildPidPath,
+    [string]$EnvironmentSnapshotPath
+)
+
 $environmentSnapshot = [ordered]@{
     cli_has_ollama_api_key = -not [string]::IsNullOrWhiteSpace($env:OLLAMA_API_KEY)
     cli_has_test_secret = -not [string]::IsNullOrWhiteSpace($env:CODEXHUB_TEST_SECRET)
@@ -417,7 +386,7 @@ $environmentSnapshot = [ordered]@{
     userprofile = $env:USERPROFILE
 }
 [System.IO.File]::WriteAllText(
-    $env:CODEXHUB_LIFECYCLE_ENV_PATH,
+    $EnvironmentSnapshotPath,
     ($environmentSnapshot | ConvertTo-Json -Compress),
     [System.Text.UTF8Encoding]::new($false)
 )
@@ -435,16 +404,15 @@ $child.StartInfo = $childStartInfo
 if (-not $child.Start()) {
     throw 'lifecycle_nested_child_start_failed'
 }
-[System.IO.File]::WriteAllText($env:CODEXHUB_LIFECYCLE_CHILD_PID_PATH, [string]$child.Id)
+[System.IO.File]::WriteAllText($ChildPidPath, [string]$child.Id)
 Start-Sleep -Seconds 10
 '@
         [System.IO.File]::WriteAllText($lifecycleScriptPath, $lifecycleChildCommand, [System.Text.UTF8Encoding]::new($false))
-        $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($powershellPath) -Additional @{
-            CODEXHUB_LIFECYCLE_CHILD_PID_PATH = $childPidPath
-            CODEXHUB_LIFECYCLE_ENV_PATH = $environmentSnapshotPath
-        }
+        $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($powershellPath)
         $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
-            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $lifecycleScriptPath
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $lifecycleScriptPath,
+            '-ChildPidPath', $childPidPath,
+            '-EnvironmentSnapshotPath', $environmentSnapshotPath
         ) -WorkingDirectory $runRoot -Environment $lifecycleEnvironment
         $childPidDeadline = (Get-Date).AddSeconds(5)
         while ((-not (Test-Path -LiteralPath $childPidPath) -or -not (Test-Path -LiteralPath $environmentSnapshotPath)) -and (Get-Date) -lt $childPidDeadline) {
@@ -481,14 +449,7 @@ Start-Sleep -Seconds 10
         Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
     }
     catch {
-        $failureMessage = [string]$_.Exception.Message
-        if ($failureMessage -eq 'lifecycle_child_start_timed_out') {
-            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_child_start_timed_out'
-            Add-SanitizedFailure -Failures $failures -Code (Get-SanitizedLifecycleRootFailureCode -Tracked $tracked)
-        }
-        else {
-            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
-        }
+        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
     }
     finally {
         if ($null -eq $cleanupStopwatch -and $null -ne $tracked) {
