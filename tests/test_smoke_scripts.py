@@ -224,6 +224,144 @@ def test_issue_108_capture_gateway_digest_replay_executes_generated_capture_path
     assert summary["tool_surface_digest"].startswith("sha256:")
 
 
+def test_issue_108_readiness_evidence_replay_preserves_singleton_tool_sequence(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the readiness evidence replay")
+
+    fixture = {
+        "schema": "codexhub.issue108.readiness-evidence-replay.v1",
+        "sanitized": True,
+        "readiness_exit_code": 0,
+        "cli_events": [
+            {"type": "thread.started"},
+            {"type": "turn.started"},
+            {
+                "type": "item.completed",
+                "item": {"type": "command_execution", "exit_code": 0},
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "SENTINEL:issue108-readiness-shell-ok",
+                },
+            },
+            {"type": "turn.completed"},
+        ],
+        "gateway_events": [
+            {
+                "event": "request_start",
+                "model": "ollama-cloud/glm-5.2",
+                "upstream": "ollama_cloud",
+                "provider_id": "ollama_cloud",
+                "route_mode": "codexhub",
+            },
+            {"event": "request_complete"},
+            {
+                "event": "request_start",
+                "model": "ollama-cloud/glm-5.2",
+                "upstream": "ollama_cloud",
+                "provider_id": "ollama_cloud",
+                "route_mode": "codexhub",
+            },
+            {"event": "request_complete"},
+        ],
+        "capture_events": [{"phase": "preflight", "stage": "before"}],
+    }
+    fixture_path = tmp_path / "readiness-evidence.json"
+    fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+    started_at = time.monotonic()
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-ReadinessEvidenceReplay",
+            "-EvidenceFixture",
+            str(fixture_path),
+            "-OutputDir",
+            str(tmp_path / "result"),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    elapsed_seconds = time.monotonic() - started_at
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
+    assert "SENTINEL:issue108-readiness-shell-ok" not in result.stdout
+    summaries = list((tmp_path / "result").glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "readiness_evidence_replay"
+    assert summary["passed"] is True
+    assert summary["failures"] == []
+    assert summary["route_identity_valid"] is True
+    assert summary["request_start_count"] == 2
+    assert summary["request_complete_count"] == 2
+    assert summary["request_error_count"] == 0
+    assert summary["capture_harness_error_count"] == 0
+    assert summary["tool_sequence_is_array"] is True
+    assert summary["completed_tool_sequence"] == ["shell_command"]
+    assert summary["completed_shell_command_count"] == 1
+    assert summary["completed_shell_command_exit_code"] == 0
+    assert summary["sentinel_observed"] is True
+    assert summary["turn_completed_observed"] is True
+
+    scalar_script = tmp_path / "scalar-readiness-replay.ps1"
+    source = (ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    array_assignment = (
+        "$preflightToolSequence = @(Get-CompletedCliToolSequence -CliOutputPath $CliOutputPath)"
+    )
+    assert array_assignment in source
+    scalar_script.write_text(
+        source.replace(
+            array_assignment,
+            "$preflightToolSequence = Get-CompletedCliToolSequence -CliOutputPath $CliOutputPath",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    scalar_result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(scalar_script),
+            "-Workspace",
+            str(ROOT),
+            "-ReadinessEvidenceReplay",
+            "-EvidenceFixture",
+            str(fixture_path),
+            "-OutputDir",
+            str(tmp_path / "scalar-result"),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert scalar_result.returncode != 0
+    scalar_summaries = list((tmp_path / "scalar-result").glob("run-*/summary.json"))
+    assert len(scalar_summaries) == 1
+    scalar_summary = json.loads(scalar_summaries[0].read_text(encoding="utf-8-sig"))
+    assert scalar_summary["passed"] is False
+    assert "readiness_tool_sequence_invalid" in scalar_summary["failures"]
+
+
 def test_issue_108_evidence_replay_rejects_unknown_fixture_fields(tmp_path):
     powershell = shutil.which("powershell.exe")
     if powershell is None:
@@ -317,7 +455,11 @@ def test_issue_108_failure_validator_preserves_sanitized_harness_error_details(t
         "timeout_classification": "harness_error",
         "error_class": "NameError",
         "http_status": 500,
-        "failure_codes": ["capture_gateway_harness_error", "qualification_readiness_failed"],
+        "failure_codes": [
+            "capture_gateway_harness_error",
+            "readiness_capture_harness_error_observed",
+            "readiness_preflight_evidence_failed",
+        ],
     }
     fixture_path = tmp_path / "harness-error.json"
     fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
@@ -416,7 +558,11 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "External qualification scratch directory must be outside the repository workspace" in source
     assert "Readiness preflight: use the accepted GLM route" in source
     assert "ReadinessTimeoutSeconds" in source
-    assert "qualification_readiness_failed" in source
+    assert "qualification_readiness_failed" not in source
+    assert "readiness_preflight_evidence_failed" in source
+    assert "readiness_tool_sequence_invalid" in source
+    assert "$preflightToolSequence = @(Get-CompletedCliToolSequence -CliOutputPath $CliOutputPath)" in source
+    assert "ReadinessEvidenceReplay" in source
     assert "'--add-dir', $testWorkspace" not in source
     assert "Isolated Gateway did not become healthy" in source
     assert "Isolated proxy did not become healthy" not in source

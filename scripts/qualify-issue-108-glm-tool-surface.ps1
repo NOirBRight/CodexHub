@@ -10,6 +10,7 @@ param(
     [switch]$HistoryAdapterReplay,
     [switch]$ToolSurfaceEvidenceReplay,
     [switch]$QualificationEvidenceReplay,
+    [switch]$ReadinessEvidenceReplay,
     [switch]$CaptureGatewayDigestReplay,
     [string]$EvidenceFixture = '',
     [switch]$ExternalIsolationQualification,
@@ -295,8 +296,11 @@ function Get-SanitizedQualificationFailureCode {
     if ($message -like 'Codex CLI timed out*') {
         return 'cli_timeout'
     }
+    if ($message -match '^readiness_[a-z0-9_]+$') {
+        return $message
+    }
     if ($message -like 'External qualification readiness preflight*') {
-        return 'qualification_readiness_failed'
+        return 'readiness_preflight_execution_failed'
     }
     if ($message -like 'External qualification scratch directory*' -or $message -like 'External qualification timeout must*') {
         return 'external_qualification_configuration_invalid'
@@ -669,6 +673,116 @@ function Get-CompletedCliToolSequence {
     return $toolSequence.ToArray()
 }
 
+function Test-ReadinessEvidence {
+    param(
+        [int]$ReadinessExitCode,
+        [string]$CliOutputPath,
+        [object[]]$GatewayEvents,
+        [object[]]$CaptureEvents
+    )
+
+    $readinessSentinel = 'SENTINEL:issue108-readiness-shell-ok'
+    $cliEvents = @(Read-JsonLines -Path $CliOutputPath)
+    # A single completed tool is otherwise unwrapped to System.String by
+    # Windows PowerShell, making [0] the first character instead of the tool.
+    $preflightToolSequence = @(Get-CompletedCliToolSequence -CliOutputPath $CliOutputPath)
+    $completedCommandEvents = @(
+        $cliEvents | Where-Object {
+            $_.type -eq 'item.completed' -and $null -ne $_.item -and $_.item.type -eq 'command_execution'
+        }
+    )
+    $commandExitCode = $null
+    if ($completedCommandEvents.Count -eq 1) {
+        try {
+            $commandExitCode = [int]$completedCommandEvents[0].item.exit_code
+        }
+        catch {
+            $commandExitCode = $null
+        }
+    }
+    $requestStarts = @($GatewayEvents | Where-Object { $_.event -eq 'request_start' })
+    $requestCompleteCount = @($GatewayEvents | Where-Object { $_.event -eq 'request_complete' }).Count
+    $requestErrorCount = @($GatewayEvents | Where-Object { $_.event -eq 'request_error' }).Count
+    $invalidRouteRequestCount = @(
+        $requestStarts | Where-Object {
+            [string]$_.model -ne 'ollama-cloud/glm-5.2' -or
+            [string]$_.upstream -ne 'ollama_cloud' -or
+            [string]$_.provider_id -ne 'ollama_cloud' -or
+            [string]$_.route_mode -ne 'codexhub'
+        }
+    ).Count
+    $routeIdentityValid = $requestStarts.Count -gt 0 -and $invalidRouteRequestCount -eq 0
+    $gatewayCompletionValid = $requestStarts.Count -gt 0 -and $requestCompleteCount -eq $requestStarts.Count
+    $captureHarnessErrorCount = @(
+        $CaptureEvents | Where-Object {
+            $_.phase -eq 'preflight' -and $_.stage -eq 'capture_harness_exception'
+        }
+    ).Count
+    $sentinelMessageCount = @(
+        $cliEvents | Where-Object {
+            $_.type -eq 'item.completed' -and
+            $null -ne $_.item -and
+            $_.item.type -eq 'agent_message' -and
+            [string]$_.item.text -eq $readinessSentinel
+        }
+    ).Count
+    $turnCompletedCount = @($cliEvents | Where-Object { $_.type -eq 'turn.completed' }).Count
+    $toolSequenceIsArray = $preflightToolSequence -is [System.Array]
+    $completedShellCommandCount = @($preflightToolSequence | Where-Object { $_ -eq 'shell_command' }).Count
+    $toolSequenceValid = (
+        $toolSequenceIsArray -and
+        $preflightToolSequence.Count -eq 1 -and
+        $preflightToolSequence[0] -eq 'shell_command' -and
+        $completedShellCommandCount -eq 1
+    )
+    $commandCompletionValid = $completedCommandEvents.Count -eq 1 -and $commandExitCode -eq 0
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if ($ReadinessExitCode -ne 0) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_cli_exit_nonzero'
+    }
+    if (-not $routeIdentityValid) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_route_identity_invalid'
+    }
+    if (-not $gatewayCompletionValid) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_gateway_completion_missing'
+    }
+    if ($requestErrorCount -ne 0) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_request_error_observed'
+    }
+    if ($captureHarnessErrorCount -ne 0) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_capture_harness_error_observed'
+    }
+    if (-not $toolSequenceValid) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_tool_sequence_invalid'
+    }
+    if (-not $commandCompletionValid) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_shell_command_exit_invalid'
+    }
+    if ($sentinelMessageCount -ne 1) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_sentinel_missing'
+    }
+    if ($turnCompletedCount -ne 1) {
+        Add-SanitizedFailure -Failures $failures -Code 'readiness_turn_incomplete'
+    }
+
+    return [ordered]@{
+        passed = $failures.Count -eq 0
+        failure_codes = @($failures.ToArray())
+        cli_exit_code = $ReadinessExitCode
+        route_identity_valid = $routeIdentityValid
+        request_start_count = $requestStarts.Count
+        request_complete_count = $requestCompleteCount
+        request_error_count = $requestErrorCount
+        capture_harness_error_count = $captureHarnessErrorCount
+        completed_tool_sequence = @($preflightToolSequence)
+        tool_sequence_is_array = $toolSequenceIsArray
+        completed_shell_command_count = $completedShellCommandCount
+        completed_shell_command_exit_code = $commandExitCode
+        sentinel_observed = $sentinelMessageCount -eq 1
+        turn_completed_observed = $turnCompletedCount -eq 1
+    }
+}
+
 function Invoke-HistoryAdapterReplay {
     param(
         [string]$ReplayOutputDir,
@@ -971,6 +1085,79 @@ function Invoke-EvidenceReplay {
     }
 }
 
+function Invoke-ReadinessEvidenceReplay {
+    param(
+        [string]$ReplayOutputDir,
+        [string]$FixturePath
+    )
+
+    $runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
+    $runRoot = Join-Path $ReplayOutputDir "run-$runId"
+    $summaryPath = Join-Path $runRoot 'summary.json'
+    $cliOutputPath = Join-Path $runRoot 'readiness-stdout.jsonl'
+    $gatewayEventsPath = Join-Path $runRoot 'gateway-events.jsonl'
+    $captureEventsPath = Join-Path $runRoot 'capture-events.jsonl'
+    $summary = [ordered]@{
+        mode = 'readiness_evidence_replay'
+        passed = $false
+        failures = @()
+    }
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($FixturePath) -or -not (Test-Path -LiteralPath $FixturePath -PathType Leaf)) {
+            throw 'readiness_evidence_fixture_missing'
+        }
+        New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
+        $fixture = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+        foreach ($propertyName in @('schema', 'sanitized', 'readiness_exit_code', 'cli_events', 'gateway_events', 'capture_events')) {
+            if ($null -eq $fixture.PSObject.Properties[$propertyName]) {
+                throw 'readiness_evidence_fixture_invalid'
+            }
+        }
+        if ($fixture.schema -ne 'codexhub.issue108.readiness-evidence-replay.v1' -or $fixture.sanitized -ne $true) {
+            throw 'readiness_evidence_fixture_invalid'
+        }
+        $cliEvents = @($fixture.cli_events)
+        $gatewayEvents = @($fixture.gateway_events)
+        $captureEvents = @($fixture.capture_events)
+        if ($cliEvents.Count -eq 0 -or $gatewayEvents.Count -eq 0 -or $captureEvents.Count -eq 0) {
+            throw 'readiness_evidence_fixture_invalid'
+        }
+        $writeJsonLines = {
+            param([object[]]$Events, [string]$Path)
+
+            $lines = @($Events | ForEach-Object { $_ | ConvertTo-Json -Depth 12 -Compress })
+            [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+        }
+        & $writeJsonLines -Events $cliEvents -Path $cliOutputPath
+        & $writeJsonLines -Events $gatewayEvents -Path $gatewayEventsPath
+        & $writeJsonLines -Events $captureEvents -Path $captureEventsPath
+
+        $readinessEvidence = Test-ReadinessEvidence -ReadinessExitCode ([int]$fixture.readiness_exit_code) -CliOutputPath $cliOutputPath -GatewayEvents @(Read-JsonLines -Path $gatewayEventsPath) -CaptureEvents @(Read-JsonLines -Path $captureEventsPath)
+        foreach ($property in $readinessEvidence.Keys) {
+            $summary[$property] = $readinessEvidence[$property]
+        }
+        if (-not [bool]$readinessEvidence.passed) {
+            foreach ($failureCode in @($readinessEvidence.failure_codes)) {
+                Add-SanitizedSummaryFailure -Summary $summary -Code $failureCode
+            }
+            throw 'readiness_evidence_replay_invalid'
+        }
+        $summary.passed = $true
+    }
+    catch {
+        Add-SanitizedSummaryFailure -Summary $summary -Code 'readiness_evidence_replay_failed'
+    }
+    finally {
+        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    }
+
+    Get-Content -LiteralPath $summaryPath -Raw
+    if (-not $summary.passed) {
+        exit 1
+    }
+}
+
 function Invoke-CaptureGatewayDigestReplay {
     param(
         [string]$ReplayOutputDir,
@@ -1240,6 +1427,10 @@ if ($QualificationEvidenceReplay) {
         $EvidenceFixture
     }
     Invoke-EvidenceReplay -ReplayOutputDir $OutputDir -ReplayWorkspace $Workspace -ReplayKind 'qualification' -FixturePath $qualificationFixture
+    exit $LASTEXITCODE
+}
+if ($ReadinessEvidenceReplay) {
+    Invoke-ReadinessEvidenceReplay -ReplayOutputDir $OutputDir -FixturePath $EvidenceFixture
     exit $LASTEXITCODE
 }
 if ($CaptureGatewayDigestReplay) {
@@ -1922,7 +2113,9 @@ Readiness preflight: use the accepted GLM route and call shell_command exactly o
         }
         if (-not $readinessCli.Process.HasExited) {
             Stop-TrackedProcess $readinessCli
-            throw 'External qualification readiness preflight timed out.'
+            $summary.readiness_preflight_failure_codes = @('readiness_preflight_timeout')
+            Add-SanitizedSummaryFailure -Summary $summary -Code 'readiness_preflight_timeout'
+            throw 'readiness_preflight_timeout'
         }
         $readinessExitCode = $readinessCli.Process.ExitCode
         $readinessStdout = $readinessCli.StdoutTask.GetAwaiter().GetResult()
@@ -1930,20 +2123,30 @@ Readiness preflight: use the accepted GLM route and call shell_command exactly o
         Save-BoundedText -Path $preflightStdoutPath -Text $readinessStdout
         Save-BoundedText -Path $preflightStderrPath -Text $readinessStderr
         $readinessOutputCaptured = $true
-        if ($readinessExitCode -ne 0) {
-            throw 'External qualification readiness preflight exited unsuccessfully.'
-        }
-        $preflightRequests = @(Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl') | Where-Object { $_.event -eq 'request_start' })
-        $preflightToolSequence = Get-CompletedCliToolSequence -CliOutputPath $preflightStdoutPath
-        if (-not (Test-ExpectedGlmGatewayRoute -RequestStarts $preflightRequests)) {
-            throw 'External qualification readiness preflight did not reach the expected Gateway route.'
-        }
-        if ($preflightToolSequence.Count -ne 1 -or $preflightToolSequence[0] -ne 'shell_command') {
-            throw 'External qualification readiness preflight did not complete exactly one shell_command.'
+        $preflightGatewayEvents = @(Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl'))
+        $preflightCaptureEvents = @(Read-JsonLines -Path $requestShapePath)
+        $readinessEvidence = Test-ReadinessEvidence -ReadinessExitCode $readinessExitCode -CliOutputPath $preflightStdoutPath -GatewayEvents $preflightGatewayEvents -CaptureEvents $preflightCaptureEvents
+        $summary.readiness_preflight_cli_exit_code = $readinessEvidence.cli_exit_code
+        $summary.readiness_preflight_route_identity_valid = $readinessEvidence.route_identity_valid
+        $summary.readiness_preflight_request_count = $readinessEvidence.request_start_count
+        $summary.readiness_preflight_request_complete_count = $readinessEvidence.request_complete_count
+        $summary.readiness_preflight_request_error_count = $readinessEvidence.request_error_count
+        $summary.readiness_preflight_capture_harness_error_count = $readinessEvidence.capture_harness_error_count
+        $summary.readiness_preflight_tool_sequence = @($readinessEvidence.completed_tool_sequence)
+        $summary.readiness_preflight_tool_sequence_is_array = $readinessEvidence.tool_sequence_is_array
+        $summary.readiness_preflight_completed_shell_command_count = $readinessEvidence.completed_shell_command_count
+        $summary.readiness_preflight_completed_shell_command_exit_code = $readinessEvidence.completed_shell_command_exit_code
+        $summary.readiness_preflight_sentinel_observed = $readinessEvidence.sentinel_observed
+        $summary.readiness_preflight_turn_completed_observed = $readinessEvidence.turn_completed_observed
+        $summary.readiness_preflight_failure_codes = @($readinessEvidence.failure_codes)
+        if (-not [bool]$readinessEvidence.passed) {
+            foreach ($failureCode in @($readinessEvidence.failure_codes)) {
+                Add-SanitizedSummaryFailure -Summary $summary -Code $failureCode
+            }
+            throw 'readiness_preflight_evidence_failed'
         }
         $summary.readiness_preflight_passed = $true
-        $summary.readiness_preflight_request_count = $preflightRequests.Count
-        $preflightGatewayEventCount = (Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl')).Count
+        $preflightGatewayEventCount = $preflightGatewayEvents.Count
         [System.IO.File]::WriteAllText($requestCapturePhasePath, 'acceptance', [System.Text.UTF8Encoding]::new($false))
     }
 
@@ -2361,7 +2564,7 @@ finally {
             elseif ($failureCodes -contains 'cli_timeout') {
                 'harness_timeout'
             }
-            elseif ($failureCodes -contains 'qualification_readiness_failed') {
+            elseif (@($failureCodes | Where-Object { $_ -like 'readiness_*' }).Count -gt 0) {
                 'readiness_failed'
             }
             elseif ($cliExitCode -eq 0) {
