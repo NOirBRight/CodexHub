@@ -51,9 +51,9 @@ export function RuntimeBar({
         <span className="truncate text-base font-semibold text-ink">
           {appFlavor?.product_name ?? "CodexHub"}
         </span>
-        {appFlavor?.flavor === "beta" ? (
+        {appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled ? (
           <span className="rounded-control border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
-            Beta
+            {t("runtime.debugDiagnostics")}
           </span>
         ) : null}
       </div>

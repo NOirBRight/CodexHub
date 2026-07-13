@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("stable", "beta")]
-    [string]$Flavor = "stable",
+    [ValidateSet("normal", "debug")]
+    [string]$Flavor = "normal",
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$OutputRoot = ""
 )

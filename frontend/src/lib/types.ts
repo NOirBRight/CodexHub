@@ -110,11 +110,18 @@ export interface AppVersionInfo {
   current_version: string;
 }
 
-export type RuntimeFlavor = "stable" | "beta";
+export type BuildFlavor = "normal" | "debug";
 export type RoutingOwner = "official" | "release" | "beta" | "unknown_external";
 
+export interface BuildInfo {
+  semantic_version: string;
+  flavor: BuildFlavor;
+  source_revision: string;
+  diagnostics_enabled: boolean;
+}
+
 export interface AppFlavorInfo {
-  flavor: RuntimeFlavor;
+  build: BuildInfo;
   routing_owner: RoutingOwner;
   product_name: string;
   bridge_port: number;

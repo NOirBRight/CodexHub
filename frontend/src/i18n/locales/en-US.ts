@@ -58,6 +58,7 @@ const enUS = {
   },
   runtime: {
     closeToTray: "Close to tray",
+    debugDiagnostics: "Debug diagnostics",
     gatewayHint: "Gateway is the local OpenAI-compatible server in front of Hub",
     maximizeOrRestore: "Maximize or restore",
     minimize: "Minimize",

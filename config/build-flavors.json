@@ -1,5 +1,5 @@
 {
-  "stable": {
+  "normal": {
     "productName": "CodexHub",
     "executableBaseName": "CodexHub",
     "identifier": "com.codexhub.app",
@@ -13,28 +13,30 @@
     "updaterEndpoint": "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
     "updaterManifestName": "latest.json",
     "releaseAssetPrefix": "CodexHub",
+    "releaseAssetSuffix": "",
     "autostartTaskName": "CodexHubProxy",
     "macosLabel": "com.codexhub.proxy",
     "macosPlistFile": "com.codexhub.proxy.plist",
     "linuxServiceFile": "codexhub-proxy.service"
   },
-  "beta": {
-    "productName": "CodexHub Beta",
-    "executableBaseName": "CodexHubBeta",
-    "identifier": "com.codexhub.beta",
-    "windowTitle": "CodexHub Beta",
-    "frontendPort": 1430,
-    "bridgePort": 1431,
-    "gatewayPort": 9109,
-    "routingOwner": "beta",
-    "defaultCodexHome": ".codexhub-beta",
+  "debug": {
+    "productName": "CodexHub",
+    "executableBaseName": "CodexHub",
+    "identifier": "com.codexhub.app",
+    "windowTitle": "CodexHub",
+    "frontendPort": 1420,
+    "bridgePort": 1421,
+    "gatewayPort": 9099,
+    "routingOwner": "release",
+    "defaultCodexHome": ".codex",
     "codexTargetHome": ".codex",
-    "updaterEndpoint": "https://github.com/NOirBRight/CodexHub/releases/download/beta/latest-beta.json",
-    "updaterManifestName": "latest-beta.json",
-    "releaseAssetPrefix": "CodexHubBeta",
-    "autostartTaskName": "CodexHubBetaProxy",
-    "macosLabel": "com.codexhub.beta.proxy",
-    "macosPlistFile": "com.codexhub.beta.proxy.plist",
-    "linuxServiceFile": "codexhub-beta-proxy.service"
+    "updaterEndpoint": "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest-debug.json",
+    "updaterManifestName": "latest-debug.json",
+    "releaseAssetPrefix": "CodexHub",
+    "releaseAssetSuffix": "_debug",
+    "autostartTaskName": "CodexHubProxy",
+    "macosLabel": "com.codexhub.proxy",
+    "macosPlistFile": "com.codexhub.proxy.plist",
+    "linuxServiceFile": "codexhub-proxy.service"
   }
 }

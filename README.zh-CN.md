@@ -60,13 +60,43 @@ CodexHub Desktop App
 
 发布版安装包随附普通使用所需的运行时；普通用户不需要额外安装 Python、Node.js 或 Rust。从源码开发时仍需要本机具备 Node.js、Rust/Tauri 工具链和 Python 运行环境。
 
-## Release 与 Beta 通道
+## Normal 与 Debug 构建风味
 
-CodexHub 正式版默认使用前端端口 `1420`、桥接端口 `1421`、Gateway 端口 `9099`，并使用 `%USERPROFILE%\.codex`。
+每个发布 tag 都会从同一个提交和同一个语义版本产出两个经过 release 优化的 CodexHub 构建：
 
-CodexHub Beta 默认使用前端端口 `1430`、桥接端口 `1431`、Gateway 端口 `9109`，并使用 `%USERPROFILE%\.codexhub-beta\codex-home`。Beta 不会在首次启动时自动接管正式版 Codex 配置。
+- `normal` 是默认构建，保留现有 `latest.json` 更新契约和 `CodexHub_<version>_x64-setup.exe` 安装包名称。
+- `debug` 必须在构建时显式选择，并启用诊断能力代码。它使用 `latest-debug.json` 和 `CodexHub_<version>_debug_x64-setup.exe`，因此自动更新不会悄悄切回 `normal`。
 
-客户端路由状态以目标配置为准：`Official`、`Release` 或 `Beta`。当某个目标由另一个通道管理时，当前 App 会显示 `Managed by Release` 或 `Managed by Beta`，需要显式确认后才会接管。
+两个风味使用同一个应用标识、安装应用、端口（`1420`/`1421`/`9099`）、`%USERPROFILE%\.codex` 运行目录、设置和 Gateway 所有者。它们不是两个产品，也不是 Rust/Tauri 的开发构建。同一版本安装一个风味覆盖另一个风味时，会替换已安装应用并保留受支持的运行时数据；不要并排运行两个风味。
+
+构建脚本会在编译前拒绝不受支持的风味名称。可以使用默认的 normal，或显式选择 debug：
+
+```powershell
+# Portable 构建计划（不编译）
+.\scripts\build-windows-portable.ps1 -DryRun
+.\scripts\build-windows-portable.ps1 -Flavor debug -DryRun
+
+# 已签名、release 优化的安装包构建
+.\scripts\build-windows-release.ps1 -Flavor normal
+.\scripts\build-windows-release.ps1 -Flavor debug
+```
+
+两个安装包和两个 manifest 属于同一个 GitHub Release tag。Debug manifest 会声明风味和产物名称；不匹配会在下载和安装前被拒绝。没有风味元数据的 normal manifest 只会在其指向历史 normal 产物名称时被接受，以保持已安装 normal 用户的更新兼容性。
+
+如需验证同版本替换，请先查看契约，再只在专用 Windows 测试环境中执行显式安装包序列，并提供已知的设置文件：
+
+```powershell
+.\scripts\Test-BuildFlavorReplacement.ps1 -DryRun
+.\scripts\Test-BuildFlavorReplacement.ps1 `
+  -Version 0.1.4 `
+  -NormalInstaller .\CodexHub_0.1.4_x64-setup.exe `
+  -DebugInstaller .\CodexHub_0.1.4_debug_x64-setup.exe `
+  -SettingsPath "$env:USERPROFILE\.codex\proxy\settings.json" `
+  -InstalledExe 'C:\path\to\CodexHub.exe' `
+  -RunInstall -LaunchAfterInstall
+```
+
+该 smoke 会验证 normal → debug → normal 替换保持指定设置文件不变，并且观察到恰好一个 Gateway 监听者。因为它会运行已签名安装包，所以必须显式执行。
 
 ## 使用说明
 

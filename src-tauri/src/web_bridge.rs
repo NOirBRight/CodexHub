@@ -254,9 +254,14 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "switch_mode" => {
             let mode = string_arg(&request.args, "mode")?;
             let auto_sync = bool_arg(&request.args, "autoSync")?;
-            let force_takeover = optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"])
-                .unwrap_or(false);
-            to_value(config::switch_mode_with_takeover(&mode, auto_sync, force_takeover))
+            let force_takeover =
+                optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"])
+                    .unwrap_or(false);
+            to_value(config::switch_mode_with_takeover(
+                &mode,
+                auto_sync,
+                force_takeover,
+            ))
         }
         "start_proxy" => to_value(proxy::start()),
         "stop_proxy" => to_value(proxy::stop()),
@@ -528,9 +533,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 target_unified,
             ))
         }
-        "get_conversation_sync_status" => {
-            to_value(history::preflight_unified_history(false, None))
-        }
+        "get_conversation_sync_status" => to_value(history::preflight_unified_history(false, None)),
         "sync_conversation_history" => {
             let target_provider = request.args.get("targetProvider").and_then(Value::as_str);
             to_value(history::preflight_unified_history(
@@ -539,8 +542,8 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             ))
         }
         "diagnose_conversation_history" => {
-            let _full_scan = optional_bool_arg(&request.args, &["fullScan", "full_scan"])
-                .unwrap_or(true);
+            let _full_scan =
+                optional_bool_arg(&request.args, &["fullScan", "full_scan"]).unwrap_or(true);
             to_value(history::preflight_unified_history(false, None))
         }
         "sync_catalog" => to_value(catalog::sync_catalog()),
@@ -805,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn get_app_flavor_returns_runtime_metadata() {
+    fn get_app_flavor_returns_build_and_runtime_metadata() {
         let response = handle_request(
             BridgeRequest {
                 method: "POST".to_string(),
@@ -822,8 +825,16 @@ mod tests {
         .expect("invoke");
 
         assert_eq!(response.status, 200);
-        let text = String::from_utf8_lossy(&response.body);
-        assert!(text.contains("\"product_name\":\"CodexHub\""));
-        assert!(text.contains("\"gateway_port\":9099"));
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+        let value = &body["value"];
+        assert_eq!(value["product_name"], "CodexHub");
+        assert_eq!(value["gateway_port"], 9099);
+        let build = crate::build_info::current();
+        assert_eq!(value["build"]["semantic_version"], build.semantic_version);
+        assert_eq!(value["build"]["flavor"], build.flavor.as_str());
+        assert_eq!(
+            value["build"]["diagnostics_enabled"],
+            build.diagnostics_enabled
+        );
     }
 }

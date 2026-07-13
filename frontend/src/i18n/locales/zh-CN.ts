@@ -58,6 +58,7 @@ const zhCN = {
   },
   runtime: {
     closeToTray: "最小化到托盘",
+    debugDiagnostics: "调试诊断",
     gatewayHint: "Gateway 是 Hub 前面的本地 OpenAI 兼容服务",
     maximizeOrRestore: "最大化或还原",
     minimize: "最小化",
