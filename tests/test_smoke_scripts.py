@@ -39,7 +39,7 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     )
     elapsed_seconds = time.monotonic() - started_at
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
     assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
     summaries = list(tmp_path.glob("run-*/summary.json"))
     assert len(summaries) == 1
@@ -84,7 +84,7 @@ def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(t
     )
     elapsed_seconds = time.monotonic() - started_at
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
     assert elapsed_seconds < REPLAY_COMPLETION_BOUND_SECONDS, result.stderr
     summaries = list(tmp_path.glob("run-*/summary.json"))
     assert len(summaries) == 1

@@ -199,7 +199,8 @@ function Invoke-TrackedTreeKill {
 function Stop-TrackedProcess {
     param(
         $Tracked,
-        [datetime]$DeadlineUtc = [datetime]::MinValue
+        [datetime]$DeadlineUtc = [datetime]::MinValue,
+        [switch]$AllowRetainedProcessFallback
     )
 
     if ($null -eq $Tracked -or $null -eq $Tracked.Process -or $Tracked.Process.HasExited) {
@@ -218,6 +219,9 @@ function Stop-TrackedProcess {
             Invoke-TrackedTreeKill -ProcessId $Tracked.Process.Id -DeadlineUtc $DeadlineUtc
         }
         catch {
+            if (-not $AllowRetainedProcessFallback) {
+                throw
+            }
             try {
                 if (-not $Tracked.Process.HasExited) {
                     $Tracked.Process.Kill()
@@ -225,7 +229,6 @@ function Stop-TrackedProcess {
             }
             catch {
             }
-            throw
         }
     }
     $exitTimeoutMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $DeadlineUtc -MaximumMilliseconds $TrackedProcessStopTimeoutMilliseconds
@@ -428,7 +431,7 @@ Start-Sleep -Seconds 10
         }
         $cleanupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $cleanupDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($LifecycleReplayCleanupTimeoutMilliseconds)
-        Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc
+        Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
     }
     catch {
         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
@@ -441,7 +444,7 @@ Start-Sleep -Seconds 10
         try {
             if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
                 try {
-                    Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc
+                    Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
                 }
                 catch {
                     Add-SanitizedFailure -Failures $failures -Code 'lifecycle_root_cleanup_failed'
@@ -481,7 +484,7 @@ Start-Sleep -Seconds 10
                     else {
                         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
                         try {
-                            Stop-TrackedProcess ([pscustomobject]@{ Process = $childProcess }) -DeadlineUtc $cleanupDeadlineUtc
+                            Stop-TrackedProcess ([pscustomobject]@{ Process = $childProcess }) -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
                             $childExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
                             if (-not $childProcess.HasExited -and $childExitProbeMilliseconds -gt 0) {
                                 [void]$childProcess.WaitForExit($childExitProbeMilliseconds)
