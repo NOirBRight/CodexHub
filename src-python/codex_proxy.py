@@ -651,8 +651,9 @@ PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 # Both limits apply to serialized Gateway telemetry still awaiting a sink write,
 # including an in-flight batch, so slow storage cannot grow request memory.
-PROXY_EVENT_QUEUE_MAXSIZE = _env_positive_int("CODEX_PROXY_EVENT_QUEUE_MAXSIZE", 4096)
-GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_PROXY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
+GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
+GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
+GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 def _gateway_event_writer_recovery_record(
@@ -678,7 +679,7 @@ if isinstance(_previous_gateway_event_writer, bounded_event_writer.BoundedEventW
 
 GATEWAY_EVENT_WRITER = bounded_event_writer.BoundedEventWriter(
     bounded_event_writer.JsonlFileSink(PROXY_EVENT_LOG_PATH),
-    max_records=PROXY_EVENT_QUEUE_MAXSIZE,
+    max_records=GATEWAY_EVENT_QUEUE_MAX_RECORDS,
     max_bytes=GATEWAY_EVENT_QUEUE_MAX_BYTES,
     recovery_record_factory=_gateway_event_writer_recovery_record,
     thread_name="codex-gateway-event-writer",
@@ -1378,10 +1379,10 @@ def gateway_transparent_vision_proxy_enabled() -> bool:
 
 def write_proxy_event(event: str, **fields: Any) -> None:
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
-    _enqueue_proxy_event_payload(payload)
+    _enqueue_gateway_event_payload(payload)
 
 
-def _enqueue_proxy_event_payload(payload: Mapping[str, Any]) -> bool:
+def _enqueue_gateway_event_payload(payload: Mapping[str, Any]) -> bool:
     return GATEWAY_EVENT_WRITER.enqueue(payload)
 
 
@@ -14217,7 +14218,14 @@ def run_server(host: str, port: int) -> None:
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
     logger.info("serving Codex proxy on %s:%s", host, port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        writer_result = GATEWAY_EVENT_WRITER.shutdown(
+            timeout=GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        if not writer_result.completed:
+            logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
 
 
 def main(argv: list[str] | None = None) -> int:

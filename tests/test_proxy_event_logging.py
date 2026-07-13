@@ -537,8 +537,8 @@ class ProxyEventLoggingTests(TestCase):
             {"event": "request_complete", "request_id": "req-two"},
         ]
         with patch.object(codex_proxy.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
-            self.assertTrue(codex_proxy._enqueue_proxy_event_payload(payloads[0]))
-            self.assertFalse(codex_proxy._enqueue_proxy_event_payload(payloads[1]))
+            self.assertTrue(codex_proxy._enqueue_gateway_event_payload(payloads[0]))
+            self.assertFalse(codex_proxy._enqueue_gateway_event_payload(payloads[1]))
 
         self.assertEqual(enqueue.call_args_list[0].args, (payloads[0],))
         self.assertEqual(enqueue.call_args_list[1].args, (payloads[1],))

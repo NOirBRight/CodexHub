@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import errno
 import json
+import math
 from pathlib import Path
 import threading
 import time
@@ -20,6 +21,10 @@ import weakref
 
 WriterOutcome = Literal["drained", "timeout", "failed"]
 WriterShutdownState = Literal["running", "stopping", "stopped"]
+
+
+class _RecordTooLarge(ValueError):
+    """Raised when bounded admission proves a record cannot fit in the queue."""
 
 
 class EventSink(Protocol):
@@ -299,6 +304,9 @@ class BoundedEventWriter:
         self._shutdown_state: WriterShutdownState = "running"
         self._worker: threading.Thread | None = None
         self._writer_generation = 0
+        # A crash with retained backlog gets exactly one automatic replacement.
+        # A successful write resets this guard for a later, independent crash.
+        self._automatic_restart_used = False
         self._rotation_target_sequence: int | None = None
         self._sink_ownership: Literal["weak", "strong"]
         self._claim_sink_ownership()
@@ -306,8 +314,27 @@ class BoundedEventWriter:
     def enqueue(self, record: Mapping[str, Any]) -> bool:
         """Attempt a non-blocking in-memory enqueue of one sanitized record."""
 
+        with self._condition:
+            if self._shutdown_state != "running":
+                self._dropped_records += 1
+                self._condition.notify_all()
+                return False
+            if self._pending_records >= self._max_records:
+                self._record_overflow_locked(byte_count=0)
+                self._condition.notify_all()
+                return False
+            admission_limit = self._max_bytes
+
         try:
-            data = _serialize_record(record)
+            data = _serialize_record(record, max_bytes=admission_limit)
+        except _RecordTooLarge:
+            with self._condition:
+                if self._shutdown_state == "running":
+                    self._record_overflow_locked(byte_count=0)
+                else:
+                    self._dropped_records += 1
+                self._condition.notify_all()
+            return False
         except Exception:
             with self._condition:
                 self._record_failure_locked("serialization_rejected", record_count=1, byte_count=0)
@@ -322,10 +349,7 @@ class BoundedEventWriter:
                 self._condition.notify_all()
                 return False
             if self._pending_records >= self._max_records or self._pending_bytes + byte_count > self._max_bytes:
-                self._dropped_records += 1
-                self._dropped_bytes += byte_count
-                self._pending_recovery.overflow_records += 1
-                self._pending_recovery.overflow_bytes += byte_count
+                self._record_overflow_locked(byte_count=byte_count)
                 self._condition.notify_all()
                 return False
 
@@ -486,6 +510,7 @@ class BoundedEventWriter:
     def _writer_loop(self) -> None:
         current_worker = threading.current_thread()
         inflight: Sequence[_QueuedRecord] = ()
+        writer_crashed = False
         try:
             while True:
                 with self._condition:
@@ -521,6 +546,7 @@ class BoundedEventWriter:
                 with self._condition:
                     self._complete_batch_locked(inflight)
                     self._written_records += len(inflight)
+                    self._automatic_restart_used = False
                     recovery = self._pending_recovery.snapshot() if self._pending_recovery.has_data() else None
                     self._recovery_inflight = recovery is not None
                     self._condition.notify_all()
@@ -529,6 +555,7 @@ class BoundedEventWriter:
                 if recovery is not None:
                     self._emit_recovery(recovery)
         except BaseException:
+            writer_crashed = True
             with self._condition:
                 if inflight:
                     self._complete_batch_locked(inflight)
@@ -545,6 +572,9 @@ class BoundedEventWriter:
             with self._condition:
                 if self._worker is current_worker:
                     self._worker = None
+                if writer_crashed and self._queue and not self._automatic_restart_used:
+                    self._automatic_restart_used = True
+                    self._ensure_worker_locked()
                 if self._shutdown_state == "stopping" and self._pending_records == 0:
                     self._shutdown_state = "stopped"
                     release_sink_ownership = True
@@ -619,6 +649,12 @@ class BoundedEventWriter:
         if include_recovery:
             self._pending_recovery.add_failure(category, record_count)
 
+    def _record_overflow_locked(self, *, byte_count: int) -> None:
+        self._dropped_records += 1
+        self._dropped_bytes += byte_count
+        self._pending_recovery.overflow_records += 1
+        self._pending_recovery.overflow_bytes += byte_count
+
     def _status_locked(self) -> BoundedEventWriterStatus:
         return BoundedEventWriterStatus(
             queued_records=self._pending_records,
@@ -638,11 +674,153 @@ class BoundedEventWriter:
         )
 
 
-def _serialize_record(record: Mapping[str, Any]) -> bytes:
+def _serialize_record(record: Mapping[str, Any], *, max_bytes: int | None = None) -> bytes:
     if not isinstance(record, Mapping):
         raise TypeError("event record must be a mapping")
+    if max_bytes is not None:
+        _admit_record_size(record, max_bytes)
     text = json.dumps(dict(record), ensure_ascii=True, separators=(",", ":"))
-    return text.encode("utf-8") + b"\n"
+    data = text.encode("utf-8") + b"\n"
+    if max_bytes is not None and len(data) > max_bytes:
+        # The admission pass is deliberately conservative. Keep this fallback
+        # so a future serializer change cannot violate the request-path bound.
+        raise _RecordTooLarge("serialized event exceeds bounded admission")
+    return data
+
+
+def _admit_record_size(record: Mapping[str, Any], max_bytes: int) -> None:
+    """Prove a JSONL record fits before allocating its serialized snapshot.
+
+    ``json.dumps`` can allocate a string proportional to arbitrary request
+    content. This pass measures exactly the JSON shape emitted by the writer
+    and stops as soon as the configured byte budget is exhausted. It performs
+    no JSON encoding or mapping snapshot until the record is known to fit.
+    """
+
+    if max_bytes < 3:
+        raise _RecordTooLarge("JSONL record cannot fit in bounded admission")
+    budget = _JsonSizeBudget(max_bytes - 1)
+    _measure_json_mapping(record, budget, set())
+
+
+class _JsonSizeBudget:
+    def __init__(self, remaining: int) -> None:
+        self.remaining = remaining
+
+    def consume(self, byte_count: int) -> None:
+        if byte_count > self.remaining:
+            raise _RecordTooLarge("JSON record exceeds bounded admission")
+        self.remaining -= byte_count
+
+
+def _measure_json_mapping(value: Mapping[Any, Any], budget: _JsonSizeBudget, active: set[int]) -> None:
+    identity = id(value)
+    if identity in active:
+        raise ValueError("circular event mapping")
+    active.add(identity)
+    try:
+        budget.consume(1)
+        first = True
+        for key in value:
+            if not first:
+                budget.consume(1)
+            first = False
+            _measure_json_key(key, budget)
+            budget.consume(1)
+            _measure_json_value(value[key], budget, active)
+        budget.consume(1)
+    finally:
+        active.remove(identity)
+
+
+def _measure_json_sequence(value: list[Any] | tuple[Any, ...], budget: _JsonSizeBudget, active: set[int]) -> None:
+    identity = id(value)
+    if identity in active:
+        raise ValueError("circular event sequence")
+    active.add(identity)
+    try:
+        budget.consume(1)
+        first = True
+        for item in value:
+            if not first:
+                budget.consume(1)
+            first = False
+            _measure_json_value(item, budget, active)
+        budget.consume(1)
+    finally:
+        active.remove(identity)
+
+
+def _measure_json_value(value: Any, budget: _JsonSizeBudget, active: set[int]) -> None:
+    if value is None:
+        budget.consume(4)
+    elif isinstance(value, bool):
+        budget.consume(4 if value else 5)
+    elif isinstance(value, str):
+        _measure_json_string(value, budget)
+    elif isinstance(value, int):
+        _measure_json_integer(value, budget)
+    elif isinstance(value, float):
+        _measure_json_float(value, budget)
+    elif isinstance(value, dict):
+        _measure_json_mapping(value, budget, active)
+    elif isinstance(value, (list, tuple)):
+        _measure_json_sequence(value, budget, active)
+    else:
+        raise TypeError("event record contains a non-JSON value")
+
+
+def _measure_json_key(key: Any, budget: _JsonSizeBudget) -> None:
+    if isinstance(key, str):
+        _measure_json_string(key, budget)
+    elif key is None:
+        budget.consume(6)
+    elif isinstance(key, bool):
+        budget.consume(6 if key else 7)
+    elif isinstance(key, int):
+        _measure_json_integer(key, budget, quoted=True)
+    elif isinstance(key, float):
+        _measure_json_float(key, budget, quoted=True)
+    else:
+        raise TypeError("event record contains a non-JSON key")
+
+
+def _measure_json_string(value: str, budget: _JsonSizeBudget) -> None:
+    budget.consume(2)
+    for character in value:
+        code_point = ord(character)
+        if character in {'"', "\\"}:
+            budget.consume(2)
+        elif character in {"\b", "\t", "\n", "\f", "\r"}:
+            budget.consume(2)
+        elif code_point < 0x20:
+            budget.consume(6)
+        elif code_point <= 0x7F:
+            budget.consume(1)
+        elif code_point <= 0xFFFF:
+            budget.consume(6)
+        else:
+            budget.consume(12)
+
+
+def _measure_json_integer(value: int, budget: _JsonSizeBudget, *, quoted: bool = False) -> None:
+    sign = 1 if value < 0 else 0
+    digit_upper_bound = 1 if value == 0 else (value.bit_length() * 30_103) // 100_000 + 2
+    rendered_upper_bound = sign + digit_upper_bound
+    if rendered_upper_bound > budget.remaining + 2:
+        raise _RecordTooLarge("integer exceeds bounded admission")
+    rendered_size = len(str(value))
+    budget.consume(rendered_size + (2 if quoted else 0))
+
+
+def _measure_json_float(value: float, budget: _JsonSizeBudget, *, quoted: bool = False) -> None:
+    if math.isnan(value):
+        rendered_size = 3
+    elif math.isinf(value):
+        rendered_size = 9 if value < 0 else 8
+    else:
+        rendered_size = len(float.__repr__(value))
+    budget.consume(rendered_size + (2 if quoted else 0))
 
 
 def _default_recovery_record(summary: RecoverySummary) -> Mapping[str, Any]:

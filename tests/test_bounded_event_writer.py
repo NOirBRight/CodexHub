@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Sequence
 from unittest import TestCase
+from unittest.mock import patch
 
 from bounded_event_writer import BoundedEventWriter, JsonlFileSink
 
@@ -82,16 +83,22 @@ class FailingSink(RecordingSink):
         super().append(records)
 
 
-class CrashOnceSink(RecordingSink):
+class CrashWithRetainedBacklogSink(RecordingSink):
     def __init__(self) -> None:
         super().__init__()
+        self.crash_entered = threading.Event()
+        self.release_crash = threading.Event()
+        self.replacement_wrote = threading.Event()
         self._crash_once = True
 
     def append(self, records: Sequence[bytes]) -> None:
         if self._crash_once:
             self._crash_once = False
+            self.crash_entered.set()
+            self.release_crash.wait(3)
             raise WriterCrash()
         super().append(records)
+        self.replacement_wrote.set()
 
 
 class AggregateFailureSink(BlockingSink):
@@ -165,6 +172,35 @@ class BoundedEventWriterTests(TestCase):
         self.assertEqual(byte_writer.status().dropped_bytes, second_size)
         byte_sink.release.set()
         self.assertTrue(byte_writer.flush(1).completed)
+
+    def test_oversized_single_record_is_rejected_before_full_json_serialization(self) -> None:
+        sink = RecordingSink()
+        writer = self._writer(sink, max_records=8, max_bytes=128)
+        oversized = {"event": "oversized", "payload": "x" * 1_000_000}
+
+        with patch("bounded_event_writer.json.dumps", wraps=json.dumps) as dumps:
+            self.assertFalse(writer.enqueue(oversized))
+
+        self.assertEqual(dumps.call_count, 0)
+        status = writer.status()
+        self.assertEqual(status.queued_records, 0)
+        self.assertEqual(status.dropped_records, 1)
+        self.assertEqual(status.dropped_bytes, 0)
+        self.assertTrue(status.recovery_pending)
+
+    def test_bounded_admission_preserves_escaped_json_record_bytes(self) -> None:
+        record = {
+            "event": "escaped",
+            "value": '"\\\n\x01\u00e9\U0001f600',
+            "nested": [None, True, False, -12, float("nan")],
+        }
+        expected = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        sink = RecordingSink()
+        writer = self._writer(sink, max_records=8, max_bytes=len(expected))
+
+        self.assertTrue(writer.enqueue(record))
+        self.assertTrue(writer.flush(1).completed)
+        self.assertEqual(sink.batches, [[expected]])
 
     def test_accepted_records_keep_fifo_order_and_batch_after_slow_write(self) -> None:
         sink = BlockingSink()
@@ -376,19 +412,19 @@ class BoundedEventWriterTests(TestCase):
             records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([record["event"] for record in records], ["after-repair", "telemetry_writer_recovered"])
 
-    def test_writer_crash_is_recovered_by_one_new_writer_lifecycle(self) -> None:
-        sink = CrashOnceSink()
+    def test_writer_crash_restarts_once_and_drains_retained_backlog_without_followup_calls(self) -> None:
+        sink = CrashWithRetainedBacklogSink()
         writer = self._writer(sink)
         self.assertTrue(writer.enqueue({"event": "crash"}))
-        self.assertEqual(writer.flush(1).outcome, "failed")
-        self.assertFalse(writer.status().writer_alive)
+        self.assertTrue(sink.crash_entered.wait(1))
+        self.assertTrue(writer.enqueue({"event": "retained"}))
+        sink.release_crash.set()
 
-        self.assertTrue(writer.enqueue({"event": "after-crash"}))
-        self.assertTrue(writer.flush(1).completed)
-        self.assertGreaterEqual(writer.status().writer_generation, 2)
+        self.assertTrue(sink.replacement_wrote.wait(1))
+        self.assertEqual(writer.status().writer_generation, 2)
         self.assertEqual(
             [record["event"] for record in sink.records()],
-            ["after-crash", "telemetry_writer_recovered"],
+            ["retained", "telemetry_writer_recovered"],
         )
 
     def test_shutdown_drains_or_times_out_without_hanging(self) -> None:
