@@ -86,7 +86,7 @@ LAUNCH_READINESS_STRATEGIES = (
 DEFAULT_LAUNCHER_STRATEGY = "explicit_user_data_arg"
 DEFAULT_LAUNCH_READINESS_SECONDS = 8.0
 MAX_LAUNCH_DIAGNOSTIC_BYTES = 4096
-BOUNDARY_TRACE_SCHEMA_VERSION = 1
+BOUNDARY_TRACE_SCHEMA_VERSION = 2
 BOUNDARY_CLOSING_SIDES = (
     "downstream_client",
     "gateway_relay",
@@ -913,6 +913,7 @@ def prepare(model: str) -> dict[str, Any]:
         "gateway_pid": None,
         "gateway_port": None,
         "gateway_key": None,
+        "desktop_route_mode": "disposable_auth_bootstrap",
         "current_app_pid": None,
         "current_leg": None,
         "app_launches": [],
@@ -1063,6 +1064,8 @@ def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCH
         raise CaptureError("unsupported_leg")
     if launcher_strategy not in LAUNCH_READINESS_STRATEGIES:
         raise CaptureError("unsupported_launcher_strategy")
+    if leg == "direct_official":
+        raise CaptureError("direct_official_control_cancelled")
     root = _session_root(session_id)
     state = _load_state(session_id)
     if state.get("long_stream") is not None and leg != "direct_official":
@@ -1073,6 +1076,8 @@ def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCH
         paths = _runtime_paths(root)
         if not (paths["codex_home"] / "auth.json").is_file():
             raise CaptureError("manual_login_required_in_disposable_profile")
+        state["desktop_route_mode"] = "isolated_gateway_loopback"
+        _write_state(root, state)
         _start_gateway(root, state)
         state = _load_state(session_id)
     try:
@@ -1389,6 +1394,8 @@ BOUNDARY_TRACE_TOKEN_FIELDS = {
     "protocol",
     "configured_proxy_mode",
     "effective_proxy_mode",
+    "desktop_route_mode",
+    "app_stream_consumer_boundary",
     "connection_disposition",
     "error",
     "gateway_event",
@@ -1467,31 +1474,84 @@ def _normalize_boundary_trace(trace: Iterable[dict[str, Any]]) -> tuple[list[dic
 
 def _boundary_candidate(row: dict[str, Any]) -> tuple[str, str] | None:
     event = row.get("event")
-    phase = _boundary_phase(row.get("failure_phase"))
     if event in {"downstream_body_read_failed", "downstream_body_short_read"}:
         return "downstream_client", "downstream_body"
     if event == "downstream_write_failed":
         return "downstream_client", "downstream_write"
     if event in {"gateway_relay_terminal_not_forwarded", "gateway_relay_exception_after_terminal"}:
         return "gateway_relay", "relay_terminalization"
-    if event == "upstream_service_error_headers":
-        return "upstream_service", "response_headers"
-    if event == "upstream_dns_failed":
-        return "upstream_transport", "dns"
-    if event == "upstream_tcp_connect_failed":
-        return "upstream_transport", "tcp_connect"
-    if event == "upstream_tls_handshake_failed":
-        return "upstream_transport", "tls_handshake"
-    if event == "upstream_request_write_failed":
-        return "upstream_transport", "request_write"
-    if event in {"upstream_open_failed", "upstream_sse_read_failed", "upstream_sse_eof_without_terminal"}:
-        return "upstream_transport", phase
+    return None
+
+
+UPSTREAM_TRANSPORT_BOUNDARY_EVENTS = frozenset(
+    {
+        "upstream_dns_failed",
+        "upstream_tcp_connect_failed",
+        "upstream_tls_handshake_failed",
+        "upstream_request_write_failed",
+        "upstream_open_failed",
+        "upstream_sse_read_failed",
+        "upstream_sse_eof_without_terminal",
+    }
+)
+DOWNSTREAM_WRITABLE_AFTER_UPSTREAM_FAILURE_EVENTS = frozenset(
+    {
+        "downstream_write_after_upstream_failure_succeeded",
+    }
+)
+
+
+def _first_supported_boundary_candidate(events: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], str, str] | None:
+    """Classify only a boundary whose observed ordering proves its direction.
+
+    An exception raised by the upstream reader is a useful phase marker but is
+    not by itself proof that the remote peer closed first.  It becomes an
+    upstream-transport result only when a later successful Gateway-to-Desktop
+    write proves that the downstream connection remained writable.  Otherwise
+    the trace fails closed as ``unknown``.
+    """
+
+    ordered = list(events)
+    unresolved_upstream_requests: set[str | None] = set()
+    for index, row in enumerate(ordered):
+        event = row.get("event")
+        if event in UPSTREAM_TRANSPORT_BOUNDARY_EVENTS:
+            request = row.get("request")
+            downstream_writable = any(
+                later.get("request") == request
+                and later.get("event") in DOWNSTREAM_WRITABLE_AFTER_UPSTREAM_FAILURE_EVENTS
+                for later in ordered[index + 1 :]
+            )
+            if downstream_writable:
+                return row, "upstream_transport", _boundary_phase(row.get("failure_phase"))
+            unresolved_upstream_requests.add(request if isinstance(request, str) else None)
+            continue
+        candidate = _boundary_candidate(row)
+        if candidate is None:
+            continue
+        request = row.get("request")
+        if (request if isinstance(request, str) else None) in unresolved_upstream_requests:
+            return None
+        return row, *candidate
     return None
 
 
 def _new_boundary_request_summary() -> dict[str, Any]:
     return {
-        "route": {"protocol": None, "configured_proxy_mode": None, "effective_proxy_mode": None},
+        "route": {
+            "protocol": None,
+            "configured_proxy_mode": None,
+            "effective_proxy_mode": None,
+            "desktop_route_mode": None,
+        },
+        "downstream": {
+            "request_observed": False,
+            "stream_consumer_boundary": None,
+            "response_opened": False,
+            "response_headers_sent": False,
+            "first_exposed": False,
+            "write_failure_observed": False,
+        },
         "connections": {"identities": [], "dispositions": []},
         "retry": {"attempts_observed": [], "max_attempts": None, "configured_budget": None},
         "upstream": {
@@ -1528,7 +1588,6 @@ def _summarize_gateway_boundary_trace(trace: Iterable[dict[str, Any]]) -> dict[s
     events: list[dict[str, Any]] = []
     request_summaries: dict[str, dict[str, Any]] = {}
     transport_scope: dict[str, str] = {}
-    first_candidate: tuple[dict[str, Any], str, str] | None = None
     for source_row in rows:
         row = {key: value for key, value in source_row.items() if not key.startswith("_raw_")}
         request = label(source_row.get("_raw_request"), "request", request_labels)
@@ -1551,10 +1610,24 @@ def _summarize_gateway_boundary_trace(trace: Iterable[dict[str, Any]]) -> dict[s
             continue
         summary = request_summaries.setdefault(request, _new_boundary_request_summary())
         route = summary["route"]
-        for key in ("protocol", "configured_proxy_mode", "effective_proxy_mode"):
+        for key in ("protocol", "configured_proxy_mode", "effective_proxy_mode", "desktop_route_mode"):
             value = row.get(key)
             if isinstance(value, str):
                 route[key] = value
+        downstream_summary = summary["downstream"]
+        if row["event"] == "downstream_request_bound":
+            downstream_summary["request_observed"] = True
+            boundary = row.get("app_stream_consumer_boundary")
+            if isinstance(boundary, str):
+                downstream_summary["stream_consumer_boundary"] = boundary
+        if row["event"] == "downstream_response_open":
+            downstream_summary["response_opened"] = True
+        if row["event"] == "downstream_response_headers_sent":
+            downstream_summary["response_headers_sent"] = True
+        if row["event"] == "downstream_first_exposed":
+            downstream_summary["first_exposed"] = True
+        if row["event"] == "downstream_write_failed":
+            downstream_summary["write_failure_observed"] = True
         retry = summary["retry"]
         attempt = row.get("attempt")
         if isinstance(attempt, int) and attempt not in retry["attempts_observed"]:
@@ -1601,11 +1674,6 @@ def _summarize_gateway_boundary_trace(trace: Iterable[dict[str, Any]]) -> dict[s
             relay["local_socket_closed"] = True
         if row["event"] == "gateway_event" and row.get("gateway_event") in {"request_complete", "request_error"}:
             summary["_gateway_terminals"].append(str(row["gateway_event"]))
-        if first_candidate is None:
-            candidate = _boundary_candidate(row)
-            if candidate is not None:
-                first_candidate = (row, *candidate)
-
     rendered_requests: dict[str, dict[str, Any]] = {}
     for request, summary in request_summaries.items():
         terminals = summary.pop("_gateway_terminals")
@@ -1623,16 +1691,29 @@ def _summarize_gateway_boundary_trace(trace: Iterable[dict[str, Any]]) -> dict[s
     first_closing_side = "unknown"
     first_failure_phase = "unknown"
     classification_event: dict[str, Any] | None = None
-    if trace_order_valid and first_candidate is not None:
+    first_candidate = _first_supported_boundary_candidate(events) if trace_order_valid else None
+    if first_candidate is not None:
         candidate_row, first_closing_side, first_failure_phase = first_candidate
         classification_event = {
             key: candidate_row[key]
             for key in ("sequence", "elapsed_ms", "event", "request")
             if key in candidate_row
         }
-        classification_reason = "monotonic_boundary_trace"
+        classification_reason = "monotonic_boundary_trace_with_downstream_writability"
     elif not trace_order_valid:
         classification_reason = "trace_order_invalid" if rows else classification_reason
+
+    downstream_boundaries = sorted(
+        {
+            str(summary["downstream"]["stream_consumer_boundary"])
+            for summary in rendered_requests.values()
+            if isinstance(summary["downstream"].get("stream_consumer_boundary"), str)
+        }
+    )
+    desktop_downstream = {
+        "request_count": sum(1 for summary in rendered_requests.values() if summary["downstream"]["request_observed"]),
+        "stream_consumer_boundaries": downstream_boundaries,
+    }
 
     return {
         "schema_version": BOUNDARY_TRACE_SCHEMA_VERSION,
@@ -1642,6 +1723,7 @@ def _summarize_gateway_boundary_trace(trace: Iterable[dict[str, Any]]) -> dict[s
         "first_failure_phase": _boundary_phase(first_failure_phase),
         "classification_event": classification_event,
         "transport_scope": transport_scope,
+        "desktop_downstream": desktop_downstream,
         "request_count": len(rendered_requests),
         "requests": rendered_requests,
         "events": events,
@@ -1707,6 +1789,28 @@ def _summarize_app_lifecycle(root: Path) -> dict[str, Any]:
     }
 
 
+def _capture_readiness_after_collection(state: dict[str, Any], boundary_trace: dict[str, Any]) -> dict[str, Any]:
+    """State the next safe action without silently scheduling a control rerun."""
+
+    results = state.get("app_results")
+    latest = results[-1] if isinstance(results, list) and results and isinstance(results[-1], dict) else {}
+    if latest.get("leg") != "gateway_official_auto":
+        return {"status": "not_applicable"}
+    if boundary_trace.get("first_closing_side") == "unknown":
+        return {
+            "status": "retained_for_next_natural_faulty_window",
+            "automatic_retest": False,
+            "rearm": "new_disposable_gateway_only_session",
+            "direct_official_control": "cancelled",
+        }
+    return {
+        "status": "first_close_localization_collected",
+        "automatic_retest": False,
+        "next_action": "choose_one_causal_probe_only_after_review",
+        "direct_official_control": "cancelled",
+    }
+
+
 def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
     root = _session_root(session_id)
     state = _load_state(session_id)
@@ -1761,6 +1865,15 @@ def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
             else "incomplete_long_stream_capture"
         )
     boundary_trace = _summarize_gateway_boundary_trace(_read_jsonl(_capture_path(root, "gateway-trace.jsonl")))
+    desktop_downstream = boundary_trace["desktop_downstream"]
+    desktop_boundary = {
+        "desktop_build_identity": "package_build",
+        "desktop_build_version": state.get("build_version"),
+        "app_server_rollout_identity": "not_exposed_by_supported_isolation_seam",
+        "configured_route_mode": state.get("desktop_route_mode"),
+        "app_stream_consumer_boundaries": desktop_downstream["stream_consumer_boundaries"],
+        "gateway_downstream_request_observed": desktop_downstream["request_count"] > 0,
+    }
     report = {
         "schema_version": 4,
         "status": status,
@@ -1776,12 +1889,14 @@ def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
         ],
         "cli_negative_control": state.get("cli_negative_control"),
         "app_lifecycle": _summarize_app_lifecycle(root),
+        "desktop_boundary": desktop_boundary,
         "gateway": _summarize_gateway_events(state, _read_jsonl(paths["gateway_events"])),
         "gateway_connection_trace": boundary_trace,
         "gateway_boundary": boundary_trace,
         "long_stream": long_stream,
         "desktop_process": desktop_process,
         "session_reusable": False,
+        "capture_readiness": _capture_readiness_after_collection(state, boundary_trace),
         "cleanup": {
             "gateway": gateway_stop,
             "isolated_config_overlay": overlay_restore,
@@ -1873,11 +1988,30 @@ def _watch(session_id: str) -> int:
         time.sleep(0.5)
 
 
-def _response_connection_identity(response: Any) -> object:
+def _response_connection_identity(response: Any) -> object | None:
+    """Return a real socket handle, never a per-response wrapper fallback."""
+
     raw_response = getattr(response, "_response", response)
-    connection = getattr(raw_response, "connection", None)
-    socket_value = getattr(connection, "sock", None)
-    return socket_value if socket_value is not None else connection if connection is not None else raw_response
+    candidates = (response, raw_response)
+    for candidate in candidates:
+        connection = getattr(candidate, "connection", None)
+        socket_value = getattr(connection, "sock", None)
+        if socket_value is not None:
+            return socket_value
+        direct_socket = getattr(candidate, "sock", None)
+        if direct_socket is not None:
+            return direct_socket
+    for candidate in candidates:
+        file_pointer = getattr(candidate, "fp", None)
+        raw_stream = getattr(file_pointer, "raw", None)
+        socket_value = getattr(raw_stream, "_sock", None)
+        if socket_value is not None:
+            return socket_value
+        connection = getattr(raw_stream, "_connection", None)
+        socket_value = getattr(connection, "sock", None)
+        if socket_value is not None:
+            return socket_value
+    return None
 
 
 def _live_upstream_phase(request_state: dict[str, Any] | None) -> str:
@@ -1980,9 +2114,23 @@ class _BoundaryTraceWriter:
         except OSError as exc:
             self._record_write_failure("write", exc)
             raise
+        request_state = self._request_state
+        if (
+            payload
+            and request_state.get("upstream_failure_observed")
+            and not request_state.get("downstream_post_upstream_failure_write_confirmed")
+        ):
+            request_state["downstream_post_upstream_failure_write_confirmed"] = True
+            self._record(
+                {
+                    "event": "downstream_write_after_upstream_failure_succeeded",
+                    "request": request_state.get("request"),
+                    "downstream_connection": request_state.get("downstream_connection"),
+                    "bytes": len(payload),
+                }
+            )
         if not payload or not self._request_state["downstream_headers_complete"]:
             return result
-        request_state = self._request_state
         request_state["downstream_bytes_exposed"] += len(payload)
         request_state["downstream_lines_exposed"] += payload.count(b"\n")
         if not request_state["downstream_first_exposed"]:
@@ -2039,6 +2187,7 @@ def _wrap_readline(
         try:
             line = original(*args, **kwargs)
         except BaseException as exc:
+            request_state["upstream_failure_observed"] = True
             partial = getattr(exc, "partial", b"")
             try:
                 partial_bytes = len(partial)
@@ -2069,6 +2218,7 @@ def _wrap_readline(
                 }
             )
             if not terminal_observed:
+                request_state["upstream_failure_observed"] = True
                 record(
                     {
                         "event": "upstream_sse_eof_without_terminal",
@@ -2200,13 +2350,20 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
         if request_state.get("request") == request_label:
             return
         request_state["request"] = request_label
-        emit("downstream_request_bound", request_state)
+        emit(
+            "downstream_request_bound",
+            request_state,
+            desktop_route_mode=request_state["desktop_route_mode"],
+            app_stream_consumer_boundary=request_state["app_stream_consumer_boundary"],
+        )
 
     def new_request_state(peer: object) -> dict[str, Any]:
         return {
             "request": None,
             "downstream_connection": _opaque_label(session_state, "downstream_connection", peer),
             "protocol": None,
+            "desktop_route_mode": str(session_state.get("desktop_route_mode") or "unknown"),
+            "app_stream_consumer_boundary": "gateway_downstream_socket",
             "attempt": 1,
             "retry_budget": None,
             "last_upstream_phase": "unknown",
@@ -2222,6 +2379,8 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
             "downstream_terminal_forwarded": False,
             "downstream_write_failed": False,
             "downstream_headers_complete": False,
+            "upstream_failure_observed": False,
+            "downstream_post_upstream_failure_write_confirmed": False,
             "trace_finalized": False,
         }
 
@@ -2318,7 +2477,12 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
         request_state = new_request_state(getattr(handler, "client_address", None))
         context.request_state = request_state
         context.last_request_state = None
-        emit("downstream_accept", request_state)
+        emit(
+            "downstream_accept",
+            request_state,
+            desktop_route_mode=request_state["desktop_route_mode"],
+            app_stream_consumer_boundary=request_state["app_stream_consumer_boundary"],
+        )
         try:
             return original_handle(handler)
         finally:
@@ -2455,6 +2619,7 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
             retry_budget=request_state.get("retry_budget"),
             configured_proxy_mode=str(session_state.get("gateway_proxy_mode") or session_state.get("proxy_mode") or "unknown"),
             effective_proxy_mode=effective_proxy_mode(protocol, request),
+            connection_disposition="unobserved",
             official_global_opener_before=opener_before,
         )
         try:
@@ -2473,6 +2638,7 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
             )
             raise
         except BaseException as exc:
+            request_state["upstream_failure_observed"] = True
             emit(
                 "upstream_open_failed",
                 request_state,
@@ -2487,10 +2653,13 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
             raise
         request_state["last_upstream_phase"] = "response_headers"
         connection = _response_connection_identity(response)
-        connection_label = _opaque_label(session_state, "upstream_connection", id(connection))
-        with connection_lock:
-            disposition = "reused" if connection_label in observed_connections else "new"
-            observed_connections.add(connection_label)
+        connection_label: str | None = None
+        disposition = "unobserved"
+        if connection is not None:
+            connection_label = _opaque_label(session_state, "upstream_connection", id(connection))
+            with connection_lock:
+                disposition = "reused" if connection_label in observed_connections else "new"
+                observed_connections.add(connection_label)
         status = getattr(response, "status", getattr(response, "code", None))
         emit(
             "upstream_response_headers",
@@ -2524,6 +2693,7 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
             try:
                 value = original(*args, **kwargs)
             except BaseException as exc:
+                request_state["upstream_failure_observed"] = True
                 emit(failure_event, request_state, failure_phase=phase, error=type(exc).__name__)
                 raise
             emit(success_event, request_state, failure_phase=phase)
@@ -2581,6 +2751,7 @@ def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
         try:
             value = original_send(connection, data)
         except BaseException as exc:
+            request_state["upstream_failure_observed"] = True
             emit(
                 "upstream_request_write_failed",
                 request_state,
@@ -2706,6 +2877,7 @@ def dry_run() -> dict[str, Any]:
             "proxy_mode": "auto_windows_registry",
             "websockets": "disabled_for_gateway_leg",
             "gateway_retries": "disabled_for_first_failure_capture",
+            "clean_window_policy": "stop_without_retest_and_rearm_a_new_disposable_gateway_session_only_on_natural_recurrence",
         },
         "authentication": {
             "bootstrap_leg": AUTH_BOOTSTRAP_LEG,

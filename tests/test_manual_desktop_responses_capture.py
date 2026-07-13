@@ -67,7 +67,7 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertEqual(result["recommended_launcher_strategy"], "explicit_user_data_arg")
         self.assertEqual(result["probe_count"], len(capture.LAUNCH_READINESS_STRATEGIES))
 
-    def test_manual_launch_waits_for_and_reports_readiness(self) -> None:
+    def test_manual_bootstrap_launch_waits_for_and_reports_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
                 capture,
@@ -77,11 +77,27 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
                 prepared = capture.prepare("gpt-5.6-terra")
                 readiness = {"status": "ready", "readiness_indicator": "main_window", "exit_code": None}
                 with patch.object(capture, "_launch_desktop", return_value=readiness) as launch_desktop:
-                    launched = capture.launch(prepared["session"], "direct_official")
+                    launched = capture.launch(prepared["session"], capture.AUTH_BOOTSTRAP_LEG)
 
                 self.assertEqual(launched["startup_readiness"], readiness)
                 self.assertEqual(launched["launcher_strategy"], "explicit_user_data_arg")
+                self.assertEqual(launched["route"], "disposable_auth_bootstrap")
                 self.assertEqual(launch_desktop.call_args.args[-1], "explicit_user_data_arg")
+                shutil.rmtree(capture._session_root(prepared["session"]))
+
+    def test_direct_official_launch_is_cancelled_before_desktop_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
+                capture,
+                "_require_desktop_seams",
+                return_value=(Path("desktop-package"), "test-build"),
+            ):
+                prepared = capture.prepare("gpt-5.6-terra")
+                with patch.object(capture, "_launch_desktop") as launch_desktop:
+                    with self.assertRaisesRegex(capture.CaptureError, "direct_official_control_cancelled"):
+                        capture.launch(prepared["session"], "direct_official")
+
+                launch_desktop.assert_not_called()
                 shutil.rmtree(capture._session_root(prepared["session"]))
 
     def test_auth_bootstrap_is_not_a_direct_control_or_renderer_result(self) -> None:
@@ -404,6 +420,13 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
                     "error": "IncompleteRead",
                     "failure_phase": "sse_read",
                 },
+                {
+                    "sequence": 6,
+                    "elapsed_ms": 10,
+                    "event": "downstream_write_after_upstream_failure_succeeded",
+                    "request": "request-1",
+                    "bytes": 32,
+                },
             ]
         )
 
@@ -414,6 +437,39 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertEqual(summary["first_failure_phase"], "sse_read")
         self.assertEqual(summary["requests"]["request-1"]["upstream"]["first_sse_elapsed_ms"], 5)
         self.assertEqual(summary["requests"]["request-1"]["upstream"]["last_complete_sse_elapsed_ms"], 7)
+
+    def test_boundary_trace_does_not_classify_exception_or_error_headers_without_close_evidence(self) -> None:
+        upstream_reader_exception = capture._summarize_gateway_boundary_trace(
+            [
+                {"sequence": 1, "elapsed_ms": 0, "event": "downstream_body_read_complete", "request": "request-1"},
+                {"sequence": 2, "elapsed_ms": 3, "event": "upstream_response_headers", "request": "request-1"},
+                {
+                    "sequence": 3,
+                    "elapsed_ms": 8,
+                    "event": "upstream_sse_read_failed",
+                    "request": "request-1",
+                    "failure_phase": "sse_read",
+                    "error": "IncompleteRead",
+                },
+            ]
+        )
+        service_error_headers = capture._summarize_gateway_boundary_trace(
+            [
+                {"sequence": 1, "elapsed_ms": 0, "event": "downstream_body_read_complete", "request": "request-1"},
+                {
+                    "sequence": 2,
+                    "elapsed_ms": 3,
+                    "event": "upstream_service_error_headers",
+                    "request": "request-1",
+                    "status_class": 5,
+                },
+            ]
+        )
+
+        self.assertEqual(upstream_reader_exception["first_closing_side"], "unknown")
+        self.assertEqual(upstream_reader_exception["first_failure_phase"], "unknown")
+        self.assertEqual(service_error_headers["first_closing_side"], "unknown")
+        self.assertEqual(service_error_headers["first_failure_phase"], "unknown")
 
     def test_boundary_writer_excludes_headers_from_downstream_body_exposure(self) -> None:
         class _Stats:
@@ -452,6 +508,43 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertEqual(request_state["downstream_bytes_exposed"], len(b"data: {}\n\n"))
         self.assertTrue(request_state["downstream_first_exposed"])
         self.assertEqual([event["event"] for event in events], ["downstream_first_exposed"])
+
+    def test_boundary_writer_confirms_downstream_writability_after_upstream_failure(self) -> None:
+        class _Stats:
+            terminal_event_seen = False
+            completed_event_seen = False
+
+            def observe_line(self, _data: bytes) -> None:
+                return None
+
+        request_state = {
+            "request": "request-1",
+            "downstream_connection": "connection-1",
+            "upstream_sse_stats": _Stats(),
+            "downstream_sse_stats": _Stats(),
+            "downstream_headers_complete": False,
+            "downstream_bytes_exposed": 0,
+            "downstream_lines_exposed": 0,
+            "downstream_first_exposed": False,
+            "downstream_terminal_forwarded": False,
+            "downstream_write_failed": False,
+            "upstream_failure_observed": True,
+            "downstream_post_upstream_failure_write_confirmed": False,
+        }
+        events: list[dict[str, object]] = []
+        writer = capture._BoundaryTraceWriter(
+            io.BytesIO(),
+            request_state=request_state,
+            record=events.append,
+        )
+
+        writer.write(b"HTTP/1.1 502 Bad Gateway\r\n")
+
+        self.assertTrue(request_state["downstream_post_upstream_failure_write_confirmed"])
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["downstream_write_after_upstream_failure_succeeded"],
+        )
 
     def test_boundary_trace_marks_downstream_write_before_later_upstream_fault(self) -> None:
         summary = capture._summarize_gateway_boundary_trace(
@@ -510,6 +603,86 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
         self.assertEqual(invalid_order["first_failure_phase"], "unknown")
         self.assertEqual(exception_only["first_closing_side"], "unknown")
         self.assertEqual(exception_only["first_failure_phase"], "unknown")
+
+    def test_boundary_trace_records_desktop_gateway_boundary_and_route_mode(self) -> None:
+        summary = capture._summarize_gateway_boundary_trace(
+            [
+                {
+                    "sequence": 1,
+                    "elapsed_ms": 0,
+                    "event": "downstream_request_bound",
+                    "request": "request-1",
+                    "downstream_connection": "connection-1",
+                    "desktop_route_mode": "isolated_gateway_loopback",
+                    "app_stream_consumer_boundary": "gateway_downstream_socket",
+                },
+                {
+                    "sequence": 2,
+                    "elapsed_ms": 2,
+                    "event": "upstream_attempt_begin",
+                    "request": "request-1",
+                    "protocol": "official",
+                    "effective_proxy_mode": "auto_direct",
+                    "connection_disposition": "unobserved",
+                },
+            ]
+        )
+
+        request = summary["requests"]["request-1"]
+        self.assertEqual(request["route"]["desktop_route_mode"], "isolated_gateway_loopback")
+        self.assertEqual(request["downstream"]["stream_consumer_boundary"], "gateway_downstream_socket")
+        self.assertTrue(request["downstream"]["request_observed"])
+
+    def test_response_connection_identity_requires_an_observed_connection_handle(self) -> None:
+        class _Socket:
+            pass
+
+        class _Connection:
+            def __init__(self, socket_value: object | None) -> None:
+                self.sock = socket_value
+
+        class _RawResponse:
+            def __init__(self, connection: object | None) -> None:
+                self.connection = connection
+
+        class _Response:
+            def __init__(self, raw_response: object) -> None:
+                self._response = raw_response
+
+        socket_value = _Socket()
+        self.assertIs(
+            capture._response_connection_identity(_Response(_RawResponse(_Connection(socket_value)))),
+            socket_value,
+        )
+
+        class _RawStream:
+            def __init__(self, nested_socket: object) -> None:
+                self._sock = nested_socket
+
+        class _FilePointer:
+            def __init__(self, raw_stream: object) -> None:
+                self.raw = raw_stream
+
+        class _StdlibResponse:
+            def __init__(self, file_pointer: object) -> None:
+                self.fp = file_pointer
+
+        self.assertIs(
+            capture._response_connection_identity(_StdlibResponse(_FilePointer(_RawStream(socket_value)))),
+            socket_value,
+        )
+        self.assertIsNone(capture._response_connection_identity(_Response(_RawResponse(None))))
+
+    def test_clean_gateway_capture_retains_only_gateway_fault_readiness(self) -> None:
+        readiness = capture._capture_readiness_after_collection(
+            {"app_results": [{"leg": "gateway_official_auto", "result": "completed"}]},
+            {"first_closing_side": "unknown"},
+        )
+
+        self.assertEqual(readiness["status"], "retained_for_next_natural_faulty_window")
+        self.assertFalse(readiness["automatic_retest"])
+        self.assertEqual(readiness["rearm"], "new_disposable_gateway_only_session")
+        self.assertEqual(readiness["direct_official_control"], "cancelled")
 
     def test_current_transport_scope_reports_no_global_official_opener_installation(self) -> None:
         scope = capture._current_gateway_transport_scope()
