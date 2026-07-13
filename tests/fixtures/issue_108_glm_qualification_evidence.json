@@ -1,0 +1,37 @@
+{
+  "schema": "codexhub.issue108.qualification-evidence.v1",
+  "sanitized": true,
+  "route_identity": {
+    "model": "glm-5.2",
+    "upstream": "ollama_cloud",
+    "route_mode": "codexhub"
+  },
+  "tool_surface_strategy": "deferred_core",
+  "tool_sequence": [
+    "shell_command",
+    "apply_patch",
+    "shell_command"
+  ],
+  "mutation": {
+    "file_count": 1,
+    "hunk_count": 1,
+    "line_replacement_count": 1
+  },
+  "termination": "completed",
+  "request_count": 4,
+  "request_error_count": 0,
+  "fallback_counts": {
+    "luna": 0,
+    "terra": 0
+  },
+  "adapter_counts": {
+    "apply_patch": 1,
+    "history": 2
+  },
+  "deferred_payload": {
+    "sha256": "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294",
+    "equivalent_request_count": 4,
+    "namespace_flattened_count": 0,
+    "tool_search_visible": true
+  }
+}

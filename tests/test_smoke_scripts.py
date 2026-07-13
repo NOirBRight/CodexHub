@@ -403,7 +403,7 @@ def test_issue_108_evidence_replay_rejects_unknown_fixture_fields(tmp_path):
     assert "unexpected" not in result.stdout
 
 
-def test_issue_108_qualification_evidence_replay_fails_closed_without_live_fixture(tmp_path):
+def test_issue_108_qualification_evidence_replay_validates_committed_live_fixture(tmp_path):
     powershell = shutil.which("powershell.exe")
     if powershell is None:
         pytest.skip("Windows PowerShell is required for the evidence replay")
@@ -427,14 +427,18 @@ def test_issue_108_qualification_evidence_replay_fails_closed_without_live_fixtu
         timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stdout + result.stderr
     summaries = list(tmp_path.glob("run-*/summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
     assert summary["mode"] == "qualification_evidence_replay"
-    assert summary["passed"] is False
-    assert summary["failures"] == ["qualification_evidence_fixture_missing"]
-    assert not (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
+    assert summary["passed"] is True
+    assert summary["failures"] == []
+    assert summary["request_count"] == 4
+    assert summary["deferred_payload_digest"] == (
+        "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294"
+    )
+    assert (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
 
 
 def test_issue_108_failure_validator_preserves_sanitized_harness_error_details(tmp_path):
