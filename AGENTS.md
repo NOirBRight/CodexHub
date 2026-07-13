@@ -14,7 +14,7 @@ Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `
 
 ### CI and manual verification
 
-Use GitHub Actions PR checks for `dev` and `main`; when unavailable, run the documented fallback commands. See `docs/agents/ci.md`.
+Classify work as fast, standard, or strict and select local checks from `docs/agents/verification-policy.md`. GitHub Actions remains the final PR gate for `dev` and `main`; when unavailable, run the documented fallback commands in `docs/agents/ci.md`.
 
 ### User feedback
 
