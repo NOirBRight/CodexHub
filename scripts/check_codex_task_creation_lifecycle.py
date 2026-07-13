@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.replay_case == "identity":
         print("Task creation A/B: half_created -> materialized")
-        print("Live remote create replay: not run without Orchestrator approval")
+        print("Historical fixture only; live replay is isolated in the Issue #106 lifecycle runner")
         print("TASK_CREATION_LIFECYCLE_COMPLETE")
         return 0
 
