@@ -6,20 +6,22 @@ explicitly asks it to, and collects sanitized lifecycle/Gateway evidence after
 the maintainer finishes the visible turn.  It never reads or copies a shared
 profile, credential, proxy configuration, or request body.
 
-The first A/B changes exactly one variable: direct Official traffic versus the
-same Desktop build/profile/model through an isolated Gateway using automatic
-Windows proxy discovery.  Gateway retries are disabled only to expose the first
-failure boundary; WebSockets remain disabled for the Gateway condition.
+The active localization leg inserts an isolated Gateway into the known-fault
+Official Desktop path while retaining the same Desktop build/profile/model and
+automatic Windows proxy discovery.  Direct Official stability is retained only
+as historical reporter context, not rerun as a rate control.  Gateway retries
+are disabled only to expose the first failure boundary; WebSockets remain
+disabled for the Gateway condition.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 from dataclasses import asdict
 from datetime import UTC, datetime
 import hashlib
 import hmac
+import http.client
 import json
 import os
 from pathlib import Path
@@ -27,13 +29,16 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from typing import Any, Callable, Iterable
-from urllib.error import URLError
+from urllib import request as urllib_request
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -53,7 +58,8 @@ DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_PROMPT_BYTES = 0
 SESSION_PREFIX = "codexhub-issue-114-manual"
 SESSION_ID_RE = re.compile(r"^[a-z0-9]{12}$")
-LEGS = ("direct_official", "gateway_official_auto")
+AUTH_BOOTSTRAP_LEG = "auth_bootstrap"
+LEGS = (AUTH_BOOTSTRAP_LEG, "direct_official", "gateway_official_auto")
 APP_RESULTS = (
     "completed",
     "reconnecting",
@@ -80,6 +86,26 @@ LAUNCH_READINESS_STRATEGIES = (
 DEFAULT_LAUNCHER_STRATEGY = "explicit_user_data_arg"
 DEFAULT_LAUNCH_READINESS_SECONDS = 8.0
 MAX_LAUNCH_DIAGNOSTIC_BYTES = 4096
+BOUNDARY_TRACE_SCHEMA_VERSION = 1
+BOUNDARY_CLOSING_SIDES = (
+    "downstream_client",
+    "gateway_relay",
+    "upstream_transport",
+    "upstream_service",
+    "unknown",
+)
+BOUNDARY_FAILURE_PHASES = (
+    "dns",
+    "tcp_connect",
+    "tls_handshake",
+    "request_write",
+    "response_headers",
+    "sse_read",
+    "downstream_body",
+    "downstream_write",
+    "relay_terminalization",
+    "unknown",
+)
 GATEWAY_EVENT_FIELDS = (
     "status",
     "failure_phase",
@@ -94,7 +120,13 @@ GATEWAY_EVENT_FIELDS = (
     "sse_downstream_output_seen",
     "synthetic_terminal_event_sent",
     "synthetic_terminal_event_type",
+    "attempt",
+    "max_attempts",
+    "delay_ms",
     "duration_ms",
+    "last_upstream_byte_age_ms",
+    "headers_sent_downstream",
+    "downstream_sse_started",
     "error",
 )
 
@@ -1058,7 +1090,13 @@ def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCH
         "leg": leg,
         "model": state.get("model"),
         "test_gateway": "connected" if leg == "gateway_official_auto" else "disconnected",
-        "route": "gateway_official_auto" if leg == "gateway_official_auto" else "direct_official",
+        "route": (
+            "gateway_official_auto"
+            if leg == "gateway_official_auto"
+            else "disposable_auth_bootstrap"
+            if leg == AUTH_BOOTSTRAP_LEG
+            else "direct_official"
+        ),
         "proxy_mode": "auto_windows_registry",
         "launcher_strategy": launcher_strategy,
         "startup_readiness": readiness,
@@ -1073,6 +1111,8 @@ def mark(session_id: str, result: str) -> dict[str, Any]:
     leg = state.get("current_leg")
     if leg not in LEGS:
         raise CaptureError("desktop_leg_not_started")
+    if leg == AUTH_BOOTSTRAP_LEG:
+        raise CaptureError("auth_bootstrap_has_no_renderer_result")
     at = _utc_now()
     entry = {"at": at, "leg": leg, "result": result}
     configuration = _long_stream_configuration(state)
@@ -1264,10 +1304,353 @@ def _safe_event_value(value: Any) -> int | bool | str | None:
     return None
 
 
+def _current_gateway_transport_scope() -> dict[str, str]:
+    """Describe the current Gateway transport boundary without a route or endpoint."""
+
+    import codex_proxy
+
+    private_official_pool = all(
+        hasattr(codex_proxy, name)
+        for name in ("OFFICIAL_HTTP_POOLS", "_official_pool_manager", "_OfficialHTTPSConnectionPool")
+    )
+    global_opener_installer = any(
+        hasattr(codex_proxy, name)
+        for name in ("_ensure_official_keepalive_opener_installed", "_OfficialKeepaliveHTTPSHandler")
+    )
+    external_urlopen = getattr(codex_proxy, "urlopen", None)
+    return {
+        "official_transport": "private_urllib3_pool" if private_official_pool else "unknown",
+        "external_transport": "stdlib_urlopen"
+        if getattr(external_urlopen, "__module__", None) == "urllib.request"
+        else "unknown",
+        "official_global_opener_installation": "present_current_source"
+        if global_opener_installer
+        else "absent_current_source",
+    }
+
+
+def _stdlib_global_opener_state() -> str:
+    return "unset" if getattr(urllib_request, "_opener", None) is None else "set"
+
+
+def _boundary_phase(value: object, *, default: str = "unknown") -> str:
+    return value if isinstance(value, str) and value in BOUNDARY_FAILURE_PHASES else default
+
+
+def _status_class(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value // 100 if 100 <= value <= 999 else None
+
+
+def _safe_boundary_token(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 80:
+        return None
+    return value if re.fullmatch(r"[A-Za-z0-9_.:-]+", value) else None
+
+
+BOUNDARY_TRACE_INTEGER_FIELDS = {
+    "status",
+    "attempt",
+    "max_attempts",
+    "retry_budget",
+    "status_class",
+    "bytes",
+    "line_index",
+    "body_bytes",
+    "body_expected",
+    "bytes_exposed",
+    "lines_exposed",
+    "partial_bytes",
+    "lines_streamed",
+    "bytes_streamed",
+    "last_upstream_byte_age_ms",
+    "duration_ms",
+    "delay_ms",
+    "sse_events_streamed",
+}
+BOUNDARY_TRACE_BOOLEAN_FIELDS = {
+    "line_complete",
+    "sse_event_complete",
+    "terminal_observed",
+    "completed_terminal_observed",
+    "terminal_forwarded",
+    "close_requested",
+    "official_global_opener_changed",
+    "client_disconnected",
+    "synthetic_terminal_event_sent",
+    "headers_sent_downstream",
+    "downstream_sse_started",
+    "sse_terminal_event_seen",
+    "sse_completed_event_seen",
+    "sse_downstream_output_seen",
+}
+BOUNDARY_TRACE_TOKEN_FIELDS = {
+    "protocol",
+    "configured_proxy_mode",
+    "effective_proxy_mode",
+    "connection_disposition",
+    "error",
+    "gateway_event",
+    "terminal_kind",
+    "official_global_opener_before",
+    "official_global_opener_after",
+    "official_transport",
+    "external_transport",
+    "official_global_opener_installation",
+    "reported_failure_phase",
+    "reported_failure_side",
+    "reported_failure_class",
+    "synthetic_terminal_event_type",
+}
+
+
+def _normalize_boundary_trace(trace: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool, str]:
+    """Keep only ordered, content-free boundary events.
+
+    Old capture rows intentionally have no sequence number and are ignored.  A
+    malformed new row invalidates classification rather than allowing a later
+    exception name to stand in for an ordering decision.
+    """
+
+    rows: list[dict[str, Any]] = []
+    expected_sequence = 1
+    previous_elapsed = -1
+    for item in trace:
+        if "sequence" not in item:
+            continue
+        sequence = item.get("sequence")
+        elapsed_ms = item.get("elapsed_ms")
+        event = _safe_boundary_token(item.get("event"))
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence != expected_sequence
+            or isinstance(elapsed_ms, bool)
+            or not isinstance(elapsed_ms, int)
+            or elapsed_ms < previous_elapsed
+            or event is None
+        ):
+            return [], False, "trace_order_invalid"
+        expected_sequence += 1
+        previous_elapsed = elapsed_ms
+        row: dict[str, Any] = {"sequence": sequence, "elapsed_ms": elapsed_ms, "event": event}
+        raw_request = item.get("request")
+        raw_downstream = item.get("downstream_connection")
+        raw_upstream = item.get("upstream_connection")
+        if isinstance(raw_request, str) and raw_request:
+            row["_raw_request"] = raw_request
+        if isinstance(raw_downstream, str) and raw_downstream:
+            row["_raw_downstream_connection"] = raw_downstream
+        if isinstance(raw_upstream, str) and raw_upstream:
+            row["_raw_upstream_connection"] = raw_upstream
+        failure_phase = _boundary_phase(item.get("failure_phase"), default="")
+        if failure_phase:
+            row["failure_phase"] = failure_phase
+        for field in BOUNDARY_TRACE_INTEGER_FIELDS:
+            value = item.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                row[field] = value
+        for field in BOUNDARY_TRACE_BOOLEAN_FIELDS:
+            value = item.get(field)
+            if isinstance(value, bool):
+                row[field] = value
+        for field in BOUNDARY_TRACE_TOKEN_FIELDS:
+            value = _safe_boundary_token(item.get(field))
+            if value is not None:
+                row[field] = value
+        rows.append(row)
+    if not rows:
+        return [], False, "boundary_trace_missing"
+    return rows, True, "no_boundary_failure_observed"
+
+
+def _boundary_candidate(row: dict[str, Any]) -> tuple[str, str] | None:
+    event = row.get("event")
+    phase = _boundary_phase(row.get("failure_phase"))
+    if event in {"downstream_body_read_failed", "downstream_body_short_read"}:
+        return "downstream_client", "downstream_body"
+    if event == "downstream_write_failed":
+        return "downstream_client", "downstream_write"
+    if event in {"gateway_relay_terminal_not_forwarded", "gateway_relay_exception_after_terminal"}:
+        return "gateway_relay", "relay_terminalization"
+    if event == "upstream_service_error_headers":
+        return "upstream_service", "response_headers"
+    if event == "upstream_dns_failed":
+        return "upstream_transport", "dns"
+    if event == "upstream_tcp_connect_failed":
+        return "upstream_transport", "tcp_connect"
+    if event == "upstream_tls_handshake_failed":
+        return "upstream_transport", "tls_handshake"
+    if event == "upstream_request_write_failed":
+        return "upstream_transport", "request_write"
+    if event in {"upstream_open_failed", "upstream_sse_read_failed", "upstream_sse_eof_without_terminal"}:
+        return "upstream_transport", phase
+    return None
+
+
+def _new_boundary_request_summary() -> dict[str, Any]:
+    return {
+        "route": {"protocol": None, "configured_proxy_mode": None, "effective_proxy_mode": None},
+        "connections": {"identities": [], "dispositions": []},
+        "retry": {"attempts_observed": [], "max_attempts": None, "configured_budget": None},
+        "upstream": {
+            "lines_received": 0,
+            "bytes_received": 0,
+            "first_sse_elapsed_ms": None,
+            "last_complete_sse_elapsed_ms": None,
+            "partial_line_observed": False,
+            "eof_observed": False,
+            "protocol_terminal_observed": False,
+            "completed_terminal_observed": False,
+        },
+        "relay": {
+            "bytes_exposed": 0,
+            "lines_exposed": 0,
+            "terminal_forwarded": False,
+            "local_socket_closed": False,
+        },
+        "_gateway_terminals": [],
+    }
+
+
+def _summarize_gateway_boundary_trace(trace: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    rows, trace_order_valid, classification_reason = _normalize_boundary_trace(trace)
+    request_labels: dict[str, str] = {}
+    downstream_labels: dict[str, str] = {}
+    upstream_labels: dict[str, str] = {}
+
+    def label(raw: object, prefix: str, labels: dict[str, str]) -> str | None:
+        if not isinstance(raw, str) or not raw:
+            return None
+        return labels.setdefault(raw, f"{prefix}-{len(labels) + 1}")
+
+    events: list[dict[str, Any]] = []
+    request_summaries: dict[str, dict[str, Any]] = {}
+    transport_scope: dict[str, str] = {}
+    first_candidate: tuple[dict[str, Any], str, str] | None = None
+    for source_row in rows:
+        row = {key: value for key, value in source_row.items() if not key.startswith("_raw_")}
+        request = label(source_row.get("_raw_request"), "request", request_labels)
+        downstream = label(source_row.get("_raw_downstream_connection"), "downstream", downstream_labels)
+        upstream = label(source_row.get("_raw_upstream_connection"), "upstream", upstream_labels)
+        if request is not None:
+            row["request"] = request
+        if downstream is not None:
+            row["downstream_connection"] = downstream
+        if upstream is not None:
+            row["upstream_connection"] = upstream
+        events.append(row)
+
+        if row["event"] == "gateway_trace_started":
+            for key in ("official_transport", "external_transport", "official_global_opener_installation"):
+                value = row.get(key)
+                if isinstance(value, str):
+                    transport_scope[key] = value
+        if request is None:
+            continue
+        summary = request_summaries.setdefault(request, _new_boundary_request_summary())
+        route = summary["route"]
+        for key in ("protocol", "configured_proxy_mode", "effective_proxy_mode"):
+            value = row.get(key)
+            if isinstance(value, str):
+                route[key] = value
+        retry = summary["retry"]
+        attempt = row.get("attempt")
+        if isinstance(attempt, int) and attempt not in retry["attempts_observed"]:
+            retry["attempts_observed"].append(attempt)
+        max_attempts = row.get("max_attempts")
+        if isinstance(max_attempts, int):
+            retry["max_attempts"] = max(max_attempts, retry["max_attempts"] or 0)
+        retry_budget = row.get("retry_budget")
+        if isinstance(retry_budget, int):
+            retry["configured_budget"] = retry_budget
+        connections = summary["connections"]
+        if upstream is not None and upstream not in connections["identities"]:
+            connections["identities"].append(upstream)
+        disposition = row.get("connection_disposition")
+        if isinstance(disposition, str):
+            connections["dispositions"].append(disposition)
+        upstream_summary = summary["upstream"]
+        if row["event"] == "upstream_sse_line":
+            upstream_summary["lines_received"] = max(
+                upstream_summary["lines_received"], int(row.get("line_index", 0))
+            )
+            upstream_summary["bytes_received"] += int(row.get("bytes", 0))
+            if upstream_summary["first_sse_elapsed_ms"] is None:
+                upstream_summary["first_sse_elapsed_ms"] = row["elapsed_ms"]
+            # A physical newline is not necessarily a complete SSE event.  Keep
+            # the last-event marker tied to the live parser transition so a
+            # partial event cannot be mistaken for a clean terminal boundary.
+            if row.get("sse_event_complete") is True:
+                upstream_summary["last_complete_sse_elapsed_ms"] = row["elapsed_ms"]
+        if row["event"] == "upstream_sse_partial_line":
+            upstream_summary["partial_line_observed"] = True
+        if row["event"] == "upstream_sse_eof":
+            upstream_summary["eof_observed"] = True
+        if row["event"] == "upstream_protocol_terminal_observed":
+            upstream_summary["protocol_terminal_observed"] = True
+            upstream_summary["completed_terminal_observed"] = row.get("completed_terminal_observed") is True
+        relay = summary["relay"]
+        if row["event"] == "relay_exposure_summary":
+            relay["bytes_exposed"] = max(relay["bytes_exposed"], int(row.get("bytes_exposed", 0)))
+            relay["lines_exposed"] = max(relay["lines_exposed"], int(row.get("lines_exposed", 0)))
+        if row["event"] == "relay_terminal_forwarded":
+            relay["terminal_forwarded"] = True
+        if row["event"] == "gateway_local_socket_closed":
+            relay["local_socket_closed"] = True
+        if row["event"] == "gateway_event" and row.get("gateway_event") in {"request_complete", "request_error"}:
+            summary["_gateway_terminals"].append(str(row["gateway_event"]))
+        if first_candidate is None:
+            candidate = _boundary_candidate(row)
+            if candidate is not None:
+                first_candidate = (row, *candidate)
+
+    rendered_requests: dict[str, dict[str, Any]] = {}
+    for request, summary in request_summaries.items():
+        terminals = summary.pop("_gateway_terminals")
+        terminal_count = len(terminals)
+        summary["terminal"] = {
+            "gateway_terminal_outcome": terminals[0] if terminal_count == 1 else "duplicate" if terminal_count > 1 else "not_observed",
+            "gateway_terminal_count": terminal_count,
+            "silent_gateway_terminal": terminal_count == 0,
+            "protocol_terminal_observed": summary["upstream"]["protocol_terminal_observed"],
+            "completed_terminal_observed": summary["upstream"]["completed_terminal_observed"],
+            "terminal_forwarded": summary["relay"]["terminal_forwarded"],
+        }
+        rendered_requests[request] = summary
+
+    first_closing_side = "unknown"
+    first_failure_phase = "unknown"
+    classification_event: dict[str, Any] | None = None
+    if trace_order_valid and first_candidate is not None:
+        candidate_row, first_closing_side, first_failure_phase = first_candidate
+        classification_event = {
+            key: candidate_row[key]
+            for key in ("sequence", "elapsed_ms", "event", "request")
+            if key in candidate_row
+        }
+        classification_reason = "monotonic_boundary_trace"
+    elif not trace_order_valid:
+        classification_reason = "trace_order_invalid" if rows else classification_reason
+
+    return {
+        "schema_version": BOUNDARY_TRACE_SCHEMA_VERSION,
+        "trace_order_valid": trace_order_valid,
+        "classification_reason": classification_reason,
+        "first_closing_side": first_closing_side if first_closing_side in BOUNDARY_CLOSING_SIDES else "unknown",
+        "first_failure_phase": _boundary_phase(first_failure_phase),
+        "classification_event": classification_event,
+        "transport_scope": transport_scope,
+        "request_count": len(rendered_requests),
+        "requests": rendered_requests,
+        "events": events,
+    }
+
+
 def _summarize_gateway_events(state: dict[str, Any], events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     labels: dict[str, str] = {}
     event_rows: list[dict[str, Any]] = []
-    first_closing_side = "not_observed"
     terminal_by_request: dict[str, str] = {}
     for item in events:
         event = item.get("event")
@@ -1286,12 +1669,6 @@ def _summarize_gateway_events(state: dict[str, Any], events: Iterable[dict[str, 
                 row[field] = value
         if event in {"request_complete", "request_error"} and request_label is not None:
             terminal_by_request[request_label] = event
-        failure_side = item.get("failure_side")
-        if first_closing_side == "not_observed":
-            if event == "client_write_failed" or failure_side == "downstream_write":
-                first_closing_side = "downstream_app_or_client"
-            elif event in {"upstream_retry", "official_passthrough_stream_closed", "request_error"}:
-                first_closing_side = "gateway_or_upstream"
         if event in {
             "request_start",
             "upstream_retry",
@@ -1305,40 +1682,12 @@ def _summarize_gateway_events(state: dict[str, Any], events: Iterable[dict[str, 
         "request_count": len(labels),
         "events": event_rows,
         "terminal_by_request": terminal_by_request,
-        "first_closing_side": first_closing_side,
+        "first_closing_side": "unknown",
+        "classification_source": "boundary_trace_required",
         "silent_terminal_request_count": sum(
             1 for label in labels.values() if label not in terminal_by_request
         ),
     }
-
-
-def _summarize_trace(trace: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    connections: dict[str, list[str]] = defaultdict(list)
-    opens: list[dict[str, Any]] = []
-    reads: list[dict[str, Any]] = []
-    for item in trace:
-        event = item.get("event")
-        request = item.get("request")
-        if event == "upstream_opened" and isinstance(request, str):
-            label = item.get("upstream_connection")
-            if isinstance(label, str):
-                connections[request].append(label)
-            opens.append(
-                {
-                    key: item[key]
-                    for key in ("event", "request", "protocol", "upstream_connection")
-                    if isinstance(item.get(key), str)
-                }
-            )
-        elif event in {"upstream_open_failed", "upstream_read_failed"}:
-            reads.append(
-                {
-                    key: item[key]
-                    for key in ("event", "request", "protocol", "error")
-                    if isinstance(item.get(key), str)
-                }
-            )
-    return {"connections_by_request": dict(connections), "opens": opens, "read_faults": reads}
 
 
 def _summarize_app_lifecycle(root: Path) -> dict[str, Any]:
@@ -1411,8 +1760,9 @@ def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
             if desktop_process["state"] == "background_after_normal_close"
             else "incomplete_long_stream_capture"
         )
+    boundary_trace = _summarize_gateway_boundary_trace(_read_jsonl(_capture_path(root, "gateway-trace.jsonl")))
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": status,
         "session": session_id,
         "desktop_build_version": state.get("build_version"),
@@ -1427,7 +1777,8 @@ def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
         "cli_negative_control": state.get("cli_negative_control"),
         "app_lifecycle": _summarize_app_lifecycle(root),
         "gateway": _summarize_gateway_events(state, _read_jsonl(paths["gateway_events"])),
-        "gateway_connection_trace": _summarize_trace(_read_jsonl(_capture_path(root, "gateway-trace.jsonl"))),
+        "gateway_connection_trace": boundary_trace,
+        "gateway_boundary": boundary_trace,
         "long_stream": long_stream,
         "desktop_process": desktop_process,
         "session_reusable": False,
@@ -1529,11 +1880,155 @@ def _response_connection_identity(response: Any) -> object:
     return socket_value if socket_value is not None else connection if connection is not None else raw_response
 
 
+def _live_upstream_phase(request_state: dict[str, Any] | None) -> str:
+    if request_state is None:
+        return "unknown"
+    return _boundary_phase(request_state.get("last_upstream_phase"))
+
+
+def _complete_sse_line(data: bytes) -> bool:
+    return data.endswith((b"\n", b"\r"))
+
+
+class _BoundaryTraceReader:
+    def __init__(
+        self,
+        reader: Any,
+        *,
+        request_state: dict[str, Any],
+        expected_bytes: int,
+        record: Callable[[dict[str, Any]], None],
+    ) -> None:
+        self._reader = reader
+        self._request_state = request_state
+        self._expected_bytes = expected_bytes
+        self._record = record
+        self._started = False
+
+    def read(self, *args: Any, **kwargs: Any) -> Any:
+        if not self._started:
+            self._started = True
+            self._record(
+                {
+                    "event": "downstream_body_read_begin",
+                    "request": self._request_state.get("request"),
+                    "downstream_connection": self._request_state.get("downstream_connection"),
+                    "body_expected": self._expected_bytes,
+                }
+            )
+        try:
+            value = self._reader.read(*args, **kwargs)
+        except OSError as exc:
+            self._record(
+                {
+                    "event": "downstream_body_read_failed",
+                    "request": self._request_state.get("request"),
+                    "downstream_connection": self._request_state.get("downstream_connection"),
+                    "failure_phase": "downstream_body",
+                    "error": type(exc).__name__,
+                }
+            )
+            raise
+        body_bytes = len(value) if isinstance(value, (bytes, bytearray, memoryview)) else 0
+        event = "downstream_body_read_complete" if body_bytes >= self._expected_bytes else "downstream_body_short_read"
+        payload: dict[str, Any] = {
+            "event": event,
+            "request": self._request_state.get("request"),
+            "downstream_connection": self._request_state.get("downstream_connection"),
+            "body_expected": self._expected_bytes,
+            "body_bytes": body_bytes,
+        }
+        if event == "downstream_body_short_read":
+            payload["failure_phase"] = "downstream_body"
+        self._record(payload)
+        return value
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._reader, name)
+
+
+class _BoundaryTraceWriter:
+    def __init__(
+        self,
+        writer: Any,
+        *,
+        request_state: dict[str, Any],
+        record: Callable[[dict[str, Any]], None],
+    ) -> None:
+        self._writer = writer
+        self._request_state = request_state
+        self._record = record
+
+    def _record_write_failure(self, operation: str, exc: OSError) -> None:
+        self._request_state["downstream_write_failed"] = True
+        self._record(
+            {
+                "event": "downstream_write_failed",
+                "request": self._request_state.get("request"),
+                "downstream_connection": self._request_state.get("downstream_connection"),
+                "failure_phase": "downstream_write",
+                "error": type(exc).__name__,
+                "terminal_observed": bool(self._request_state["upstream_sse_stats"].terminal_event_seen),
+                "close_requested": operation == "flush",
+            }
+        )
+
+    def write(self, data: Any) -> Any:
+        payload = bytes(data) if isinstance(data, (bytes, bytearray, memoryview)) else b""
+        try:
+            result = self._writer.write(data)
+        except OSError as exc:
+            self._record_write_failure("write", exc)
+            raise
+        if not payload or not self._request_state["downstream_headers_complete"]:
+            return result
+        request_state = self._request_state
+        request_state["downstream_bytes_exposed"] += len(payload)
+        request_state["downstream_lines_exposed"] += payload.count(b"\n")
+        if not request_state["downstream_first_exposed"]:
+            request_state["downstream_first_exposed"] = True
+            self._record(
+                {
+                    "event": "downstream_first_exposed",
+                    "request": request_state.get("request"),
+                    "downstream_connection": request_state.get("downstream_connection"),
+                    "bytes": len(payload),
+                }
+            )
+        stats = request_state["downstream_sse_stats"]
+        terminal_before = bool(stats.terminal_event_seen)
+        stats.observe_line(payload)
+        if stats.terminal_event_seen and not terminal_before and not request_state["downstream_terminal_forwarded"]:
+            request_state["downstream_terminal_forwarded"] = True
+            self._record(
+                {
+                    "event": "relay_terminal_forwarded",
+                    "request": request_state.get("request"),
+                    "downstream_connection": request_state.get("downstream_connection"),
+                    "terminal_forwarded": True,
+                    "terminal_kind": "response_completed" if stats.completed_event_seen else "protocol_terminal",
+                    "bytes_exposed": request_state["downstream_bytes_exposed"],
+                    "lines_exposed": request_state["downstream_lines_exposed"],
+                }
+            )
+        return result
+
+    def flush(self) -> Any:
+        try:
+            return self._writer.flush()
+        except OSError as exc:
+            self._record_write_failure("flush", exc)
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
+
+
 def _wrap_readline(
     response: Any,
     *,
     record: Callable[[dict[str, Any]], None],
-    request_label: str | None,
+    request_state: dict[str, Any],
     protocol: str,
 ) -> Any:
     original = getattr(response, "readline", None)
@@ -1542,18 +2037,99 @@ def _wrap_readline(
 
     def traced_readline(*args: Any, **kwargs: Any) -> Any:
         try:
-            return original(*args, **kwargs)
+            line = original(*args, **kwargs)
         except BaseException as exc:
+            partial = getattr(exc, "partial", b"")
+            try:
+                partial_bytes = len(partial)
+            except TypeError:
+                partial_bytes = 0
             record(
                 {
-                    "at": _utc_now(),
-                    "event": "upstream_read_failed",
-                    "request": request_label,
+                    "event": "upstream_sse_read_failed",
+                    "request": request_state.get("request"),
                     "protocol": protocol,
+                    "failure_phase": _live_upstream_phase(request_state),
                     "error": type(exc).__name__,
+                    "partial_bytes": partial_bytes,
                 }
             )
             raise
+        data = bytes(line) if isinstance(line, (bytes, bytearray, memoryview)) else b""
+        stats = request_state["upstream_sse_stats"]
+        if not data:
+            terminal_observed = bool(stats.terminal_event_seen)
+            record(
+                {
+                    "event": "upstream_sse_eof",
+                    "request": request_state.get("request"),
+                    "protocol": protocol,
+                    "terminal_observed": terminal_observed,
+                    "completed_terminal_observed": bool(stats.completed_event_seen),
+                }
+            )
+            if not terminal_observed:
+                record(
+                    {
+                        "event": "upstream_sse_eof_without_terminal",
+                        "request": request_state.get("request"),
+                        "protocol": protocol,
+                        "failure_phase": _live_upstream_phase(request_state),
+                    }
+                )
+            return line
+        request_state["last_upstream_phase"] = "sse_read"
+        request_state["upstream_lines"] += 1
+        request_state["upstream_bytes"] += len(data)
+        if not request_state["upstream_first_sse"]:
+            request_state["upstream_first_sse"] = True
+            record(
+                {
+                    "event": "upstream_sse_first",
+                    "request": request_state.get("request"),
+                    "protocol": protocol,
+                    "bytes": len(data),
+                }
+            )
+        terminal_before = bool(stats.terminal_event_seen)
+        events_before = stats.events_streamed
+        stats.observe_line(data)
+        line_complete = _complete_sse_line(data)
+        record(
+            {
+                "event": "upstream_sse_line",
+                "request": request_state.get("request"),
+                "protocol": protocol,
+                "line_index": request_state["upstream_lines"],
+                "bytes": len(data),
+                "line_complete": line_complete,
+                "sse_event_complete": stats.events_streamed > events_before,
+                "terminal_observed": bool(stats.terminal_event_seen),
+                "completed_terminal_observed": bool(stats.completed_event_seen),
+            }
+        )
+        if not line_complete:
+            record(
+                {
+                    "event": "upstream_sse_partial_line",
+                    "request": request_state.get("request"),
+                    "protocol": protocol,
+                    "bytes": len(data),
+                }
+            )
+        if stats.terminal_event_seen and not terminal_before:
+            request_state["upstream_terminal_observed"] = True
+            record(
+                {
+                    "event": "upstream_protocol_terminal_observed",
+                    "request": request_state.get("request"),
+                    "protocol": protocol,
+                    "terminal_observed": True,
+                    "completed_terminal_observed": bool(stats.completed_event_seen),
+                    "terminal_kind": "response_completed" if stats.completed_event_seen else "protocol_terminal",
+                }
+            )
+        return line
 
     try:
         setattr(response, "readline", traced_readline)
@@ -1562,40 +2138,176 @@ def _wrap_readline(
     return response
 
 
-def _install_gateway_trace(root: Path, state: dict[str, Any]) -> None:
+def _install_gateway_trace(root: Path, session_state: dict[str, Any]) -> None:
+    """Install task-owned, content-free first-close instrumentation in the Gateway child."""
+
     import codex_proxy
 
     trace_path = _capture_path(root, "gateway-trace.jsonl")
     trace_lock = threading.Lock()
+    connection_lock = threading.Lock()
     context = threading.local()
+    trace_started_at = time.monotonic()
+    sequence = 0
+    observed_connections: set[str] = set()
 
     def record(payload: dict[str, Any]) -> None:
-        compact = {key: value for key, value in payload.items() if value is not None}
-        _append_jsonl(trace_path, compact, lock=trace_lock)
+        nonlocal sequence
+        event = _safe_boundary_token(payload.get("event"))
+        if event is None:
+            return
+        compact: dict[str, Any] = {"schema_version": BOUNDARY_TRACE_SCHEMA_VERSION, "event": event}
+        for field in ("request", "downstream_connection", "upstream_connection"):
+            value = _safe_boundary_token(payload.get(field))
+            if value is not None:
+                compact[field] = value
+        failure_phase = _boundary_phase(payload.get("failure_phase"), default="")
+        if failure_phase:
+            compact["failure_phase"] = failure_phase
+        for field in BOUNDARY_TRACE_INTEGER_FIELDS:
+            value = payload.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                compact[field] = value
+        for field in BOUNDARY_TRACE_BOOLEAN_FIELDS:
+            value = payload.get(field)
+            if isinstance(value, bool):
+                compact[field] = value
+        for field in BOUNDARY_TRACE_TOKEN_FIELDS:
+            value = _safe_boundary_token(payload.get(field))
+            if value is not None:
+                compact[field] = value
+        with trace_lock:
+            sequence += 1
+            compact["sequence"] = sequence
+            compact["elapsed_ms"] = int(max(0.0, time.monotonic() - trace_started_at) * 1000)
+            _append_jsonl(trace_path, compact)
+
+    def current_request_state() -> dict[str, Any] | None:
+        value = getattr(context, "request_state", None)
+        return value if isinstance(value, dict) else None
+
+    def emit(event: str, request_state: dict[str, Any] | None = None, **fields: Any) -> None:
+        payload: dict[str, Any] = {"event": event, **fields}
+        if request_state is not None:
+            payload.setdefault("request", request_state.get("request"))
+            payload.setdefault("downstream_connection", request_state.get("downstream_connection"))
+        record(payload)
+
+    def bind_request(request_state: dict[str, Any], raw_request: object) -> None:
+        if not isinstance(raw_request, str) or not raw_request:
+            return
+        request_label = _opaque_label(session_state, "gateway_request", raw_request)
+        if request_state.get("request") == request_label:
+            return
+        request_state["request"] = request_label
+        emit("downstream_request_bound", request_state)
+
+    def new_request_state(peer: object) -> dict[str, Any]:
+        return {
+            "request": None,
+            "downstream_connection": _opaque_label(session_state, "downstream_connection", peer),
+            "protocol": None,
+            "attempt": 1,
+            "retry_budget": None,
+            "last_upstream_phase": "unknown",
+            "upstream_sse_stats": codex_proxy.PassthroughSseSemanticStats(),
+            "downstream_sse_stats": codex_proxy.PassthroughSseSemanticStats(),
+            "upstream_first_sse": False,
+            "upstream_lines": 0,
+            "upstream_bytes": 0,
+            "upstream_terminal_observed": False,
+            "downstream_first_exposed": False,
+            "downstream_bytes_exposed": 0,
+            "downstream_lines_exposed": 0,
+            "downstream_terminal_forwarded": False,
+            "downstream_write_failed": False,
+            "downstream_headers_complete": False,
+            "trace_finalized": False,
+        }
+
+    def effective_proxy_mode(protocol: str, request: Any) -> str:
+        configured = str(session_state.get("gateway_proxy_mode") or session_state.get("proxy_mode") or "unknown")
+        try:
+            if protocol == "official":
+                proxy_discovered = codex_proxy._official_proxy_url(request.full_url) is not None
+            else:
+                scheme = urlsplit(str(request.full_url)).scheme
+                proxy_discovered = bool(codex_proxy.getproxies().get(scheme))
+        except (AttributeError, OSError, ValueError):
+            return "auto_proxy_unresolved" if configured == "auto_windows_registry" else "process_proxy_unresolved"
+        if configured == "auto_windows_registry":
+            return "auto_proxy_discovered" if proxy_discovered else "auto_direct"
+        return "process_proxy_configured" if proxy_discovered else "process_direct"
+
+    def finalize_request_trace(handler: Any, request_state: dict[str, Any] | None) -> None:
+        if request_state is None or request_state.get("trace_finalized"):
+            return
+        request_state["trace_finalized"] = True
+        if not isinstance(request_state.get("request"), str):
+            return
+        emit(
+            "relay_exposure_summary",
+            request_state,
+            bytes_exposed=request_state["downstream_bytes_exposed"],
+            lines_exposed=request_state["downstream_lines_exposed"],
+            terminal_forwarded=request_state["downstream_terminal_forwarded"],
+        )
+        upstream_terminal = bool(request_state["upstream_sse_stats"].terminal_event_seen)
+        if upstream_terminal and not request_state["downstream_terminal_forwarded"] and not request_state["downstream_write_failed"]:
+            emit("gateway_relay_terminal_not_forwarded", request_state, failure_phase="relay_terminalization")
+        close_requested = bool(getattr(handler, "close_connection", False))
+        emit("gateway_local_socket_close_requested", request_state, close_requested=close_requested)
+
+    record(
+        {
+            "event": "gateway_trace_started",
+            "configured_proxy_mode": str(session_state.get("gateway_proxy_mode") or session_state.get("proxy_mode") or "unknown"),
+            **_current_gateway_transport_scope(),
+        }
+    )
 
     original_write = codex_proxy.write_proxy_event
 
     def traced_write(event: str, **fields: Any) -> None:
+        request_state = current_request_state()
         raw_request = fields.get("request_id")
-        if event == "request_start" and isinstance(raw_request, str):
-            context.request_id = raw_request
-        request_label = (
-            _opaque_label(state, "gateway_request", raw_request)
-            if isinstance(raw_request, str) and raw_request
-            else None
-        )
-        payload: dict[str, Any] = {
-            "at": _utc_now(),
-            "event": "gateway_event",
-            "gateway_event": event,
-            "request": request_label,
-            "downstream_connection": getattr(context, "downstream_connection", None),
-        }
+        if request_state is not None:
+            bind_request(request_state, raw_request)
+        gateway_fields: dict[str, Any] = {"gateway_event": event}
         for name in GATEWAY_EVENT_FIELDS:
             value = _safe_event_value(fields.get(name))
-            if value is not None:
-                payload[name] = value
-        record(payload)
+            if value is None:
+                continue
+            if name == "failure_phase":
+                gateway_fields["reported_failure_phase"] = value
+            elif name == "failure_side":
+                gateway_fields["reported_failure_side"] = value
+            elif name == "failure_class":
+                gateway_fields["reported_failure_class"] = value
+            else:
+                gateway_fields[name] = value
+        emit("gateway_event", request_state, **gateway_fields)
+        if request_state is not None and event == "upstream_retry":
+            attempt = fields.get("attempt")
+            max_attempts = fields.get("max_attempts")
+            if isinstance(attempt, int) and not isinstance(attempt, bool):
+                request_state["attempt"] = attempt + 1
+            if isinstance(max_attempts, int) and not isinstance(max_attempts, bool):
+                request_state["retry_budget"] = max_attempts
+        if request_state is not None and event == "official_passthrough_stream_closed":
+            relay_fields = {
+                "failure_phase": _live_upstream_phase(request_state),
+                "reported_failure_phase": _safe_event_value(fields.get("failure_phase")),
+                "reported_failure_side": _safe_event_value(fields.get("failure_side")),
+                "reported_failure_class": _safe_event_value(fields.get("failure_class")),
+                "lines_streamed": _safe_event_value(fields.get("lines_streamed")),
+                "bytes_streamed": _safe_event_value(fields.get("bytes_streamed")),
+                "last_upstream_byte_age_ms": _safe_event_value(fields.get("last_upstream_byte_age_ms")),
+                "synthetic_terminal_event_sent": _safe_event_value(fields.get("synthetic_terminal_event_sent")),
+                "synthetic_terminal_event_type": _safe_event_value(fields.get("synthetic_terminal_event_type")),
+                "client_disconnected": _safe_event_value(fields.get("client_disconnected")),
+            }
+            emit("relay_reported_stream_close", request_state, **relay_fields)
         original_write(event, **fields)
 
     codex_proxy.write_proxy_event = traced_write
@@ -1603,56 +2315,308 @@ def _install_gateway_trace(root: Path, state: dict[str, Any]) -> None:
     original_handle = codex_proxy.CodexProxyHandler.handle_one_request
 
     def traced_handle(handler: Any) -> Any:
-        peer = getattr(handler, "client_address", None)
-        context.downstream_connection = _opaque_label(state, "downstream_connection", peer)
-        record(
-            {
-                "at": _utc_now(),
-                "event": "downstream_connection_opened",
-                "downstream_connection": context.downstream_connection,
-            }
-        )
-        return original_handle(handler)
+        request_state = new_request_state(getattr(handler, "client_address", None))
+        context.request_state = request_state
+        context.last_request_state = None
+        emit("downstream_accept", request_state)
+        try:
+            return original_handle(handler)
+        finally:
+            request_state["close_requested"] = bool(getattr(handler, "close_connection", False))
+            if isinstance(request_state.get("request"), str):
+                emit("downstream_handler_complete", request_state, close_requested=request_state["close_requested"])
+            context.last_request_state = request_state
+            context.request_state = None
 
     codex_proxy.CodexProxyHandler.handle_one_request = traced_handle
 
-    def instrument_open(protocol: str, original: Callable[..., Any]) -> Callable[..., Any]:
-        def traced_open(*args: Any, **kwargs: Any) -> Any:
-            raw_request = getattr(context, "request_id", None)
-            request_label = (
-                _opaque_label(state, "gateway_request", raw_request)
-                if isinstance(raw_request, str) and raw_request
-                else None
-            )
-            try:
-                response = original(*args, **kwargs)
-            except BaseException as exc:
-                record(
-                    {
-                        "at": _utc_now(),
-                        "event": "upstream_open_failed",
-                        "request": request_label,
-                        "protocol": protocol,
-                        "error": type(exc).__name__,
-                    }
+    original_finish = codex_proxy.CodexProxyHandler.finish
+
+    def traced_finish(handler: Any) -> Any:
+        request_state = current_request_state() or getattr(context, "last_request_state", None)
+        try:
+            return original_finish(handler)
+        finally:
+            if isinstance(request_state, dict) and isinstance(request_state.get("request"), str):
+                emit(
+                    "gateway_local_socket_closed",
+                    request_state,
+                    close_requested=bool(getattr(handler, "close_connection", False)),
                 )
-                raise
-            connection = _response_connection_identity(response)
-            record(
-                {
-                    "at": _utc_now(),
-                    "event": "upstream_opened",
-                    "request": request_label,
-                    "protocol": protocol,
-                    "upstream_connection": _opaque_label(state, "upstream_connection", id(connection)),
-                }
+            context.last_request_state = None
+
+    codex_proxy.CodexProxyHandler.finish = traced_finish
+
+    original_parse = codex_proxy._parse_gateway_request_input
+
+    def traced_parse(handler: Any, *args: Any, **kwargs: Any) -> Any:
+        request_state = current_request_state()
+        if request_state is None:
+            return original_parse(handler, *args, **kwargs)
+        bind_request(request_state, kwargs.get("request_id"))
+        content_length = kwargs.get("content_length")
+        expected_bytes = content_length if isinstance(content_length, int) and content_length >= 0 else 0
+        original_reader = handler.rfile
+        handler.rfile = _BoundaryTraceReader(
+            original_reader,
+            request_state=request_state,
+            expected_bytes=expected_bytes,
+            record=record,
+        )
+        try:
+            return original_parse(handler, *args, **kwargs)
+        finally:
+            handler.rfile = original_reader
+
+    codex_proxy._parse_gateway_request_input = traced_parse
+
+    original_send_response = codex_proxy.CodexProxyHandler.send_response
+
+    def traced_send_response(handler: Any, code: int, message: str | None = None) -> Any:
+        request_state = current_request_state()
+        if request_state is not None and isinstance(request_state.get("request"), str):
+            request_state["downstream_headers_complete"] = False
+            emit("downstream_response_open", request_state, status_class=_status_class(code))
+        return original_send_response(handler, code, message)
+
+    codex_proxy.CodexProxyHandler.send_response = traced_send_response
+
+    original_end_headers = codex_proxy.CodexProxyHandler.end_headers
+
+    def traced_end_headers(handler: Any) -> Any:
+        result = original_end_headers(handler)
+        request_state = current_request_state()
+        if request_state is not None and isinstance(request_state.get("request"), str):
+            request_state["downstream_headers_complete"] = True
+            emit("downstream_response_headers_sent", request_state)
+        return result
+
+    codex_proxy.CodexProxyHandler.end_headers = traced_end_headers
+
+    original_do_post = codex_proxy.CodexProxyHandler.do_POST
+
+    def traced_do_post(handler: Any) -> Any:
+        request_state = current_request_state()
+        if request_state is None:
+            return original_do_post(handler)
+        original_writer = handler.wfile
+        handler.wfile = _BoundaryTraceWriter(original_writer, request_state=request_state, record=record)
+        try:
+            return original_do_post(handler)
+        except BaseException as exc:
+            if request_state["upstream_sse_stats"].terminal_event_seen:
+                emit(
+                    "gateway_relay_exception_after_terminal",
+                    request_state,
+                    failure_phase="relay_terminalization",
+                    error=type(exc).__name__,
+                )
+            raise
+        finally:
+            handler.wfile = original_writer
+            finalize_request_trace(handler, request_state)
+
+    codex_proxy.CodexProxyHandler.do_POST = traced_do_post
+
+    original_open_response = codex_proxy._open_upstream_response
+
+    def traced_open_response(*args: Any, **kwargs: Any) -> Any:
+        request_state = current_request_state()
+        if request_state is not None:
+            request_kind = kwargs.get("request_kind")
+            retry_budget = kwargs.get("max_attempts")
+            if not isinstance(retry_budget, int) or isinstance(retry_budget, bool):
+                try:
+                    retry_budget = codex_proxy._upstream_retry_attempts(str(request_kind or "main_generation"))
+                except (AttributeError, TypeError, ValueError):
+                    retry_budget = None
+            if isinstance(retry_budget, int) and not isinstance(retry_budget, bool):
+                request_state["retry_budget"] = retry_budget
+                emit("upstream_retry_budget", request_state, retry_budget=retry_budget, attempt=request_state["attempt"])
+        return original_open_response(*args, **kwargs)
+
+    codex_proxy._open_upstream_response = traced_open_response
+
+    original_open_once = codex_proxy._open_upstream_once
+
+    def traced_open_once(request: Any, *, upstream_name: str, timeout: int) -> Any:
+        request_state = current_request_state()
+        if request_state is None:
+            return original_open_once(request, upstream_name=upstream_name, timeout=timeout)
+        protocol = upstream_name if upstream_name in {"official", "external"} else "external"
+        request_state["protocol"] = protocol
+        request_state["last_upstream_phase"] = "unknown"
+        opener_before = _stdlib_global_opener_state() if protocol == "official" else None
+        emit(
+            "upstream_attempt_begin",
+            request_state,
+            protocol=protocol,
+            attempt=request_state["attempt"],
+            retry_budget=request_state.get("retry_budget"),
+            configured_proxy_mode=str(session_state.get("gateway_proxy_mode") or session_state.get("proxy_mode") or "unknown"),
+            effective_proxy_mode=effective_proxy_mode(protocol, request),
+            official_global_opener_before=opener_before,
+        )
+        try:
+            response = original_open_once(request, upstream_name=upstream_name, timeout=timeout)
+        except HTTPError as exc:
+            request_state["last_upstream_phase"] = "response_headers"
+            emit(
+                "upstream_service_error_headers",
+                request_state,
+                protocol=protocol,
+                status_class=_status_class(getattr(exc, "code", None)),
+                official_global_opener_after=_stdlib_global_opener_state() if protocol == "official" else None,
+                official_global_opener_changed=(
+                    opener_before != _stdlib_global_opener_state() if protocol == "official" else False
+                ),
             )
-            return _wrap_readline(response, record=record, request_label=request_label, protocol=protocol)
+            raise
+        except BaseException as exc:
+            emit(
+                "upstream_open_failed",
+                request_state,
+                protocol=protocol,
+                failure_phase=_live_upstream_phase(request_state),
+                error=type(exc).__name__,
+                official_global_opener_after=_stdlib_global_opener_state() if protocol == "official" else None,
+                official_global_opener_changed=(
+                    opener_before != _stdlib_global_opener_state() if protocol == "official" else False
+                ),
+            )
+            raise
+        request_state["last_upstream_phase"] = "response_headers"
+        connection = _response_connection_identity(response)
+        connection_label = _opaque_label(session_state, "upstream_connection", id(connection))
+        with connection_lock:
+            disposition = "reused" if connection_label in observed_connections else "new"
+            observed_connections.add(connection_label)
+        status = getattr(response, "status", getattr(response, "code", None))
+        emit(
+            "upstream_response_headers",
+            request_state,
+            protocol=protocol,
+            status_class=_status_class(status),
+            upstream_connection=connection_label,
+            connection_disposition=disposition,
+            official_global_opener_after=_stdlib_global_opener_state() if protocol == "official" else None,
+            official_global_opener_changed=(
+                opener_before != _stdlib_global_opener_state() if protocol == "official" else False
+            ),
+        )
+        return _wrap_readline(response, record=record, request_state=request_state, protocol=protocol)
 
-        return traced_open
+    codex_proxy._open_upstream_once = traced_open_once
 
-    codex_proxy._official_urlopen = instrument_open("official", codex_proxy._official_urlopen)
-    codex_proxy.urlopen = instrument_open("external", codex_proxy.urlopen)
+    def trace_network_phase(
+        begin_event: str,
+        success_event: str,
+        failure_event: str,
+        phase: str,
+        original: Callable[..., Any],
+    ) -> Callable[..., Any]:
+        def traced_network_call(*args: Any, **kwargs: Any) -> Any:
+            request_state = current_request_state()
+            if request_state is None:
+                return original(*args, **kwargs)
+            request_state["last_upstream_phase"] = phase
+            emit(begin_event, request_state, failure_phase=phase)
+            try:
+                value = original(*args, **kwargs)
+            except BaseException as exc:
+                emit(failure_event, request_state, failure_phase=phase, error=type(exc).__name__)
+                raise
+            emit(success_event, request_state, failure_phase=phase)
+            return value
+
+        return traced_network_call
+
+    socket.getaddrinfo = trace_network_phase(
+        "upstream_dns_begin", "upstream_dns_succeeded", "upstream_dns_failed", "dns", socket.getaddrinfo
+    )
+
+    def trace_connection_factory(original: Callable[..., Any]) -> Callable[..., Any]:
+        def traced_connection_factory(*args: Any, **kwargs: Any) -> Any:
+            request_state = current_request_state()
+            if request_state is None:
+                return original(*args, **kwargs)
+            request_state["last_upstream_phase"] = "tcp_connect"
+            emit("upstream_tcp_connect_begin", request_state, failure_phase="tcp_connect")
+            try:
+                connection = original(*args, **kwargs)
+            except BaseException as exc:
+                emit("upstream_tcp_connect_failed", request_state, failure_phase="tcp_connect", error=type(exc).__name__)
+                raise
+            emit(
+                "upstream_tcp_connect_succeeded",
+                request_state,
+                failure_phase="tcp_connect",
+                upstream_connection=_opaque_label(session_state, "upstream_connection", id(connection)),
+                connection_disposition="new",
+            )
+            return connection
+
+        return traced_connection_factory
+
+    socket.create_connection = trace_connection_factory(socket.create_connection)
+    codex_proxy.urllib3.util.connection.create_connection = trace_connection_factory(
+        codex_proxy.urllib3.util.connection.create_connection
+    )
+    ssl.SSLSocket.do_handshake = trace_network_phase(
+        "upstream_tls_handshake_begin",
+        "upstream_tls_handshake_succeeded",
+        "upstream_tls_handshake_failed",
+        "tls_handshake",
+        ssl.SSLSocket.do_handshake,
+    )
+    original_send = http.client.HTTPConnection.send
+
+    def traced_send(connection: Any, data: Any) -> Any:
+        request_state = current_request_state()
+        if request_state is None:
+            return original_send(connection, data)
+        request_state["last_upstream_phase"] = "request_write"
+        byte_count = len(data) if isinstance(data, (bytes, bytearray, memoryview)) else 0
+        emit("upstream_request_write_begin", request_state, failure_phase="request_write", bytes=byte_count)
+        try:
+            value = original_send(connection, data)
+        except BaseException as exc:
+            emit(
+                "upstream_request_write_failed",
+                request_state,
+                failure_phase="request_write",
+                error=type(exc).__name__,
+                bytes=byte_count,
+            )
+            raise
+        emit("upstream_request_write_succeeded", request_state, failure_phase="request_write", bytes=byte_count)
+        return value
+
+    http.client.HTTPConnection.send = traced_send
+
+    original_official_relay = codex_proxy.CodexProxyHandler._relay_official_passthrough_sse_response
+
+    def traced_official_relay(handler: Any, response: Any, upstream_name: str, *args: Any, **kwargs: Any) -> Any:
+        request_state = current_request_state()
+        if request_state is None:
+            return original_official_relay(handler, response, upstream_name, *args, **kwargs)
+        bind_request(request_state, kwargs.get("request_id"))
+        emit("relay_official_passthrough_begin", request_state, protocol="official")
+        try:
+            status = original_official_relay(handler, response, upstream_name, *args, **kwargs)
+        except BaseException as exc:
+            if request_state["upstream_sse_stats"].terminal_event_seen:
+                emit(
+                    "gateway_relay_exception_after_terminal",
+                    request_state,
+                    failure_phase="relay_terminalization",
+                    error=type(exc).__name__,
+                )
+            raise
+        emit("relay_official_passthrough_end", request_state, status_class=_status_class(status))
+        return status
+
+    codex_proxy.CodexProxyHandler._relay_official_passthrough_sse_response = traced_official_relay
 
 
 def _gateway(session_id: str) -> int:
@@ -1734,12 +2698,18 @@ def dry_run() -> dict[str, Any]:
         if seams.installed and seams.electron_user_data_override and seams.codex_home_override
         else "desktop_isolation_seam_unavailable",
         "desktop_app": asdict(seams),
-        "first_ab": {
-            "variable": "direct_official_vs_gateway_official_auto",
+        "next_localization_leg": {
+            "variable": "Gateway insertion on the known-fault Official Desktop path",
+            "route": "gateway_official_auto",
+            "direct_official": "historical_reporter_control_not_rerun",
             "model": DEFAULT_MODEL,
             "proxy_mode": "auto_windows_registry",
             "websockets": "disabled_for_gateway_leg",
             "gateway_retries": "disabled_for_first_failure_capture",
+        },
+        "authentication": {
+            "bootstrap_leg": AUTH_BOOTSTRAP_LEG,
+            "rule": "manual_disposable_login_only_no_model_request_or_renderer_result",
         },
         "artifacts": [
             "sanitized_app_renderer_result",

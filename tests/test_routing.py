@@ -11,6 +11,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, call, patch
+from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
 import codex_proxy
@@ -1933,6 +1934,38 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(event["headers_sent_downstream"])
         self.assertTrue(event["downstream_sse_started"])
 
+    def test_official_passthrough_incomplete_read_after_sse_uses_live_stream_body_phase(self):
+        fake = FakeHandler()
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                FakeSseResponse(
+                    [
+                        b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                        codex_proxy.IncompleteRead(b""),
+                    ]
+                ),
+                "official",
+                request_id="req-official-incomplete-read",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture={},
+            )
+
+        event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(codex_proxy.transport_failure_phase(codex_proxy.IncompleteRead(b"")), "response_headers")
+        self.assertEqual(event["failure_phase"], "stream_body")
+        self.assertEqual(event["failure_side"], "upstream_read")
+
     def test_official_passthrough_stream_close_records_downstream_write_failure(self):
         fake = FakeHandler()
         fake.wfile = FakeWFile(fail_on_write=lambda _data, index: index == 0)
@@ -2365,6 +2398,45 @@ class RoutingTests(unittest.TestCase):
         self.assertIs(third_party_response, third_party_success)
         official_urlopen.assert_called_once_with(official_request, timeout=1)
         mock_urlopen.assert_called_once_with(third_party_request, timeout=1)
+
+    def test_current_official_open_does_not_mutate_stdlib_global_opener_before_external_open(self):
+        official_request = codex_proxy.Request(
+            "https://official.invalid/v1/responses", data=b"{}", method="POST"
+        )
+        third_party_request = codex_proxy.Request(
+            "https://external.invalid/v1/responses", data=b"{}", method="POST"
+        )
+        pool_response = Mock()
+        pool_response.status = 200
+        pool_response.reason = "OK"
+        pool_response.headers = {}
+        manager = Mock()
+        manager.request.return_value = pool_response
+
+        for opener_before in (None, object()):
+            observed_external_opener: list[object] = []
+
+            def external_open(*_args, **_kwargs):
+                observed_external_opener.append(urllib_request._opener)
+                return FakeResponse(b'{"id":"resp_default_transport"}')
+
+            with (
+                patch.object(urllib_request, "_opener", opener_before),
+                patch.object(urllib_request, "install_opener") as install_opener,
+                patch("codex_proxy._official_pool_manager", return_value=manager),
+                patch("codex_proxy.urlopen", side_effect=external_open),
+            ):
+                official_response = codex_proxy._official_urlopen(official_request, timeout=1)
+                external_response = codex_proxy._open_upstream_once(
+                    third_party_request,
+                    upstream_name="volcengine",
+                    timeout=1,
+                )
+
+            self.assertEqual(official_response.status, 200)
+            self.assertIsInstance(external_response, FakeResponse)
+            self.assertEqual(observed_external_opener, [opener_before])
+            install_opener.assert_not_called()
 
     def test_official_connection_pool_is_cached_and_bounded(self):
         private_pool = Mock()

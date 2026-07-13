@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 from pathlib import Path
 import shutil
@@ -82,6 +83,31 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
                 self.assertEqual(launched["launcher_strategy"], "explicit_user_data_arg")
                 self.assertEqual(launch_desktop.call_args.args[-1], "explicit_user_data_arg")
                 shutil.rmtree(capture._session_root(prepared["session"]))
+
+    def test_auth_bootstrap_is_not_a_direct_control_or_renderer_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.object(capture.tempfile, "gettempdir", return_value=temporary_directory), patch.object(
+                capture,
+                "_require_desktop_seams",
+                return_value=(Path("desktop-package"), "test-build"),
+            ):
+                prepared = capture.prepare("gpt-5.6-terra")
+                readiness = {"status": "ready", "readiness_indicator": "main_window", "exit_code": None}
+                with patch.object(capture, "_launch_desktop", return_value=readiness), patch.object(
+                    capture, "_start_gateway"
+                ) as start_gateway:
+                    launched = capture.launch(prepared["session"], capture.AUTH_BOOTSTRAP_LEG)
+
+                self.assertEqual(launched["route"], "disposable_auth_bootstrap")
+                self.assertEqual(launched["test_gateway"], "disconnected")
+                start_gateway.assert_not_called()
+                root = capture._session_root(prepared["session"])
+                state = capture._load_state(prepared["session"])
+                state["current_leg"] = capture.AUTH_BOOTSTRAP_LEG
+                capture._write_state(root, state)
+                with self.assertRaisesRegex(capture.CaptureError, "auth_bootstrap_has_no_renderer_result"):
+                    capture.mark(prepared["session"], "completed")
+                shutil.rmtree(root)
 
     def test_readiness_wait_rejects_a_tree_that_exits_before_window(self) -> None:
         process = Mock(pid=123)
@@ -310,7 +336,7 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
                 self.assertEqual(report["cleanup"]["gateway"], "not_started")
                 shutil.rmtree(root)
 
-    def test_gateway_summary_uses_opaque_request_labels_and_finds_upstream_first(self) -> None:
+    def test_gateway_summary_uses_opaque_request_labels_and_defers_first_close_to_boundary_trace(self) -> None:
         raw_request_id = "private-request-id"
         summary = capture._summarize_gateway_events(
             {"session_hmac_key": "a" * 64},
@@ -328,9 +354,169 @@ class ManualDesktopResponsesCaptureTests(unittest.TestCase):
 
         rendered = str(summary)
         self.assertNotIn(raw_request_id, rendered)
-        self.assertEqual(summary["first_closing_side"], "gateway_or_upstream")
+        self.assertEqual(summary["first_closing_side"], "unknown")
+        self.assertEqual(summary["classification_source"], "boundary_trace_required")
         self.assertEqual(summary["terminal_by_request"], {"request-1": "request_error"})
         self.assertEqual(summary["silent_terminal_request_count"], 0)
+
+    def test_boundary_trace_uses_live_stream_order_not_exception_classification(self) -> None:
+        raw_request_id = "private-request-id"
+        summary = capture._summarize_gateway_boundary_trace(
+            [
+                {
+                    "sequence": 1,
+                    "elapsed_ms": 0,
+                    "event": "downstream_body_read_complete",
+                    "request": "request-1",
+                    "downstream_connection": "connection-1",
+                },
+                {
+                    "sequence": 2,
+                    "elapsed_ms": 3,
+                    "event": "upstream_response_headers",
+                    "request": "request-1",
+                    "protocol": "official",
+                    "status_class": 2,
+                },
+                {
+                    "sequence": 3,
+                    "elapsed_ms": 5,
+                    "event": "upstream_sse_line",
+                    "request": "request-1",
+                    "bytes": 48,
+                    "line_complete": True,
+                    "sse_event_complete": False,
+                },
+                {
+                    "sequence": 4,
+                    "elapsed_ms": 7,
+                    "event": "upstream_sse_line",
+                    "request": "request-1",
+                    "bytes": 1,
+                    "line_complete": True,
+                    "sse_event_complete": True,
+                },
+                {
+                    "sequence": 5,
+                    "elapsed_ms": 9,
+                    "event": "upstream_sse_read_failed",
+                    "request": "request-1",
+                    "error": "IncompleteRead",
+                    "failure_phase": "sse_read",
+                },
+            ]
+        )
+
+        rendered = str(summary)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertTrue(summary["trace_order_valid"])
+        self.assertEqual(summary["first_closing_side"], "upstream_transport")
+        self.assertEqual(summary["first_failure_phase"], "sse_read")
+        self.assertEqual(summary["requests"]["request-1"]["upstream"]["first_sse_elapsed_ms"], 5)
+        self.assertEqual(summary["requests"]["request-1"]["upstream"]["last_complete_sse_elapsed_ms"], 7)
+
+    def test_boundary_writer_excludes_headers_from_downstream_body_exposure(self) -> None:
+        class _Stats:
+            terminal_event_seen = False
+            completed_event_seen = False
+
+            def observe_line(self, _data: bytes) -> None:
+                return None
+
+        request_state = {
+            "request": "request-1",
+            "downstream_connection": "connection-1",
+            "upstream_sse_stats": _Stats(),
+            "downstream_sse_stats": _Stats(),
+            "downstream_headers_complete": False,
+            "downstream_bytes_exposed": 0,
+            "downstream_lines_exposed": 0,
+            "downstream_first_exposed": False,
+            "downstream_terminal_forwarded": False,
+            "downstream_write_failed": False,
+        }
+        events: list[dict[str, object]] = []
+        writer = capture._BoundaryTraceWriter(
+            io.BytesIO(),
+            request_state=request_state,
+            record=events.append,
+        )
+
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+        self.assertEqual(request_state["downstream_bytes_exposed"], 0)
+        self.assertFalse(request_state["downstream_first_exposed"])
+
+        request_state["downstream_headers_complete"] = True
+        writer.write(b"data: {}\n\n")
+
+        self.assertEqual(request_state["downstream_bytes_exposed"], len(b"data: {}\n\n"))
+        self.assertTrue(request_state["downstream_first_exposed"])
+        self.assertEqual([event["event"] for event in events], ["downstream_first_exposed"])
+
+    def test_boundary_trace_marks_downstream_write_before_later_upstream_fault(self) -> None:
+        summary = capture._summarize_gateway_boundary_trace(
+            [
+                {
+                    "sequence": 1,
+                    "elapsed_ms": 0,
+                    "event": "downstream_response_open",
+                    "request": "request-1",
+                    "status_class": 2,
+                },
+                {
+                    "sequence": 2,
+                    "elapsed_ms": 8,
+                    "event": "downstream_write_failed",
+                    "request": "request-1",
+                    "failure_phase": "downstream_write",
+                    "error": "ConnectionResetError",
+                },
+                {
+                    "sequence": 3,
+                    "elapsed_ms": 11,
+                    "event": "upstream_sse_read_failed",
+                    "request": "request-1",
+                    "failure_phase": "sse_read",
+                    "error": "IncompleteRead",
+                },
+            ]
+        )
+
+        self.assertEqual(summary["first_closing_side"], "downstream_client")
+        self.assertEqual(summary["first_failure_phase"], "downstream_write")
+
+    def test_boundary_trace_fails_closed_on_invalid_order_or_exception_only(self) -> None:
+        invalid_order = capture._summarize_gateway_boundary_trace(
+            [
+                {"sequence": 2, "elapsed_ms": 4, "event": "upstream_open_failed", "request": "request-1"},
+                {"sequence": 1, "elapsed_ms": 5, "event": "gateway_event", "request": "request-1"},
+            ]
+        )
+        exception_only = capture._summarize_gateway_boundary_trace(
+            [
+                {
+                    "sequence": 1,
+                    "elapsed_ms": 0,
+                    "event": "gateway_event",
+                    "request": "request-1",
+                    "gateway_event": "upstream_retry",
+                    "error": "IncompleteRead",
+                }
+            ]
+        )
+
+        self.assertFalse(invalid_order["trace_order_valid"])
+        self.assertEqual(invalid_order["first_closing_side"], "unknown")
+        self.assertEqual(invalid_order["first_failure_phase"], "unknown")
+        self.assertEqual(exception_only["first_closing_side"], "unknown")
+        self.assertEqual(exception_only["first_failure_phase"], "unknown")
+
+    def test_current_transport_scope_reports_no_global_official_opener_installation(self) -> None:
+        scope = capture._current_gateway_transport_scope()
+
+        self.assertEqual(scope["official_transport"], "private_urllib3_pool")
+        self.assertEqual(scope["external_transport"], "stdlib_urlopen")
+        self.assertEqual(scope["official_global_opener_installation"], "absent_current_source")
 
 
 if __name__ == "__main__":
