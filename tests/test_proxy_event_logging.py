@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import queue
 import sqlite3
 import stat
 import tempfile
@@ -532,21 +531,14 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 importlib.reload(codex_proxy)
 
-    def test_proxy_event_writer_queue_is_bounded_and_drops_without_blocking(self):
+    def test_gateway_event_writer_delegates_payloads_to_the_bounded_writer(self):
         payloads = [
             {"event": "request_start", "request_id": "req-one"},
             {"event": "request_complete", "request_id": "req-two"},
         ]
-        original_queue = codex_proxy.PROXY_EVENT_QUEUE
-        original_dropped = codex_proxy.PROXY_EVENT_DROPPED_COUNT
-        try:
-            codex_proxy.PROXY_EVENT_QUEUE = queue.Queue(maxsize=1)
-            codex_proxy.PROXY_EVENT_DROPPED_COUNT = 0
-            with patch("codex_proxy._ensure_proxy_event_writer_started"):
-                self.assertTrue(codex_proxy._enqueue_proxy_event_payload(payloads[0]))
-                self.assertFalse(codex_proxy._enqueue_proxy_event_payload(payloads[1]))
-            self.assertEqual(codex_proxy.PROXY_EVENT_QUEUE.qsize(), 1)
-            self.assertEqual(codex_proxy.PROXY_EVENT_DROPPED_COUNT, 1)
-        finally:
-            codex_proxy.PROXY_EVENT_QUEUE = original_queue
-            codex_proxy.PROXY_EVENT_DROPPED_COUNT = original_dropped
+        with patch.object(codex_proxy.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
+            self.assertTrue(codex_proxy._enqueue_gateway_event_payload(payloads[0]))
+            self.assertFalse(codex_proxy._enqueue_gateway_event_payload(payloads[1]))
+
+        self.assertEqual(enqueue.call_args_list[0].args, (payloads[0],))
+        self.assertEqual(enqueue.call_args_list[1].args, (payloads[1],))

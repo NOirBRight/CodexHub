@@ -118,6 +118,7 @@ from websocket_transport import (
     write_frame,
 )
 import proxy_telemetry
+import bounded_event_writer
 
 try:
     import zstandard
@@ -648,13 +649,41 @@ RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
-PROXY_EVENT_LOG_LOCK = threading.Lock()
-PROXY_EVENT_QUEUE_MAXSIZE = _env_positive_int("CODEX_PROXY_EVENT_QUEUE_MAXSIZE", 4096)
-PROXY_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=PROXY_EVENT_QUEUE_MAXSIZE)
-PROXY_EVENT_WRITER_LOCK = threading.Lock()
-PROXY_EVENT_WRITER_THREAD: threading.Thread | None = None
-PROXY_EVENT_DROPPED_COUNT = 0
-PROXY_EVENT_DROPPED_LOCK = threading.Lock()
+# Both limits apply to serialized Gateway telemetry still awaiting a sink write,
+# including an in-flight batch, so slow storage cannot grow request memory.
+GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
+GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
+GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _gateway_event_writer_recovery_record(
+    summary: bounded_event_writer.RecoverySummary,
+) -> Mapping[str, Any]:
+    return proxy_telemetry.prepare_event_payload(
+        "telemetry_writer_recovered",
+        {
+            "overflow_records": summary.overflow_records,
+            "overflow_bytes": summary.overflow_bytes,
+            "failed_records": summary.failed_records,
+            "failure_count": summary.failure_count,
+            "failure_categories": list(summary.failure_categories),
+        },
+        RUNTIME_CODEX_DIR,
+    )
+
+
+_previous_gateway_event_writer = globals().get("GATEWAY_EVENT_WRITER")
+if isinstance(_previous_gateway_event_writer, bounded_event_writer.BoundedEventWriter):
+    _previous_gateway_event_writer.shutdown(timeout=1.0)
+
+
+GATEWAY_EVENT_WRITER = bounded_event_writer.BoundedEventWriter(
+    bounded_event_writer.JsonlFileSink(PROXY_EVENT_LOG_PATH),
+    max_records=GATEWAY_EVENT_QUEUE_MAX_RECORDS,
+    max_bytes=GATEWAY_EVENT_QUEUE_MAX_BYTES,
+    recovery_record_factory=_gateway_event_writer_recovery_record,
+    thread_name="codex-gateway-event-writer",
+)
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
@@ -1350,62 +1379,15 @@ def gateway_transparent_vision_proxy_enabled() -> bool:
 
 def write_proxy_event(event: str, **fields: Any) -> None:
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
-    _enqueue_proxy_event_payload(payload)
+    _enqueue_gateway_event_payload(payload)
 
 
-def _enqueue_proxy_event_payload(payload: dict[str, Any]) -> bool:
-    global PROXY_EVENT_DROPPED_COUNT
-    _ensure_proxy_event_writer_started()
-    try:
-        PROXY_EVENT_QUEUE.put_nowait(payload)
-        return True
-    except queue.Full:
-        with PROXY_EVENT_DROPPED_LOCK:
-            PROXY_EVENT_DROPPED_COUNT += 1
-        return False
-
-
-def _ensure_proxy_event_writer_started() -> None:
-    global PROXY_EVENT_WRITER_THREAD
-    with PROXY_EVENT_WRITER_LOCK:
-        if PROXY_EVENT_WRITER_THREAD is not None and PROXY_EVENT_WRITER_THREAD.is_alive():
-            return
-        PROXY_EVENT_WRITER_THREAD = threading.Thread(
-            target=_proxy_event_writer_loop,
-            name="codex-proxy-event-writer",
-            daemon=True,
-        )
-        PROXY_EVENT_WRITER_THREAD.start()
-
-
-def _proxy_event_writer_loop() -> None:
-    while True:
-        payload = PROXY_EVENT_QUEUE.get()
-        try:
-            _write_proxy_event_payload_to_log(payload)
-        finally:
-            PROXY_EVENT_QUEUE.task_done()
-
-
-def _write_proxy_event_payload_to_log(payload: Mapping[str, Any]) -> None:
-    line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    try:
-        with PROXY_EVENT_LOG_LOCK:
-            PROXY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with PROXY_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-    except OSError as exc:
-        logger.warning("failed to write proxy event log: %s", type(exc).__name__)
+def _enqueue_gateway_event_payload(payload: Mapping[str, Any]) -> bool:
+    return GATEWAY_EVENT_WRITER.enqueue(payload)
 
 
 def flush_proxy_event_writer(timeout: float = 5.0) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout)
-    while PROXY_EVENT_QUEUE.unfinished_tasks:
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.01)
-    return True
+    return GATEWAY_EVENT_WRITER.flush(timeout).completed
 
 
 def _usage_int(value: Any) -> int | None:
@@ -14236,7 +14218,14 @@ def run_server(host: str, port: int) -> None:
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
     logger.info("serving Codex proxy on %s:%s", host, port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        writer_result = GATEWAY_EVENT_WRITER.shutdown(
+            timeout=GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        if not writer_result.completed:
+            logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
 
 
 def main(argv: list[str] | None = None) -> int:
