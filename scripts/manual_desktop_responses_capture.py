@@ -63,6 +63,12 @@ APP_RESULTS = (
     "auth_required",
     "aborted",
 )
+LONG_STREAM_PROTOCOL = "desktop_direct_official_long_stream_v1"
+LONG_STREAM_PROMPT_IDENTIFIER = "direct_official_reliability_64x80_90_v1"
+LONG_STREAM_PROMPT_SHA256 = "5e1a8777d2b410a11485b50b957342fbe2e228a80bc415712e1b6a2454b521a2"
+LONG_STREAM_TARGET_DURATION_MS = 45_000
+LONG_STREAM_MARKERS = ("first_visible_output", "stream_active_target_reached")
+LONG_STREAM_FIRST_VISIBLE_SEMANTICS = "operator_observed_renderer_proxy_not_transport_first_byte"
 PROXY_ENV_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 LAUNCH_READINESS_STRATEGIES = (
     "baseline",
@@ -577,6 +583,86 @@ def _pid_alive(pid: object) -> bool:
     return True
 
 
+def _classify_isolated_background_desktop(root: Path, state: dict[str, Any]) -> dict[str, bool | str]:
+    """Classify a surviving task-owned Desktop process without controlling it.
+
+    A normal ``CloseMainWindow`` can leave the packaged Desktop App alive with
+    no visible window.  Collection may record that narrow, identity-verified
+    state, but it must never terminate or otherwise control the process.
+    """
+
+    pid = state.get("current_app_pid")
+    result: dict[str, bool | str] = {
+        "state": "unverified_running_process",
+        "identity_verified": False,
+        "visible_main_window": False,
+        "responsive": False,
+    }
+    if not isinstance(pid, int) or pid <= 0 or not _pid_alive(pid):
+        result["state"] = "not_running"
+        return result
+    if os.name != "nt":
+        return result
+
+    environment = os.environ.copy()
+    environment["CODEXHUB_EXPECTED_USER_DATA"] = str(_runtime_paths(root)["electron_user_data"])
+    command = "\n".join(
+        (
+            f"$process = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction SilentlyContinue",
+            f"$runtime = Get-Process -Id {pid} -ErrorAction SilentlyContinue",
+            "if ($null -eq $process -or $null -eq $runtime) { @{present=$false} | ConvertTo-Json -Compress; exit 0 }",
+            "$expected = [Environment]::GetEnvironmentVariable('CODEXHUB_EXPECTED_USER_DATA')",
+            "$commandLine = [string]$process.CommandLine",
+            "$hasUserDataArgument = $commandLine -match '(?i)(?:^|\\s)--user-data-dir(?:=|\\s)'",
+            "$matchesIsolatedUserData = $commandLine.IndexOf($expected, [System.StringComparison]::OrdinalIgnoreCase) -ge 0",
+            "@{",
+            "  present=$true;",
+            "  name_is_expected=([string]$process.Name -eq 'ChatGPT.exe');",
+            "  has_user_data_argument=$hasUserDataArgument;",
+            "  matches_isolated_user_data=$matchesIsolatedUserData;",
+            "  visible_main_window=([int64]$runtime.MainWindowHandle -ne 0);",
+            "  responsive=[bool]$runtime.Responding",
+            "} | ConvertTo-Json -Compress",
+        )
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=environment,
+        )
+        payload = json.loads(completed.stdout) if completed.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict) or not payload.get("present"):
+        result["state"] = "not_running" if isinstance(payload, dict) and payload.get("present") is False else "unverified_running_process"
+        return result
+
+    identity_verified = all(
+        payload.get(key) is True
+        for key in ("name_is_expected", "has_user_data_argument", "matches_isolated_user_data")
+    )
+    visible_main_window = payload.get("visible_main_window") is True
+    responsive = payload.get("responsive") is True
+    result.update(
+        {
+            "identity_verified": identity_verified,
+            "visible_main_window": visible_main_window,
+            "responsive": responsive,
+        }
+    )
+    if identity_verified and not visible_main_window and responsive:
+        result["state"] = "background_after_normal_close"
+    elif identity_verified and visible_main_window:
+        result["state"] = "visible_window_still_open"
+    elif identity_verified:
+        result["state"] = "task_owned_process_still_running"
+    return result
+
+
 def _manual_wait_for_gateway(port: int, timeout_seconds: float = 15.0) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -813,6 +899,133 @@ def prepare(model: str) -> dict[str, Any]:
     }
 
 
+def _long_stream_configuration(state: dict[str, Any]) -> dict[str, Any] | None:
+    configuration = state.get("long_stream")
+    if configuration is None:
+        return None
+    if not isinstance(configuration, dict):
+        raise CaptureError("invalid_long_stream_state")
+    expected = {
+        "protocol": LONG_STREAM_PROTOCOL,
+        "prompt_identifier": LONG_STREAM_PROMPT_IDENTIFIER,
+        "prompt_sha256": LONG_STREAM_PROMPT_SHA256,
+        "target_duration_ms": LONG_STREAM_TARGET_DURATION_MS,
+        "first_visible_output_semantics": LONG_STREAM_FIRST_VISIBLE_SEMANTICS,
+    }
+    if any(configuration.get(key) != value for key, value in expected.items()):
+        raise CaptureError("invalid_long_stream_state")
+    events = configuration.get("events")
+    if not isinstance(events, list) or any(not isinstance(item, dict) for item in events):
+        raise CaptureError("invalid_long_stream_state")
+    return configuration
+
+
+def arm_long_stream(session_id: str) -> dict[str, Any]:
+    """Arm a fresh isolated session for the direct-Official long-stream control.
+
+    The exact human prompt is deliberately not stored here.  Runtime evidence
+    receives only its stable identifier and digest, never prompt or response
+    content.
+    """
+
+    root = _session_root(session_id)
+    state = _load_state(session_id)
+    if state.get("long_stream") is not None:
+        raise CaptureError("long_stream_already_armed")
+    if (
+        state.get("current_leg") is not None
+        or state.get("app_launches")
+        or state.get("app_results")
+        or state.get("gateway_overlay_active")
+        or state.get("gateway_pid") is not None
+    ):
+        raise CaptureError("long_stream_requires_fresh_unlaunched_session")
+    state["long_stream"] = {
+        "protocol": LONG_STREAM_PROTOCOL,
+        "prompt_identifier": LONG_STREAM_PROMPT_IDENTIFIER,
+        "prompt_sha256": LONG_STREAM_PROMPT_SHA256,
+        "target_duration_ms": LONG_STREAM_TARGET_DURATION_MS,
+        "first_visible_output_semantics": LONG_STREAM_FIRST_VISIBLE_SEMANTICS,
+        "phase": "awaiting_first_visible_output",
+        "events": [],
+    }
+    _write_state(root, state)
+    return {
+        "status": "long_stream_armed",
+        "session": session_id,
+        "protocol": LONG_STREAM_PROTOCOL,
+        "prompt_identifier": LONG_STREAM_PROMPT_IDENTIFIER,
+        "prompt_sha256": LONG_STREAM_PROMPT_SHA256,
+        "target_duration_ms": LONG_STREAM_TARGET_DURATION_MS,
+        "first_visible_output_semantics": LONG_STREAM_FIRST_VISIBLE_SEMANTICS,
+        "route": "direct_official",
+    }
+
+
+def mark_long_stream(session_id: str, marker: str) -> dict[str, Any]:
+    """Record one sanitized operator-observed marker for the long-stream run."""
+
+    if marker not in LONG_STREAM_MARKERS:
+        raise CaptureError("unsupported_long_stream_marker")
+    root = _session_root(session_id)
+    state = _load_state(session_id)
+    configuration = _long_stream_configuration(state)
+    if configuration is None:
+        raise CaptureError("long_stream_not_armed")
+    if state.get("current_leg") != "direct_official":
+        raise CaptureError("long_stream_direct_official_leg_not_active")
+    phase = configuration.get("phase")
+    if marker == "first_visible_output":
+        if phase != "awaiting_first_visible_output":
+            raise CaptureError("long_stream_marker_out_of_order")
+        next_phase = "awaiting_stream_active_target"
+        lifecycle_event = "renderer_first_visible_output"
+    else:
+        if phase == "awaiting_first_visible_output":
+            raise CaptureError("long_stream_first_visible_output_required")
+        if phase != "awaiting_stream_active_target":
+            raise CaptureError("long_stream_marker_out_of_order")
+        next_phase = "awaiting_terminal"
+        lifecycle_event = "renderer_stream_active_target_reached"
+
+    at = _utc_now()
+    events = configuration["events"]
+    events.append({"sequence": len(events) + 1, "event": marker, "at": at})
+    configuration["phase"] = next_phase
+    _write_state(root, state)
+    _append_jsonl(
+        _capture_path(root, "app-cues.jsonl"),
+        {
+            "at": at,
+            "event": lifecycle_event,
+            "leg": "direct_official",
+            "prompt_identifier": LONG_STREAM_PROMPT_IDENTIFIER,
+        },
+    )
+    return {
+        "status": "long_stream_marker_recorded",
+        "session": session_id,
+        "marker": marker,
+        "target_duration_ms": LONG_STREAM_TARGET_DURATION_MS,
+        "first_visible_output_semantics": LONG_STREAM_FIRST_VISIBLE_SEMANTICS,
+    }
+
+
+def _record_long_stream_terminal(configuration: dict[str, Any], result: str, at: str) -> None:
+    events = configuration["events"]
+    if any(item.get("event") == "terminal" for item in events):
+        raise CaptureError("duplicate_long_stream_terminal")
+    phase = configuration.get("phase")
+    if phase not in {
+        "awaiting_first_visible_output",
+        "awaiting_stream_active_target",
+        "awaiting_terminal",
+    }:
+        raise CaptureError("long_stream_terminal_out_of_order")
+    events.append({"sequence": len(events) + 1, "event": "terminal", "at": at, "result": result})
+    configuration["phase"] = "terminal_recorded"
+
+
 def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCHER_STRATEGY) -> dict[str, Any]:
     if leg not in LEGS:
         raise CaptureError("unsupported_leg")
@@ -820,6 +1033,8 @@ def launch(session_id: str, leg: str, *, launcher_strategy: str = DEFAULT_LAUNCH
         raise CaptureError("unsupported_launcher_strategy")
     root = _session_root(session_id)
     state = _load_state(session_id)
+    if state.get("long_stream") is not None and leg != "direct_official":
+        raise CaptureError("long_stream_requires_direct_official")
     if _pid_alive(state.get("current_app_pid")):
         raise CaptureError("previous_isolated_desktop_instance_is_still_running")
     if leg == "gateway_official_auto":
@@ -858,11 +1073,152 @@ def mark(session_id: str, result: str) -> dict[str, Any]:
     leg = state.get("current_leg")
     if leg not in LEGS:
         raise CaptureError("desktop_leg_not_started")
-    entry = {"at": _utc_now(), "leg": leg, "result": result}
+    at = _utc_now()
+    entry = {"at": at, "leg": leg, "result": result}
+    configuration = _long_stream_configuration(state)
+    if configuration is not None:
+        if leg != "direct_official":
+            raise CaptureError("long_stream_requires_direct_official")
+        _record_long_stream_terminal(configuration, result, at)
+        entry["long_stream_protocol"] = LONG_STREAM_PROTOCOL
     state.setdefault("app_results", []).append(entry)
     _write_state(root, state)
     _append_jsonl(_capture_path(root, "app-cues.jsonl"), {"event": "renderer_terminal_cue", **entry})
     return {"status": "marked", "session": session_id, "leg": leg, "result": result}
+
+
+def _duration_between_timestamps_ms(start: object, end: object) -> int | None:
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    try:
+        start_at = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_at = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    duration_ms = round((end_at - start_at).total_seconds() * 1000)
+    return duration_ms if duration_ms >= 0 else None
+
+
+def _summarize_long_stream(state: dict[str, Any]) -> dict[str, Any] | None:
+    configuration = state.get("long_stream")
+    if configuration is None:
+        return None
+    summary: dict[str, Any] = {
+        "protocol": LONG_STREAM_PROTOCOL,
+        "prompt_identifier": LONG_STREAM_PROMPT_IDENTIFIER,
+        "prompt_sha256": LONG_STREAM_PROMPT_SHA256,
+        "target_duration_ms": LONG_STREAM_TARGET_DURATION_MS,
+        "first_visible_output_semantics": LONG_STREAM_FIRST_VISIBLE_SEMANTICS,
+        "first_visible_output_observed": False,
+        "target_marker_recorded": False,
+        "stream_active_target_reached": False,
+        "terminal": None,
+        "terminal_count": 0,
+        "first_visible_to_target_ms": None,
+        "first_visible_to_terminal_ms": None,
+        "capture_status": "incomplete",
+        "qualification": "invalid_marker_state",
+    }
+    if not isinstance(configuration, dict):
+        return summary
+    expected = {
+        "protocol": LONG_STREAM_PROTOCOL,
+        "prompt_identifier": LONG_STREAM_PROMPT_IDENTIFIER,
+        "prompt_sha256": LONG_STREAM_PROMPT_SHA256,
+        "target_duration_ms": LONG_STREAM_TARGET_DURATION_MS,
+        "first_visible_output_semantics": LONG_STREAM_FIRST_VISIBLE_SEMANTICS,
+    }
+    if any(configuration.get(key) != value for key, value in expected.items()):
+        return summary
+    events = configuration.get("events")
+    if not isinstance(events, list) or any(not isinstance(item, dict) for item in events):
+        return summary
+
+    allowed_events = {"first_visible_output", "stream_active_target_reached", "terminal"}
+    malformed = False
+    for sequence, item in enumerate(events, start=1):
+        if item.get("sequence") != sequence or item.get("event") not in allowed_events or not isinstance(item.get("at"), str):
+            malformed = True
+        if item.get("event") == "terminal" and item.get("result") not in APP_RESULTS:
+            malformed = True
+    first_events = [item for item in events if item.get("event") == "first_visible_output"]
+    target_events = [item for item in events if item.get("event") == "stream_active_target_reached"]
+    terminal_events = [item for item in events if item.get("event") == "terminal"]
+    summary["first_visible_output_observed"] = len(first_events) == 1
+    summary["target_marker_recorded"] = len(target_events) == 1
+    summary["terminal_count"] = len(terminal_events)
+    if len(terminal_events) == 1:
+        summary["terminal"] = terminal_events[0].get("result")
+
+    first_index = first_events[0].get("sequence") if len(first_events) == 1 else None
+    target_index = target_events[0].get("sequence") if len(target_events) == 1 else None
+    terminal_index = terminal_events[0].get("sequence") if len(terminal_events) == 1 else None
+    if not isinstance(first_index, int) and first_index is not None:
+        malformed = True
+    if not isinstance(target_index, int) and target_index is not None:
+        malformed = True
+    if not isinstance(terminal_index, int) and terminal_index is not None:
+        malformed = True
+    if target_index is not None and (first_index is None or target_index <= first_index):
+        malformed = True
+    if terminal_index is not None and terminal_index != len(events):
+        malformed = True
+    if terminal_index is not None and target_index is not None and terminal_index <= target_index:
+        malformed = True
+    if len(first_events) > 1 or len(target_events) > 1 or len(terminal_events) > 1:
+        malformed = True
+
+    first_at = first_events[0].get("at") if len(first_events) == 1 else None
+    target_at = target_events[0].get("at") if len(target_events) == 1 else None
+    terminal_at = terminal_events[0].get("at") if len(terminal_events) == 1 else None
+    summary["first_visible_to_target_ms"] = _duration_between_timestamps_ms(first_at, target_at)
+    summary["first_visible_to_terminal_ms"] = _duration_between_timestamps_ms(first_at, terminal_at)
+    target_duration_met = (
+        summary["first_visible_to_target_ms"] is not None
+        and summary["first_visible_to_target_ms"] >= LONG_STREAM_TARGET_DURATION_MS
+    )
+    summary["stream_active_target_reached"] = bool(target_index is not None and target_duration_met and not malformed)
+
+    expected_phase = "awaiting_first_visible_output"
+    if terminal_index is not None:
+        expected_phase = "terminal_recorded"
+    elif target_index is not None:
+        expected_phase = "awaiting_terminal"
+    elif first_index is not None:
+        expected_phase = "awaiting_stream_active_target"
+    if configuration.get("phase") != expected_phase:
+        malformed = True
+
+    if malformed:
+        return summary
+    if target_index is not None and not target_duration_met:
+        summary["qualification"] = "target_duration_not_met"
+        return summary
+    if first_index is not None and target_index is not None and terminal_index is not None:
+        summary["capture_status"] = "complete"
+        terminal = summary["terminal"]
+        summary["qualification"] = (
+            "sustained_control_observed"
+            if terminal == "completed"
+            else f"target_reached_{terminal}_observed"
+        )
+        return summary
+    if terminal_index is not None:
+        terminal = summary["terminal"]
+        summary["qualification"] = (
+            f"under_target_{terminal}"
+            if first_index is not None
+            else f"first_visible_output_missing_{terminal}"
+        )
+        return summary
+    if first_index is not None and target_index is None:
+        summary["qualification"] = "target_and_terminal_missing"
+        return summary
+    if first_index is not None and target_index is not None:
+        summary["qualification"] = "terminal_missing"
+        return summary
+    summary["qualification"] = "first_visible_target_and_terminal_missing"
+    return summary
 
 
 def _manual_stop_gateway(root: Path, state: dict[str, Any]) -> str:
@@ -1005,8 +1361,29 @@ def _summarize_app_lifecycle(root: Path) -> dict[str, Any]:
 def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
     root = _session_root(session_id)
     state = _load_state(session_id)
+    long_stream = _summarize_long_stream(state)
+    desktop_process = {
+        "state": "not_running",
+        "identity_verified": False,
+        "visible_main_window": False,
+        "responsive": False,
+    }
     if _pid_alive(state.get("current_app_pid")):
-        raise CaptureError("close_isolated_desktop_before_collection")
+        desktop_process = _classify_isolated_background_desktop(root, state)
+        if not (
+            desktop_process.get("state") == "background_after_normal_close"
+            and isinstance(state.get("app_results"), list)
+            and state["app_results"]
+        ):
+            raise CaptureError("close_isolated_desktop_before_collection")
+        _append_jsonl(
+            _capture_path(root, "app-lifecycle.jsonl"),
+            {
+                "at": _utc_now(),
+                "event": "desktop_background_after_normal_close",
+                "leg": state.get("current_leg"),
+            },
+        )
     paths = _runtime_paths(root)
     paths["watch_stop"].parent.mkdir(parents=True, exist_ok=True)
     paths["watch_stop"].touch()
@@ -1014,11 +1391,29 @@ def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
     overlay_restore = _restore_isolated_overlay(root, state)
     state["gateway_stop"] = gateway_stop
     state["overlay_restore"] = overlay_restore
+    state["desktop_process_close_state"] = desktop_process["state"]
     state["collected_at"] = _utc_now()
     _write_state(root, state)
+    status = (
+        "aborted_with_background_process"
+        if aborted and desktop_process["state"] == "background_after_normal_close"
+        else "aborted"
+        if aborted
+        else "collected_with_background_process"
+        if desktop_process["state"] == "background_after_normal_close"
+        else "collected"
+    )
+    if long_stream is not None and long_stream["capture_status"] != "complete":
+        status = (
+            "aborted_incomplete_long_stream_capture"
+            if aborted
+            else "incomplete_long_stream_capture_with_background_process"
+            if desktop_process["state"] == "background_after_normal_close"
+            else "incomplete_long_stream_capture"
+        )
     report = {
-        "schema_version": 1,
-        "status": "aborted" if aborted else "collected",
+        "schema_version": 3,
+        "status": status,
         "session": session_id,
         "desktop_build_version": state.get("build_version"),
         "model": state.get("model"),
@@ -1033,9 +1428,17 @@ def collect(session_id: str, *, aborted: bool = False) -> dict[str, Any]:
         "app_lifecycle": _summarize_app_lifecycle(root),
         "gateway": _summarize_gateway_events(state, _read_jsonl(paths["gateway_events"])),
         "gateway_connection_trace": _summarize_trace(_read_jsonl(_capture_path(root, "gateway-trace.jsonl"))),
+        "long_stream": long_stream,
+        "desktop_process": desktop_process,
+        "session_reusable": False,
         "cleanup": {
             "gateway": gateway_stop,
             "isolated_config_overlay": overlay_restore,
+            "desktop_process_teardown": (
+                "not_permitted"
+                if desktop_process["state"] == "background_after_normal_close"
+                else "not_needed"
+            ),
             "shared_state_touched": False,
         },
     }
@@ -1382,6 +1785,11 @@ def main(argv: list[str] | None = None) -> int:
     readiness_parser = subparsers.add_parser("launch-readiness")
     readiness_parser.add_argument("--strategy", choices=("all", *LAUNCH_READINESS_STRATEGIES), default="all")
     readiness_parser.add_argument("--duration-seconds", type=float, default=DEFAULT_LAUNCH_READINESS_SECONDS)
+    arm_long_stream_parser = subparsers.add_parser("arm-long-stream")
+    arm_long_stream_parser.add_argument("--session", required=True)
+    long_stream_marker_parser = subparsers.add_parser("long-stream-marker")
+    long_stream_marker_parser.add_argument("--session", required=True)
+    long_stream_marker_parser.add_argument("--marker", choices=LONG_STREAM_MARKERS, required=True)
     mark_parser = subparsers.add_parser("mark")
     mark_parser.add_argument("--session", required=True)
     mark_parser.add_argument("--result", choices=APP_RESULTS, required=True)
@@ -1408,6 +1816,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "launch-readiness":
             _render(launch_readiness(args.strategy, args.duration_seconds))
+            return 0
+        if args.command == "arm-long-stream":
+            _render(arm_long_stream(args.session))
+            return 0
+        if args.command == "long-stream-marker":
+            _render(mark_long_stream(args.session, args.marker))
             return 0
         if args.command == "mark":
             _render(mark(args.session, args.result))
