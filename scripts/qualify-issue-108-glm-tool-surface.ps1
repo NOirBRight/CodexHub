@@ -342,7 +342,7 @@ function Invoke-LifecycleReplay {
     $summaryPath = Join-Path $runRoot 'summary.json'
     $childPidPath = Join-Path $runRoot 'tracked-child.pid'
     $environmentSnapshotPath = Join-Path $runRoot 'child-environment.json'
-    $lifecycleScriptPath = Join-Path $runRoot 'lifecycle-root.ps1'
+    $lifecycleScriptPath = Join-Path $runRoot 'lifecycle-root.py'
     $replayHome = Join-Path $runRoot 'home'
     $replayTemp = Join-Path $runRoot 'tmp'
     $tracked = $null
@@ -369,50 +369,50 @@ function Invoke-LifecycleReplay {
 
     try {
         New-Item -ItemType Directory -Force -Path $runRoot, $replayHome, $replayTemp | Out-Null
-        $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        if (-not (Test-Path -LiteralPath $powershellPath)) {
-            throw 'lifecycle_powershell_not_found'
+        $pythonCommand = Get-Command 'python.exe' -ErrorAction SilentlyContinue
+        if ($null -eq $pythonCommand) {
+            $pythonCommand = Get-Command 'python' -ErrorAction SilentlyContinue
         }
+        if ($null -eq $pythonCommand -or [string]::IsNullOrWhiteSpace([string]$pythonCommand.Source)) {
+            throw 'lifecycle_python_not_found'
+        }
+        $pythonPath = [string]$pythonCommand.Source
         $lifecycleChildCommand = @'
-param(
-    [string]$ChildPidPath,
-    [string]$EnvironmentSnapshotPath
-)
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
 
-$environmentSnapshot = [ordered]@{
-    cli_has_ollama_api_key = -not [string]::IsNullOrWhiteSpace($env:OLLAMA_API_KEY)
-    cli_has_test_secret = -not [string]::IsNullOrWhiteSpace($env:CODEXHUB_TEST_SECRET)
-    codex_home = $env:CODEX_HOME
-    userprofile = $env:USERPROFILE
+child_pid_path = Path(sys.argv[1])
+environment_snapshot_path = Path(sys.argv[2])
+environment_snapshot = {
+    "cli_has_ollama_api_key": bool(os.environ.get("OLLAMA_API_KEY", "").strip()),
+    "cli_has_test_secret": bool(os.environ.get("CODEXHUB_TEST_SECRET", "").strip()),
+    "codex_home": os.environ.get("CODEX_HOME"),
+    "userprofile": os.environ.get("USERPROFILE"),
 }
-[System.IO.File]::WriteAllText(
-    $EnvironmentSnapshotPath,
-    ($environmentSnapshot | ConvertTo-Json -Compress),
-    [System.Text.UTF8Encoding]::new($false)
+environment_snapshot_path.write_text(
+    json.dumps(environment_snapshot, separators=(",", ":")),
+    encoding="utf-8",
 )
-# Keep the nested child out of Start-TrackedProcess's redirected streams so
-# the outer replay can observe EOF as soon as the retained root is stopped.
-$childStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
-$childStartInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$childStartInfo.Arguments = '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 10"'
-$childStartInfo.UseShellExecute = $false
-$childStartInfo.CreateNoWindow = $true
-$childStartInfo.RedirectStandardOutput = $true
-$childStartInfo.RedirectStandardError = $true
-$child = [System.Diagnostics.Process]::new()
-$child.StartInfo = $childStartInfo
-if (-not $child.Start()) {
-    throw 'lifecycle_nested_child_start_failed'
-}
-[System.IO.File]::WriteAllText($ChildPidPath, [string]$child.Id)
-Start-Sleep -Seconds 10
+# Use fresh null streams and close inherited handles so this nested process
+# cannot retain Start-TrackedProcess's redirected stdout or stderr.
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(10)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    close_fds=True,
+)
+child_pid_path.write_text(str(child.pid), encoding="utf-8")
+time.sleep(10)
 '@
         [System.IO.File]::WriteAllText($lifecycleScriptPath, $lifecycleChildCommand, [System.Text.UTF8Encoding]::new($false))
-        $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($powershellPath)
-        $tracked = Start-TrackedProcess -FileName $powershellPath -Arguments @(
-            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $lifecycleScriptPath,
-            '-ChildPidPath', $childPidPath,
-            '-EnvironmentSnapshotPath', $environmentSnapshotPath
+        $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($pythonPath)
+        $tracked = Start-TrackedProcess -FileName $pythonPath -Arguments @(
+            '-u', $lifecycleScriptPath, $childPidPath, $environmentSnapshotPath
         ) -WorkingDirectory $runRoot -Environment $lifecycleEnvironment
         $childPidDeadline = (Get-Date).AddSeconds(5)
         while ((-not (Test-Path -LiteralPath $childPidPath) -or -not (Test-Path -LiteralPath $environmentSnapshotPath)) -and (Get-Date) -lt $childPidDeadline) {
