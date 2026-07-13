@@ -23,6 +23,7 @@ _LOCAL_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\users\\|/users/|/home/)")
 _RAW_CONTENT = re.compile(r"(?i)(?:automated qualification|\*\*\* begin patch|\*\*\* update file:)")
 DIRECT_TOOL_SURFACE_BUDGET = 64
 _ACCEPTED_DEFERRED_PAYLOAD_SHA256 = "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294"
+_ACCEPTED_QUALIFICATION_REQUEST_COUNT = 4
 _REQUIRED_CORE_TOOL_NAMES = frozenset({"shell_command", "apply_patch"})
 _EXPECTED_DEFERRED_CANONICAL_TOOL_SHAPE = [
     {
@@ -357,8 +358,14 @@ def _validate_gateway_capture_events(value: Any) -> tuple[int, dict[str, int]]:
         else:
             raise EvidenceValidationError("qualification_gateway_event_unexpected")
 
-    _require(request_start_count >= 1, "qualification_request_start_missing")
-    _require(request_complete_count == request_start_count, "qualification_request_completion_count_invalid")
+    _require(
+        request_start_count == _ACCEPTED_QUALIFICATION_REQUEST_COUNT,
+        "qualification_accepted_request_count_invalid",
+    )
+    _require(
+        request_complete_count == _ACCEPTED_QUALIFICATION_REQUEST_COUNT,
+        "qualification_accepted_request_count_invalid",
+    )
     _require(adapter_counts["apply_patch"] >= 1, "qualification_apply_patch_adapter_missing")
     _require(adapter_counts["history"] >= 1, "qualification_history_adapter_missing")
     return request_start_count, adapter_counts
@@ -372,6 +379,10 @@ def _validate_canonical_tool_shape(value: Any) -> str:
 
 def _validate_request_surfaces(value: Any, *, request_count: int, canonical_shape_sha256: str) -> str:
     surfaces = _require_list(value, "qualification_request_surfaces_invalid")
+    _require(
+        len(surfaces) == _ACCEPTED_QUALIFICATION_REQUEST_COUNT,
+        "qualification_accepted_request_surface_count_invalid",
+    )
     _require(len(surfaces) == request_count, "qualification_payload_equivalence_invalid")
     raw_digests: set[str] = set()
     for value in surfaces:

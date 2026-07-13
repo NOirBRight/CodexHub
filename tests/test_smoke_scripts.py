@@ -535,6 +535,43 @@ def test_issue_108_qualification_evidence_replay_rejects_digest_and_equivalence_
     assert json.loads(accepted_digest_result.stdout)["failures"] == ["evidence_fixture_invalid"]
 
 
+def test_issue_108_qualification_evidence_replay_requires_all_four_accepted_request_groups(tmp_path):
+    fixture_path = ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    validator = _load_issue_108_evidence_validator()
+
+    missing_group = json.loads(json.dumps(fixture))
+    capture = missing_group["acceptance_capture"]
+    capture["gateway_events"] = capture["gateway_events"][2:]
+    capture["request_surfaces"] = capture["request_surfaces"][1:]
+
+    with pytest.raises(
+        validator.EvidenceValidationError,
+        match="qualification_accepted_request_count_invalid",
+    ):
+        validator.validate_qualification_fixture(missing_group)
+
+    missing_group_path = tmp_path / "missing-request-group.json"
+    missing_group_path.write_text(json.dumps(missing_group), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tests" / "validate_issue_108_evidence.py"),
+            "--mode",
+            "qualification",
+            "--fixture",
+            str(missing_group_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["failures"] == ["evidence_fixture_invalid"]
+
+
 def test_issue_108_failure_validator_preserves_sanitized_harness_error_details(tmp_path):
     fixture = {
         "schema": "codexhub.issue108.qualification-failure.v1",
