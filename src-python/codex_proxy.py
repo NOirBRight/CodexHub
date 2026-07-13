@@ -6986,9 +6986,7 @@ def official_passthrough_request_body(
     model_id: str | None = None,
 ) -> bytes:
     if not isinstance(payload, Mapping):
-        upstream_model = upstream.get("upstream_model")
-        if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
-            return _replace_embedded_model(body, model_id, upstream_model)
+        # Strict official passthrough has no parsed shape to safely rewrite.
         return body
 
     next_payload = dict(payload)

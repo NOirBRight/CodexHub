@@ -11737,6 +11737,23 @@ Execution constraints:
                     body,
                 )
 
+    def test_official_passthrough_helper_keeps_unparsed_body_byte_identical(self):
+        upstream = {"name": "official", "upstream_model": "gpt-5.5"}
+        for shape, body in {
+            "non_object": b"[]",
+            "malformed_embedded_model": b'{"model":"caller",oops',
+        }.items():
+            with self.subTest(shape=shape):
+                self.assertEqual(
+                    codex_proxy.official_passthrough_request_body(
+                        body,
+                        None,
+                        upstream,
+                        model_id="caller",
+                    ),
+                    body,
+                )
+
     def test_external_request_flattens_mcp_node_repl_namespace_without_tool_search(self):
         body = json.dumps(
             {
