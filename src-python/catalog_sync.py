@@ -155,7 +155,7 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
     "experimental_supported_tools": [],
     "input_modalities": ["text"],
     "supports_search_tool": True,
-    "use_responses_lite": True,
+    "use_responses_lite": False,
 }
 
 OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
@@ -255,19 +255,34 @@ PINNED_OFFICIAL_MODEL_IDS = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
 )
-PINNED_OFFICIAL_MODEL_COMMON_FIELDS = (
+PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS = {
+    "gpt-5.6-sol": "v2",
+    "gpt-5.6-terra": "v2",
+    "gpt-5.6-luna": "v1",
+}
+PINNED_OFFICIAL_LEGACY_MODEL_IDS = (
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+)
+PINNED_OFFICIAL_PLANNER_FIELD_SET = (
     "prefer_websockets",
     "tool_mode",
     "multi_agent_version",
     "use_responses_lite",
-    "comp_hash",
-    "supports_search_tool",
 )
-PINNED_OFFICIAL_MODEL_LIMIT_FIELDS = (
-    "context_window",
-    "max_context_window",
-)
+PINNED_OFFICIAL_MODEL_FIELD_SETS = {
+    **{
+        slug: PINNED_OFFICIAL_PLANNER_FIELD_SET
+        for slug in PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS
+    },
+    **{slug: PINNED_OFFICIAL_PLANNER_FIELD_SET for slug in PINNED_OFFICIAL_LEGACY_MODEL_IDS},
+    "gpt-5.3-codex-spark": ("use_responses_lite",),
+}
 
 
 def load_pinned_official_catalog_metadata(
@@ -288,27 +303,28 @@ def load_pinned_official_catalog_metadata(
         metadata = models.get(slug)
         if not isinstance(metadata, dict):
             raise ValueError(f"official catalog metadata for {slug} is invalid")
-        required_fields = set(PINNED_OFFICIAL_MODEL_COMMON_FIELDS)
-        if slug == "gpt-5.5":
-            required_fields.update(PINNED_OFFICIAL_MODEL_LIMIT_FIELDS)
-        if set(metadata) != required_fields:
+        if set(metadata) != set(PINNED_OFFICIAL_MODEL_FIELD_SETS[slug]):
             raise ValueError(f"official catalog metadata for {slug} has an invalid field set")
-        if not isinstance(metadata["prefer_websockets"], bool):
-            raise ValueError(f"official catalog metadata for {slug} has an invalid websocket flag")
-        if metadata["tool_mode"] not in (None, "code_mode_only"):
-            raise ValueError(f"official catalog metadata for {slug} has an invalid tool mode")
-        if metadata["multi_agent_version"] not in (None, "v1", "v2"):
-            raise ValueError(f"official catalog metadata for {slug} has an invalid multi-agent version")
-        if not isinstance(metadata["use_responses_lite"], bool):
+        if slug in PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS:
+            if metadata["prefer_websockets"] is not True:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid websocket flag")
+            if metadata["tool_mode"] != "code_mode_only":
+                raise ValueError(f"official catalog metadata for {slug} has an invalid tool mode")
+            if metadata["multi_agent_version"] != PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS[slug]:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid multi-agent version")
+            if metadata["use_responses_lite"] is not True:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid Responses Lite flag")
+        elif slug in PINNED_OFFICIAL_LEGACY_MODEL_IDS:
+            if metadata["prefer_websockets"] is not True:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid websocket flag")
+            if metadata["tool_mode"] is not None:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid tool mode")
+            if metadata["multi_agent_version"] is not None:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid multi-agent version")
+            if metadata["use_responses_lite"] is not False:
+                raise ValueError(f"official catalog metadata for {slug} has an invalid Responses Lite flag")
+        elif metadata["use_responses_lite"] is not False:
             raise ValueError(f"official catalog metadata for {slug} has an invalid Responses Lite flag")
-        if not isinstance(metadata["supports_search_tool"], bool):
-            raise ValueError(f"official catalog metadata for {slug} has an invalid search-tool flag")
-        if not isinstance(metadata["comp_hash"], str) or not metadata["comp_hash"]:
-            raise ValueError(f"official catalog metadata for {slug} has an invalid compatibility hash")
-        if slug == "gpt-5.5":
-            for field in PINNED_OFFICIAL_MODEL_LIMIT_FIELDS:
-                if not isinstance(metadata[field], int) or isinstance(metadata[field], bool) or metadata[field] <= 0:
-                    raise ValueError(f"official catalog metadata for {slug} has an invalid {field}")
         validated[slug] = deepcopy(metadata)
     return validated
 
@@ -671,6 +687,11 @@ def apply_pinned_official_catalog_metadata(model: dict[str, Any], slug: str) -> 
         model.update(deepcopy(metadata))
 
 
+def normalize_official_responses_lite_opt_in(model: dict[str, Any]) -> None:
+    if not isinstance(model.get("use_responses_lite"), bool):
+        model["use_responses_lite"] = False
+
+
 def official_proxy_alias(slug: str) -> str:
     return f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/{slug}"
 
@@ -729,6 +750,7 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
     model["display_name"] = official_short_display_name(slug, model, policy)
     if source_model is None:
         apply_official_model_defaults(model, slug)
+    normalize_official_responses_lite_opt_in(model)
     apply_pinned_official_catalog_metadata(model, slug)
     limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
     live_context = model.get("context_window")

@@ -28,17 +28,17 @@ const PINNED_OFFICIAL_MODEL_IDS: &[&str] = &[
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
 ];
-const PINNED_OFFICIAL_MODEL_COMMON_FIELDS: &[&str] = &[
+const PINNED_OFFICIAL_PLANNER_FIELDS: &[&str] = &[
     "prefer_websockets",
     "tool_mode",
     "multi_agent_version",
     "use_responses_lite",
-    "comp_hash",
-    "supports_search_tool",
 ];
-const PINNED_OFFICIAL_MODEL_LIMIT_FIELDS: &[&str] =
-    &["context_window", "max_context_window"];
+const PINNED_OFFICIAL_LITE_ONLY_FIELDS: &[&str] = &["use_responses_lite"];
 type PinnedOfficialCatalogMetadata = HashMap<String, Map<String, Value>>;
 type PinnedOfficialCatalogMetadataResult = Result<PinnedOfficialCatalogMetadata, String>;
 static PINNED_OFFICIAL_CATALOG_METADATA: OnceLock<PinnedOfficialCatalogMetadataResult> =
@@ -597,17 +597,28 @@ fn subscription_models_from_payload(
 fn apply_pinned_official_catalog_metadata_to_seed(
     model: &mut OfficialSubscriptionModel,
 ) -> Result<(), String> {
-    let Some(metadata) = pinned_official_catalog_metadata()?.get(&model.slug) else {
-        return Ok(());
-    };
+    let metadata = pinned_official_catalog_metadata()?.get(&model.slug);
     let raw = model
         .raw
         .as_object_mut()
         .ok_or_else(|| format!("official model {} has invalid raw metadata", model.slug))?;
-    for (key, value) in metadata {
-        raw.insert(key.clone(), value.clone());
+    ensure_responses_lite_opt_in(raw);
+    if let Some(metadata) = metadata {
+        for (key, value) in metadata {
+            raw.insert(key.clone(), value.clone());
+        }
     }
     Ok(())
+}
+
+fn ensure_responses_lite_opt_in(metadata: &mut Map<String, Value>) {
+    if metadata
+        .get("use_responses_lite")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        metadata.insert("use_responses_lite".to_string(), json!(false));
+    }
 }
 
 fn pinned_official_catalog_metadata() -> Result<&'static PinnedOfficialCatalogMetadata, String> {
@@ -651,10 +662,13 @@ fn validate_pinned_official_catalog_metadata(
     slug: &str,
     metadata: &Map<String, Value>,
 ) -> Result<(), String> {
-    let mut required_fields = PINNED_OFFICIAL_MODEL_COMMON_FIELDS.to_vec();
-    if slug == "gpt-5.5" {
-        required_fields.extend_from_slice(PINNED_OFFICIAL_MODEL_LIMIT_FIELDS);
-    }
+    let required_fields = if pinned_official_code_mode_multi_agent_version(slug).is_some()
+        || is_pinned_official_legacy_model(slug)
+    {
+        PINNED_OFFICIAL_PLANNER_FIELDS
+    } else {
+        PINNED_OFFICIAL_LITE_ONLY_FIELDS
+    };
     if metadata.len() != required_fields.len()
         || required_fields.iter().any(|field| !metadata.contains_key(*field))
     {
@@ -662,66 +676,94 @@ fn validate_pinned_official_catalog_metadata(
             "official catalog metadata for {slug} has an invalid field set"
         ));
     }
-    if !metadata
-        .get("prefer_websockets")
-        .and_then(Value::as_bool)
-        .is_some()
+    if let Some(expected_multi_agent_version) = pinned_official_code_mode_multi_agent_version(slug)
     {
-        return Err(format!(
-            "official catalog metadata for {slug} has an invalid websocket flag"
-        ));
-    }
-    let valid_tool_mode = match metadata.get("tool_mode") {
-        Some(Value::Null) => true,
-        Some(Value::String(value)) => value == "code_mode_only",
-        _ => false,
-    };
-    if !valid_tool_mode {
-        return Err(format!(
-            "official catalog metadata for {slug} has an invalid tool mode"
-        ));
-    }
-    let valid_multi_agent_version = match metadata.get("multi_agent_version") {
-        Some(Value::Null) => true,
-        Some(Value::String(value)) => value == "v1" || value == "v2",
-        _ => false,
-    };
-    if !valid_multi_agent_version {
-        return Err(format!(
-            "official catalog metadata for {slug} has an invalid multi-agent version"
-        ));
-    }
-    for field in ["use_responses_lite", "supports_search_tool"] {
-        if metadata.get(field).and_then(Value::as_bool).is_none() {
+        if metadata
+            .get("prefer_websockets")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
             return Err(format!(
-                "official catalog metadata for {slug} has an invalid {field} flag"
+                "official catalog metadata for {slug} has an invalid websocket flag"
             ));
         }
-    }
-    if !metadata
-        .get("comp_hash")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
+        if metadata.get("tool_mode").and_then(Value::as_str) != Some("code_mode_only") {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid tool mode"
+            ));
+        }
+        if metadata
+            .get("multi_agent_version")
+            .and_then(Value::as_str)
+            != Some(expected_multi_agent_version)
+        {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid multi-agent version"
+            ));
+        }
+        if metadata
+            .get("use_responses_lite")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid Responses Lite flag"
+            ));
+        }
+    } else if is_pinned_official_legacy_model(slug) {
+        if metadata
+            .get("prefer_websockets")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid websocket flag"
+            ));
+        }
+        if !metadata.get("tool_mode").is_some_and(Value::is_null) {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid tool mode"
+            ));
+        }
+        if !metadata
+            .get("multi_agent_version")
+            .is_some_and(Value::is_null)
+        {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid multi-agent version"
+            ));
+        }
+        if metadata
+            .get("use_responses_lite")
+            .and_then(Value::as_bool)
+            != Some(false)
+        {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid Responses Lite flag"
+            ));
+        }
+    } else if metadata
+        .get("use_responses_lite")
+        .and_then(Value::as_bool)
+        != Some(false)
     {
         return Err(format!(
-            "official catalog metadata for {slug} has an invalid compatibility hash"
+            "official catalog metadata for {slug} has an invalid Responses Lite flag"
         ));
     }
-    if slug == "gpt-5.5" {
-        for field in PINNED_OFFICIAL_MODEL_LIMIT_FIELDS {
-            if metadata
-                .get(*field)
-                .and_then(Value::as_u64)
-                .filter(|value| *value > 0)
-                .is_none()
-            {
-                return Err(format!(
-                    "official catalog metadata for {slug} has an invalid {field}"
-                ));
-            }
-        }
-    }
     Ok(())
+}
+
+fn pinned_official_code_mode_multi_agent_version(slug: &str) -> Option<&'static str> {
+    match slug {
+        "gpt-5.6-sol" | "gpt-5.6-terra" => Some("v2"),
+        "gpt-5.6-luna" => Some("v1"),
+        _ => None,
+    }
+}
+
+fn is_pinned_official_legacy_model(slug: &str) -> bool {
+    matches!(slug, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini")
 }
 
 fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionModel> {
@@ -927,6 +969,7 @@ fn write_official_subscription_seed(
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
+    ensure_responses_lite_opt_in(&mut payload);
     payload.insert("slug".to_string(), json!(model.slug));
     payload
         .entry("display_name".to_string())
@@ -2597,6 +2640,31 @@ mod tests {
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
+                },
+                {
+                    "id": "gpt-5.4",
+                    "model": "gpt-5.4",
+                    "use_responses_lite": true,
+                    "tool_mode": "code_mode_only",
+                    "multi_agent_version": "v2"
+                },
+                {
+                    "id": "gpt-5.4-mini",
+                    "model": "gpt-5.4-mini",
+                    "use_responses_lite": true,
+                    "tool_mode": "code_mode_only",
+                    "multi_agent_version": "v2"
+                },
+                {
+                    "id": "gpt-5.3-codex-spark",
+                    "model": "gpt-5.3-codex-spark",
+                    "use_responses_lite": true
+                },
+                {"id": "gpt-sparse", "model": "gpt-sparse"},
+                {
+                    "id": "gpt-explicit-lite",
+                    "model": "gpt-explicit-lite",
+                    "use_responses_lite": true
                 }
             ]
         }))
@@ -2613,16 +2681,22 @@ mod tests {
             assert_eq!(seeds[index]["use_responses_lite"], true);
         }
 
-        let gpt_55 = &seeds[3];
-        assert!(gpt_55.get("tool_mode").is_some());
-        assert!(gpt_55["tool_mode"].is_null());
-        assert!(gpt_55.get("multi_agent_version").is_some());
-        assert!(gpt_55["multi_agent_version"].is_null());
-        assert_eq!(gpt_55["prefer_websockets"], true);
-        assert_eq!(gpt_55["use_responses_lite"], false);
-        assert_eq!(gpt_55["context_window"], 272000);
-        assert_eq!(gpt_55["max_context_window"], 272000);
-        assert_eq!(gpt_55["comp_hash"], "2911");
+        for legacy_model in &seeds[3..6] {
+            assert!(legacy_model.get("tool_mode").is_some());
+            assert!(legacy_model["tool_mode"].is_null());
+            assert!(legacy_model.get("multi_agent_version").is_some());
+            assert!(legacy_model["multi_agent_version"].is_null());
+            assert_eq!(legacy_model["prefer_websockets"], true);
+            assert_eq!(legacy_model["use_responses_lite"], false);
+        }
+
+        for sparse_model in [&seeds[6], &seeds[7]] {
+            assert_eq!(sparse_model["use_responses_lite"], false);
+            assert!(sparse_model.get("prefer_websockets").is_none());
+            assert!(sparse_model.get("tool_mode").is_none());
+            assert!(sparse_model.get("multi_agent_version").is_none());
+        }
+        assert_eq!(seeds[8]["use_responses_lite"], true);
     }
 
     #[test]

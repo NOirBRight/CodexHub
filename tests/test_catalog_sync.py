@@ -317,9 +317,32 @@ class CatalogSyncTests(unittest.TestCase):
                 "slug": "gpt-5.5",
                 "display_name": "GPT-5.5",
                 "use_responses_lite": True,
+                "prefer_websockets": False,
                 "tool_mode": "code_mode_only",
                 "multi_agent_version": "v2",
             },
+            {
+                "slug": "gpt-5.4",
+                "display_name": "GPT-5.4",
+                "use_responses_lite": True,
+                "prefer_websockets": False,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+            },
+            {
+                "slug": "gpt-5.4-mini",
+                "display_name": "GPT-5.4-Mini",
+                "use_responses_lite": True,
+                "prefer_websockets": False,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+            },
+            {
+                "slug": "gpt-5.3-codex-spark",
+                "display_name": "GPT-5.3-Codex-Spark",
+                "use_responses_lite": True,
+            },
+            {"slug": "gpt-sparse", "display_name": "GPT-Sparse"},
         ]
 
         catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
@@ -336,20 +359,24 @@ class CatalogSyncTests(unittest.TestCase):
                 self.assertEqual(model["multi_agent_version"], multi_agent_version)
                 self.assertIs(model["prefer_websockets"], True)
                 self.assertIs(model["use_responses_lite"], True)
-                self.assertEqual(model["comp_hash"], "3000")
-                self.assertIs(model["supports_search_tool"], True)
 
-        gpt_55 = by_slug["gpt-5.5"]
-        self.assertIn("tool_mode", gpt_55)
-        self.assertIsNone(gpt_55["tool_mode"])
-        self.assertIn("multi_agent_version", gpt_55)
-        self.assertIsNone(gpt_55["multi_agent_version"])
-        self.assertIs(gpt_55["prefer_websockets"], True)
-        self.assertIs(gpt_55["use_responses_lite"], False)
-        self.assertEqual(gpt_55["context_window"], 272000)
-        self.assertEqual(gpt_55["max_context_window"], 272000)
-        self.assertEqual(gpt_55["comp_hash"], "2911")
-        self.assertIs(gpt_55["supports_search_tool"], True)
+        for slug in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini"):
+            with self.subTest(slug=slug):
+                model = by_slug[slug]
+                self.assertIn("tool_mode", model)
+                self.assertIsNone(model["tool_mode"])
+                self.assertIn("multi_agent_version", model)
+                self.assertIsNone(model["multi_agent_version"])
+                self.assertIs(model["prefer_websockets"], True)
+                self.assertIs(model["use_responses_lite"], False)
+
+        for slug in ("gpt-5.3-codex-spark", "gpt-sparse"):
+            with self.subTest(slug=slug):
+                model = by_slug[slug]
+                self.assertIs(model["use_responses_lite"], False)
+                self.assertNotIn("prefer_websockets", model)
+                self.assertNotIn("tool_mode", model)
+                self.assertNotIn("multi_agent_version", model)
 
     def test_minimal_official_catalog_uses_pinned_planner_metadata(self):
         policy = CatalogPolicy(
@@ -361,6 +388,10 @@ class CatalogSyncTests(unittest.TestCase):
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
                 "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
+                "gpt-sparse",
             ),
             allowed_ollama_cloud_models=(),
         )
@@ -374,6 +405,18 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertIs(by_slug["gpt-5.5"]["use_responses_lite"], False)
         self.assertIsNone(by_slug["gpt-5.5"]["tool_mode"])
         self.assertIsNone(by_slug["gpt-5.5"]["multi_agent_version"])
+        for slug in ("gpt-5.4", "gpt-5.4-mini"):
+            with self.subTest(slug=slug):
+                self.assertIs(by_slug[slug]["use_responses_lite"], False)
+                self.assertIs(by_slug[slug]["prefer_websockets"], True)
+                self.assertIsNone(by_slug[slug]["tool_mode"])
+                self.assertIsNone(by_slug[slug]["multi_agent_version"])
+        for slug in ("gpt-5.3-codex-spark", "gpt-sparse"):
+            with self.subTest(slug=slug):
+                self.assertIs(by_slug[slug]["use_responses_lite"], False)
+                self.assertNotIn("prefer_websockets", by_slug[slug])
+                self.assertNotIn("tool_mode", by_slug[slug])
+                self.assertNotIn("multi_agent_version", by_slug[slug])
 
     def test_pinned_official_catalog_metadata_rejects_an_incomplete_model_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -535,8 +578,8 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog([], [], policy, "0.142.0")
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
-        self.assertEqual(by_slug["gpt-5.5"]["context_window"], 272000)
-        self.assertEqual(by_slug["gpt-5.5"]["max_context_window"], 272000)
+        self.assertEqual(by_slug["gpt-5.5"]["context_window"], 258400)
+        self.assertEqual(by_slug["gpt-5.5"]["max_context_window"], 258400)
         self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["context_window"], 258400)
         self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["max_context_window"], 258400)
         self.assertEqual(by_slug["gpt-5.5"]["additional_speed_tiers"], ["fast"])
