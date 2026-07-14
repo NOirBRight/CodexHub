@@ -3053,3 +3053,14 @@ test("debug diagnostics default to a compact accessible disclosure", async () =>
   assert.match(enSource, /summary: "\{\{hours\}\}h · \{\{bytes\}\} bytes · \{\{count\}\} incidents"/);
   assert.match(zhSource, /summary: "\{\{hours\}\} 小时 · \{\{bytes\}\} 字节 · \{\{count\}\} 个事件"/);
 });
+
+test("gateway reserves its flexible left-column row for the usage chart", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+  const leftColumn = gatewaySource.match(
+    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\r?\n\r?\n      <aside/,
+  )?.[0] ?? "";
+
+  assert.ok(leftColumn, "Gateway left column should declare four rows");
+  assert.match(leftColumn, /<RecoveryActivityPanel[\s\S]*?<DebugDiagnosticsPanel[\s\S]*?<StackedUsageChartShell/);
+  assert.doesNotMatch(gatewaySource, /grid-rows-\[auto_auto_minmax\(320px,1fr\)\]/);
+});

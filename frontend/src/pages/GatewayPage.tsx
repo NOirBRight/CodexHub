@@ -406,7 +406,7 @@ function GatewayPageImpl({
 
   return (
     <main className="relative grid h-full min-h-[704px] w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(300px,340px)] gap-4 overflow-hidden">
-      <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(320px,1fr)] gap-2.5">
+      <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_auto_minmax(320px,1fr)] gap-2.5">
         <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
           <div className="flex min-w-0 items-center justify-between gap-3">
             <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
