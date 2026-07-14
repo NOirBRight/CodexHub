@@ -1850,8 +1850,9 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(catalogActionsSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(catalogActionsSource, /updateToast\(toastId, \{[\s\S]*providers\.probeCompleted/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
-  assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
-  assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
+  assert.match(providerDetail, /const dirty = isProviderDirty\(normalizedProvider, draft\);/);
+  assert.doesNotMatch(providerDetail, /JSON\.stringify\(draft\)/);
+  assert.match(providerEditorSource, /import \{ isProviderDirty \} from "\.\.\/\.\.\/lib\/providerComparison";/);
   assert.match(providerDetail, /setDraft\(\(current\) => applyProviderProbeResult\(current, result\)\);/);
   assert.match(providerDetail, /current\.id === provider\.id[\s\S]*available_upstream_formats: availableFormats/);
   assert.doesNotMatch(providerDetail, /const upstreamFormat = normalizedEndpointFormat\(provider\.upstream_format\);/);
