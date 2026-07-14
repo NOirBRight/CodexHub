@@ -29,6 +29,7 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "../config/*.toml": "config",
+      "../config/official_model_catalog_metadata.json": "config/official_model_catalog_metadata.json",
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
       "../src-python/vendor/*.whl": "src-python/vendor",

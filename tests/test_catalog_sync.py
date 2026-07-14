@@ -274,7 +274,7 @@ class CatalogSyncTests(unittest.TestCase):
                     {"effort": "ultra", "description": "Ultra"},
                 ],
                 "multi_agent_version": "v2",
-                "tool_mode": "native",
+                "tool_mode": "code_mode_only",
                 "model_messages": {"upgrade": "Use Sol"},
                 "skills_instructions": "Official skills contract",
                 "web_search_tool_type": "text",
@@ -282,7 +282,7 @@ class CatalogSyncTests(unittest.TestCase):
                 "availability": {"plan": "plus"},
                 "upgrade": "gpt-5.7-sol",
                 "upgrade_info": {"message": "Upgrade available"},
-                "comp_hash": "sol-compat-hash",
+                "comp_hash": "3000",
             }
         ]
 
@@ -307,6 +307,134 @@ class CatalogSyncTests(unittest.TestCase):
                 "upstream_model": "gpt-5.6-sol",
             },
         )
+
+    def test_official_catalog_backfills_pinned_planner_metadata_per_model(self):
+        official = [
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol"},
+            {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra"},
+            {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna"},
+            {
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "use_responses_lite": True,
+                "prefer_websockets": False,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+            },
+            {
+                "slug": "gpt-5.4",
+                "display_name": "GPT-5.4",
+                "use_responses_lite": True,
+                "prefer_websockets": False,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+            },
+            {
+                "slug": "gpt-5.4-mini",
+                "display_name": "GPT-5.4-Mini",
+                "use_responses_lite": True,
+                "prefer_websockets": False,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+            },
+            {
+                "slug": "gpt-5.3-codex-spark",
+                "display_name": "GPT-5.3-Codex-Spark",
+                "use_responses_lite": True,
+            },
+            {"slug": "gpt-sparse", "display_name": "GPT-Sparse"},
+        ]
+
+        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+
+        for slug, multi_agent_version in (
+            ("gpt-5.6-sol", "v2"),
+            ("gpt-5.6-terra", "v2"),
+            ("gpt-5.6-luna", "v1"),
+        ):
+            with self.subTest(slug=slug):
+                model = by_slug[slug]
+                self.assertEqual(model["tool_mode"], "code_mode_only")
+                self.assertEqual(model["multi_agent_version"], multi_agent_version)
+                self.assertIs(model["prefer_websockets"], True)
+                self.assertIs(model["use_responses_lite"], True)
+
+        for slug in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini"):
+            with self.subTest(slug=slug):
+                model = by_slug[slug]
+                self.assertIn("tool_mode", model)
+                self.assertIsNone(model["tool_mode"])
+                self.assertIn("multi_agent_version", model)
+                self.assertIsNone(model["multi_agent_version"])
+                self.assertIs(model["prefer_websockets"], True)
+                self.assertIs(model["use_responses_lite"], False)
+
+        for slug in ("gpt-5.3-codex-spark", "gpt-sparse"):
+            with self.subTest(slug=slug):
+                model = by_slug[slug]
+                self.assertIs(model["use_responses_lite"], False)
+                self.assertNotIn("prefer_websockets", model)
+                self.assertNotIn("tool_mode", model)
+                self.assertNotIn("multi_agent_version", model)
+
+    def test_minimal_official_catalog_uses_pinned_planner_metadata(self):
+        policy = CatalogPolicy(
+            denied_models=set(),
+            denied_substrings=set(),
+            display_names={},
+            official_models=(
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
+                "gpt-sparse",
+            ),
+            allowed_ollama_cloud_models=(),
+        )
+
+        catalog = build_codex_catalog([], [], policy, "0.144.0")
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+
+        self.assertEqual(by_slug["gpt-5.6-sol"]["multi_agent_version"], "v2")
+        self.assertEqual(by_slug["gpt-5.6-terra"]["multi_agent_version"], "v2")
+        self.assertEqual(by_slug["gpt-5.6-luna"]["multi_agent_version"], "v1")
+        self.assertIs(by_slug["gpt-5.5"]["use_responses_lite"], False)
+        self.assertIsNone(by_slug["gpt-5.5"]["tool_mode"])
+        self.assertIsNone(by_slug["gpt-5.5"]["multi_agent_version"])
+        for slug in ("gpt-5.4", "gpt-5.4-mini"):
+            with self.subTest(slug=slug):
+                self.assertIs(by_slug[slug]["use_responses_lite"], False)
+                self.assertIs(by_slug[slug]["prefer_websockets"], True)
+                self.assertIsNone(by_slug[slug]["tool_mode"])
+                self.assertIsNone(by_slug[slug]["multi_agent_version"])
+        for slug in ("gpt-5.3-codex-spark", "gpt-sparse"):
+            with self.subTest(slug=slug):
+                self.assertIs(by_slug[slug]["use_responses_lite"], False)
+                self.assertNotIn("prefer_websockets", by_slug[slug])
+                self.assertNotIn("tool_mode", by_slug[slug])
+                self.assertNotIn("multi_agent_version", by_slug[slug])
+
+    def test_pinned_official_catalog_metadata_rejects_an_incomplete_model_set(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "official-models.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "models": {
+                            "gpt-5.6-sol": {},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "incomplete model set"):
+                catalog_sync.load_pinned_official_catalog_metadata(path)
 
     def test_official_alias_duplicates_collapse_to_fresh_bare_record(self):
         official = [

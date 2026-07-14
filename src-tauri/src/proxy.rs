@@ -2208,6 +2208,19 @@ time.sleep(10)
             }
         }
 
+        let config_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config")
+            .join("official_model_catalog_metadata.json");
+        let config_target = repo_root.join("config");
+        fs::create_dir_all(&config_target).unwrap();
+        fs::copy(
+            config_source,
+            config_target.join("official_model_catalog_metadata.json"),
+        )
+        .unwrap();
+
         repo_root
     }
 
