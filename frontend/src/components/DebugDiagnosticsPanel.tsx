@@ -1,4 +1,4 @@
-import { Flag, Pause, Play, RefreshCcw, Trash2 } from "lucide-react";
+import { ChevronDown, Flag, Pause, Play, RefreshCcw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, messageFromError } from "../lib/tauri";
@@ -16,6 +16,7 @@ export function DebugDiagnosticsPanel({ enabled, gatewayRunning }: DebugDiagnost
   const [status, setStatus] = useState<DiagnosticsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   async function refresh(silent = false) {
     if (!enabled || !gatewayRunning) {
@@ -89,29 +90,9 @@ export function DebugDiagnosticsPanel({ enabled, gatewayRunning }: DebugDiagnost
   const paused = Boolean(status?.paused);
   const controlsAvailable = gatewayRunning && Boolean(status) && !busy;
   const rollingHours = Math.floor((status?.rolling_window_seconds ?? 0) / 3600);
-
-  return (
-    <section className="grid min-w-0 gap-2 rounded-panel bg-surface p-2.5 shadow-card">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-ink">
-            <Flag size={15} className="shrink-0 text-amber-700" />
-            {t("diagnostics.title")}
-          </h2>
-          <p className="mt-0.5 text-[11px] text-slate-500">{t("diagnostics.subtitle")}</p>
-        </div>
-        <span
-          className={`rounded-control px-2 py-1 text-[10px] font-semibold ${
-            paused
-              ? "bg-amber-100 text-amber-800"
-              : active
-                ? "bg-emerald-100 text-emerald-800"
-                : "bg-slate-100 text-slate-600"
-          }`}
-        >
-          {paused ? t("diagnostics.paused") : active ? t("diagnostics.active") : t("diagnostics.unavailable")}
-        </span>
-      </div>
+  const detailedContent = expanded ? (
+    <div id="debug-diagnostics-details" className="grid gap-2 border-t border-line pt-2">
+      <p className="text-[11px] text-slate-500">{t("diagnostics.subtitle")}</p>
 
       {!gatewayRunning ? (
         <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-slate-600">{t("diagnostics.gatewayRequired")}</p>
@@ -180,6 +161,55 @@ export function DebugDiagnosticsPanel({ enabled, gatewayRunning }: DebugDiagnost
           ))}
         </div>
       ) : null}
+    </div>
+  ) : null;
+
+  return (
+    <section className="grid min-w-0 gap-1.5 rounded-panel bg-surface p-2.5 shadow-card">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-ink">
+            <Flag size={15} className="shrink-0 text-amber-700" />
+            {t("diagnostics.title")}
+          </h2>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <span
+            className={`rounded-control px-2 py-1 text-[10px] font-semibold ${
+              paused
+                ? "bg-amber-100 text-amber-800"
+                : active
+                  ? "bg-emerald-100 text-emerald-800"
+                  : "bg-slate-100 text-slate-600"
+            }`}
+          >
+            {paused ? t("diagnostics.paused") : active ? t("diagnostics.active") : t("diagnostics.unavailable")}
+          </span>
+          <button
+            type="button"
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+            aria-label={`${expanded ? t("common.collapse") : t("common.expand")} ${t("diagnostics.title")}`}
+            aria-controls="debug-diagnostics-details"
+            aria-expanded={expanded}
+            title={`${expanded ? t("common.collapse") : t("common.expand")} ${t("diagnostics.title")}`}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            <ChevronDown
+              size={15}
+              aria-hidden="true"
+              className={`transition-transform duration-150 ease-out ${expanded ? "rotate-180" : ""}`}
+            />
+          </button>
+        </div>
+      </div>
+      <p className="truncate text-[11px] text-slate-500">
+        {t("diagnostics.summary", {
+          hours: rollingHours,
+          bytes: status?.rolling_bytes ?? 0,
+          count: status?.incident_count ?? 0,
+        })}
+      </p>
+      {detailedContent}
     </section>
   );
 }

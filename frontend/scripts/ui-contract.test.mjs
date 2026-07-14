@@ -3025,3 +3025,31 @@ test("debug diagnostics are compile-selected, content-free, and expose bounded c
   assert.match(enSource, /Gateway traffic continues; no restart is required/);
   assert.match(zhSource, /diagnostics: \{/);
 });
+
+test("debug diagnostics default to a compact accessible disclosure", async () => {
+  const [panelSource, enSource, zhSource] = await Promise.all([
+    readFile(debugDiagnosticsPanelPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const detailedContent = panelSource.match(/const detailedContent = expanded \? \([\s\S]*?\n  \) : null;/)?.[0] ?? "";
+  const collapsedSurface = panelSource.slice(panelSource.lastIndexOf("  return ("), panelSource.indexOf("{detailedContent}"));
+
+  assert.match(panelSource, /const \[expanded, setExpanded\] = useState\(false\)/);
+  assert.match(panelSource, /aria-expanded=\{expanded\}/);
+  assert.match(panelSource, /aria-controls="debug-diagnostics-details"/);
+  assert.match(panelSource, /onClick=\{\(\) => setExpanded\(\(current\) => !current\)\}/);
+  assert.match(panelSource, /<ChevronDown/);
+  assert.match(
+    panelSource,
+    /t\("diagnostics\.summary", \{[\s\S]*hours: rollingHours,[\s\S]*bytes: status\?\.rolling_bytes \?\? 0,[\s\S]*count: status\?\.incident_count \?\? 0,[\s\S]*\}\)/,
+  );
+  assert.ok(detailedContent, "expanded diagnostics content should be conditional");
+  assert.match(detailedContent, /t\("diagnostics\.subtitle"\)/);
+  assert.match(detailedContent, /t\("diagnostics\.mark"\)/);
+  assert.match(detailedContent, /t\("diagnostics\.refresh"\)/);
+  assert.match(detailedContent, /t\("diagnostics\.delete"\)/);
+  assert.doesNotMatch(collapsedSurface, /t\("diagnostics\.(subtitle|mark|pause|resume|refresh|delete|incidents|noRestartRequired|gatewayRequired|statusDelayed|loading)"\)/);
+  assert.match(enSource, /summary: "\{\{hours\}\}h · \{\{bytes\}\} bytes · \{\{count\}\} incidents"/);
+  assert.match(zhSource, /summary: "\{\{hours\}\} 小时 · \{\{bytes\}\} 字节 · \{\{count\}\} 个事件"/);
+});

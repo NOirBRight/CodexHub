@@ -301,6 +301,7 @@ const enUS = {
     statusDelayed: "Recorder status is temporarily unavailable; Gateway traffic continues.",
     statusFailed: "Could not refresh the diagnostic recorder status.",
     subtitle: "Debug-only bounded recorder; request content is never retained.",
+    summary: "{{hours}}h · {{bytes}} bytes · {{count}} incidents",
     title: "Debug diagnostics",
     unavailable: "Unavailable",
   },

@@ -301,6 +301,7 @@ const zhCN = {
     statusDelayed: "记录器状态暂不可用；Gateway 流量继续运行。",
     statusFailed: "无法刷新诊断记录器状态。",
     subtitle: "仅调试版本的有界记录器；绝不保留请求内容。",
+    summary: "{{hours}} 小时 · {{bytes}} 字节 · {{count}} 个事件",
     title: "调试诊断",
     unavailable: "不可用",
   },
