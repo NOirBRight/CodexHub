@@ -5,13 +5,13 @@ use crate::{
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,26 @@ const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 const RESOLVED_MODEL_LIMITS_JSON: &str = include_str!("../../config/resolved_model_limits.json");
+const OFFICIAL_CATALOG_METADATA_JSON: &str =
+    include_str!("../../config/official_model_catalog_metadata.json");
+const PINNED_OFFICIAL_MODEL_IDS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+];
+const PINNED_OFFICIAL_MODEL_COMMON_FIELDS: &[&str] = &[
+    "prefer_websockets",
+    "tool_mode",
+    "multi_agent_version",
+    "use_responses_lite",
+    "comp_hash",
+    "supports_search_tool",
+];
+const PINNED_OFFICIAL_MODEL_LIMIT_FIELDS: &[&str] =
+    &["context_window", "max_context_window"];
+static PINNED_OFFICIAL_CATALOG_METADATA: OnceLock<Result<HashMap<String, Map<String, Value>>, String>> =
+    OnceLock::new();
 const RESPONSE_ENDPOINT_SUFFIXES: &[&str] = &["/responses", "/response"];
 const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/chat/completions",
@@ -546,6 +566,7 @@ fn subscription_models_from_payload(
         let Some(mut model) = subscription_model_from_item(item) else {
             continue;
         };
+        apply_pinned_official_catalog_metadata_to_seed(&mut model)?;
         if let Some(&position) = positions.get(&model.slug) {
             let existing: &OfficialSubscriptionModel = &output[position];
             let enabled = existing.enabled || model.enabled;
@@ -569,6 +590,136 @@ fn subscription_models_from_payload(
         }
     }
     Ok(output)
+}
+
+fn apply_pinned_official_catalog_metadata_to_seed(
+    model: &mut OfficialSubscriptionModel,
+) -> Result<(), String> {
+    let Some(metadata) = pinned_official_catalog_metadata()?.get(&model.slug) else {
+        return Ok(());
+    };
+    let raw = model
+        .raw
+        .as_object_mut()
+        .ok_or_else(|| format!("official model {} has invalid raw metadata", model.slug))?;
+    for (key, value) in metadata {
+        raw.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn pinned_official_catalog_metadata() -> Result<&'static HashMap<String, Map<String, Value>>, String> {
+    PINNED_OFFICIAL_CATALOG_METADATA
+        .get_or_init(parse_pinned_official_catalog_metadata)
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
+fn parse_pinned_official_catalog_metadata() -> Result<HashMap<String, Map<String, Value>>, String> {
+    let document: Value = serde_json::from_str(OFFICIAL_CATALOG_METADATA_JSON)
+        .map_err(|error| format!("official catalog metadata is unreadable: {error}"))?;
+    if document.get("schema_version") != Some(&json!(1)) {
+        return Err("official catalog metadata has an unsupported schema".to_string());
+    }
+    let models = document
+        .get("models")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "official catalog metadata has no model map".to_string())?;
+    if models.len() != PINNED_OFFICIAL_MODEL_IDS.len()
+        || PINNED_OFFICIAL_MODEL_IDS
+            .iter()
+            .any(|slug| !models.contains_key(*slug))
+    {
+        return Err("official catalog metadata has an incomplete model set".to_string());
+    }
+
+    let mut output = HashMap::new();
+    for slug in PINNED_OFFICIAL_MODEL_IDS {
+        let metadata = models
+            .get(*slug)
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("official catalog metadata for {slug} is invalid"))?;
+        validate_pinned_official_catalog_metadata(slug, metadata)?;
+        output.insert((*slug).to_string(), metadata.clone());
+    }
+    Ok(output)
+}
+
+fn validate_pinned_official_catalog_metadata(
+    slug: &str,
+    metadata: &Map<String, Value>,
+) -> Result<(), String> {
+    let mut required_fields = PINNED_OFFICIAL_MODEL_COMMON_FIELDS.to_vec();
+    if slug == "gpt-5.5" {
+        required_fields.extend_from_slice(PINNED_OFFICIAL_MODEL_LIMIT_FIELDS);
+    }
+    if metadata.len() != required_fields.len()
+        || required_fields.iter().any(|field| !metadata.contains_key(*field))
+    {
+        return Err(format!(
+            "official catalog metadata for {slug} has an invalid field set"
+        ));
+    }
+    if !metadata
+        .get("prefer_websockets")
+        .and_then(Value::as_bool)
+        .is_some()
+    {
+        return Err(format!(
+            "official catalog metadata for {slug} has an invalid websocket flag"
+        ));
+    }
+    let valid_tool_mode = match metadata.get("tool_mode") {
+        Some(Value::Null) => true,
+        Some(Value::String(value)) => value == "code_mode_only",
+        _ => false,
+    };
+    if !valid_tool_mode {
+        return Err(format!(
+            "official catalog metadata for {slug} has an invalid tool mode"
+        ));
+    }
+    let valid_multi_agent_version = match metadata.get("multi_agent_version") {
+        Some(Value::Null) => true,
+        Some(Value::String(value)) => value == "v1" || value == "v2",
+        _ => false,
+    };
+    if !valid_multi_agent_version {
+        return Err(format!(
+            "official catalog metadata for {slug} has an invalid multi-agent version"
+        ));
+    }
+    for field in ["use_responses_lite", "supports_search_tool"] {
+        if metadata.get(field).and_then(Value::as_bool).is_none() {
+            return Err(format!(
+                "official catalog metadata for {slug} has an invalid {field} flag"
+            ));
+        }
+    }
+    if !metadata
+        .get("comp_hash")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Err(format!(
+            "official catalog metadata for {slug} has an invalid compatibility hash"
+        ));
+    }
+    if slug == "gpt-5.5" {
+        for field in PINNED_OFFICIAL_MODEL_LIMIT_FIELDS {
+            if metadata
+                .get(*field)
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .is_none()
+            {
+                return Err(format!(
+                    "official catalog metadata for {slug} has an invalid {field}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionModel> {
@@ -2376,7 +2527,7 @@ mod tests {
                     ],
                     "defaultReasoningEffort": "low",
                     "multi_agent_version": "v2",
-                    "tool_mode": "native",
+                    "tool_mode": "code_mode_only",
                     "model_messages": {"upgrade": "Use Sol"},
                     "skills_instructions": "Official skills contract",
                     "web_search_tool_type": "text",
@@ -2384,7 +2535,7 @@ mod tests {
                     "availability": {"plan": "plus"},
                     "upgrade": "gpt-5.7-sol",
                     "upgradeInfo": {"message": "Upgrade available"},
-                    "comp_hash": "sol-compat-hash"
+                    "comp_hash": "3000"
                 }
             ]
         }))
@@ -2400,7 +2551,7 @@ mod tests {
         assert_eq!(sol["display_name"], "5.6 Sol");
         assert_eq!(sol["context_window"], 400000);
         assert_eq!(sol["multi_agent_version"], "v2");
-        assert_eq!(sol["tool_mode"], "native");
+        assert_eq!(sol["tool_mode"], "code_mode_only");
         assert_eq!(sol["model_messages"]["upgrade"], "Use Sol");
         assert_eq!(sol["skills_instructions"], "Official skills contract");
         assert_eq!(sol["web_search_tool_type"], "text");
@@ -2408,7 +2559,7 @@ mod tests {
         assert_eq!(sol["availability"]["plan"], "plus");
         assert_eq!(sol["upgrade"], "gpt-5.7-sol");
         assert_eq!(sol["upgradeInfo"]["message"], "Upgrade available");
-        assert_eq!(sol["comp_hash"], "sol-compat-hash");
+        assert_eq!(sol["comp_hash"], "3000");
         let terra_efforts = terra["supported_reasoning_levels"]
             .as_array()
             .unwrap()
@@ -2429,6 +2580,47 @@ mod tests {
             sol_efforts,
             ["low", "medium", "high", "xhigh", "max", "ultra"]
         );
+    }
+
+    #[test]
+    fn subscription_seed_backfills_pinned_official_planner_metadata_per_model() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol"},
+                {"id": "gpt-5.6-terra", "model": "gpt-5.6-terra"},
+                {"id": "gpt-5.6-luna", "model": "gpt-5.6-luna"},
+                {
+                    "id": "gpt-5.5",
+                    "model": "gpt-5.5",
+                    "use_responses_lite": true,
+                    "tool_mode": "code_mode_only",
+                    "multi_agent_version": "v2"
+                }
+            ]
+        }))
+        .expect("subscription models");
+        let seeds = subscription_models
+            .iter()
+            .map(super::official_subscription_seed_model)
+            .collect::<Vec<_>>();
+
+        for (index, version) in [(0, "v2"), (1, "v2"), (2, "v1")] {
+            assert_eq!(seeds[index]["tool_mode"], "code_mode_only");
+            assert_eq!(seeds[index]["multi_agent_version"], version);
+            assert_eq!(seeds[index]["prefer_websockets"], true);
+            assert_eq!(seeds[index]["use_responses_lite"], true);
+        }
+
+        let gpt_55 = &seeds[3];
+        assert!(gpt_55.get("tool_mode").is_some());
+        assert!(gpt_55["tool_mode"].is_null());
+        assert!(gpt_55.get("multi_agent_version").is_some());
+        assert!(gpt_55["multi_agent_version"].is_null());
+        assert_eq!(gpt_55["prefer_websockets"], true);
+        assert_eq!(gpt_55["use_responses_lite"], false);
+        assert_eq!(gpt_55["context_window"], 272000);
+        assert_eq!(gpt_55["max_context_window"], 272000);
+        assert_eq!(gpt_55["comp_hash"], "2911");
     }
 
     #[test]

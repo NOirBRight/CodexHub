@@ -61,6 +61,7 @@ GENERATED_STATE_PATH = RUNTIME_MODEL_CATALOG_DIR / "codex-proxy-state.json"
 SETTINGS_PATH = RUNTIME_CODEX_DIR / "proxy" / "settings.json"
 RESOLVED_MODEL_LIMITS_PATH = REPO_ROOT / "config" / "resolved_model_limits.json"
 RESOLVED_MODEL_LIMITS = load_resolved_model_limits(RESOLVED_MODEL_LIMITS_PATH)
+OFFICIAL_CATALOG_METADATA_PATH = REPO_ROOT / "config" / "official_model_catalog_metadata.json"
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -249,6 +250,70 @@ REASONING_LEVEL_DESCRIPTIONS = {
 }
 THIRD_PARTY_REASONING_LEVEL_ORDER = ("low", "medium", "high", "xhigh", "max")
 THIRD_PARTY_REASONING_LEVELS = set(THIRD_PARTY_REASONING_LEVEL_ORDER)
+PINNED_OFFICIAL_MODEL_IDS = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+)
+PINNED_OFFICIAL_MODEL_COMMON_FIELDS = (
+    "prefer_websockets",
+    "tool_mode",
+    "multi_agent_version",
+    "use_responses_lite",
+    "comp_hash",
+    "supports_search_tool",
+)
+PINNED_OFFICIAL_MODEL_LIMIT_FIELDS = (
+    "context_window",
+    "max_context_window",
+)
+
+
+def load_pinned_official_catalog_metadata(
+    path: Path = OFFICIAL_CATALOG_METADATA_PATH,
+) -> dict[str, dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"official catalog metadata is unreadable: {error}") from error
+    if payload.get("schema_version") != 1:
+        raise ValueError("official catalog metadata has an unsupported schema")
+    models = payload.get("models")
+    if not isinstance(models, dict) or set(models) != set(PINNED_OFFICIAL_MODEL_IDS):
+        raise ValueError("official catalog metadata has an incomplete model set")
+
+    validated: dict[str, dict[str, Any]] = {}
+    for slug in PINNED_OFFICIAL_MODEL_IDS:
+        metadata = models.get(slug)
+        if not isinstance(metadata, dict):
+            raise ValueError(f"official catalog metadata for {slug} is invalid")
+        required_fields = set(PINNED_OFFICIAL_MODEL_COMMON_FIELDS)
+        if slug == "gpt-5.5":
+            required_fields.update(PINNED_OFFICIAL_MODEL_LIMIT_FIELDS)
+        if set(metadata) != required_fields:
+            raise ValueError(f"official catalog metadata for {slug} has an invalid field set")
+        if not isinstance(metadata["prefer_websockets"], bool):
+            raise ValueError(f"official catalog metadata for {slug} has an invalid websocket flag")
+        if metadata["tool_mode"] not in (None, "code_mode_only"):
+            raise ValueError(f"official catalog metadata for {slug} has an invalid tool mode")
+        if metadata["multi_agent_version"] not in (None, "v1", "v2"):
+            raise ValueError(f"official catalog metadata for {slug} has an invalid multi-agent version")
+        if not isinstance(metadata["use_responses_lite"], bool):
+            raise ValueError(f"official catalog metadata for {slug} has an invalid Responses Lite flag")
+        if not isinstance(metadata["supports_search_tool"], bool):
+            raise ValueError(f"official catalog metadata for {slug} has an invalid search-tool flag")
+        if not isinstance(metadata["comp_hash"], str) or not metadata["comp_hash"]:
+            raise ValueError(f"official catalog metadata for {slug} has an invalid compatibility hash")
+        if slug == "gpt-5.5":
+            for field in PINNED_OFFICIAL_MODEL_LIMIT_FIELDS:
+                if not isinstance(metadata[field], int) or isinstance(metadata[field], bool) or metadata[field] <= 0:
+                    raise ValueError(f"official catalog metadata for {slug} has an invalid {field}")
+        validated[slug] = deepcopy(metadata)
+    return validated
+
+
+PINNED_OFFICIAL_CATALOG_METADATA = load_pinned_official_catalog_metadata()
 
 
 def sanitize_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
@@ -600,6 +665,12 @@ def apply_official_model_defaults(model: dict[str, Any], slug: str) -> None:
         model[key] = deepcopy(value)
 
 
+def apply_pinned_official_catalog_metadata(model: dict[str, Any], slug: str) -> None:
+    metadata = PINNED_OFFICIAL_CATALOG_METADATA.get(slug)
+    if metadata is not None:
+        model.update(deepcopy(metadata))
+
+
 def official_proxy_alias(slug: str) -> str:
     return f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/{slug}"
 
@@ -658,6 +729,7 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
     model["display_name"] = official_short_display_name(slug, model, policy)
     if source_model is None:
         apply_official_model_defaults(model, slug)
+    apply_pinned_official_catalog_metadata(model, slug)
     limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
     live_context = model.get("context_window")
     apply_resolved_model_limits(model, limits)
