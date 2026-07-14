@@ -9,6 +9,7 @@ const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
 const buildWindowsPortablePath = new URL("../../scripts/build-windows-portable.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
+const debugDiagnosticsPanelPath = new URL("../src/components/DebugDiagnosticsPanel.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
@@ -1220,7 +1221,7 @@ test("gateway recovery panel stays compact and labels actual observed requests",
   assert.match(gatewaySource, /grid-cols-\[repeat\(3,minmax\(0,0\.72fr\)\)_minmax\(210px,1\.7fr\)\]/);
   assert.match(gatewaySource, /const routeText = event \? \(client \? `\$\{client\} → \$\{provider\}` : provider\) : t\("gateway\.recoveryEmpty"\)/);
   assert.match(gatewaySource, /title=\{event \? recoveryEventTitle\(event\) : t\("gateway\.recoveryOverviewTitle"\)\}/);
-  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/);
+  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
   assert.match(gatewaySource, /<RecoveryEventRow[\s\S]*event=\{latestEvent\}[\s\S]*onOverview=\{\(\) => void openOverview\(\)\}/);
   assert.match(gatewaySource, /aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/);
   assert.match(gatewaySource, /className="focus-ring grid h-7 w-7 shrink-0 place-items-center/);
@@ -2995,4 +2996,93 @@ test("legacy provider hidden capability is removed from model/provider UI state"
   assert.doesNotMatch(formatSource, /hidden:/);
   assert.doesNotMatch(appSource, /provider\.hidden/);
   assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false|label="Hidden"|hidden: checked/);
+});
+
+test("debug diagnostics are compile-selected, content-free, and expose bounded controls", async () => {
+  const [gatewaySource, panelSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(debugDiagnosticsPanelPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /DebugDiagnosticsOverlay/);
+  assert.match(gatewaySource, /appFlavor\?\.build\.flavor === "debug"/);
+  assert.match(gatewaySource, /appFlavor\.build\.diagnostics_enabled/);
+  assert.match(panelSource, /api\.diagnosticsStatus\(\)/);
+  assert.match(panelSource, /api\.diagnosticsManualMark\(\)/);
+  assert.match(panelSource, /api\.diagnosticsPause\(\)/);
+  assert.match(panelSource, /api\.diagnosticsResume\(\)/);
+  assert.match(panelSource, /api\.diagnosticsDeleteIncident\(incidentId\)/);
+  assert.doesNotMatch(panelSource, /diagnosticsRead|zip|artifact/i);
+  assert.match(tauriSource, /diagnostics_status/);
+  assert.match(tauriSource, /diagnostics_manual_mark/);
+  assert.match(tauriSource, /diagnostics_delete_incident/);
+  assert.match(typesSource, /export interface DiagnosticsStatus/);
+  assert.match(typesSource, /incident_ids: string\[\]/);
+  assert.match(enSource, /diagnostics: \{/);
+  assert.match(enSource, /Gateway traffic continues; no restart is required/);
+  assert.match(zhSource, /diagnostics: \{/);
+});
+
+test("debug diagnostics open from Recovery in a localized accessible overlay", async () => {
+  const [gatewaySource, panelSource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(debugDiagnosticsPanelPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const recoveryEventRow = gatewaySource.match(/function RecoveryEventRow\([\s\S]*?function RecoveryOverviewModal/)?.[0] ?? "";
+
+  assert.match(
+    gatewaySource,
+    /const diagnosticsEnabled = Boolean\(appFlavor\?\.build\.flavor === "debug" && appFlavor\.build\.diagnostics_enabled\)/,
+  );
+  assert.match(
+    gatewaySource,
+    /<DebugDiagnosticsOverlay[\s\S]*enabled=\{diagnosticsEnabled\}[\s\S]*open=\{diagnosticsOpen\}[\s\S]*onClose=\{\(\) => setDiagnosticsOpen\(false\)\}/,
+  );
+  assert.match(gatewaySource, /onOpenDiagnostics=\{diagnosticsEnabled \? onOpenDiagnostics : undefined\}/);
+  assert.match(
+    recoveryEventRow,
+    /\{onOpenDiagnostics \? \([\s\S]*aria-label=\{t\("diagnostics\.open"\)\}[\s\S]*<Activity size=\{13\} \/>[\s\S]*aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/,
+  );
+  assert.match(recoveryEventRow, /h-7 w-7/);
+  assert.match(recoveryEventRow, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
+  assert.match(panelSource, /if \(!enabled \|\| !open\) \{\s*return null;/);
+  assert.match(panelSource, /aria-modal="true"/);
+  assert.match(panelSource, /role="dialog"/);
+  assert.match(panelSource, /event\.key === "Escape"/);
+  assert.match(panelSource, /aria-label=\{t\("common\.close"\)\}/);
+  assert.match(panelSource, /if \(!enabled \|\| !gatewayRunning \|\| !open\)/);
+  assert.match(panelSource, /window\.setInterval\(\(\) => void refresh\(true\), 5_000\)/);
+  assert.match(
+    panelSource,
+    /t\("diagnostics\.summary", \{[\s\S]*hours: rollingHours,[\s\S]*bytes: status\?\.rolling_bytes \?\? 0,[\s\S]*count: status\?\.incident_count \?\? 0,[\s\S]*\}\)/,
+  );
+  assert.match(panelSource, /t\("diagnostics\.subtitle"\)/);
+  assert.match(panelSource, /t\("diagnostics\.mark"\)/);
+  assert.match(panelSource, /t\("diagnostics\.pause"\)/);
+  assert.match(panelSource, /t\("diagnostics\.resume"\)/);
+  assert.match(panelSource, /t\("diagnostics\.refresh"\)/);
+  assert.match(panelSource, /t\("diagnostics\.delete"\)/);
+  assert.doesNotMatch(panelSource, /ChevronDown|setExpanded|aria-expanded/);
+  assert.match(enSource, /open: "Open debug diagnostics"/);
+  assert.match(zhSource, /open: "打开调试诊断"/);
+  assert.match(enSource, /summary: "\{\{hours\}\}h · \{\{bytes\}\} bytes · \{\{count\}\} incidents"/);
+  assert.match(zhSource, /summary: "\{\{hours\}\} 小时 · \{\{bytes\}\} 字节 · \{\{count\}\} 个事件"/);
+});
+
+test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+  const leftColumn = gatewaySource.match(
+    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
+  )?.[0] ?? "";
+
+  assert.ok(leftColumn, "Gateway left column should restore three rows");
+  assert.match(leftColumn, /<RecoveryActivityPanel[\s\S]*?<StackedUsageChartShell/);
+  assert.doesNotMatch(leftColumn, /DebugDiagnosticsPanel|DebugDiagnosticsOverlay/);
+  assert.doesNotMatch(gatewaySource, /grid-rows-\[auto_auto_auto_minmax\(320px,1fr\)\]/);
 });
