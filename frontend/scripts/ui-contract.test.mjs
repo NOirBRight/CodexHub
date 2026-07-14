@@ -1221,7 +1221,7 @@ test("gateway recovery panel stays compact and labels actual observed requests",
   assert.match(gatewaySource, /grid-cols-\[repeat\(3,minmax\(0,0\.72fr\)\)_minmax\(210px,1\.7fr\)\]/);
   assert.match(gatewaySource, /const routeText = event \? \(client \? `\$\{client\} → \$\{provider\}` : provider\) : t\("gateway\.recoveryEmpty"\)/);
   assert.match(gatewaySource, /title=\{event \? recoveryEventTitle\(event\) : t\("gateway\.recoveryOverviewTitle"\)\}/);
-  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/);
+  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
   assert.match(gatewaySource, /<RecoveryEventRow[\s\S]*event=\{latestEvent\}[\s\S]*onOverview=\{\(\) => void openOverview\(\)\}/);
   assert.match(gatewaySource, /aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/);
   assert.match(gatewaySource, /className="focus-ring grid h-7 w-7 shrink-0 place-items-center/);
@@ -3007,7 +3007,7 @@ test("debug diagnostics are compile-selected, content-free, and expose bounded c
     readFile(zhLocalePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /DebugDiagnosticsPanel/);
+  assert.match(gatewaySource, /DebugDiagnosticsOverlay/);
   assert.match(gatewaySource, /appFlavor\?\.build\.flavor === "debug"/);
   assert.match(gatewaySource, /appFlavor\.build\.diagnostics_enabled/);
   assert.match(panelSource, /api\.diagnosticsStatus\(\)/);
@@ -3026,41 +3026,62 @@ test("debug diagnostics are compile-selected, content-free, and expose bounded c
   assert.match(zhSource, /diagnostics: \{/);
 });
 
-test("debug diagnostics default to a compact accessible disclosure", async () => {
-  const [panelSource, enSource, zhSource] = await Promise.all([
+test("debug diagnostics open from Recovery in a localized accessible overlay", async () => {
+  const [gatewaySource, panelSource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
     readFile(debugDiagnosticsPanelPath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
-  const detailedContent = panelSource.match(/const detailedContent = expanded \? \([\s\S]*?\n  \) : null;/)?.[0] ?? "";
-  const collapsedSurface = panelSource.slice(panelSource.lastIndexOf("  return ("), panelSource.indexOf("{detailedContent}"));
+  const recoveryEventRow = gatewaySource.match(/function RecoveryEventRow\([\s\S]*?function RecoveryOverviewModal/)?.[0] ?? "";
 
-  assert.match(panelSource, /const \[expanded, setExpanded\] = useState\(false\)/);
-  assert.match(panelSource, /aria-expanded=\{expanded\}/);
-  assert.match(panelSource, /aria-controls="debug-diagnostics-details"/);
-  assert.match(panelSource, /onClick=\{\(\) => setExpanded\(\(current\) => !current\)\}/);
-  assert.match(panelSource, /<ChevronDown/);
+  assert.match(
+    gatewaySource,
+    /const diagnosticsEnabled = Boolean\(appFlavor\?\.build\.flavor === "debug" && appFlavor\.build\.diagnostics_enabled\)/,
+  );
+  assert.match(
+    gatewaySource,
+    /<DebugDiagnosticsOverlay[\s\S]*enabled=\{diagnosticsEnabled\}[\s\S]*open=\{diagnosticsOpen\}[\s\S]*onClose=\{\(\) => setDiagnosticsOpen\(false\)\}/,
+  );
+  assert.match(gatewaySource, /onOpenDiagnostics=\{diagnosticsEnabled \? onOpenDiagnostics : undefined\}/);
+  assert.match(
+    recoveryEventRow,
+    /\{onOpenDiagnostics \? \([\s\S]*aria-label=\{t\("diagnostics\.open"\)\}[\s\S]*<Activity size=\{13\} \/>[\s\S]*aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/,
+  );
+  assert.match(recoveryEventRow, /h-7 w-7/);
+  assert.match(recoveryEventRow, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
+  assert.match(panelSource, /if \(!enabled \|\| !open\) \{\s*return null;/);
+  assert.match(panelSource, /aria-modal="true"/);
+  assert.match(panelSource, /role="dialog"/);
+  assert.match(panelSource, /event\.key === "Escape"/);
+  assert.match(panelSource, /aria-label=\{t\("common\.close"\)\}/);
+  assert.match(panelSource, /if \(!enabled \|\| !gatewayRunning \|\| !open\)/);
+  assert.match(panelSource, /window\.setInterval\(\(\) => void refresh\(true\), 5_000\)/);
   assert.match(
     panelSource,
     /t\("diagnostics\.summary", \{[\s\S]*hours: rollingHours,[\s\S]*bytes: status\?\.rolling_bytes \?\? 0,[\s\S]*count: status\?\.incident_count \?\? 0,[\s\S]*\}\)/,
   );
-  assert.ok(detailedContent, "expanded diagnostics content should be conditional");
-  assert.match(detailedContent, /t\("diagnostics\.subtitle"\)/);
-  assert.match(detailedContent, /t\("diagnostics\.mark"\)/);
-  assert.match(detailedContent, /t\("diagnostics\.refresh"\)/);
-  assert.match(detailedContent, /t\("diagnostics\.delete"\)/);
-  assert.doesNotMatch(collapsedSurface, /t\("diagnostics\.(subtitle|mark|pause|resume|refresh|delete|incidents|noRestartRequired|gatewayRequired|statusDelayed|loading)"\)/);
+  assert.match(panelSource, /t\("diagnostics\.subtitle"\)/);
+  assert.match(panelSource, /t\("diagnostics\.mark"\)/);
+  assert.match(panelSource, /t\("diagnostics\.pause"\)/);
+  assert.match(panelSource, /t\("diagnostics\.resume"\)/);
+  assert.match(panelSource, /t\("diagnostics\.refresh"\)/);
+  assert.match(panelSource, /t\("diagnostics\.delete"\)/);
+  assert.doesNotMatch(panelSource, /ChevronDown|setExpanded|aria-expanded/);
+  assert.match(enSource, /open: "Open debug diagnostics"/);
+  assert.match(zhSource, /open: "打开调试诊断"/);
   assert.match(enSource, /summary: "\{\{hours\}\}h · \{\{bytes\}\} bytes · \{\{count\}\} incidents"/);
   assert.match(zhSource, /summary: "\{\{hours\}\} 小时 · \{\{bytes\}\} 字节 · \{\{count\}\} 个事件"/);
 });
 
-test("gateway reserves its flexible left-column row for the usage chart", async () => {
+test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
   const leftColumn = gatewaySource.match(
-    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\r?\n\r?\n      <aside/,
+    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
   )?.[0] ?? "";
 
-  assert.ok(leftColumn, "Gateway left column should declare four rows");
-  assert.match(leftColumn, /<RecoveryActivityPanel[\s\S]*?<DebugDiagnosticsPanel[\s\S]*?<StackedUsageChartShell/);
-  assert.doesNotMatch(gatewaySource, /grid-rows-\[auto_auto_minmax\(320px,1fr\)\]/);
+  assert.ok(leftColumn, "Gateway left column should restore three rows");
+  assert.match(leftColumn, /<RecoveryActivityPanel[\s\S]*?<StackedUsageChartShell/);
+  assert.doesNotMatch(leftColumn, /DebugDiagnosticsPanel|DebugDiagnosticsOverlay/);
+  assert.doesNotMatch(gatewaySource, /grid-rows-\[auto_auto_auto_minmax\(320px,1fr\)\]/);
 });

@@ -289,6 +289,7 @@ const enUS = {
     markLoading: "Marking a diagnostic incident...",
     markUnavailable: "The recorder could not accept a marker. Gateway traffic was not changed.",
     noRestartRequired: "Gateway traffic continues; no restart is required.",
+    open: "Open debug diagnostics",
     pause: "Pause",
     pauseDone: "Recorder paused. Gateway traffic was not restarted.",
     pauseLoading: "Pausing the recorder...",

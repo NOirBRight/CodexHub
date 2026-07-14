@@ -289,6 +289,7 @@ const zhCN = {
     markLoading: "正在标记诊断事件...",
     markUnavailable: "记录器无法接受标记；Gateway 流量未改变。",
     noRestartRequired: "Gateway 流量继续运行；无需重启。",
+    open: "打开调试诊断",
     pause: "暂停",
     pauseDone: "记录器已暂停；Gateway 流量未重启。",
     pauseLoading: "正在暂停记录器...",
