@@ -98,7 +98,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
             self.assertEqual(codex_proxy._connection_disposition(connection), "reused")
         self.assertEqual(codex_proxy._diagnostic_connection_disposition(object()), "unobserved")
 
-    def test_upstream_open_records_only_sanitized_attempt_and_header_metadata(self) -> None:
+    def test_reused_upstream_open_omits_unobservable_transport_success_phases(self) -> None:
         tmpdir = self.enterContext(tempfile.TemporaryDirectory())
         recorder = diagnostic_recorder.DiagnosticRecorder(Path(tmpdir))
         self.addCleanup(recorder.shutdown, 1)
@@ -124,9 +124,6 @@ class DiagnosticRecorderGatewayTests(TestCase):
         self.assertEqual(
             [record["kind"] for record in records],
             [
-                "upstream_dns",
-                "upstream_tcp",
-                "upstream_tls",
                 "upstream_request_write",
                 "upstream_attempt",
                 "upstream_headers",
@@ -134,8 +131,11 @@ class DiagnosticRecorderGatewayTests(TestCase):
         )
         self.assertNotIn("raw-request-secret", rendered)
         self.assertNotIn("upstream-secret", rendered)
-        self.assertEqual(records[4]["connection_disposition"], "reused")
-        self.assertEqual(records[5]["content_type_class"], "event-stream")
+        self.assertTrue(
+            all(record["kind"] not in {"upstream_dns", "upstream_tcp", "upstream_tls"} for record in records)
+        )
+        self.assertEqual(records[1]["connection_disposition"], "reused")
+        self.assertEqual(records[2]["content_type_class"], "event-stream")
 
     def test_upstream_failure_records_the_supported_transport_phase(self) -> None:
         tmpdir = self.enterContext(tempfile.TemporaryDirectory())

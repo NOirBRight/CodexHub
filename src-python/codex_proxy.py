@@ -10719,21 +10719,22 @@ def _open_upstream_response(
             )
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
             connection_disposition = _diagnostic_connection_disposition(response)
-            # A response is the supported Gateway seam that proves the open
-            # completed through request write. Keep each named boundary
-            # content-free; lower-level socket details stay out of the record.
-            for phase in ("upstream_dns", "upstream_tcp", "upstream_tls", "upstream_request_write"):
-                _observe_gateway_diagnostic(
-                    "observe_upstream_phase",
-                    diagnostic_request_key,
-                    phase=phase,
-                    attempt=attempt,
-                    retry_budget=base_retry_attempts,
-                    elapsed_ms=elapsed_ms,
-                    outcome="ok",
-                    provider=upstream_name,
-                    model=diagnostic_model,
-                )
+            # A returned response proves this Gateway attempt reached response
+            # completion after writing its request. It cannot prove DNS, TCP,
+            # or TLS occurred for this attempt (especially on a reused lease),
+            # so those success phases remain absent unless a lower-level seam
+            # later exposes them.
+            _observe_gateway_diagnostic(
+                "observe_upstream_phase",
+                diagnostic_request_key,
+                phase="upstream_request_write",
+                attempt=attempt,
+                retry_budget=base_retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="ok",
+                provider=upstream_name,
+                model=diagnostic_model,
+            )
             _observe_gateway_diagnostic(
                 "observe_upstream_attempt",
                 diagnostic_request_key,
