@@ -126,6 +126,16 @@ def _top_level_positive_int(text: str, key: str) -> int | None:
     return value if value > 0 else None
 
 
+def _positive_toml_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value.replace("_", ""))
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
 def context_guard_status(
     config_path: Path,
     state_path: Path | None = None,
@@ -191,6 +201,46 @@ def _read_context_guard_state(
     return entries or None
 
 
+def _safe_official_disable_updates(
+    text: str,
+    previous: dict[str, str | None],
+    managed: dict[str, str | None],
+    safe_budget: tuple[int, int],
+) -> dict[str, str]:
+    """Restore only a still-safe Official override when disabling the guard.
+
+    A disabled convenience switch must not revive a larger pre-guard Codex
+    runtime value after the current Direct Official authority lowered it.  A
+    post-enable user edit is retained only when it is also within the current
+    safe budget; otherwise the authoritative safe values remain in place.
+    """
+
+    def candidate(key: str) -> str | None:
+        current = top_level_value(text, key)
+        if managed.get(key) is not None and current == managed.get(key):
+            return previous.get(key)
+        return current
+
+    context_cap, compact_cap = safe_budget
+    requested_context = _positive_toml_int(candidate("model_context_window"))
+    context_window = (
+        requested_context
+        if requested_context is not None and requested_context <= context_cap
+        else context_cap
+    )
+    requested_compact = _positive_toml_int(candidate("model_auto_compact_token_limit"))
+    auto_compact_token_limit = (
+        requested_compact
+        if requested_compact is not None
+        and requested_compact <= min(compact_cap, context_window)
+        else min(compact_cap, context_window)
+    )
+    return {
+        "model_context_window": str(context_window),
+        "model_auto_compact_token_limit": str(auto_compact_token_limit),
+    }
+
+
 def set_context_guard(
     config_path: Path,
     backup_path: Path,
@@ -250,11 +300,28 @@ def set_context_guard(
             previous = entry.get("previous", {key: None for key in CONTEXT_GUARD_KEYS})
             managed = entry.get("managed", {key: None for key in CONTEXT_GUARD_KEYS})
             text = read_text_preserving_newlines(path)
-            updates = {
-                key: previous.get(key)
-                for key, managed_value in managed.items()
-                if managed_value is not None and top_level_value(text, key) == managed_value
-            }
+            selected_model = top_level_value(text, "model")
+            selected_official = _selected_model_is_official(selected_model)
+            safe_official_budget = (
+                _selected_official_context_budget(catalog_path, selected_model)
+                if selected_official
+                else None
+            )
+            if selected_official and safe_official_budget is None:
+                raise ValueError("safe current Official context budget is unavailable")
+            if safe_official_budget is not None:
+                updates = _safe_official_disable_updates(
+                    text,
+                    previous,
+                    managed,
+                    safe_official_budget,
+                )
+            else:
+                updates = {
+                    key: previous.get(key)
+                    for key, managed_value in managed.items()
+                    if managed_value is not None and top_level_value(text, key) == managed_value
+                }
             if updates:
                 atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
         state_path.unlink(missing_ok=True)

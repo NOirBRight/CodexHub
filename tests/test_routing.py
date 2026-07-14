@@ -377,6 +377,24 @@ class RoutingTests(unittest.TestCase):
         event_names = {call.args[0] for call in self.write_proxy_event.call_args_list if call.args}
         self.assertFalse(blocked & event_names, blocked & event_names)
 
+    def _write_official_publication_fence(
+        self,
+        catalog_path: Path,
+        budgets: dict[str, dict[str, int]],
+        *,
+        ready: bool = True,
+    ) -> None:
+        (catalog_path.parent / "official-refresh-state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "publication_ready": ready,
+                    "published_context_budgets": budgets,
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_gateway_auto_retry_settings_default_to_enabled_thirty_attempts(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(codex_proxy.gateway_auto_retry_enabled())
@@ -4593,6 +4611,23 @@ class RoutingTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            self._write_official_publication_fence(
+                catalog_path,
+                {
+                    "gpt-5.6-sol": {
+                        "model_context_window": 272_000,
+                        "effective_context_window_percent": 95,
+                        "effective_context_window": 258_400,
+                        "model_auto_compact_token_limit": 240_000,
+                    },
+                    "gpt-5.3-codex-spark": {
+                        "model_context_window": 128_000,
+                        "effective_context_window_percent": 100,
+                        "effective_context_window": 128_000,
+                        "model_auto_compact_token_limit": 115_200,
+                    },
+                },
+            )
 
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
@@ -4658,6 +4693,17 @@ class RoutingTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            self._write_official_publication_fence(
+                catalog_path,
+                {
+                    "gpt-5.6-sol": {
+                        "model_context_window": 300_000,
+                        "effective_context_window_percent": 80,
+                        "effective_context_window": 240_000,
+                        "model_auto_compact_token_limit": 210_000,
+                    },
+                },
+            )
 
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
@@ -4668,6 +4714,41 @@ class RoutingTests(unittest.TestCase):
         by_slug = {model["slug"]: model for model in catalog["models"]}
         self.assertEqual(by_slug["gpt-5.6-sol"]["context_window"], 300_000)
         self.assertEqual(by_slug["gpt-5.6-sol"]["max_context_window"], 300_000)
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_context_guard_hides_official_limits_while_publication_is_interrupted(self):
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 353_000,
+                    "max_context_window": 353_000,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "current_direct_official",
+                            "freshness": "fresh",
+                            "model_context_window": 272_000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258_400,
+                            "model_auto_compact_token_limit": 240_000,
+                        },
+                    },
+                },
+                {"slug": "volc/glm-5.2", "context_window": 1_000_000},
+            ]
+        }
+
+        guarded = codex_proxy.catalog_with_openai_context_guard(
+            catalog,
+            {},
+            require_published_snapshot=True,
+        )
+        by_slug = {model["slug"]: model for model in guarded["models"]}
+
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-sol"])
         self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
 
     def test_context_guard_hides_incomplete_or_untrusted_official_budget(self):

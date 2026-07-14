@@ -51,6 +51,15 @@ pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus,
     set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
 }
 
+/// Reapply only the CodexHub-managed runtime context projection after a new
+/// Official catalog snapshot has published.  This intentionally ignores
+/// unowned and cross-channel Codex configuration.
+pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
+    let paths = ConfigPaths::runtime()?;
+    let python = find_python();
+    republish_managed_codex_context_budget_with_paths(&paths, &python, &ProcessCommandRunner)
+}
+
 pub fn switch_mode_with_takeover(
     mode: &str,
     auto_sync: bool,
@@ -702,6 +711,84 @@ fn set_codex_context_guard_with_paths(
     Ok(combined_context_guard_status(codex_status, enabled))
 }
 
+fn republish_managed_codex_context_budget_with_paths(
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<bool, String> {
+    ensure_mode_switch_directories(paths)?;
+    let settings = get_settings_with_paths(paths)?;
+    let config_path = paths.codex_config_path();
+    let before = fs::read_to_string(&config_path).unwrap_or_default();
+    let current_owner = crate::app_flavor::current().routing_owner();
+    let managed_owner = codex_overlay_owner(&before);
+
+    if managed_owner == Some(current_owner) {
+        let args = vec![
+            "apply".to_string(),
+            "--config".to_string(),
+            config_path.to_string_lossy().into_owned(),
+            "--backup".to_string(),
+            paths
+                .config_backup_path_for_owner(current_owner)
+                .to_string_lossy()
+                .into_owned(),
+            "--catalog".to_string(),
+            paths
+                .generated_catalog_path()
+                .to_string_lossy()
+                .into_owned(),
+            "--base-url".to_string(),
+            format!("http://127.0.0.1:{}", settings.proxy_port),
+            "--gateway-key".to_string(),
+            settings.gateway_client_key.clone(),
+            "--owner".to_string(),
+            match current_owner {
+                crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
+                _ => "release".to_string(),
+            },
+        ];
+        run_python_script(
+            "republish managed Codex context budget",
+            python,
+            paths.config_overlay_script(),
+            args,
+            runner,
+        )?;
+    }
+
+    // The optional user-facing context guard has separate managed-state
+    // bookkeeping.  Refresh it only for an explicit Official selection; an
+    // unrelated third-party selection must remain untouched.
+    let after_overlay = fs::read_to_string(&config_path).unwrap_or_default();
+    if settings.openai_context_guard_enabled && top_level_model_is_official(&after_overlay) {
+        set_codex_context_guard_with_paths(true, paths, python, runner)?;
+    }
+
+    Ok(before != fs::read_to_string(config_path).unwrap_or_default())
+}
+
+fn top_level_model_is_official(text: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            break;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "model" {
+            continue;
+        }
+        let selected = value
+            .trim()
+            .trim_matches(|character| character == '\'' || character == '"');
+        let selected = selected.strip_prefix("openai/").unwrap_or(selected);
+        return selected.starts_with("gpt-");
+    }
+    false
+}
+
 fn combined_context_guard_status(
     codex_status: CodexConfigContextGuardStatus,
     gateway_enabled: bool,
@@ -1038,10 +1125,11 @@ mod tests {
     use super::{
         codex_overlay_owner, ensure_codex_owner_mutation_allowed,
         get_codex_context_guard_status_with_paths, get_providers_with_paths,
-        get_settings_with_paths, save_providers_with_paths, save_settings_with_paths,
-        set_codex_context_guard_with_paths, switch_mode_with_paths,
-        switch_mode_with_paths_takeover_as_owner, CommandOutcome, CommandRunner,
-        ConfigPaths, ProcessCommandRunner,
+        get_settings_with_paths, republish_managed_codex_context_budget_with_paths,
+        save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
+        switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner,
+        top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths,
+        ProcessCommandRunner,
     };
     use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
     use std::cell::RefCell;
@@ -2269,6 +2357,67 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_contains_sequence(
             &get_runner.commands.borrow()[0].args,
             &["context-guard-status", "--config"],
+        );
+    }
+
+    #[test]
+    fn runtime_projection_recognizes_only_an_explicit_official_top_level_model() {
+        assert!(top_level_model_is_official("model = \"gpt-5.6-terra\"\n"));
+        assert!(top_level_model_is_official(
+            "model = 'openai/gpt-5.6-terra'\n"
+        ));
+        assert!(!top_level_model_is_official("model = \"volc/glm-5.2\"\n"));
+        assert!(!top_level_model_is_official(
+            "[profiles.work]\nmodel = \"gpt-5.6-terra\"\n"
+        ));
+    }
+
+    #[test]
+    fn refreshed_budget_reapplies_the_owned_codex_overlay_from_the_published_catalog() {
+        let root = temp_root("republish-owned-context-budget");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.codex_config_path(),
+            concat!(
+                "# BEGIN CODEX PROXY SESSION CONFIG\n",
+                "# owner = release\n",
+                "# END CODEX PROXY SESSION CONFIG\n",
+                "model = \"gpt-5.6-terra\"\n",
+            ),
+        )
+        .unwrap();
+        save_settings_with_paths(Settings::default(), &paths).expect("settings save");
+        let runner = RecordingRunner::successful();
+
+        let changed = republish_managed_codex_context_budget_with_paths(
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("owned runtime projection");
+
+        assert!(
+            !changed,
+            "the recording runner leaves the config text unchanged"
+        );
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_contains_sequence(
+            &commands[0].args,
+            &[
+                "apply",
+                "--config",
+                "--backup",
+                "--catalog",
+                "--owner",
+                "release",
+            ],
+        );
+        assert_arg_value(
+            &commands[0].args,
+            "--catalog",
+            &paths.generated_catalog_path(),
         );
     }
 

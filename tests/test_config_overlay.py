@@ -21,7 +21,39 @@ from config_overlay import (
     set_feature_flags,
     strip_section,
     strip_top_level_keys,
+    top_level_value,
 )
+
+
+class DeterministicCompactionReplay:
+    """A narrow Codex runtime-config contract replay used by #124.
+
+    Codex App owns the actual compaction operation.  This fixture consumes the
+    same generated top-level runtime setting and asserts the sequencing
+    contract: an ordinary generation may not leave the scheduler at or above
+    the configured threshold before compaction completes.
+    """
+
+    def __init__(self, config_text: str):
+        raw_limit = top_level_value(config_text, "model_auto_compact_token_limit")
+        self.auto_compact_token_limit = int(raw_limit or "0")
+        self.events: list[tuple[str, int]] = []
+        self.compaction_pending = False
+
+    def submit_ordinary_generation(self, input_tokens: int) -> bool:
+        if self.compaction_pending:
+            self.events.append(("ordinary_generation_withheld", input_tokens))
+            return False
+        if input_tokens >= self.auto_compact_token_limit:
+            self.compaction_pending = True
+            self.events.append(("context_compacted", input_tokens))
+            return False
+        self.events.append(("ordinary_generation", input_tokens))
+        return True
+
+    def complete_compaction(self, compacted_input_tokens: int) -> None:
+        self.compaction_pending = False
+        self.events.append(("compaction_completed", compacted_input_tokens))
 
 
 class ConfigOverlayTests(unittest.TestCase):
@@ -286,6 +318,51 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("model_context_window = 272000", text)
             self.assertIn("model_auto_compact_token_limit = 244800", text)
             self.assertLess(244_800, 249_433)
+
+    def test_249433_token_replay_compacts_before_the_next_ordinary_generation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'model = "gpt-5.6-terra"',
+                        "model_context_window = 353400",
+                        "model_auto_compact_token_limit = 300000",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            replay = DeterministicCompactionReplay(config_path.read_text(encoding="utf-8"))
+
+            self.assertFalse(replay.submit_ordinary_generation(249_433))
+            self.assertEqual(replay.events, [("context_compacted", 249_433)])
+
+            self.assertFalse(replay.submit_ordinary_generation(45_514))
+            self.assertEqual(
+                replay.events,
+                [
+                    ("context_compacted", 249_433),
+                    ("ordinary_generation_withheld", 45_514),
+                ],
+            )
+
+            replay.complete_compaction(45_514)
+            self.assertTrue(replay.submit_ordinary_generation(45_514))
+            self.assertEqual(
+                replay.events,
+                [
+                    ("context_compacted", 249_433),
+                    ("ordinary_generation_withheld", 45_514),
+                    ("compaction_completed", 45_514),
+                    ("ordinary_generation", 45_514),
+                ],
+            )
 
     def test_overlay_adopts_a_larger_budget_only_from_a_fresh_direct_catalog_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1046,6 +1123,90 @@ class ConfigOverlayTests(unittest.TestCase):
                 self.assertIn("model_context_window = 400000", text)
                 self.assertIn("model_auto_compact_token_limit = 360000", text)
                 self.assertIn('model_reasoning_effort = "high"', text)
+
+    def test_context_guard_disable_does_not_restore_an_unsafe_official_override(self):
+        original = "\n".join(
+            [
+                'model = "gpt-5.6-terra"',
+                "model_context_window = 400000",
+                "model_auto_compact_token_limit = 360000",
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(original, encoding="utf-8")
+            backup_path.write_text(original, encoding="utf-8")
+
+            set_context_guard(
+                config_path,
+                backup_path,
+                state_path,
+                enabled=True,
+                catalog_path=catalog_path,
+            )
+            disabled = set_context_guard(
+                config_path,
+                backup_path,
+                state_path,
+                enabled=False,
+                catalog_path=catalog_path,
+            )
+
+            self.assertFalse(disabled["enabled"])
+            for path in (config_path, backup_path):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("model_context_window = 272000", text)
+                self.assertIn("model_auto_compact_token_limit = 240000", text)
+                self.assertNotIn("model_context_window = 400000", text)
+                self.assertNotIn("model_auto_compact_token_limit = 360000", text)
+
+    def test_context_guard_disable_keeps_a_third_party_backup_unchanged(self):
+        official = (
+            'model = "gpt-5.6-terra"\n'
+            "model_context_window = 400000\n"
+            "model_auto_compact_token_limit = 360000\n"
+        )
+        third_party_backup = (
+            'model = "volc/glm-5.2"\n'
+            "model_context_window = 1000000\n"
+            "model_auto_compact_token_limit = 900000\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(official, encoding="utf-8")
+            backup_path.write_text(third_party_backup, encoding="utf-8")
+
+            set_context_guard(
+                config_path,
+                backup_path,
+                state_path,
+                enabled=True,
+                catalog_path=catalog_path,
+            )
+            set_context_guard(
+                config_path,
+                backup_path,
+                state_path,
+                enabled=False,
+                catalog_path=catalog_path,
+            )
+
+            self.assertIn("model_context_window = 272000", config_path.read_text(encoding="utf-8"))
+            restored_backup = backup_path.read_text(encoding="utf-8")
+            self.assertIn('model = "volc/glm-5.2"', restored_backup)
+            self.assertIn("model_context_window = 1000000", restored_backup)
+            self.assertIn("model_auto_compact_token_limit = 900000", restored_backup)
 
     def test_context_guard_disable_removes_managed_values_when_no_previous_values_exist(self):
         with tempfile.TemporaryDirectory() as tmpdir:

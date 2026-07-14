@@ -23,6 +23,11 @@ export interface Model {
   enabled: boolean;
 }
 
+export interface OfficialRefreshResult {
+  models: Model[];
+  restart_required: boolean;
+}
+
 export interface ModelPricing {
   input_per_million?: number | null;
   cached_input_per_million?: number | null;

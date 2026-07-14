@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -43,6 +44,11 @@ type RuntimeSnapshot = {
   appFlavor: RuntimeCache<AppFlavorInfo>;
   appVersion: RuntimeCache<AppVersionInfo>;
   updateStatus: RuntimeCache<AppUpdateStatus>;
+};
+
+type TrayToastPayload = {
+  text: string;
+  tone: "success" | "error";
 };
 
 type LoadRuntimeOptions = {
@@ -752,6 +758,34 @@ export default function App() {
       window.clearInterval(clientTimer);
     };
   }, [loadGatewayClients, refreshCoreRuntime, refreshRuntimeStatus]);
+
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<TrayToastPayload>("codexhub:toast", (event) => {
+      showToast({
+        text: event.payload.text,
+        tone: event.payload.tone,
+      });
+    })
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => {
+        // The bridge-only frontend has no native tray event surface.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [showToast]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

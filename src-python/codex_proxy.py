@@ -671,6 +671,7 @@ def _runtime_codex_dir() -> Path:
 
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 # Both limits apply to serialized Gateway telemetry still awaiting a sink write,
@@ -9007,16 +9008,48 @@ def current_catalog_data() -> dict[str, Any]:
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
+    published_budgets = published_official_context_budgets(catalog_path)
     return catalog_with_vision_proxy_capabilities(
         catalog_with_openai_context_guard(
-            catalog_with_official_fast_variants(
-                json.loads(catalog_path.read_text(encoding="utf-8-sig"))
-            )
+            catalog_with_official_fast_variants(json.loads(catalog_path.read_text(encoding="utf-8-sig"))),
+            published_budgets,
+            require_published_snapshot=True,
         )
     )
 
 
-def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]:
+def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
+    """Read the Rust publication fence that commits an Official budget.
+
+    The catalog and Codex runtime overlay are separate atomic files.  The
+    refresh coordinator clears this fence before it begins an update, then
+    commits it only after both files agree.  A missing, interrupted, or
+    mismatched fence is therefore not a safe current Official snapshot.
+    """
+
+    state_path = catalog_path.parent / OFFICIAL_REFRESH_STATE_FILENAME
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, Mapping) or payload.get("publication_ready") is not True:
+        return {}
+    budgets = payload.get("published_context_budgets")
+    if not isinstance(budgets, Mapping):
+        return {}
+    return {
+        str(model_id): budget
+        for model_id, budget in budgets.items()
+        if isinstance(model_id, str) and isinstance(budget, Mapping)
+    }
+
+
+def catalog_with_openai_context_guard(
+    catalog: dict[str, Any],
+    published_budgets: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    require_published_snapshot: bool = False,
+) -> dict[str, Any]:
     # The Direct Official budget is a safety invariant, not an optional
     # presentation preference.  Gateway request handling only projects the
     # atomically published resolver result and never refreshes it itself.
@@ -9070,6 +9103,24 @@ def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]
             # An incomplete or interrupted resolved snapshot must not keep a
             # larger stale catalog value visible to an Official caller.
             return without_context_budget()
+        if require_published_snapshot:
+            if not isinstance(published_budgets, Mapping):
+                return without_context_budget()
+            model_id = str(model.get("slug", "")).removeprefix("openai/")
+            upstream_model = metadata.get("upstream_model")
+            expected = published_budgets.get(model_id)
+            if expected is None and isinstance(upstream_model, str):
+                expected = published_budgets.get(upstream_model.removeprefix("openai/"))
+            if not isinstance(expected, Mapping) or any(
+                expected.get(key) != budget.get(key)
+                for key in (
+                    "model_context_window",
+                    "effective_context_window_percent",
+                    "effective_context_window",
+                    "model_auto_compact_token_limit",
+                )
+            ):
+                return without_context_budget()
         reported_windows = [
             value
             for value in (

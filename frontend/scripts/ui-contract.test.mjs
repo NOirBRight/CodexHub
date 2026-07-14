@@ -2949,6 +2949,26 @@ test("route and context changes disclose the exact Codex restart requirement", a
   assert.match(zhSource, /Gateway 更改已实时生效；请重启 Codex App/);
 });
 
+test("manual Official refresh carries and discloses a Codex restart requirement", async () => {
+  const [actionsSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface OfficialRefreshResult[\s\S]*restart_required: boolean/);
+  assert.match(tauriSource, /refreshOfficialModels: \(\) => call<OfficialRefreshResult>\("refresh_official_models"\)/);
+  assert.match(actionsSource, /const refreshResult = await api\.refreshOfficialModels\(\)/);
+  assert.match(actionsSource, /refreshResult\.restart_required[\s\S]*officialContextLimitsRestartCodex/);
+  const refresh = actionsSource.match(/async function refreshOfficialModels[\s\S]*?async function discoverForForm/)?.[0] ?? "";
+  assert.match(refresh, /catalogAlreadyPublished: true/);
+  assert.doesNotMatch(refresh, /api\.generateCatalog\(\)/);
+  assert.match(enSource, /officialContextLimitsRestartCodex: "Official context limits changed\. Restart Codex App to apply them\."/);
+  assert.match(zhSource, /officialContextLimitsRestartCodex: "官方上下文限制已更新。请重启 Codex App 以应用它们。"/);
+});
+
 test("persistent state changes follow the project toast and restart-disclosure standard", async () => {
   const [agentsSource, standardSource] = await Promise.all([
     readFile(new URL("../../AGENTS.md", import.meta.url), "utf8"),

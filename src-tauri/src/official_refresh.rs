@@ -46,7 +46,10 @@ struct OfficialRefreshState {
     last_automatic_attempt_at: Option<u64>,
     last_attempt_trigger: Option<String>,
     last_attempt_success: Option<bool>,
-    restart_required: bool,
+    // This is a publication fence, not a cache hint.  It becomes false before
+    // acquisition and true only after the catalog and managed Codex runtime
+    // overlay have both published successfully.
+    publication_ready: bool,
     // Retained for a conservative one-time migration from state written by
     // earlier builds that only tracked the raw context window.
     published_context_windows: BTreeMap<String, u32>,
@@ -61,10 +64,24 @@ struct PublishedOfficialBudget {
     model_auto_compact_token_limit: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct OfficialRefreshResult {
+    pub models: Vec<Model>,
+    pub restart_required: bool,
+}
+
 #[derive(Debug, Clone)]
 struct RefreshOutcome {
+    trigger: RefreshTrigger,
     models: Vec<Model>,
     snapshot_available: bool,
+    restart_required: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FlightRun<T> {
+    result: Result<T, String>,
+    joined: bool,
 }
 
 struct FlightState<T> {
@@ -96,7 +113,7 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T: Clone> SingleFlight<T> {
-    fn run(&self, work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    fn run(&self, work: impl FnOnce() -> Result<T, String>) -> FlightRun<T> {
         let mut state = self
             .state
             .lock()
@@ -108,9 +125,12 @@ impl<T: Clone> SingleFlight<T> {
                     .wait(state)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
-            return state.completed.clone().unwrap_or_else(|| {
-                Err("Official refresh single-flight lost its result".to_string())
-            });
+            return FlightRun {
+                result: state.completed.clone().unwrap_or_else(|| {
+                    Err("Official refresh single-flight lost its result".to_string())
+                }),
+                joined: true,
+            };
         }
 
         state.active = true;
@@ -125,7 +145,10 @@ impl<T: Clone> SingleFlight<T> {
         state.active = false;
         state.completed = Some(result.clone());
         self.completed.notify_all();
-        result
+        FlightRun {
+            result,
+            joined: false,
+        }
     }
 }
 
@@ -146,12 +169,18 @@ pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
     if outcome.snapshot_available {
         Ok(())
     } else {
-        Err("current Official context snapshot is unavailable; refuse to activate CodexHub Official without a safe budget".to_string())
+        Err(
+            "current Official context snapshot is unavailable; refuse to activate CodexHub Official without a safe budget"
+                .to_string(),
+        )
     }
 }
 
-pub(crate) fn refresh_manual() -> Result<Vec<Model>, String> {
-    refresh(RefreshTrigger::Manual).map(|outcome| outcome.models)
+pub(crate) fn refresh_manual() -> Result<OfficialRefreshResult, String> {
+    refresh(RefreshTrigger::Manual).map(|outcome| OfficialRefreshResult {
+        models: outcome.models,
+        restart_required: outcome.restart_required,
+    })
 }
 
 pub(crate) fn refresh_after_resume() -> Result<(), String> {
@@ -173,15 +202,38 @@ pub(crate) fn start_scheduled_refresh_loop() {
 }
 
 fn refresh(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
-    refresh_flight().run(|| refresh_once(trigger))
+    refresh_with_flight(refresh_flight(), trigger, refresh_once)
+}
+
+fn refresh_with_flight<F>(
+    flight: &SingleFlight<RefreshOutcome>,
+    trigger: RefreshTrigger,
+    mut work: F,
+) -> Result<RefreshOutcome, String>
+where
+    F: FnMut(RefreshTrigger) -> Result<RefreshOutcome, String>,
+{
+    loop {
+        let flight_run = flight.run(|| work(trigger));
+        let outcome = flight_run.result?;
+        // A manual click which joined a cache-only automatic refresh still
+        // needs its own Direct acquisition.  Re-enter the same single-flight
+        // after the automatic work completes rather than returning its weaker
+        // no-op result to the user.
+        if trigger != RefreshTrigger::Manual || !flight_run.joined || outcome.trigger == trigger {
+            return Ok(outcome);
+        }
+    }
 }
 
 fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
     let settings = config::get_settings()?;
     if !settings.include_official_models {
         return Ok(RefreshOutcome {
+            trigger,
             models: Vec::new(),
             snapshot_available: false,
+            restart_required: false,
         });
     }
 
@@ -191,13 +243,12 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
     hydrate_last_success_from_cached_snapshot(&mut state);
 
     if !should_attempt(trigger, &state, now) {
-        catalog::sync_catalog()?;
-        update_published_context_budgets(&mut state, published_context_budgets_from_catalog()?);
-        write_state(&state_path, &state)?;
         let models = models::list_cached_official_models().unwrap_or_default();
         return Ok(RefreshOutcome {
-            snapshot_available: state.last_success_at.is_some() || !models.is_empty(),
+            trigger,
+            snapshot_available: current_published_snapshot_available(&state),
             models,
+            restart_required: false,
         });
     }
 
@@ -206,45 +257,126 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
 
     match models::refresh_official_models_direct() {
         Ok(models) => {
-            state.last_success_at = Some(now);
-            state.last_attempt_success = Some(true);
-            write_state(&state_path, &state)?;
-            catalog::sync_catalog()?;
-            update_published_context_budgets(&mut state, published_context_budgets_from_catalog()?);
-            write_state(&state_path, &state)?;
+            let publication = publish_resolved_snapshot(&state_path, &mut state, now, true)
+                .map_err(|error| persist_failed_publication(&state_path, &mut state, error))?;
             Ok(RefreshOutcome {
+                trigger,
                 models,
                 snapshot_available: true,
+                restart_required: publication.restart_required,
             })
         }
         Err(direct_error) => {
-            state.last_attempt_success = Some(false);
-            write_state(&state_path, &state)?;
             let models = models::list_cached_official_models().unwrap_or_default();
-            catalog::sync_catalog()?;
-            update_published_context_budgets(&mut state, published_context_budgets_from_catalog()?);
-            write_state(&state_path, &state)?;
-            if models.is_empty() && state.last_success_at.is_none() {
+            let publication = publish_resolved_snapshot(&state_path, &mut state, now, false)
+                .map_err(|publication_error| {
+                    persist_failed_publication(
+                        &state_path,
+                        &mut state,
+                        format!(
+                            "Direct Official refresh failed: {direct_error}; failed to publish a degraded safe snapshot: \
+                             {publication_error}"
+                        ),
+                    )
+                })?;
+            if !current_published_snapshot_available(&state) {
                 return Err(format!(
-                    "Direct Official refresh failed and no previous safe snapshot is available: {direct_error}"
+                    "Direct Official refresh failed and no previous safe snapshot is available: \
+                     {direct_error}"
                 ));
             }
             Ok(RefreshOutcome {
-                snapshot_available: state.last_success_at.is_some() || !models.is_empty(),
+                trigger,
+                snapshot_available: true,
                 models,
+                restart_required: publication.restart_required,
             })
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PublicationOutcome {
+    restart_required: bool,
+}
+
+fn publish_resolved_snapshot(
+    state_path: &Path,
+    state: &mut OfficialRefreshState,
+    now: u64,
+    direct_success: bool,
+) -> Result<PublicationOutcome, String> {
+    let outcome = finalize_published_snapshot(
+        state,
+        now,
+        direct_success,
+        || catalog::sync_catalog().map(|_| ()),
+        published_context_budgets_from_catalog,
+        config::republish_managed_codex_context_budget,
+    )?;
+    write_state(state_path, state)?;
+    Ok(outcome)
+}
+
+fn finalize_published_snapshot<SyncCatalog, ReadBudgets, ProjectRuntime>(
+    state: &mut OfficialRefreshState,
+    now: u64,
+    direct_success: bool,
+    sync_catalog: SyncCatalog,
+    read_budgets: ReadBudgets,
+    project_runtime: ProjectRuntime,
+) -> Result<PublicationOutcome, String>
+where
+    SyncCatalog: FnOnce() -> Result<(), String>,
+    ReadBudgets: FnOnce() -> Result<BTreeMap<String, PublishedOfficialBudget>, String>,
+    ProjectRuntime: FnOnce() -> Result<bool, String>,
+{
+    // The state fence remains false until every consumer has the same safe
+    // snapshot.  A failed catalog or runtime publication therefore cannot
+    // leave an older larger catalog accepted as current.
+    sync_catalog()?;
+    let next_budgets = read_budgets()?;
+    if next_budgets.is_empty() {
+        return Err(
+            "published Official catalog contains no safe resolved context budget".to_string(),
+        );
+    }
+    let runtime_changed = project_runtime()?;
+    update_published_context_budgets(state, next_budgets);
+    state.publication_ready = true;
+    state.last_attempt_success = Some(direct_success);
+    if direct_success {
+        // Direct success is durable only after both catalog and runtime
+        // publication succeeded.  This ordering keeps a publication failure
+        // recoverable instead of treating it as a fresh snapshot for 12h.
+        state.last_success_at = Some(now);
+    }
+    Ok(PublicationOutcome {
+        restart_required: runtime_changed,
+    })
+}
+
+fn persist_failed_publication(
+    state_path: &Path,
+    state: &mut OfficialRefreshState,
+    error: String,
+) -> String {
+    state.last_attempt_success = Some(false);
+    state.publication_ready = false;
+    match write_state(state_path, state) {
+        Ok(()) => error,
+        Err(persist_error) => format!(
+            "{error}; additionally failed to persist the unsafe publication fence: {persist_error}"
+        ),
     }
 }
 
 fn should_attempt(trigger: RefreshTrigger, state: &OfficialRefreshState, now: u64) -> bool {
     match trigger {
         RefreshTrigger::Startup | RefreshTrigger::Manual => true,
-        RefreshTrigger::Activation => state
-            .last_success_at
-            .map(|success| elapsed_at_least(now, success, OFFICIAL_REFRESH_INTERVAL_SECONDS))
-            .unwrap_or(true),
-        RefreshTrigger::Scheduled | RefreshTrigger::Resume => automatic_refresh_due(state, now),
+        RefreshTrigger::Activation | RefreshTrigger::Scheduled | RefreshTrigger::Resume => {
+            automatic_refresh_due(state, now)
+        }
     }
 }
 
@@ -297,10 +429,11 @@ fn record_attempt(
     now: u64,
     success: bool,
 ) {
-    state.schema_version = 1;
+    state.schema_version = 2;
     state.last_attempt_at = Some(now);
     state.last_attempt_trigger = Some(trigger.as_str().to_string());
     state.last_attempt_success = Some(success);
+    state.publication_ready = false;
     if trigger.is_automatic() {
         state.last_automatic_attempt_at = Some(now);
     }
@@ -309,7 +442,7 @@ fn record_attempt(
 fn update_published_context_budgets(
     state: &mut OfficialRefreshState,
     next: BTreeMap<String, PublishedOfficialBudget>,
-) {
+) -> bool {
     let next_windows = next
         .iter()
         .map(|(id, budget)| (id.clone(), budget.model_context_window))
@@ -320,15 +453,9 @@ fn update_published_context_budgets(
     } else {
         state.published_context_budgets != next
     };
-    if changed {
-        // The Gateway reads the newly written catalog immediately.  The Codex
-        // App reads compaction configuration at normal restart, so any lower
-        // or higher context/effective/auto-compaction transition is explicitly
-        // restart-gated there.
-        state.restart_required = true;
-    }
     state.published_context_windows = next_windows;
     state.published_context_budgets = next;
+    changed
 }
 
 fn published_context_budgets_from_catalog(
@@ -421,6 +548,14 @@ fn published_context_budgets_from_catalog(
     Ok(budgets)
 }
 
+fn current_published_snapshot_available(state: &OfficialRefreshState) -> bool {
+    state.publication_ready
+        && !state.published_context_budgets.is_empty()
+        && published_context_budgets_from_catalog()
+            .map(|budgets| budgets == state.published_context_budgets)
+            .unwrap_or(false)
+}
+
 fn positive_budget_value(value: Option<&Value>) -> Option<u32> {
     value
         .and_then(Value::as_u64)
@@ -468,9 +603,10 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_refresh_due, read_state, record_attempt, should_attempt,
-        update_published_context_budgets, write_state, OfficialRefreshState,
-        PublishedOfficialBudget, RefreshTrigger, SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        automatic_refresh_due, finalize_published_snapshot, read_state, record_attempt,
+        refresh_with_flight, should_attempt, update_published_context_budgets, write_state,
+        OfficialRefreshState, PublishedOfficialBudget, RefreshOutcome, RefreshTrigger,
+        SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -529,41 +665,56 @@ mod tests {
     }
 
     #[test]
-    fn lower_and_higher_direct_transitions_mark_codex_restart_required() {
+    fn activation_honors_the_failed_automatic_attempt_bound() {
         let mut state = OfficialRefreshState::default();
-        update_published_context_budgets(
+        record_attempt(&mut state, RefreshTrigger::Scheduled, 1_000, false);
+
+        assert!(!should_attempt(RefreshTrigger::Activation, &state, 1_001));
+        assert!(should_attempt(
+            RefreshTrigger::Activation,
+            &state,
+            1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        ));
+    }
+
+    #[test]
+    fn lower_and_higher_direct_transitions_are_detected_for_runtime_projection() {
+        let mut state = OfficialRefreshState::default();
+        assert!(!update_published_context_budgets(
             &mut state,
             budget_map("gpt-5.6-terra", 300_000, 100, 300_000, 270_000),
-        );
-        assert!(!state.restart_required);
+        ));
 
-        update_published_context_budgets(
+        assert!(update_published_context_budgets(
             &mut state,
             budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000),
-        );
-        assert!(state.restart_required);
+        ));
 
-        state.restart_required = false;
-        update_published_context_budgets(
+        assert!(update_published_context_budgets(
             &mut state,
             budget_map("gpt-5.6-terra", 400_000, 100, 400_000, 360_000),
-        );
-        assert!(state.restart_required);
+        ));
     }
 
     #[test]
     fn a_changed_compaction_limit_marks_codex_restart_required_without_context_change() {
         let mut state = OfficialRefreshState::default();
-        update_published_context_budgets(
+        assert!(!update_published_context_budgets(
             &mut state,
             budget_map("gpt-5.6-terra", 300_000, 100, 300_000, 270_000),
-        );
-        update_published_context_budgets(
+        ));
+        assert!(update_published_context_budgets(
             &mut state,
             budget_map("gpt-5.6-terra", 300_000, 80, 240_000, 210_000),
-        );
+        ));
 
-        assert!(state.restart_required);
+        assert_eq!(
+            state
+                .published_context_budgets
+                .get("gpt-5.6-terra")
+                .map(|budget| budget.model_auto_compact_token_limit),
+            Some(210_000)
+        );
     }
 
     #[test]
@@ -592,9 +743,102 @@ mod tests {
             })
         });
 
-        assert_eq!(first.join().unwrap(), Ok(7));
-        assert_eq!(second.join().unwrap(), Ok(7));
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert_eq!(first.result, Ok(7));
+        assert!(!first.joined);
+        assert_eq!(second.result, Ok(7));
+        assert!(second.joined);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn manual_refresh_joining_a_cache_only_automatic_refresh_runs_directly_afterward() {
+        let flight = Arc::new(SingleFlight::<RefreshOutcome>::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (automatic_started_tx, automatic_started_rx) = mpsc::channel();
+
+        let automatic_flight = Arc::clone(&flight);
+        let automatic_calls = Arc::clone(&calls);
+        let automatic = thread::spawn(move || {
+            refresh_with_flight(
+                &automatic_flight,
+                RefreshTrigger::Scheduled,
+                move |trigger| {
+                    automatic_calls.fetch_add(1, Ordering::SeqCst);
+                    automatic_started_tx.send(()).unwrap();
+                    thread::sleep(Duration::from_millis(40));
+                    Ok(outcome(trigger, false))
+                },
+            )
+        });
+
+        automatic_started_rx.recv().unwrap();
+        let manual_flight = Arc::clone(&flight);
+        let manual_calls = Arc::clone(&calls);
+        let manual = thread::spawn(move || {
+            refresh_with_flight(&manual_flight, RefreshTrigger::Manual, move |trigger| {
+                manual_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(outcome(trigger, true))
+            })
+        });
+
+        let automatic = automatic.join().unwrap().unwrap();
+        let manual = manual.join().unwrap().unwrap();
+        assert_eq!(automatic.trigger, RefreshTrigger::Scheduled);
+        assert!(!automatic.snapshot_available);
+        assert_eq!(manual.trigger, RefreshTrigger::Manual);
+        assert!(manual.snapshot_available);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn publication_failure_does_not_mark_direct_success_or_leave_the_snapshot_ready() {
+        let mut state = OfficialRefreshState {
+            last_success_at: Some(1_000),
+            publication_ready: false,
+            ..OfficialRefreshState::default()
+        };
+        record_attempt(&mut state, RefreshTrigger::Activation, 2_000, false);
+
+        let error = finalize_published_snapshot(
+            &mut state,
+            2_000,
+            true,
+            || Err("catalog write failed".to_string()),
+            || Ok(budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000)),
+            || Ok(true),
+        )
+        .expect_err("failed catalog publication must fail closed");
+
+        assert!(error.contains("catalog write failed"));
+        assert_eq!(state.last_success_at, Some(1_000));
+        assert_eq!(state.last_attempt_success, Some(false));
+        assert!(!state.publication_ready);
+        assert!(should_attempt(RefreshTrigger::Startup, &state, 2_001));
+        assert!(should_attempt(RefreshTrigger::Manual, &state, 2_001));
+    }
+
+    #[test]
+    fn publication_finalization_updates_runtime_before_marking_the_snapshot_current() {
+        let mut state = OfficialRefreshState::default();
+        record_attempt(&mut state, RefreshTrigger::Manual, 2_000, false);
+
+        let publication = finalize_published_snapshot(
+            &mut state,
+            2_000,
+            true,
+            || Ok(()),
+            || Ok(budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000)),
+            || Ok(true),
+        )
+        .expect("catalog and managed runtime projection publish");
+
+        assert!(publication.restart_required);
+        assert_eq!(state.last_success_at, Some(2_000));
+        assert_eq!(state.last_attempt_success, Some(true));
+        assert!(state.publication_ready);
+        assert_eq!(state.schema_version, 2);
     }
 
     #[test]
@@ -630,6 +874,15 @@ mod tests {
                 model_auto_compact_token_limit: auto_compact_token_limit,
             },
         )])
+    }
+
+    fn outcome(trigger: RefreshTrigger, snapshot_available: bool) -> RefreshOutcome {
+        RefreshOutcome {
+            trigger,
+            models: Vec::new(),
+            snapshot_available,
+            restart_required: false,
+        }
     }
 
     fn temp_root(name: &str) -> PathBuf {
