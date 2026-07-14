@@ -6,6 +6,107 @@ from pathlib import Path
 from typing import Any
 
 
+OFFICIAL_CONTEXT_FALLBACK_WINDOW = 272_000
+OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95
+OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT = 240_000
+CURRENT_DIRECT_OFFICIAL_SOURCE = "current_direct_official"
+
+
+@dataclass(frozen=True)
+class OfficialContextBudget:
+    """One safe, sanitized context decision for an Official catalog model."""
+
+    context_window: int
+    max_context_window: int
+    effective_context_window_percent: int
+    effective_context_window: int
+    model_context_window: int
+    model_auto_compact_token_limit: int
+    source: str
+    freshness: str
+
+
+def _positive_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def resolve_official_context_budget(
+    *,
+    direct_context_window: Any = None,
+    direct_max_context_window: Any = None,
+    direct_freshness: str = "missing",
+    direct_source: str = "missing",
+    fallback_context_window: Any = None,
+) -> OfficialContextBudget:
+    """Resolve an Official usable-context budget without trusting stale probes.
+
+    Only a fresh Direct Official catalog value can raise the conservative
+    fallback.  The selected value is deliberately projected into every
+    context-facing field so the catalog and Codex auto-compaction setting do
+    not disagree about the usable upper bound.
+    """
+
+    fallback_values = [OFFICIAL_CONTEXT_FALLBACK_WINDOW]
+    fallback_context = _positive_int(fallback_context_window)
+    if fallback_context is not None:
+        fallback_values.append(fallback_context)
+    conservative_window = min(fallback_values)
+
+    direct_context = _positive_int(direct_context_window)
+    direct_max = _positive_int(direct_max_context_window)
+    allowed_freshness = {"fresh", "missing", "stale", "contradictory"}
+    freshness = direct_freshness if direct_freshness in allowed_freshness else "missing"
+    source = "conservative_fallback"
+    selected_window = conservative_window
+
+    trusted_current_direct = (
+        direct_source == CURRENT_DIRECT_OFFICIAL_SOURCE
+        and freshness == "fresh"
+    )
+    values_that_can_only_tighten = [
+        value
+        for value in (direct_context, direct_max)
+        if value is not None
+    ]
+
+    if trusted_current_direct and direct_context is not None:
+        if direct_max is not None and direct_max < direct_context:
+            # A reported maximum below the usable value is internally
+            # contradictory.  Preserve the lower bound rather than emitting
+            # a larger catalog/runtime setting.
+            selected_window = min(conservative_window, direct_max)
+            freshness = "contradictory"
+        else:
+            selected_window = direct_context
+            source = CURRENT_DIRECT_OFFICIAL_SOURCE
+    else:
+        # Untrusted, stale, or incomplete data can never expand the budget,
+        # but an independently smaller value remains a safe cap.
+        if values_that_can_only_tighten:
+            selected_window = min(conservative_window, *values_that_can_only_tighten)
+        if direct_context is not None and direct_max is not None and direct_max < direct_context:
+            freshness = "contradictory"
+        elif freshness == "fresh":
+            freshness = "missing"
+
+    effective_window = max(
+        1,
+        selected_window * OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT // 100,
+    )
+    auto_compact_limit = min(OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT, effective_window)
+
+    return OfficialContextBudget(
+        context_window=selected_window,
+        max_context_window=selected_window,
+        effective_context_window_percent=OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+        effective_context_window=effective_window,
+        model_context_window=selected_window,
+        model_auto_compact_token_limit=auto_compact_limit,
+        source=source,
+        freshness=freshness,
+    )
+
+
 @dataclass(frozen=True)
 class ResolvedModelLimits:
     provider_id: str

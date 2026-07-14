@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 
 from atomic_io import atomic_write_text
+from model_limits import (
+    CURRENT_DIRECT_OFFICIAL_SOURCE,
+    OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT,
+    OFFICIAL_CONTEXT_FALLBACK_WINDOW,
+    OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+)
 import re
 import sys
 from urllib.parse import urlsplit
@@ -26,8 +32,8 @@ STALE_PROXY_PROVIDER_SECTIONS = (
     "model_providers.custom",
     "model_providers.codex_proxy",
 )
-CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
-CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT = 240_000
+CONTEXT_GUARD_CONTEXT_WINDOW = OFFICIAL_CONTEXT_FALLBACK_WINDOW
+CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT = OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT
 CONTEXT_GUARD_KEYS = {
     "model_context_window",
     "model_auto_compact_token_limit",
@@ -421,17 +427,119 @@ def catalog_config_value(_config_path: Path, catalog_path: Path) -> str:
     return str(catalog_path.resolve())
 
 
-def build_overlay(catalog_value: str, owner: str) -> str:
-    return "\n".join(
-        [
-            MARKER_BEGIN,
-            f"# owner = {owner}",
-            f'model_provider = "{PROXY_PROVIDER_ID}"',
-            f"model_catalog_json = {toml_literal(catalog_value)}",
-            MARKER_END,
-            "",
-        ]
+def _positive_catalog_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _selected_official_context_budget(
+    catalog_path: Path,
+    selected_model: str | None,
+) -> tuple[int, int] | None:
+    """Return the selected Official model's safe Codex configuration cap.
+
+    The generated catalog is the cross-process handoff for the resolver.  A
+    context value larger than the conservative fallback is accepted only when
+    the catalog records a fresh Direct Official decision.  An explicit
+    third-party selection deliberately receives no new global Codex cap.
+    """
+
+    try:
+        payload = json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+
+    models = payload.get("models") if isinstance(payload, dict) else None
+    official_budgets: dict[str, dict[str, object]] = {}
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            slug = model.get("slug")
+            if not isinstance(slug, str) or not slug.startswith("gpt-"):
+                continue
+            metadata = model.get("codex_proxy_metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("provider") != "openai" or metadata.get("upstream_name") != "official":
+                continue
+            budget = metadata.get("official_context_budget")
+            if isinstance(budget, dict):
+                official_budgets[slug] = budget
+
+    normalized_selected_model = selected_model.strip() if isinstance(selected_model, str) else ""
+    if normalized_selected_model.startswith("openai/"):
+        normalized_selected_model = normalized_selected_model.removeprefix("openai/")
+
+    budget: dict[str, object] | None = None
+    if normalized_selected_model:
+        budget = official_budgets.get(normalized_selected_model)
+        if budget is None and not normalized_selected_model.startswith("gpt-"):
+            return None
+    elif official_budgets:
+        budget = next(iter(official_budgets.values()))
+
+    if budget is None:
+        return (
+            CONTEXT_GUARD_CONTEXT_WINDOW,
+            CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
+        )
+
+    context_window = _positive_catalog_int(budget.get("model_context_window"))
+    if context_window is None:
+        context_window = _positive_catalog_int(budget.get("context_window"))
+    if context_window is None:
+        return (
+            CONTEXT_GUARD_CONTEXT_WINDOW,
+            CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
+        )
+
+    trusted_current_direct = (
+        budget.get("source") == CURRENT_DIRECT_OFFICIAL_SOURCE
+        and budget.get("freshness") == "fresh"
     )
+    if not trusted_current_direct:
+        context_window = min(context_window, CONTEXT_GUARD_CONTEXT_WINDOW)
+
+    effective_window = max(
+        1,
+        context_window * OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT // 100,
+    )
+    auto_compact_token_limit = _positive_catalog_int(
+        budget.get("model_auto_compact_token_limit")
+    )
+    if auto_compact_token_limit is None:
+        auto_compact_token_limit = CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
+
+    return (
+        context_window,
+        min(
+            auto_compact_token_limit,
+            CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
+            effective_window,
+        ),
+    )
+
+
+def build_overlay(
+    catalog_value: str,
+    owner: str,
+    context_budget: tuple[int, int] | None = None,
+) -> str:
+    lines = [
+        MARKER_BEGIN,
+        f"# owner = {owner}",
+        f'model_provider = "{PROXY_PROVIDER_ID}"',
+        f"model_catalog_json = {toml_literal(catalog_value)}",
+    ]
+    if context_budget is not None:
+        context_window, auto_compact_token_limit = context_budget
+        lines.extend(
+            [
+                f"model_context_window = {context_window}",
+                f"model_auto_compact_token_limit = {auto_compact_token_limit}",
+            ]
+        )
+    return "\n".join([*lines, MARKER_END, ""])
 
 
 def overlay_owner(text: str) -> str | None:
@@ -521,6 +629,10 @@ def apply_overlay(
         custom_section == unified_official_provider_values() or is_managed_gateway_provider(custom_section)
     ):
         raise ValueError("refusing to overwrite unknown custom provider")
+    context_budget = _selected_official_context_budget(
+        catalog_path,
+        top_level_value(original, "model"),
+    )
     cleaned = strip_marked_overlay(original)
     active_owner = overlay_owner(original)
     cross_owner_takeover = takeover and active_owner != owner
@@ -536,8 +648,14 @@ def apply_overlay(
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
     cleaned = strip_top_level_keys(cleaned)
+    if context_budget is not None:
+        cleaned = strip_top_level_keys(cleaned, CONTEXT_GUARD_KEYS)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
-    updated = build_overlay(catalog_config_value(config_path, catalog_path), owner) + cleaned.lstrip()
+    updated = build_overlay(
+        catalog_config_value(config_path, catalog_path),
+        owner,
+        context_budget,
+    ) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
 
