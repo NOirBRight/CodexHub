@@ -119,6 +119,7 @@ from websocket_transport import (
 )
 import proxy_telemetry
 import bounded_event_writer
+import diagnostic_recorder
 
 try:
     import zstandard
@@ -684,6 +685,10 @@ GATEWAY_EVENT_WRITER = bounded_event_writer.BoundedEventWriter(
     recovery_record_factory=_gateway_event_writer_recovery_record,
     thread_name="codex-gateway-event-writer",
 )
+# The compile-selected debug flavor will install a recorder in the later
+# Tauri/runtime slice. Normal builds intentionally have no recorder object,
+# settings toggle, or environment switch that could activate persistence.
+GATEWAY_DIAGNOSTIC_RECORDER: diagnostic_recorder.DiagnosticRecorderProtocol | None = None
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
@@ -1377,7 +1382,49 @@ def gateway_transparent_vision_proxy_enabled() -> bool:
     return gateway_image_proxy_enabled()
 
 
+def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
+    """Keep optional recorder failures out of Gateway request behavior."""
+
+    recorder = GATEWAY_DIAGNOSTIC_RECORDER
+    if recorder is None:
+        return
+    try:
+        observation = getattr(recorder, method, None)
+        if callable(observation):
+            observation(*args, **kwargs)
+    except Exception:
+        return
+
+
+def _diagnostic_context_value(event_context: Mapping[str, Any] | None, key: str) -> Any:
+    """Read optional diagnostic context without changing a request on failure."""
+
+    if event_context is None:
+        return None
+    try:
+        return event_context.get(key)
+    except Exception:
+        return None
+
+
+def _diagnostic_response_metadata(response: Any) -> tuple[Any, Any]:
+    """Snapshot only optional header summaries for the failure-contained hook."""
+
+    try:
+        status = getattr(response, "status", None)
+        if not status:
+            status = getattr(response, "code", None)
+    except Exception:
+        status = None
+    try:
+        headers = getattr(response, "headers", None)
+    except Exception:
+        headers = None
+    return status, headers
+
+
 def write_proxy_event(event: str, **fields: Any) -> None:
+    _observe_gateway_diagnostic("observe_proxy_event", event, fields)
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
     _enqueue_gateway_event_payload(payload)
 
@@ -10622,16 +10669,56 @@ def _open_upstream_response(
     explicit_max_attempts = max_attempts is not None
     base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
     retry_started_at = time.monotonic()
+    diagnostic_request_key = _diagnostic_context_value(event_context, "request_id")
+    diagnostic_model = _diagnostic_context_value(event_context, "model")
     attempt = 1
     while True:
+        attempt_started_at = time.monotonic()
         try:
-            return _open_upstream_once(
+            response = _open_upstream_once(
                 request,
                 upstream_name=upstream_name,
                 timeout=timeout,
             )
+            elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            _observe_gateway_diagnostic(
+                "observe_upstream_attempt",
+                diagnostic_request_key,
+                attempt=attempt,
+                retry_budget=base_retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="ok",
+                connection_disposition="unobserved",
+                provider=upstream_name,
+                model=diagnostic_model,
+            )
+            diagnostic_status, diagnostic_headers = _diagnostic_response_metadata(response)
+            _observe_gateway_diagnostic(
+                "observe_upstream_headers",
+                diagnostic_request_key,
+                status=diagnostic_status,
+                headers=diagnostic_headers,
+            )
+            return response
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
+            elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            try:
+                failure_phase = transport_failure_phase(exc)
+            except Exception:
+                failure_phase = "unknown"
             if isinstance(exc, HTTPError) and not retry_http_errors:
+                _observe_gateway_diagnostic(
+                    "observe_upstream_attempt",
+                    diagnostic_request_key,
+                    attempt=attempt,
+                    retry_budget=attempt,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase=failure_phase,
+                    connection_disposition="unobserved",
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
                 raise
             failure_class = _upstream_failure_class(exc)
             retry_attempts = _retry_attempts_for_failure_class(
@@ -10639,6 +10726,18 @@ def _open_upstream_response(
                 base_attempts=base_retry_attempts,
                 failure_class=failure_class,
                 explicit_max_attempts=explicit_max_attempts,
+            )
+            _observe_gateway_diagnostic(
+                "observe_upstream_attempt",
+                diagnostic_request_key,
+                attempt=attempt,
+                retry_budget=retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="error",
+                failure_phase=failure_phase,
+                connection_disposition="unobserved",
+                provider=upstream_name,
+                model=diagnostic_model,
             )
             if attempt >= retry_attempts or failure_class == RETRY_FAILURE_PERMANENT:
                 raise
@@ -12129,7 +12228,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         *,
         downstream_output_started: Callable[[], bool] | None = None,
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
+        on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
+        def observe_line(line: bytes) -> None:
+            if not line or on_line is None:
+                return
+            try:
+                on_line(line)
+            except Exception:
+                return
+
         keepalive_interval = sse_keepalive_seconds()
         transport_timeout_seconds = transport_sse_idle_timeout_seconds()
         model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
@@ -12138,6 +12246,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if keepalive_interval <= 0 and not transport_idle_guard_enabled and not model_event_idle_guard_enabled:
             while True:
                 line = response.readline()
+                observe_line(line)
                 yield line
                 if not line:
                     return
@@ -12218,6 +12327,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 last_transport_at = now
                 if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
                     last_model_event_at = now
+                observe_line(value)
             yield value
             if not value:
                 return
@@ -12378,6 +12488,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         failure_side = "upstream_read"
         sse_stats = PassthroughSseSemanticStats()
         terminal_drain_timeout_shortened = False
+        diagnostic_terminal_observed = False
         try:
             while True:
                 failure_side = "upstream_read"
@@ -12389,11 +12500,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 send_downstream_headers_once()
                 last_upstream_byte_at = time.monotonic()
                 failure_side = "downstream_write"
+                _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
                 self.wfile.write(line)
                 self.wfile.flush()
                 lines_streamed += 1
                 bytes_streamed += len(line)
                 sse_stats.observe_line(line)
+                if sse_stats.terminal_event_seen and not diagnostic_terminal_observed:
+                    diagnostic_terminal_observed = True
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=False)
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=True)
                 _offer_official_passthrough_usage_line(usage_context, line)
                 if sse_stats.terminal_event_seen and not terminal_drain_timeout_shortened:
                     shorten_terminal_drain_timeout = getattr(response, "shorten_terminal_drain_timeout", None)
@@ -12568,6 +12684,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     return 502
                 if not line:
                     break
+                _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
                 if defer_stream_errors and not headers_sent:
                     pending_lines.append(line)
                     payload_bytes = _sse_payload_bytes(line)
@@ -12726,6 +12843,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format=upstream_format,
             inbound_format=inbound_format,
         )
+
+        def observe_diagnostic_sse_line(line: bytes) -> None:
+            _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+
         if (
             behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
             and upstream_format == inbound_format
@@ -13066,6 +13187,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13197,6 +13319,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13326,6 +13449,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13446,6 +13570,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13674,6 +13799,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13942,6 +14068,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 for line in self._iter_upstream_sse_lines(
                     response,
                     line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                    on_line=observe_diagnostic_sse_line,
                 ):
                     if not line:
                         break
@@ -13987,6 +14114,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             _capture_usage(usage_capture, None, missing_reason="stream_error_event")
                             return 502
                         if _responses_events_have_terminal([usage_payload]):
+                            if not saw_terminal_event:
+                                _observe_gateway_diagnostic(
+                                    "observe_terminal",
+                                    request_id,
+                                    forwarded=False,
+                                )
                             saw_terminal_event = True
                         if event_type == "response.completed":
                             saw_completed_event = True
@@ -14064,6 +14197,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 buffer=not flush_terminal,
                                 force=flush_terminal,
                             )
+                            if flush_terminal:
+                                _observe_gateway_diagnostic(
+                                    "observe_terminal",
+                                    request_id,
+                                    forwarded=True,
+                                )
                     if saw_terminal_event:
                         break
             except UpstreamStreamIdleTimeoutError as exc:
@@ -14247,6 +14386,12 @@ def run_server(host: str, port: int) -> None:
         )
         if not writer_result.completed:
             logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
+        try:
+            diagnostic_shutdown = getattr(GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
+            if callable(diagnostic_shutdown) and not diagnostic_shutdown(GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS):
+                logger.warning("Gateway diagnostic recorder shutdown did not drain")
+        except Exception:
+            logger.warning("Gateway diagnostic recorder shutdown failed")
 
 
 def main(argv: list[str] | None = None) -> int:
