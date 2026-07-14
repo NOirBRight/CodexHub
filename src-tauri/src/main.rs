@@ -1020,6 +1020,21 @@ where
     Ok(true)
 }
 
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if let Some(first_arg) = args.first() {
+        if first_arg == "web-bridge" {
+            std::process::exit(web_bridge::run(&args[1..]));
+        }
+        if first_arg != "app" {
+            std::process::exit(cli::run(&args));
+        }
+    }
+
+    run_gui();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{start_gateway_after_startup, tray_toast_for, AppStatus};
@@ -1067,19 +1082,4 @@ mod tests {
             history_sync_message: None,
         }
     }
-}
-
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    if let Some(first_arg) = args.first() {
-        if first_arg == "web-bridge" {
-            std::process::exit(web_bridge::run(&args[1..]));
-        }
-        if first_arg != "app" {
-            std::process::exit(cli::run(&args));
-        }
-    }
-
-    run_gui();
 }
