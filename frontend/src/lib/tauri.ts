@@ -9,6 +9,8 @@ import type {
   AppVersionInfo,
   CodexContextGuardStatus,
   CodexHubError,
+  DiagnosticsActionResult,
+  DiagnosticsStatus,
   GatewayClientConfig,
   GatewayClientApplyResult,
   GatewayClientConfigPreview,
@@ -227,6 +229,15 @@ export const api = {
       upstreamFormat,
     }),
   gatewayStatus: () => call<GatewayStatus>("gateway_status"),
+  diagnosticsStatus: () => call<DiagnosticsStatus>("diagnostics_status"),
+  diagnosticsManualMark: () => call<DiagnosticsActionResult>("diagnostics_manual_mark"),
+  diagnosticsPause: () => call<DiagnosticsActionResult>("diagnostics_pause"),
+  diagnosticsResume: () => call<DiagnosticsActionResult>("diagnostics_resume"),
+  diagnosticsDeleteIncident: (incidentId: string) =>
+    call<DiagnosticsActionResult>("diagnostics_delete_incident", {
+      incidentId,
+      incident_id: incidentId,
+    }),
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>
     call<GatewayTestResult>("gateway_test_request", { kind, model: model ?? null }),
   gatewayRecentEvents: (
