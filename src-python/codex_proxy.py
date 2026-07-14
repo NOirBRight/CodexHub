@@ -178,12 +178,23 @@ class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     def _get_conn(self, timeout: float | None = None) -> Any:
         connection = super()._get_conn(timeout)
         released_at = getattr(connection, "_codexhub_released_at", None)
+        try:
+            disposition = (
+                "reused" if isinstance(released_at, (int, float)) and getattr(connection, "sock", None) else "new"
+            )
+        except Exception:
+            disposition = "unobserved"
         idle_seconds = time.monotonic() - released_at if isinstance(released_at, (int, float)) else None
         max_idle_seconds = (
             OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS if self.proxy is not None else OFFICIAL_POOL_MAX_IDLE_SECONDS
         )
         if idle_seconds is not None and idle_seconds >= max_idle_seconds:
             connection.close()
+            disposition = "new"
+        try:
+            connection._codexhub_diagnostic_connection_disposition = disposition
+        except Exception:
+            pass
         return connection
 
     def _put_conn(self, connection: Any) -> None:
@@ -200,6 +211,7 @@ class _OfficialPooledResponse:
         self.status = response.status
         self.reason = response.reason
         self.headers = response.headers
+        self.connection_disposition = _connection_disposition(getattr(response, "connection", None))
         self._terminal_drain_socket: Any = None
         self._terminal_drain_original_timeout: float | None = None
 
@@ -266,6 +278,14 @@ class _OfficialPooledResponse:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
         self.close()
         return False
+
+
+def _connection_disposition(connection: Any) -> str:
+    try:
+        disposition = getattr(connection, "_codexhub_diagnostic_connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
 
 
 def _official_proxy_url(url: str) -> str | None:
@@ -1421,6 +1441,23 @@ def _diagnostic_response_metadata(response: Any) -> tuple[Any, Any]:
     except Exception:
         headers = None
     return status, headers
+
+
+def _diagnostic_connection_disposition(response: Any) -> str:
+    try:
+        disposition = getattr(response, "connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
+    return {
+        "dns": "upstream_dns",
+        "tcp_connect": "upstream_tcp",
+        "tls": "upstream_tls",
+        "request_write": "upstream_request_write",
+    }.get(failure_phase)
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
@@ -10681,6 +10718,22 @@ def _open_upstream_response(
                 timeout=timeout,
             )
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            connection_disposition = _diagnostic_connection_disposition(response)
+            # A response is the supported Gateway seam that proves the open
+            # completed through request write. Keep each named boundary
+            # content-free; lower-level socket details stay out of the record.
+            for phase in ("upstream_dns", "upstream_tcp", "upstream_tls", "upstream_request_write"):
+                _observe_gateway_diagnostic(
+                    "observe_upstream_phase",
+                    diagnostic_request_key,
+                    phase=phase,
+                    attempt=attempt,
+                    retry_budget=base_retry_attempts,
+                    elapsed_ms=elapsed_ms,
+                    outcome="ok",
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
             _observe_gateway_diagnostic(
                 "observe_upstream_attempt",
                 diagnostic_request_key,
@@ -10688,7 +10741,7 @@ def _open_upstream_response(
                 retry_budget=base_retry_attempts,
                 elapsed_ms=elapsed_ms,
                 outcome="ok",
-                connection_disposition="unobserved",
+                connection_disposition=connection_disposition,
                 provider=upstream_name,
                 model=diagnostic_model,
             )
@@ -10706,6 +10759,20 @@ def _open_upstream_response(
                 failure_phase = transport_failure_phase(exc)
             except Exception:
                 failure_phase = "unknown"
+            diagnostic_phase = _diagnostic_transport_phase(failure_phase)
+            if diagnostic_phase is not None:
+                _observe_gateway_diagnostic(
+                    "observe_upstream_phase",
+                    diagnostic_request_key,
+                    phase=diagnostic_phase,
+                    attempt=attempt,
+                    retry_budget=base_retry_attempts,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase=failure_phase,
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
             if isinstance(exc, HTTPError) and not retry_http_errors:
                 _observe_gateway_diagnostic(
                     "observe_upstream_attempt",
@@ -10778,6 +10845,30 @@ def _open_upstream_response(
 class CodexProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def handle_one_request(self) -> None:
+        self._diagnostic_request_id: str | None = None
+        try:
+            super().handle_one_request()
+        finally:
+            self._diagnostic_request_id = None
+
+    def _observe_downstream_phase(self, event: str, *, status: int | None = None) -> None:
+        request_id = getattr(self, "_diagnostic_request_id", None)
+        if not isinstance(request_id, str) or not request_id:
+            return
+        fields: dict[str, Any] = {"request_id": request_id}
+        if isinstance(status, int):
+            fields["status"] = status
+        _observe_gateway_diagnostic("observe_proxy_event", event, fields)
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        super().send_response(code, message)
+        self._observe_downstream_phase("downstream_response_open", status=code)
+
+    def end_headers(self) -> None:
+        super().end_headers()
+        self._observe_downstream_phase("downstream_headers")
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         if _is_websocket_upgrade(self.headers) and gateway_websocket_recorder_enabled():
@@ -10847,6 +10938,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         Completions format before being returned to the caller.
         """
         request_id = uuid.uuid4().hex[:12]
+        self._diagnostic_request_id = request_id
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
@@ -12501,14 +12593,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 last_upstream_byte_at = time.monotonic()
                 failure_side = "downstream_write"
                 _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+                sse_stats.observe_line(line)
+                terminal_observed_now = sse_stats.terminal_event_seen and not diagnostic_terminal_observed
+                if terminal_observed_now:
+                    diagnostic_terminal_observed = True
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=False)
                 self.wfile.write(line)
                 self.wfile.flush()
                 lines_streamed += 1
                 bytes_streamed += len(line)
-                sse_stats.observe_line(line)
-                if sse_stats.terminal_event_seen and not diagnostic_terminal_observed:
-                    diagnostic_terminal_observed = True
-                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=False)
+                if terminal_observed_now:
                     _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=True)
                 _offer_official_passthrough_usage_line(usage_context, line)
                 if sse_stats.terminal_event_seen and not terminal_drain_timeout_shortened:

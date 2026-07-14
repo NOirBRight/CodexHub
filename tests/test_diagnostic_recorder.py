@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import threading
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -27,6 +28,19 @@ class DiagnosticRecorderTests(TestCase):
     def _recorder(self, root: Path, clock: FakeClock, **kwargs) -> diagnostic_recorder.DiagnosticRecorder:
         recorder = diagnostic_recorder.DiagnosticRecorder(root, clock=clock, **kwargs)
         self.addCleanup(recorder.shutdown, 1)
+        return recorder
+
+    def _deterministic_recorder(
+        self,
+        root: Path,
+        clock: FakeClock,
+        **kwargs,
+    ) -> diagnostic_recorder.DiagnosticRecorder:
+        """Construct without the daemon so a fake-clock fixture owns freezing."""
+
+        with patch.object(diagnostic_recorder.DiagnosticRecorder, "_ensure_control_thread_locked"):
+            recorder = self._recorder(root, clock, **kwargs)
+        recorder._ensure_control_thread_locked = lambda: None
         return recorder
 
     @staticmethod
@@ -148,7 +162,7 @@ class DiagnosticRecorderTests(TestCase):
     def test_rotation_evicts_oldest_complete_segments_for_time_and_bytes(self) -> None:
         clock = FakeClock()
         root = self._root()
-        recorder = self._recorder(
+        recorder = self._deterministic_recorder(
             root,
             clock,
             rolling_window_seconds=10,
@@ -309,6 +323,11 @@ class DiagnosticRecorderTests(TestCase):
         # daemon wake-up cannot race the fake clock used by the fixture.
         with patch.object(diagnostic_recorder.DiagnosticRecorder, "_ensure_control_thread_locked"):
             recorder = self._recorder(root, clock, incident_tail_seconds=1)
+            rolling_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (root / "diagnostics" / "rolling").glob("*.jsonl")
+            )
+            self.assertNotIn("forbidden-recovered-prompt", rolling_text)
             recorder.mark_incident("manual")
             clock.advance(1)
             self.assertEqual(recorder.process_due_incidents(), 1)
@@ -317,6 +336,212 @@ class DiagnosticRecorderTests(TestCase):
         assert artifact is not None
         self.assertNotIn("forbidden-recovered-prompt", json.dumps(artifact, ensure_ascii=True))
         self.assertTrue(all("prompt" not in record for record in artifact["records"]))
+
+    def test_marker_preserves_available_prehistory_before_tail_rotation(self) -> None:
+        clock = FakeClock()
+        root = self._root()
+        recorder = self._deterministic_recorder(
+            root,
+            clock,
+            rolling_window_seconds=10,
+            incident_tail_seconds=5,
+            max_segment_bytes=512,
+            segment_seconds=1,
+        )
+        recorder.record_phase("before-marker", "downstream_accept", status=200, outcome="ok")
+        self.assertTrue(recorder.flush(3))
+
+        clock.advance(8)
+        incident_id = recorder.mark_incident("manual")
+        self.assertEqual(incident_id, "i000001")
+        # Draining the marker is the writer-thread fence that captures the
+        # marker-time rolling window without doing filesystem work on mark().
+        self.assertTrue(recorder.flush(3))
+
+        clock.advance(5)
+        recorder.record_phase("tail", "request_complete", status=200, outcome="ok")
+        self.assertEqual(recorder.process_due_incidents(), 1)
+
+        artifact = recorder.read_incident(incident_id)
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        kinds = [record["kind"] for record in artifact["records"]]
+        self.assertIn("downstream_accept", kinds)
+        self.assertIn("incident_marker", kinds)
+        self.assertIn("request_complete", kinds)
+
+    def test_manifest_extra_forbidden_field_fails_closed_on_readback(self) -> None:
+        clock = FakeClock()
+        root = self._root()
+        recorder = self._deterministic_recorder(root, clock, incident_tail_seconds=1)
+        recorder.record_phase("request", "request_complete", status=200, outcome="ok")
+        incident_id = recorder.mark_incident("manual")
+        assert incident_id is not None
+        clock.advance(1)
+        self.assertEqual(recorder.process_due_incidents(), 1)
+
+        manifest_path = root / "diagnostics" / "incidents" / f"incident-{incident_id}" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["prompt"] = "seeded-forbidden-manifest-content"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        self.assertIsNone(recorder.read_incident(incident_id))
+        manifest.pop("prompt")
+        manifest["incident_id"] = "i999999"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertIsNone(recorder.read_incident(incident_id))
+
+    def test_artifact_manifest_exposes_only_safe_build_identity(self) -> None:
+        clock = FakeClock()
+        root = self._root()
+        recorder = self._deterministic_recorder(
+            root,
+            clock,
+            incident_tail_seconds=1,
+            build_version="1.2.3-debug.4",
+            source_revision="deadbeef",
+        )
+        recorder.record_phase("request", "request_complete", status=200, outcome="ok")
+        incident_id = recorder.mark_incident("manual")
+        assert incident_id is not None
+        clock.advance(1)
+        self.assertEqual(recorder.process_due_incidents(), 1)
+
+        artifact = recorder.read_incident(incident_id)
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        manifest = artifact["manifest"]
+        self.assertEqual(manifest["build_version"], "1.2.3-debug.4")
+        self.assertEqual(manifest["build_flavor"], "debug")
+        self.assertEqual(manifest["source_revision"], "deadbeef")
+        self.assertEqual(set(manifest), diagnostic_recorder._MANIFEST_FIELDS)
+
+    def test_gateway_observation_schema_keeps_request_size_and_downstream_phases_content_free(self) -> None:
+        clock = FakeClock()
+        recorder = self._recorder(self._root(), clock)
+        raw_request = "private-downstream-request"
+        recorder.observe_proxy_event(
+            "request_start",
+            {
+                "request_id": raw_request,
+                "content_length": 4_096,
+                "upstream": "official",
+                "model": "openai/gpt-5.6",
+                "route_mode": "official",
+                "prompt": "forbidden content",
+            },
+        )
+        recorder.observe_proxy_event(
+            "downstream_response_open",
+            {"request_id": raw_request, "status": 200},
+        )
+        recorder.observe_proxy_event("downstream_headers", {"request_id": raw_request, "status": 200})
+        recorder.observe_proxy_event(
+            "request_complete",
+            {"request_id": raw_request, "status": 200, "duration_ms": 12},
+        )
+        self.assertTrue(recorder.flush(3))
+
+        records = self._rolling_records(recorder.root.parent)
+        self.assertEqual(
+            [record["kind"] for record in records],
+            [
+                "downstream_accept",
+                "downstream_body",
+                "downstream_response_open",
+                "downstream_headers",
+                "request_complete",
+                "downstream_write",
+            ],
+        )
+        self.assertEqual(records[0]["request_size_bucket"], "1k-64k")
+        self.assertEqual(records[1]["request_size_bucket"], "1k-64k")
+        self.assertNotIn(raw_request, json.dumps(records, ensure_ascii=True))
+        self.assertNotIn("forbidden content", json.dumps(records, ensure_ascii=True))
+
+    def test_record_boundary_remains_strict_across_segment_overlap_and_clock_rollback(self) -> None:
+        clock = FakeClock()
+        root = self._root()
+        recorder = self._recorder(
+            root,
+            clock,
+            rolling_window_seconds=10,
+            max_segment_bytes=512,
+            segment_seconds=60,
+        )
+        recorder.record_phase("old", "request_complete", status=200, outcome="ok")
+        clock.advance(9)
+        recorder.record_phase("near-boundary", "request_complete", status=200, outcome="ok")
+        clock.advance(2)
+        recorder.record_phase("current", "request_complete", status=200, outcome="ok")
+        self.assertTrue(recorder.flush(3))
+
+        records = self._rolling_records(root)
+        self.assertEqual([record["request"] for record in records], ["r000002", "r000003"])
+        cutoff_before_rollback = max(record["at_ms"] for record in records) - 10_000
+        self.assertTrue(all(record["at_ms"] >= cutoff_before_rollback for record in records))
+
+        clock.value -= 120
+        recorder.record_phase("after-rollback", "request_complete", status=200, outcome="ok")
+        self.assertTrue(recorder.flush(3))
+        records = self._rolling_records(root)
+        self.assertNotIn("r000001", [record.get("request") for record in records])
+        self.assertEqual([record["seq"] for record in records], sorted(record["seq"] for record in records))
+        self.assertTrue(all(record["at_ms"] >= cutoff_before_rollback for record in records))
+
+    def test_concurrent_markers_freeze_distinct_bounded_incidents(self) -> None:
+        clock = FakeClock()
+        recorder = self._deterministic_recorder(self._root(), clock, incident_tail_seconds=1, max_incidents=3)
+        barrier = threading.Barrier(5)
+        incident_ids: list[str | None] = []
+        result_lock = threading.Lock()
+
+        def mark() -> None:
+            barrier.wait()
+            incident_id = recorder.mark_incident("manual")
+            with result_lock:
+                incident_ids.append(incident_id)
+
+        threads = [threading.Thread(target=mark) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+
+        accepted = sorted(incident_id for incident_id in incident_ids if incident_id is not None)
+        self.assertEqual(accepted, ["i000001", "i000002", "i000003"])
+        self.assertEqual(incident_ids.count(None), 1)
+        self.assertTrue(recorder.flush(3))
+        clock.advance(1)
+        self.assertEqual(recorder.process_due_incidents(), 3)
+        self.assertEqual(recorder.status().incident_count, 3)
+
+    def test_healthy_long_stream_frozen_artifact_replays_without_terminal_failure(self) -> None:
+        clock = FakeClock()
+        recorder = self._deterministic_recorder(self._root(), clock, incident_tail_seconds=1)
+        raw_request = "healthy-stream-private-request"
+        recorder.record_phase(raw_request, "downstream_accept", status=200, outcome="ok")
+        for _ in range(50_000):
+            recorder.observe_sse_line(raw_request, 17)
+        recorder.observe_terminal(raw_request, forwarded=False)
+        recorder.observe_terminal(raw_request, forwarded=True)
+        incident_id = recorder.mark_incident("manual")
+        assert incident_id is not None
+        clock.advance(1)
+        self.assertEqual(recorder.process_due_incidents(), 1)
+
+        artifact = recorder.read_incident(incident_id)
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        records = artifact["records"]
+        self.assertEqual(artifact["manifest"]["classification"], "unknown")
+        self.assertEqual(sum(record["kind"] == "sse_first" for record in records), 1)
+        self.assertLessEqual(sum(record["kind"] == "sse_checkpoint" for record in records), 16)
+        self.assertIn("upstream_terminal", [record["kind"] for record in records])
+        self.assertIn("downstream_terminal", [record["kind"] for record in records])
+        self.assertNotIn(raw_request, json.dumps(artifact, ensure_ascii=True))
 
     def test_restart_ordering_pause_resume_and_delete_are_deterministic(self) -> None:
         clock = FakeClock()

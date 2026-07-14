@@ -47,10 +47,20 @@ MAX_REQUEST_KEY_CHARACTERS = 512
 _SAFE_MODELS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}\Z")
 _SAFE_INCIDENT_IDS = re.compile(r"i[0-9]{6,}\Z")
 _SAFE_REQUEST_LABELS = re.compile(r"r[0-9]{6,}\Z")
+_SAFE_BUILD_VERSIONS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
+_SAFE_SOURCE_REVISIONS = re.compile(r"(?:[0-9a-f]{7,64}|unknown)\Z")
 
 _PHASES = {
     "downstream_accept",
+    "downstream_body",
+    "downstream_response_open",
+    "downstream_headers",
+    "downstream_write",
     "upstream_attempt",
+    "upstream_dns",
+    "upstream_tcp",
+    "upstream_tls",
+    "upstream_request_write",
     "upstream_headers",
     "sse_first",
     "sse_checkpoint",
@@ -91,6 +101,87 @@ _ROUTES = {"official", "codexhub", "local", "unknown"}
 _HEADER_COUNT_BUCKETS = {"0", "1-4", "5-16", "17+"}
 _CONTENT_LENGTH_BUCKETS = {"0", "1-1k", "1k-64k", "64k-1m", "1m+", "unknown"}
 _CONTENT_TYPE_CLASSES = {"event-stream", "json", "other", "absent", "unknown"}
+_REQUEST_SIZE_BUCKETS = _CONTENT_LENGTH_BUCKETS
+_UPSTREAM_TRANSPORT_PHASES = {
+    "upstream_dns",
+    "upstream_tcp",
+    "upstream_tls",
+    "upstream_request_write",
+}
+_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "artifact_version",
+        "complete",
+        "incident_id",
+        "reason_category",
+        "marker_at_ms",
+        "cutoff_at_ms",
+        "created_at_ms",
+        "record_count",
+        "classification",
+        "records_file",
+        "truncated",
+        "build_version",
+        "build_flavor",
+        "source_revision",
+    }
+)
+_RECORD_FIELDS = frozenset(
+    {
+        "schema_version",
+        "seq",
+        "at_ms",
+        "kind",
+        "request",
+        "attempt",
+        "retry_budget",
+        "checkpoint",
+        "lines",
+        "bytes",
+        "elapsed_ms",
+        "status",
+        "outcome",
+        "connection_disposition",
+        "failure_phase",
+        "provider",
+        "route",
+        "model",
+        "header_count_bucket",
+        "content_length_bucket",
+        "content_type_class",
+        "request_size_bucket",
+        "reason_category",
+        "incident",
+        "overflow_records",
+        "overflow_bytes",
+        "failed_records",
+        "failure_count",
+    }
+)
+_SANITIZED_FIELD_KEYS = frozenset(
+    {
+        "attempt",
+        "retry_budget",
+        "checkpoint",
+        "lines",
+        "bytes",
+        "elapsed_ms",
+        "status",
+        "outcome",
+        "connection_disposition",
+        "failure_phase",
+        "provider",
+        "route",
+        "model",
+        "header_count_bucket",
+        "content_length_bucket",
+        "content_type_class",
+        "request_size_bucket",
+        "reason_category",
+        "incident",
+    }
+)
 
 
 class DiagnosticRecorderProtocol(Protocol):
@@ -118,6 +209,20 @@ class DiagnosticRecorderProtocol(Protocol):
         *,
         status: int | None,
         headers: Any,
+    ) -> None: ...
+
+    def observe_upstream_phase(
+        self,
+        request_key: str | None,
+        *,
+        phase: str,
+        attempt: int,
+        retry_budget: int,
+        elapsed_ms: int,
+        outcome: str,
+        failure_phase: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> None: ...
 
     def observe_sse_line(self, request_key: str | None, byte_count: int) -> None: ...
@@ -201,6 +306,21 @@ class DisabledDiagnosticRecorder:
     def observe_upstream_headers(self, request_key: str | None, *, status: int | None, headers: Any) -> None:
         return None
 
+    def observe_upstream_phase(
+        self,
+        request_key: str | None,
+        *,
+        phase: str,
+        attempt: int,
+        retry_budget: int,
+        elapsed_ms: int,
+        outcome: str,
+        failure_phase: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        return None
+
     def observe_sse_line(self, request_key: str | None, byte_count: int) -> None:
         return None
 
@@ -251,7 +371,13 @@ class DisabledDiagnosticRecorder:
         )
 
 
-def for_compile_flavor(runtime_home: Path, compile_flavor: str) -> DiagnosticRecorderProtocol:
+def for_compile_flavor(
+    runtime_home: Path,
+    compile_flavor: str,
+    *,
+    build_version: str = "unknown",
+    source_revision: str = "unknown",
+) -> DiagnosticRecorderProtocol:
     """Construct the recorder only for a caller-provided compile identity.
 
     The caller must supply an identity embedded by the packaged build.  There
@@ -259,8 +385,31 @@ def for_compile_flavor(runtime_home: Path, compile_flavor: str) -> DiagnosticRec
     """
 
     if compile_flavor == "debug":
-        return DiagnosticRecorder(runtime_home)
+        return DiagnosticRecorder(
+            runtime_home,
+            build_version=build_version,
+            build_flavor="debug",
+            source_revision=source_revision,
+        )
     return DisabledDiagnosticRecorder()
+
+
+class _NondecreasingClock:
+    """Keep recorder time monotonic when the host wall clock moves backward."""
+
+    def __init__(self, source: Callable[[], float]) -> None:
+        self._source = source
+        self._lock = threading.Lock()
+        self._last_ms = 0
+
+    def __call__(self) -> float:
+        try:
+            raw_ms = max(0, int(float(self._source()) * 1000))
+        except Exception:
+            raw_ms = 0
+        with self._lock:
+            self._last_ms = max(self._last_ms, raw_ms)
+            return self._last_ms / 1000
 
 
 class DiagnosticRecorder:
@@ -278,6 +427,9 @@ class DiagnosticRecorder:
         incident_tail_seconds: int = INCIDENT_TAIL_SECONDS,
         incident_retention_seconds: int = INCIDENT_RETENTION_SECONDS,
         max_incidents: int = MAX_INCIDENTS,
+        build_version: str = "unknown",
+        build_flavor: str = "debug",
+        source_revision: str = "unknown",
     ) -> None:
         if rolling_window_seconds < 1 or rolling_max_bytes < 1024:
             raise ValueError("rolling recorder bounds must be positive")
@@ -286,10 +438,14 @@ class DiagnosticRecorder:
         if max_incidents < 1:
             raise ValueError("max_incidents must be positive")
 
-        self._clock = clock
+        self._clock = _NondecreasingClock(clock)
         self._root = Path(runtime_home) / "diagnostics"
         self._rolling_dir = self._root / "rolling"
         self._incidents_dir = self._root / "incidents"
+        self._prehistory_dir = self._root / "prehistory"
+        self._build_version = _safe_build_version(build_version)
+        self._build_flavor = build_flavor if build_flavor == "debug" else "debug"
+        self._source_revision = _safe_source_revision(source_revision)
         self._rolling_window_seconds = rolling_window_seconds
         self._incident_tail_seconds = incident_tail_seconds
         self._incident_retention_seconds = incident_retention_seconds
@@ -313,7 +469,8 @@ class DiagnosticRecorder:
 
         self._sink = _RollingSegmentSink(
             self._rolling_dir,
-            clock=clock,
+            prehistory_dir=self._prehistory_dir,
+            clock=self._clock,
             rolling_window_seconds=rolling_window_seconds,
             rolling_max_bytes=rolling_max_bytes,
             max_segment_bytes=max_segment_bytes,
@@ -324,7 +481,7 @@ class DiagnosticRecorder:
             max_records=WRITER_QUEUE_MAX_RECORDS,
             max_bytes=WRITER_QUEUE_MAX_BYTES,
             recovery_record_factory=self._writer_recovery_record,
-            clock=clock,
+            clock=self._clock,
             thread_name="codex-diagnostic-recorder",
         )
         self._recover_artifacts()
@@ -355,6 +512,7 @@ class DiagnosticRecorder:
         route = _route(fields.get("route_mode"))
         status = _status(fields.get("status"))
         elapsed_ms = _bounded_counter(fields.get("duration_ms"), MAX_RECORD_ELAPSED_MS)
+        request_size_bucket = _request_size_bucket(fields.get("content_length"))
         if event == "request_start":
             self.record_phase(
                 request_key,
@@ -363,7 +521,19 @@ class DiagnosticRecorder:
                 model=model,
                 route=route,
                 status=status,
+                request_size_bucket=request_size_bucket,
             )
+            self.record_phase(
+                request_key,
+                "downstream_body",
+                status=status,
+                request_size_bucket=request_size_bucket,
+                outcome="ok",
+            )
+        elif event == "downstream_response_open":
+            self.record_phase(request_key, "downstream_response_open", status=status, outcome="ok")
+        elif event == "downstream_headers":
+            self.record_phase(request_key, "downstream_headers", status=status, outcome="ok")
         elif event == "upstream_retry":
             self.record_phase(
                 request_key,
@@ -387,6 +557,14 @@ class DiagnosticRecorder:
                 elapsed_ms=elapsed_ms,
                 outcome="ok",
             )
+            if event == "request_complete":
+                self.record_phase(
+                    request_key,
+                    "downstream_write",
+                    status=status,
+                    elapsed_ms=elapsed_ms,
+                    outcome="ok",
+                )
         elif event in {"request_error", "upstream_stream_error_event", "upstream_stream_incomplete"}:
             self.record_phase(
                 request_key,
@@ -401,6 +579,14 @@ class DiagnosticRecorder:
                 automatic_marker=True,
             )
         elif event in {"client_write_failed", "downstream_stream_closed"}:
+            self.record_phase(
+                request_key,
+                "downstream_write",
+                status=status,
+                elapsed_ms=elapsed_ms,
+                outcome="error",
+                failure_phase="downstream_write",
+            )
             self.observe_close(
                 request_key,
                 side="downstream",
@@ -416,6 +602,15 @@ class DiagnosticRecorder:
             "transparent_stream_closed",
         }:
             side = "downstream" if fields.get("failure_side") == "downstream_write" else "upstream"
+            if side == "downstream":
+                self.record_phase(
+                    request_key,
+                    "downstream_write",
+                    status=status,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase="downstream_write",
+                )
             self.observe_close(
                 request_key,
                 side=side,
@@ -462,6 +657,33 @@ class DiagnosticRecorder:
             content_type_class=content_type_class,
             content_length_bucket=content_length_bucket,
             outcome="ok",
+        )
+
+    def observe_upstream_phase(
+        self,
+        request_key: str | None,
+        *,
+        phase: str,
+        attempt: int,
+        retry_budget: int,
+        elapsed_ms: int,
+        outcome: str,
+        failure_phase: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        if phase not in _UPSTREAM_TRANSPORT_PHASES:
+            return
+        self.record_phase(
+            request_key,
+            phase,
+            attempt=attempt,
+            retry_budget=retry_budget,
+            elapsed_ms=elapsed_ms,
+            outcome=outcome,
+            failure_phase=failure_phase,
+            provider=provider,
+            model=model,
         )
 
     def observe_sse_line(self, request_key: str | None, byte_count: int) -> None:
@@ -762,6 +984,9 @@ class DiagnosticRecorder:
                 marker_at_ms=pending.marker_at_ms,
                 cutoff_at_ms=pending.cutoff_at_ms,
                 created_at_ms=self._now_ms(),
+                build_version=self._build_version,
+                build_flavor=self._build_flavor,
+                source_revision=self._source_revision,
             )
 
         try:
@@ -814,6 +1039,7 @@ class DiagnosticRecorder:
         """Discard incomplete snapshots; never advertise a partially frozen artifact."""
 
         try:
+            shutil.rmtree(self._prehistory_dir, ignore_errors=True)
             self._incidents_dir.mkdir(parents=True, exist_ok=True)
             for temporary in self._incidents_dir.glob(".incident-*.tmp"):
                 shutil.rmtree(temporary, ignore_errors=True)
@@ -906,6 +1132,7 @@ class _RollingSegmentSink:
         self,
         rolling_dir: Path,
         *,
+        prehistory_dir: Path,
         clock: Callable[[], float],
         rolling_window_seconds: int,
         rolling_max_bytes: int,
@@ -913,6 +1140,7 @@ class _RollingSegmentSink:
         segment_seconds: int,
     ) -> None:
         self._rolling_dir = rolling_dir
+        self._prehistory_dir = prehistory_dir
         self._clock = clock
         self._rolling_window_ms = rolling_window_seconds * 1000
         self._rolling_max_bytes = rolling_max_bytes
@@ -934,6 +1162,10 @@ class _RollingSegmentSink:
             for record in records:
                 if not record.endswith(b"\n"):
                     raise ValueError("recorder records must be complete JSONL lines")
+                try:
+                    decoded = _sanitize_record(json.loads(record))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    decoded = None
                 at_ms = _record_time_ms(record, self._now_ms())
                 self._expire_locked(at_ms)
                 self._ensure_capacity_locked(len(record), at_ms)
@@ -942,6 +1174,8 @@ class _RollingSegmentSink:
                 segment.sink.append([record])
                 segment.byte_count += len(record)
                 segment.end_at_ms = max(segment.end_at_ms, at_ms)
+                if decoded is not None and decoded.get("kind") == "incident_marker":
+                    self._capture_marker_prehistory_locked(decoded)
 
     def freeze(
         self,
@@ -952,6 +1186,9 @@ class _RollingSegmentSink:
         marker_at_ms: int,
         cutoff_at_ms: int,
         created_at_ms: int,
+        build_version: str,
+        build_flavor: str,
+        source_revision: str,
     ) -> dict[str, Any]:
         """Create a complete artifact while the writer rotation fence is held."""
 
@@ -961,13 +1198,19 @@ class _RollingSegmentSink:
             self._ensure_loaded_locked()
             self._close_active_locked()
             self._expire_locked(cutoff_at_ms)
-            records: list[dict[str, Any]] = []
+            records_by_sequence: dict[int, dict[str, Any]] = {}
+            for record in self._read_prehistory_locked(incident_id):
+                at_ms = record.get("at_ms")
+                sequence = _safe_sequence(record.get("seq"))
+                if isinstance(at_ms, int) and at_ms <= cutoff_at_ms and sequence < MAX_RECORD_COUNTER:
+                    records_by_sequence.setdefault(sequence, record)
             for segment in sorted(self._segments, key=lambda item: (item.start_at_ms, item.ordinal)):
                 for record in _read_jsonl_records(segment.path):
                     at_ms = record.get("at_ms")
-                    if isinstance(at_ms, int) and at_ms <= cutoff_at_ms:
-                        records.append(record)
-            records.sort(key=lambda record: _safe_sequence(record.get("seq")))
+                    sequence = _safe_sequence(record.get("seq"))
+                    if isinstance(at_ms, int) and at_ms <= cutoff_at_ms and sequence < MAX_RECORD_COUNTER:
+                        records_by_sequence.setdefault(sequence, record)
+            records = [records_by_sequence[key] for key in sorted(records_by_sequence)]
             classification = classify_frozen_records(records)
             incidents_dir.mkdir(parents=True, exist_ok=True)
             temporary = incidents_dir / f".incident-{incident_id}.tmp"
@@ -996,6 +1239,9 @@ class _RollingSegmentSink:
                     "classification": classification,
                     "records_file": "records.jsonl",
                     "truncated": self._truncated,
+                    "build_version": _safe_build_version(build_version),
+                    "build_flavor": "debug" if build_flavor == "debug" else "debug",
+                    "source_revision": _safe_source_revision(source_revision),
                 }
                 manifest_path = temporary / "manifest.json"
                 with manifest_path.open("wb") as handle:
@@ -1007,6 +1253,8 @@ class _RollingSegmentSink:
             except Exception:
                 shutil.rmtree(temporary, ignore_errors=True)
                 raise
+            finally:
+                shutil.rmtree(self._prehistory_path(incident_id), ignore_errors=True)
 
     def status(self) -> _RollingStatus:
         with self._lock:
@@ -1056,19 +1304,58 @@ class _RollingSegmentSink:
             ordinal, start_at_ms = parsed
             _repair_partial_jsonl_tail(path)
             try:
-                byte_count = path.stat().st_size
+                raw_records = path.read_bytes()
             except OSError:
                 continue
-            end_at_ms = _last_record_time_ms(path, start_at_ms)
-            segments.append(
-                _Segment(
+            records: list[dict[str, Any]] = []
+            privacy_changed = False
+            for line in raw_records.splitlines():
+                if not line:
+                    continue
+                try:
+                    raw_record = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    privacy_changed = True
+                    continue
+                sanitized = _sanitize_record(raw_record)
+                if sanitized is None:
+                    privacy_changed = True
+                    continue
+                if not isinstance(raw_record, Mapping) or dict(raw_record) != sanitized:
+                    privacy_changed = True
+                records.append(sanitized)
+            canonical_records = b"".join(_json_line(record) for record in records)
+            if raw_records != canonical_records:
+                # Recovery is a privacy boundary too: discard unknown or
+                # malformed fields from rolling storage, not only artifact
+                # reads. Canonicalize harmless formatting separately from an
+                # actual dropped or redacted field so status stays accurate.
+                self._truncated = self._truncated or privacy_changed
+                if not records:
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    self._evicted_segments += 1
+                    continue
+                segment = _Segment(
+                    path=path,
+                    ordinal=ordinal,
+                    start_at_ms=start_at_ms,
+                    end_at_ms=start_at_ms,
+                    byte_count=len(raw_records),
+                )
+                self._rewrite_segment_locked(segment, records)
+            else:
+                end_at_ms = _last_record_time_ms(path, start_at_ms)
+                segment = _Segment(
                     path=path,
                     ordinal=ordinal,
                     start_at_ms=start_at_ms,
                     end_at_ms=end_at_ms,
-                    byte_count=byte_count,
+                    byte_count=len(raw_records),
                 )
-            )
+            segments.append(segment)
             highest = max(highest, ordinal)
         self._segments = sorted(segments, key=lambda item: (item.start_at_ms, item.ordinal))
         self._next_ordinal = highest + 1
@@ -1100,6 +1387,67 @@ class _RollingSegmentSink:
         self._active.sink = None
         self._active = None
 
+    def _prehistory_path(self, incident_id: str) -> Path:
+        return self._prehistory_dir / f"prehistory-{incident_id}"
+
+    def _capture_marker_prehistory_locked(self, marker: Mapping[str, Any]) -> None:
+        """Pin the marker-time window from the writer thread before tail traffic rotates it."""
+
+        incident_id = marker.get("incident")
+        if not isinstance(incident_id, str) or not _SAFE_INCIDENT_IDS.fullmatch(incident_id):
+            return
+        final = self._prehistory_path(incident_id)
+        if final.exists():
+            return
+        temporary = self._prehistory_dir / f".prehistory-{incident_id}.tmp"
+        try:
+            self._close_active_locked()
+            self._prehistory_dir.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(temporary, ignore_errors=True)
+            temporary.mkdir(parents=True)
+            for segment in sorted(self._segments, key=lambda item: (item.start_at_ms, item.ordinal)):
+                destination = temporary / segment.path.name
+                try:
+                    os.link(segment.path, destination)
+                except OSError:
+                    shutil.copyfile(segment.path, destination)
+            os.replace(temporary, final)
+        except OSError:
+            shutil.rmtree(temporary, ignore_errors=True)
+            self._truncated = True
+
+    def _read_prehistory_locked(self, incident_id: str) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        directory = self._prehistory_path(incident_id)
+        try:
+            for path in sorted(directory.glob("segment-*.jsonl")):
+                records.extend(_read_jsonl_records(path))
+        except OSError:
+            return []
+        return records
+
+    def _rewrite_segment_locked(self, segment: _Segment, records: Sequence[Mapping[str, Any]]) -> None:
+        if not records:
+            raise ValueError("cannot rewrite an empty rolling segment")
+        temporary = segment.path.with_name(f".{segment.path.name}.tmp")
+        try:
+            with temporary.open("wb") as handle:
+                for record in records:
+                    handle.write(_json_line(record))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, segment.path)
+        except Exception:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
+        segment.byte_count = sum(len(_json_line(record)) for record in records)
+        times = [record["at_ms"] for record in records if isinstance(record.get("at_ms"), int)]
+        segment.start_at_ms = min(times)
+        segment.end_at_ms = max(times)
+
     def _ensure_capacity_locked(self, required_bytes: int, at_ms: int) -> None:
         if required_bytes > self._rolling_max_bytes:
             self._truncated = True
@@ -1128,22 +1476,33 @@ class _RollingSegmentSink:
             self._truncated = True
 
     def _expire_locked(self, now_ms: int) -> None:
-        cutoff = now_ms - self._rolling_window_ms
+        """Enforce a record-level time boundary, even inside an overlapping segment."""
+
+        cutoff = max(0, now_ms - self._rolling_window_ms)
         if self._active is not None and self._active.start_at_ms < cutoff:
             self._close_active_locked()
-        expired = [
-            segment
-            for segment in self._segments
-            if segment is not self._active and segment.end_at_ms < cutoff
-        ]
-        for segment in expired:
-            try:
-                segment.path.unlink()
-            except FileNotFoundError:
-                pass
-            self._segments.remove(segment)
-            self._evicted_segments += 1
-            self._truncated = True
+        for segment in list(sorted(self._segments, key=lambda item: (item.start_at_ms, item.ordinal))):
+            if segment is self._active:
+                continue
+            records = list(_read_jsonl_records(segment.path))
+            kept = [
+                record
+                for record in records
+                if isinstance(record.get("at_ms"), int) and record["at_ms"] >= cutoff
+            ]
+            if not kept:
+                try:
+                    segment.path.unlink()
+                except FileNotFoundError:
+                    pass
+                self._segments.remove(segment)
+                self._evicted_segments += 1
+                self._truncated = True
+                continue
+            if len(kept) != len(records) or segment.start_at_ms < cutoff:
+                self._rewrite_segment_locked(segment, kept)
+                self._evicted_segments += 1
+                self._truncated = True
 
     def _now_ms(self) -> int:
         return max(0, int(self._clock() * 1000))
@@ -1210,6 +1569,9 @@ def _sanitize_fields(values: Mapping[str, Any]) -> dict[str, Any]:
     content_type_class = values.get("content_type_class")
     if isinstance(content_type_class, str) and content_type_class in _CONTENT_TYPE_CLASSES:
         fields["content_type_class"] = content_type_class
+    request_size_bucket = values.get("request_size_bucket")
+    if isinstance(request_size_bucket, str) and request_size_bucket in _REQUEST_SIZE_BUCKETS:
+        fields["request_size_bucket"] = request_size_bucket
     reason = values.get("reason_category")
     if isinstance(reason, str) and reason in _MARKER_CATEGORIES:
         fields["reason_category"] = reason
@@ -1241,6 +1603,18 @@ def _safe_model(value: Any) -> str | None:
     return value
 
 
+def _safe_build_version(value: Any) -> str:
+    if isinstance(value, str) and _SAFE_BUILD_VERSIONS.fullmatch(value):
+        return value
+    return "unknown"
+
+
+def _safe_source_revision(value: Any) -> str:
+    if isinstance(value, str) and _SAFE_SOURCE_REVISIONS.fullmatch(value):
+        return value
+    return "unknown"
+
+
 def _status(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
         return None
@@ -1255,6 +1629,20 @@ def _bounded_counter(value: Any, maximum: int) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return min(value, maximum)
+
+
+def _request_size_bucket(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return "unknown"
+    if value == 0:
+        return "0"
+    if value <= 1024:
+        return "1-1k"
+    if value <= 64 * 1024:
+        return "1k-64k"
+    if value <= 1024 * 1024:
+        return "64k-1m"
+    return "1m+"
 
 
 def _failure_phase(value: Any) -> str | None:
@@ -1319,7 +1707,7 @@ def _record_time_ms(record: bytes, fallback: int) -> int:
     try:
         value = json.loads(record)
         at_ms = value.get("at_ms") if isinstance(value, Mapping) else None
-        return at_ms if isinstance(at_ms, int) and at_ms >= 0 else fallback
+        return at_ms if type(at_ms) is int and at_ms >= 0 else fallback
     except (UnicodeDecodeError, json.JSONDecodeError):
         return fallback
 
@@ -1347,13 +1735,14 @@ def _sanitize_record(record: Any) -> dict[str, Any] | None:
     privacy escape through a later frozen artifact.
     """
 
-    if not isinstance(record, Mapping):
+    if not isinstance(record, Mapping) or not set(record).issubset(_RECORD_FIELDS):
         return None
     kind = record.get("kind")
     sequence = _safe_sequence(record.get("seq"))
     at_ms = record.get("at_ms")
     if (
-        record.get("schema_version") != SCHEMA_VERSION
+        type(record.get("schema_version")) is not int
+        or record.get("schema_version") != SCHEMA_VERSION
         or not isinstance(kind, str)
         or kind not in _PHASES
         or sequence == MAX_RECORD_COUNTER
@@ -1368,14 +1757,22 @@ def _sanitize_record(record: Any) -> dict[str, Any] | None:
         "at_ms": at_ms,
         "kind": kind,
     }
-    request_label = record.get("request")
-    if isinstance(request_label, str) and _SAFE_REQUEST_LABELS.fullmatch(request_label):
+    if "request" in record:
+        request_label = record.get("request")
+        if not isinstance(request_label, str) or _SAFE_REQUEST_LABELS.fullmatch(request_label) is None:
+            return None
         sanitized["request"] = request_label
-    sanitized.update(_sanitize_fields(record))
+    sanitized_fields = _sanitize_fields(record)
+    if any(key in record and key not in sanitized_fields for key in _SANITIZED_FIELD_KEYS):
+        return None
+    sanitized.update(sanitized_fields)
     for key in ("overflow_records", "overflow_bytes", "failed_records", "failure_count"):
+        if key not in record:
+            continue
         value = _bounded_counter(record.get(key), MAX_RECORD_COUNTER)
-        if value is not None:
-            sanitized[key] = value
+        if value is None:
+            return None
+        sanitized[key] = value
     return sanitized
 
 
@@ -1421,26 +1818,33 @@ def _safe_sequence(value: Any) -> int:
 
 
 def _valid_manifest(manifest: Any, incident_id: Any) -> bool:
+    if not isinstance(manifest, Mapping) or set(manifest) != _MANIFEST_FIELDS:
+        return False
     classification = manifest.get("classification") if isinstance(manifest, Mapping) else None
     record_count = manifest.get("record_count") if isinstance(manifest, Mapping) else None
     reason_category = manifest.get("reason_category") if isinstance(manifest, Mapping) else None
     return (
-        isinstance(manifest, Mapping)
+        type(manifest.get("schema_version")) is int
         and manifest.get("schema_version") == SCHEMA_VERSION
+        and type(manifest.get("artifact_version")) is int
         and manifest.get("artifact_version") == ARTIFACT_VERSION
         and manifest.get("complete") is True
         and isinstance(incident_id, str)
         and _SAFE_INCIDENT_IDS.fullmatch(incident_id) is not None
+        and manifest.get("incident_id") == incident_id
         and manifest.get("records_file") == "records.jsonl"
-        and isinstance(record_count, int)
+        and type(record_count) is int
         and record_count >= 0
         and isinstance(reason_category, str)
         and reason_category in _MARKER_CATEGORIES
         and all(
-            isinstance(manifest.get(key), int) and manifest[key] >= 0
+            type(manifest.get(key)) is int and manifest[key] >= 0
             for key in ("marker_at_ms", "cutoff_at_ms", "created_at_ms")
         )
         and isinstance(manifest.get("truncated"), bool)
+        and _safe_build_version(manifest.get("build_version")) == manifest.get("build_version")
+        and manifest.get("build_flavor") == "debug"
+        and _safe_source_revision(manifest.get("source_revision")) == manifest.get("source_revision")
         and isinstance(classification, str)
         and classification in {
             "downstream-first",
