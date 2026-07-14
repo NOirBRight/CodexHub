@@ -464,6 +464,7 @@ const enUS = {
     openCodexAppUnsupportedCopied: "The local backend version connected to this page does not support opening Codex App directly; the CLI login command was copied. Run codex login in a terminal.",
     refreshingOpenAIUsage: "Refreshing OpenAI usage...",
     refreshingOfficialModels: "Refreshing official models...",
+    officialContextLimitsRestartCodex: "Official context limits changed. Restart Codex App to apply them.",
     refreshCodexAuth: "Refresh auth status",
     refreshOpenAIUsage: "Refresh OpenAI usage",
     refreshModels: "Refresh models",

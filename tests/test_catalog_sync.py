@@ -219,6 +219,11 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["gpt-5.5"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.5")
         self.assertEqual(by_slug["gpt-5.4"]["service_tiers"][0]["id"], "priority")
         self.assertNotIn("context_window", by_slug["gpt-5.4-mini"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.4-mini"])
+        self.assertEqual(
+            by_slug["gpt-5.4-mini"]["codex_proxy_metadata"]["official_context_budget"],
+            {"source": "missing", "freshness": "missing"},
+        )
         self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
         self.assertEqual(by_slug["gpt-5.4-mini"]["service_tiers"], [])
 
@@ -286,7 +291,20 @@ class CatalogSyncTests(unittest.TestCase):
             }
         ]
 
-        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        catalog = build_codex_catalog(
+            official,
+            [],
+            self.policy,
+            "0.144.0",
+            official_context_signals={
+                "gpt-5.6-sol": {
+                    "context_window": 400_000,
+                    "effective_context_window_percent": 100,
+                    "freshness": "fresh",
+                    "source": "current_direct_official",
+                }
+            },
+        )
         model = catalog["models"][0]
 
         self.assertEqual(model["slug"], "gpt-5.6-sol")
@@ -299,13 +317,12 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(model["default_reasoning_level"], "medium")
         self.assertIn("base_instructions", model)
         self.assertEqual(model["supported_in_api"], True)
+        self.assertEqual(model["codex_proxy_metadata"]["provider"], "openai")
+        self.assertEqual(model["codex_proxy_metadata"]["upstream_name"], "official")
+        self.assertEqual(model["codex_proxy_metadata"]["upstream_model"], "gpt-5.6-sol")
         self.assertEqual(
-            model["codex_proxy_metadata"],
-            {
-                "provider": "openai",
-                "upstream_name": "official",
-                "upstream_model": "gpt-5.6-sol",
-            },
+            model["codex_proxy_metadata"]["official_context_budget"]["source"],
+            "current_direct_official",
         )
 
     def test_official_catalog_backfills_pinned_planner_metadata_per_model(self):
@@ -345,7 +362,20 @@ class CatalogSyncTests(unittest.TestCase):
             {"slug": "gpt-sparse", "display_name": "GPT-Sparse"},
         ]
 
-        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        catalog = build_codex_catalog(
+            official,
+            [],
+            self.policy,
+            "0.144.0",
+            official_context_signals={
+                "gpt-5.6-sol": {
+                    "context_window": 400_000,
+                    "effective_context_window_percent": 100,
+                    "freshness": "fresh",
+                    "source": "current_direct_official",
+                }
+            },
+        )
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
         for slug, multi_agent_version in (
@@ -453,7 +483,20 @@ class CatalogSyncTests(unittest.TestCase):
             },
         ]
 
-        catalog = build_codex_catalog(official, [], self.policy, "0.144.0")
+        catalog = build_codex_catalog(
+            official,
+            [],
+            self.policy,
+            "0.144.0",
+            official_context_signals={
+                "gpt-5.6-sol": {
+                    "context_window": 400_000,
+                    "effective_context_window_percent": 100,
+                    "freshness": "fresh",
+                    "source": "current_direct_official",
+                }
+            },
+        )
         models = catalog["models"]
 
         self.assertEqual([model["slug"] for model in models], ["gpt-5.6-sol"])
@@ -461,6 +504,184 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(models[0]["context_window"], 400000)
         self.assertEqual(models[0]["multi_agent_version"], "v2")
         self.assertTrue(models[0]["enabled"])
+
+    def test_current_direct_context_signal_bounds_official_catalog_without_touching_third_party(self):
+        official = [
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6 Sol",
+                "context_window": 353_400,
+                "max_context_window": 1_050_000,
+            }
+        ]
+
+        catalog = build_codex_catalog(
+            official,
+            ["glm-5.2:cloud"],
+            self.policy,
+            "0.144.0",
+            official_context_signals={
+                "gpt-5.6-sol": {
+                    "context_window": 272_000,
+                    "max_context_window": 1_050_000,
+                    "effective_context_window_percent": 95,
+                    "auto_compact_token_limit": 240_000,
+                    "freshness": "fresh",
+                    "source": "current_direct_official",
+                }
+            },
+        )
+
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        official_model = by_slug["gpt-5.6-sol"]
+        budget = official_model["codex_proxy_metadata"]["official_context_budget"]
+        self.assertEqual(official_model["context_window"], 272_000)
+        self.assertEqual(official_model["max_context_window"], 272_000)
+        self.assertEqual(official_model["effective_context_window_percent"], 95)
+        self.assertEqual(budget["effective_context_window"], 258_400)
+        self.assertEqual(budget["model_auto_compact_token_limit"], 240_000)
+        self.assertEqual(by_slug["glm-5.2"]["context_window"], 1_000_000)
+
+    def test_current_direct_context_signal_uses_snapshot_percent_and_compact_threshold(self):
+        catalog = build_codex_catalog(
+            [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6 Sol",
+                    "context_window": 353_400,
+                }
+            ],
+            [],
+            self.policy,
+            "0.144.0",
+            official_context_signals={
+                "gpt-5.6-sol": {
+                    "context_window": 300_000,
+                    "max_context_window": 900_000,
+                    "effective_context_window_percent": 80,
+                    "auto_compact_token_limit": 210_000,
+                    "freshness": "fresh",
+                    "source": "current_direct_official",
+                }
+            },
+        )
+
+        model = catalog["models"][0]
+        budget = model["codex_proxy_metadata"]["official_context_budget"]
+        self.assertEqual(model["context_window"], 300_000)
+        self.assertEqual(model["max_context_window"], 300_000)
+        self.assertEqual(model["effective_context_window_percent"], 80)
+        self.assertEqual(budget["effective_context_window"], 240_000)
+        self.assertEqual(budget["model_auto_compact_token_limit"], 210_000)
+
+    def test_runtime_direct_snapshot_marks_only_fresh_catalog_context_as_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled_seed = root / "bundled" / "openai-plus-ollama-cloud.json"
+            runtime_seed = root / "runtime" / "openai-plus-ollama-cloud.json"
+            runtime_seed.parent.mkdir(parents=True)
+            runtime_seed.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": 1_000,
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-terra",
+                                "context_window": 272_000,
+                                "max_context_window": 1_050_000,
+                                "effectiveContextWindowPercent": 80,
+                                "autoCompactTokenLimit": 200_000,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = catalog_sync.load_official_seed_snapshot(
+                bundled_seed,
+                runtime_path=runtime_seed,
+                now_timestamp=1_001,
+            )
+            signals = catalog_sync.official_context_signals_from_snapshot(snapshot)
+            stale_snapshot = catalog_sync.load_official_seed_snapshot(
+                bundled_seed,
+                runtime_path=runtime_seed,
+                now_timestamp=1_000 + catalog_sync.DIRECT_OFFICIAL_CONTEXT_MAX_AGE_SECONDS,
+            )
+
+        self.assertEqual(snapshot.context_freshness, "fresh")
+        self.assertEqual(signals["gpt-5.6-terra"]["context_window"], 272_000)
+        self.assertEqual(signals["gpt-5.6-terra"]["effective_context_window_percent"], 80)
+        self.assertEqual(signals["gpt-5.6-terra"]["auto_compact_token_limit"], 200_000)
+        self.assertEqual(signals["gpt-5.6-terra"]["freshness"], "fresh")
+        self.assertEqual(signals["gpt-5.6-terra"]["source"], "current_direct_official")
+        self.assertEqual(stale_snapshot.context_freshness, "stale")
+        self.assertNotEqual(stale_snapshot.source, "current_direct_official")
+
+    def test_runtime_direct_snapshot_becomes_stale_at_twelve_hours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_seed = root / "runtime" / "openai-plus-ollama-cloud.json"
+            runtime_seed.parent.mkdir(parents=True)
+            runtime_seed.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": 1_000,
+                        "models": [{"slug": "gpt-5.6-terra", "context_window": 272_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = catalog_sync.load_official_seed_snapshot(
+                root / "bundled.json",
+                runtime_path=runtime_seed,
+                now_timestamp=1_000 + 12 * 60 * 60,
+            )
+
+        self.assertEqual(snapshot.context_freshness, "stale")
+        self.assertNotEqual(snapshot.source, "current_direct_official")
+
+    def test_stale_direct_snapshot_can_only_reuse_a_previously_resolved_budget(self):
+        snapshot = catalog_sync.OfficialSeedSnapshot(
+            models=[{"slug": "gpt-5.5", "context_window": 400_000}],
+            source="last_known_direct_official",
+            context_freshness="stale",
+        )
+        previous = {
+            "gpt-5.5": {
+                "model_context_window": 300_000,
+                "effective_context_window_percent": 80,
+                "model_auto_compact_token_limit": 210_000,
+            }
+        }
+        signals = catalog_sync.official_context_signals_from_snapshot(snapshot, previous)
+        catalog = build_codex_catalog(
+            snapshot.models,
+            [],
+            self.policy,
+            "0.144.0",
+            official_context_signals=signals,
+        )
+        model = next(model for model in catalog["models"] if model["slug"] == "gpt-5.5")
+        budget = model["codex_proxy_metadata"]["official_context_budget"]
+
+        self.assertEqual(model["context_window"], 300_000)
+        self.assertEqual(budget["source"], "degraded_last_known_official")
+        self.assertEqual(budget["model_auto_compact_token_limit"], 210_000)
+
+        no_prior_catalog = build_codex_catalog(
+            snapshot.models,
+            [],
+            self.policy,
+            "0.144.0",
+            official_context_signals=catalog_sync.official_context_signals_from_snapshot(snapshot),
+        )
+        no_prior_model = next(
+            model for model in no_prior_catalog["models"] if model["slug"] == "gpt-5.5"
+        )
+        self.assertNotIn("context_window", no_prior_model)
 
     def test_load_official_seed_models_falls_back_to_runtime_seed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -543,13 +764,13 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(list(by_slug), ["gpt-5.6-sol", "volc/glm-5.2"])
         self.assertNotIn("openai/gpt-5.6-sol", by_slug)
+        self.assertEqual(by_slug["gpt-5.6-sol"]["codex_proxy_metadata"]["provider"], "openai")
+        self.assertEqual(by_slug["gpt-5.6-sol"]["codex_proxy_metadata"]["upstream_name"], "official")
+        self.assertEqual(by_slug["gpt-5.6-sol"]["codex_proxy_metadata"]["upstream_model"], "gpt-5.6-sol")
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
         self.assertEqual(
-            by_slug["gpt-5.6-sol"]["codex_proxy_metadata"],
-            {
-                "provider": "openai",
-                "upstream_name": "official",
-                "upstream_model": "gpt-5.6-sol",
-            },
+            by_slug["gpt-5.6-sol"]["codex_proxy_metadata"]["official_context_budget"],
+            {"source": "missing", "freshness": "missing"},
         )
         self.assertEqual(by_slug["volc/glm-5.2"]["codex_proxy_metadata"]["provider"], "volc")
 
@@ -578,20 +799,20 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = build_codex_catalog([], [], policy, "0.142.0")
         by_slug = {model["slug"]: model for model in catalog["models"]}
 
-        self.assertEqual(by_slug["gpt-5.5"]["context_window"], 258400)
-        self.assertEqual(by_slug["gpt-5.5"]["max_context_window"], 258400)
-        self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["context_window"], 258400)
-        self.assertEqual(catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"]["max_context_window"], 258400)
+        self.assertNotIn("context_window", by_slug["gpt-5.5"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.5"])
+        self.assertNotIn("context_window", catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"])
+        self.assertNotIn("max_context_window", catalog_sync.OFFICIAL_MODEL_DEFAULTS["gpt-5.5-fast"])
         self.assertEqual(by_slug["gpt-5.5"]["additional_speed_tiers"], ["fast"])
         self.assertEqual(by_slug["gpt-5.5"]["service_tiers"][0]["id"], "priority")
         self.assertEqual(by_slug["gpt-5.5"]["default_reasoning_level"], "medium")
         self.assertNotIn("gpt-5.5-fast", by_slug)
-        self.assertEqual(by_slug["gpt-5.4"]["context_window"], 272000)
+        self.assertNotIn("context_window", by_slug["gpt-5.4"])
         self.assertEqual(by_slug["gpt-5.4"]["additional_speed_tiers"], ["fast"])
         self.assertNotIn("gpt-5.4-fast", by_slug)
-        self.assertEqual(by_slug["gpt-5.4-mini"]["context_window"], 272000)
+        self.assertNotIn("context_window", by_slug["gpt-5.4-mini"])
         self.assertEqual(by_slug["gpt-5.4-mini"]["additional_speed_tiers"], [])
-        self.assertEqual(by_slug["gpt-5.3-codex-spark"]["context_window"], 128000)
+        self.assertNotIn("context_window", by_slug["gpt-5.3-codex-spark"])
         for model_id in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"):
             self.assertEqual(
                 [entry["effort"] for entry in by_slug[model_id]["supported_reasoning_levels"]],
@@ -620,8 +841,8 @@ class CatalogSyncTests(unittest.TestCase):
             ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         )
         self.assertEqual(by_slug["gpt-5.6-terra"]["display_name"], "5.6 Terra")
-        self.assertEqual(by_slug["gpt-5.6-terra"]["context_window"], 353400)
-        self.assertEqual(by_slug["gpt-5.6-terra"]["max_context_window"], 1050000)
+        self.assertNotIn("context_window", by_slug["gpt-5.6-terra"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-terra"])
         self.assertIn(
             "max",
             [entry["effort"] for entry in by_slug["gpt-5.6-terra"]["supported_reasoning_levels"]],

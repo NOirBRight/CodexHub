@@ -95,15 +95,22 @@ export function useProviderCatalogActions({
     });
   }
 
-  async function updateGatewayAfterCatalog(activeSettings?: Settings | null, toastId?: string) {
-    if (toastId) {
+  async function updateGatewayAfterCatalog(
+    activeSettings?: Settings | null,
+    toastId?: string,
+    options?: { catalogAlreadyPublished?: boolean },
+  ) {
+    const catalogAlreadyPublished = options?.catalogAlreadyPublished ?? false;
+    if (toastId && !catalogAlreadyPublished) {
       updateToast(toastId, {
         action: null,
         text: t("providers.generatingCatalog"),
         tone: "loading",
       });
     }
-    await api.generateCatalog();
+    if (!catalogAlreadyPublished) {
+      await api.generateCatalog();
+    }
     const syncSettings = activeSettings ?? settingsDraft ?? settings;
     let syncResult: GatewayClientSyncSummary | null = null;
     if (syncSettings?.auto_sync_clients) {
@@ -237,7 +244,8 @@ export function useProviderCatalogActions({
     }
     const toastId = quiet ? null : showToast(t("providers.refreshingOfficialModels"), "loading");
     try {
-      const refreshed = filterCodexVisibleOfficialModels(await api.refreshOfficialModels());
+      const refreshResult = await api.refreshOfficialModels();
+      const refreshed = filterCodexVisibleOfficialModels(refreshResult.models);
       const followsAutomaticOrder = shouldFollowOfficialCatalogOrder(officialModelOrderDraft);
       const nextOrder = followsAutomaticOrder
         ? officialModelOrderDraft
@@ -247,13 +255,17 @@ export function useProviderCatalogActions({
       }
       setOfficialModels(sortOfficialModels(refreshed, nextOrder));
       if (quiet) {
-        await api.generateCatalog();
         await refreshGatewayState();
         setModelDiscoveryError(null);
         return;
       }
-      const syncResult = await updateGatewayAfterCatalog(undefined, toastId ?? undefined);
-      const toastMessage = catalogSyncToastMessage(t("providers.officialModelsRefreshed"), syncResult);
+      const syncResult = await updateGatewayAfterCatalog(undefined, toastId ?? undefined, {
+        catalogAlreadyPublished: true,
+      });
+      const refreshMessage = refreshResult.restart_required
+        ? `${t("providers.officialModelsRefreshed")} ${t("providers.officialContextLimitsRestartCodex")}`
+        : t("providers.officialModelsRefreshed");
+      const toastMessage = catalogSyncToastMessage(refreshMessage, syncResult);
       if (syncResult?.failed) {
         updateToast(toastId!, {
           action: null,

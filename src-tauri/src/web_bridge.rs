@@ -1,5 +1,6 @@
 use crate::{
-    app_updates, autostart, catalog, config, gateway, history, models, openai_usage, proxy,
+    app_updates, autostart, catalog, config, gateway, history, models, official_refresh,
+    openai_usage, proxy,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -257,15 +258,15 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             let force_takeover =
                 optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"])
                     .unwrap_or(false);
-            to_value(config::switch_mode_with_takeover(
-                &mode,
+            to_value(crate::switch_mode(
+                mode,
                 auto_sync,
-                force_takeover,
+                Some(force_takeover),
             ))
         }
-        "start_proxy" => to_value(proxy::start()),
+        "start_proxy" => to_value(crate::start_proxy()),
         "stop_proxy" => to_value(proxy::stop()),
-        "restart_proxy" => to_value(proxy::restart()),
+        "restart_proxy" => to_value(crate::restart_proxy()),
         "get_providers" => to_value(config::get_providers()),
         "save_providers" => {
             let providers = serde_json::from_value(
@@ -296,7 +297,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             let enabled = bool_arg(&request.args, "enabled")?;
             to_value(config::set_codex_context_guard(enabled))
         }
-        "refresh_official_models" => to_value(models::refresh_official_models()),
+        "refresh_official_models" => to_value(official_refresh::refresh_manual()),
         "openai_usage_completions" => {
             let start_time = optional_u64_arg(&request.args, &["startTime", "start_time"]);
             let end_time = optional_u64_arg(&request.args, &["endTime", "end_time"]);

@@ -25,6 +25,7 @@ import type {
   GatewayUsageSummary,
   Model,
   ModelEndpointTestResult,
+  OfficialRefreshResult,
   OpenAIUsageQueryWindow,
   OpenAIUsageSnapshot,
   Provider,
@@ -205,7 +206,7 @@ export const api = {
     call<CodexContextGuardStatus>("get_codex_context_guard_status"),
   setCodexContextGuard: (enabled: boolean) =>
     call<CodexContextGuardStatus>("set_codex_context_guard", { enabled }),
-  refreshOfficialModels: () => call<Model[]>("refresh_official_models"),
+  refreshOfficialModels: () => call<OfficialRefreshResult>("refresh_official_models"),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
     call<OpenAIUsageSnapshot>("openai_usage_completions", openaiUsageWindowArgs(window)),
   discoverProviderModels: (baseUrl: string, apiKey: string) =>

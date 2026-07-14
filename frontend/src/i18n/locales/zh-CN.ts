@@ -464,6 +464,7 @@ const zhCN = {
     openingCodexApp: "正在打开 Codex App...",
     refreshingOpenAIUsage: "正在刷新 OpenAI 用量...",
     refreshingOfficialModels: "正在刷新官方模型...",
+    officialContextLimitsRestartCodex: "官方上下文限制已更新。请重启 Codex App 以应用它们。",
     refreshCodexAuth: "刷新授权状态",
     refreshOpenAIUsage: "刷新 OpenAI 用量",
     refreshModels: "刷新模型",

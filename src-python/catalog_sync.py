@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -29,7 +30,13 @@ from providers_config import (
     load_providers,
     runtime_providers_path,
 )
-from model_limits import apply_resolved_model_limits, load_resolved_model_limits
+from model_limits import (
+    CURRENT_DIRECT_OFFICIAL_SOURCE,
+    OfficialContextBudget,
+    apply_resolved_model_limits,
+    load_resolved_model_limits,
+    resolve_official_context_budget,
+)
 
 
 PROXY_DIR = Path(__file__).resolve().parent
@@ -67,7 +74,7 @@ OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
 DEFAULT_CLIENT_VERSION = "0.142.0"
 OLLAMA_PRIORITY_BASE = 100
-DEFAULT_CACHE_MAX_AGE_SECONDS = 86400
+DIRECT_OFFICIAL_CONTEXT_MAX_AGE_SECONDS = 12 * 60 * 60
 OFFICIAL_PROXY_PROVIDER_ALIAS = "openai"
 
 
@@ -151,7 +158,6 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
     "truncation_policy": {"mode": "tokens", "limit": 10000},
     "supports_parallel_tool_calls": True,
     "supports_image_detail_original": True,
-    "effective_context_window_percent": 95,
     "experimental_supported_tools": [],
     "input_modalities": ["text"],
     "supports_search_tool": True,
@@ -165,39 +171,27 @@ OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = {"gpt-5.5-fast", "gpt-5.4-fast"}
 
 OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.5": {
-        "context_window": 258400,
-        "max_context_window": 258400,
         "additional_speed_tiers": ["fast"],
         "service_tiers": OFFICIAL_FAST_SERVICE_TIERS,
         "default_reasoning_level": "medium",
     },
     "gpt-5.5-fast": {
-        "context_window": 258400,
-        "max_context_window": 258400,
         "default_reasoning_level": "medium",
     },
     "gpt-5.4": {
-        "context_window": 272000,
-        "max_context_window": 272000,
         "additional_speed_tiers": ["fast"],
         "service_tiers": OFFICIAL_FAST_SERVICE_TIERS,
         "default_reasoning_level": "medium",
     },
     "gpt-5.4-fast": {
-        "context_window": 272000,
-        "max_context_window": 272000,
         "default_reasoning_level": "medium",
     },
     "gpt-5.4-mini": {
-        "context_window": 272000,
-        "max_context_window": 272000,
         "additional_speed_tiers": [],
         "service_tiers": [],
         "default_reasoning_level": "medium",
     },
     "gpt-5.3-codex-spark": {
-        "context_window": 128000,
-        "max_context_window": 128000,
         "additional_speed_tiers": [],
         "service_tiers": [],
         "default_reasoning_level": "high",
@@ -411,6 +405,40 @@ def load_json_file(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+@dataclass(frozen=True)
+class OfficialSeedSnapshot:
+    models: list[dict[str, Any]]
+    source: str
+    context_freshness: str
+
+
+def _catalog_fetched_at_timestamp(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+
+def _direct_catalog_context_freshness(payload: dict[str, Any], now_timestamp: float | None) -> str:
+    fetched_at = _catalog_fetched_at_timestamp(payload.get("fetched_at"))
+    if fetched_at is None:
+        return "missing"
+    now = now_timestamp if now_timestamp is not None else datetime.now(timezone.utc).timestamp()
+    age_seconds = now - fetched_at
+    return (
+        "fresh"
+        if 0 <= age_seconds < DIRECT_OFFICIAL_CONTEXT_MAX_AGE_SECONDS
+        else "stale"
+    )
+
+
 def read_client_version(
     seed_path: Path = OFFICIAL_SEED_PATH,
     fallback_path: Path = OLLAMA_FALLBACK_PATH,
@@ -434,19 +462,132 @@ def official_seed_catalog_paths(
     return paths
 
 
+def load_official_seed_snapshot(
+    path: Path = OFFICIAL_SEED_PATH,
+    runtime_path: Path = RUNTIME_OFFICIAL_SEED_PATH,
+    *,
+    now_timestamp: float | None = None,
+) -> OfficialSeedSnapshot:
+    for candidate in official_seed_catalog_paths(path, runtime_path):
+        payload = load_json_file(candidate)
+        payload_models = payload.get("models")
+        if not isinstance(payload_models, list):
+            payload_models = []
+        models = [
+            deepcopy(model)
+            for model in payload_models
+            if isinstance(model, dict) and str(model.get("slug", "")).startswith("gpt-")
+        ]
+        if not models:
+            continue
+        if candidate == runtime_path:
+            freshness = _direct_catalog_context_freshness(payload, now_timestamp)
+            return OfficialSeedSnapshot(
+                models=models,
+                source=(
+                    CURRENT_DIRECT_OFFICIAL_SOURCE
+                    if freshness == "fresh"
+                    else "last_known_direct_official"
+                ),
+                context_freshness=freshness,
+            )
+        return OfficialSeedSnapshot(models=models, source="bundled_seed", context_freshness="missing")
+    return OfficialSeedSnapshot(models=[], source="missing", context_freshness="missing")
+
+
+def load_previous_official_context_budgets(
+    path: Path = GENERATED_CATALOG_PATH,
+) -> dict[str, dict[str, Any]]:
+    """Read only previously resolved Official budgets that can hold/tighten.
+
+    The generated catalog is atomically published, so this intentionally does
+    not trust the raw bundled/runtime model values as a new degraded cap.
+    """
+
+    payload = load_json_file(existing_generated_catalog_path(path))
+    models = payload.get("models") if isinstance(payload, dict) else None
+    budgets: dict[str, dict[str, Any]] = {}
+    if not isinstance(models, list):
+        return budgets
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        slug = canonical_model_id(str(model.get("slug", "")))
+        if slug.startswith("openai/gpt-"):
+            slug = slug.removeprefix("openai/")
+        metadata = model.get("codex_proxy_metadata")
+        if (
+            not slug.startswith("gpt-")
+            or not isinstance(metadata, dict)
+            or metadata.get("provider") != OFFICIAL_PROXY_PROVIDER_ALIAS
+            or metadata.get("upstream_name") != "official"
+        ):
+            continue
+        budget = metadata.get("official_context_budget")
+        if isinstance(budget, dict):
+            budgets[slug] = dict(budget)
+    return budgets
+
+
+def _first_present_value(model: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in model:
+            return model[key]
+    return None
+
+
+def official_context_signals_from_snapshot(
+    snapshot: OfficialSeedSnapshot,
+    previous_budgets: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    signals: dict[str, dict[str, Any]] = {}
+    for model in snapshot.models:
+        raw_slug = canonical_model_id(str(model.get("slug", "")))
+        slug = raw_slug.removeprefix("openai/") if raw_slug.startswith("openai/gpt-") else raw_slug
+        if not slug:
+            continue
+        previous = (previous_budgets or {}).get(slug, {})
+        signals[slug] = {
+            "context_window": _first_present_value(
+                model,
+                "context_window",
+                "contextWindow",
+            ),
+            "max_context_window": _first_present_value(
+                model,
+                "max_context_window",
+                "maxContextWindow",
+            ),
+            "effective_context_window_percent": _first_present_value(
+                model,
+                "effective_context_window_percent",
+                "effectiveContextWindowPercent",
+            ),
+            "auto_compact_token_limit": _first_present_value(
+                model,
+                "auto_compact_token_limit",
+                "model_auto_compact_token_limit",
+                "autoCompactTokenLimit",
+                "modelAutoCompactTokenLimit",
+            ),
+            "freshness": snapshot.context_freshness,
+            "source": snapshot.source,
+            "fallback_context_window": previous.get("model_context_window"),
+            "fallback_effective_context_window_percent": previous.get(
+                "effective_context_window_percent"
+            ),
+            "fallback_auto_compact_token_limit": previous.get(
+                "model_auto_compact_token_limit"
+            ),
+        }
+    return signals
+
+
 def load_official_seed_models(
     path: Path = OFFICIAL_SEED_PATH,
     runtime_path: Path = RUNTIME_OFFICIAL_SEED_PATH,
 ) -> list[dict[str, Any]]:
-    for candidate in official_seed_catalog_paths(path, runtime_path):
-        models = [
-            deepcopy(model)
-            for model in load_catalog_models(candidate)
-            if str(model.get("slug", "")).startswith("gpt-")
-        ]
-        if models:
-            return models
-    return []
+    return load_official_seed_snapshot(path, runtime_path).models
 
 
 def fallback_catalog_paths(path: Path = OLLAMA_FALLBACK_PATH) -> list[Path]:
@@ -740,7 +881,47 @@ def official_short_display_name(slug: str, model: dict[str, Any], policy: Catalo
     return re.sub(r"[-_]+", " ", display_name).strip()
 
 
-def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, Any]], policy: CatalogPolicy) -> dict[str, Any]:
+def _apply_official_context_budget(
+    model: dict[str, Any],
+    budget: OfficialContextBudget | None,
+    *,
+    source: str,
+    freshness: str,
+) -> None:
+    proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
+    if budget is None:
+        for key in (
+            "context_window",
+            "max_context_window",
+            "effective_context_window_percent",
+        ):
+            model.pop(key, None)
+        proxy_metadata["official_context_budget"] = {
+            "source": source,
+            "freshness": freshness,
+        }
+    else:
+        model["context_window"] = budget.context_window
+        model["max_context_window"] = budget.max_context_window
+        model["effective_context_window_percent"] = budget.effective_context_window_percent
+        proxy_metadata["official_context_budget"] = {
+            "source": budget.source,
+            "freshness": budget.freshness,
+            "context_window": budget.context_window,
+            "effective_context_window_percent": budget.effective_context_window_percent,
+            "effective_context_window": budget.effective_context_window,
+            "model_context_window": budget.model_context_window,
+            "model_auto_compact_token_limit": budget.model_auto_compact_token_limit,
+        }
+    model["codex_proxy_metadata"] = proxy_metadata
+
+
+def build_official_proxy_model(
+    slug: str,
+    official_by_slug: dict[str, dict[str, Any]],
+    policy: CatalogPolicy,
+    official_context_signals: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     source_model = official_by_slug.get(slug)
     model = deepcopy(source_model or build_minimal_official_model(slug, policy))
     if source_model is not None:
@@ -753,11 +934,33 @@ def build_official_proxy_model(slug: str, official_by_slug: dict[str, dict[str, 
     normalize_official_responses_lite_opt_in(model)
     apply_pinned_official_catalog_metadata(model, slug)
     limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
-    live_context = model.get("context_window")
-    apply_resolved_model_limits(model, limits)
-    if isinstance(live_context, int) and live_context > 0:
-        model["context_window"] = live_context
-        model["effective_source"] = "codex_app_model_list"
+    if limits is not None and limits.max_output_tokens is not None:
+        model.setdefault("max_output_tokens", limits.max_output_tokens)
+    raw_context_signal = (official_context_signals or {}).get(slug)
+    context_signal = raw_context_signal if isinstance(raw_context_signal, dict) else {}
+    budget = resolve_official_context_budget(
+        direct_context_window=context_signal.get("context_window"),
+        direct_max_context_window=context_signal.get("max_context_window"),
+        direct_effective_context_window_percent=context_signal.get(
+            "effective_context_window_percent"
+        ),
+        direct_auto_compact_token_limit=context_signal.get("auto_compact_token_limit"),
+        direct_freshness=str(context_signal.get("freshness", "missing")),
+        direct_source=str(context_signal.get("source", "missing")),
+        fallback_context_window=context_signal.get("fallback_context_window"),
+        fallback_effective_context_window_percent=context_signal.get(
+            "fallback_effective_context_window_percent"
+        ),
+        fallback_auto_compact_token_limit=context_signal.get(
+            "fallback_auto_compact_token_limit"
+        ),
+    )
+    _apply_official_context_budget(
+        model,
+        budget,
+        source=str(context_signal.get("source", "missing")),
+        freshness=str(context_signal.get("freshness", "missing")),
+    )
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
     proxy_metadata.update(
         {
@@ -962,6 +1165,7 @@ def build_codex_catalog(
     external_models: Iterable[dict[str, Any]] | None = None,
     official_model_sort_order: Iterable[str] | None = None,
     disabled_official_model_ids: Iterable[str] | None = None,
+    official_context_signals: dict[str, dict[str, Any]] | None = None,
     use_ollama_policy_allowlist: bool = True,
     fetched_at: str | None = None,
 ) -> dict[str, Any]:
@@ -983,7 +1187,7 @@ def build_codex_catalog(
     for slug in official_slugs:
         if not slug or slug in seen_slugs:
             continue
-        model = build_official_proxy_model(slug, official_by_slug, policy)
+        model = build_official_proxy_model(slug, official_by_slug, policy, official_context_signals)
         models.append(model)
         seen_slugs.add(slug)
 
@@ -1150,7 +1354,17 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     include_official = load_include_official_models()
     official_model_sort_order = load_official_model_sort_order()
     disabled_official_models = load_official_disabled_models()
-    official_models = load_official_seed_models(OFFICIAL_SEED_PATH) if include_official else []
+    official_snapshot = (
+        load_official_seed_snapshot(OFFICIAL_SEED_PATH)
+        if include_official
+        else OfficialSeedSnapshot([], "missing", "missing")
+    )
+    official_models = official_snapshot.models
+    previous_official_context_budgets = load_previous_official_context_budgets()
+    official_context_signals = official_context_signals_from_snapshot(
+        official_snapshot,
+        previous_official_context_budgets,
+    )
     fallback_models = load_fallback_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
     discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
@@ -1189,6 +1403,7 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         external_models=external_models,
         official_model_sort_order=official_model_sort_order,
         disabled_official_model_ids=disabled_official_models,
+        official_context_signals=official_context_signals,
         use_ollama_policy_allowlist=not ollama_runtime_configured,
     )
     visible_slugs = [str(model["slug"]) for model in catalog["models"] if model.get("slug")]

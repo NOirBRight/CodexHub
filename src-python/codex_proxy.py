@@ -96,7 +96,10 @@ from catalog_sync import (
     existing_generated_catalog_path,
     known_official_model_ids as catalog_known_official_model_ids,
     official_short_display_name,
-    sync_catalog,
+)
+from model_limits import (
+    CURRENT_DIRECT_OFFICIAL_SOURCE,
+    DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
 )
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
@@ -668,6 +671,7 @@ def _runtime_codex_dir() -> Path:
 
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 # Both limits apply to serialized Gateway telemetry still awaiting a sink write,
@@ -716,7 +720,6 @@ DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEO
 DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
-OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
@@ -1380,14 +1383,6 @@ def gateway_image_proxy_model() -> str:
     if isinstance(settings_value, str) and settings_value.strip():
         return settings_value.strip()
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
-
-
-def openai_context_guard_enabled() -> bool:
-    return _env_or_settings_flag(
-        "CODEX_PROXY_OPENAI_CONTEXT_GUARD_ENABLED",
-        "openai_context_guard_enabled",
-        False,
-    )
 
 
 def gateway_transparent_vision_proxy_enabled() -> bool:
@@ -9004,49 +8999,142 @@ def upstream_headers(
     return outgoing
 
 
-def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
-    if sync_first:
-        try:
-            sync_catalog()
-        except Exception as exc:
-            logger.warning("catalog sync failed before /v1/models: %s", type(exc).__name__)
+def current_catalog_data() -> dict[str, Any]:
+    """Read the atomically published catalog without launching discovery.
 
+    Tauri owns Official acquisition and catalog refresh.  The Gateway only
+    consumes the published snapshot at request handling time.
+    """
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
+    published_budgets = published_official_context_budgets(catalog_path)
     return catalog_with_vision_proxy_capabilities(
         catalog_with_openai_context_guard(
-            catalog_with_official_fast_variants(
-                json.loads(catalog_path.read_text(encoding="utf-8-sig"))
-            )
+            catalog_with_official_fast_variants(json.loads(catalog_path.read_text(encoding="utf-8-sig"))),
+            published_budgets,
+            require_published_snapshot=True,
         )
     )
 
 
-def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]:
-    if not openai_context_guard_enabled():
-        return catalog
+def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
+    """Read the Rust publication fence that commits an Official budget.
 
+    The catalog and Codex runtime overlay are separate atomic files.  The
+    refresh coordinator clears this fence before it begins an update, then
+    commits it only after both files agree.  A missing, interrupted, or
+    mismatched fence is therefore not a safe current Official snapshot.
+    """
+
+    state_path = catalog_path.parent / OFFICIAL_REFRESH_STATE_FILENAME
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, Mapping) or payload.get("publication_ready") is not True:
+        return {}
+    budgets = payload.get("published_context_budgets")
+    if not isinstance(budgets, Mapping):
+        return {}
+    return {
+        str(model_id): budget
+        for model_id, budget in budgets.items()
+        if isinstance(model_id, str) and isinstance(budget, Mapping)
+    }
+
+
+def catalog_with_openai_context_guard(
+    catalog: dict[str, Any],
+    published_budgets: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    require_published_snapshot: bool = False,
+) -> dict[str, Any]:
+    # The Direct Official budget is a safety invariant, not an optional
+    # presentation preference.  Gateway request handling only projects the
+    # atomically published resolver result and never refreshes it itself.
     models = catalog.get("models")
     if not isinstance(models, list):
         return catalog
 
+    def positive_int(value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
     def guarded_model(model: Any) -> Any:
+        def without_context_budget() -> dict[str, Any]:
+            updated = dict(model)
+            updated.pop("context_window", None)
+            updated.pop("max_context_window", None)
+            updated.pop("effective_context_window_percent", None)
+            return updated
+
         if not isinstance(model, Mapping):
             return model
-        slug = canonical_model_id(str(model.get("slug", "")))
-        if not slug.startswith("gpt-"):
+        metadata = model.get("codex_proxy_metadata")
+        if not isinstance(metadata, Mapping):
             return model
-        context_window = model.get("context_window")
-        guarded_window = (
-            min(context_window, OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW)
-            if isinstance(context_window, int) and context_window > 0
-            else OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW
-        )
+        if metadata.get("provider") != "openai" or metadata.get("upstream_name") != "official":
+            return model
+        budget = metadata.get("official_context_budget")
+        if not isinstance(budget, Mapping):
+            return without_context_budget()
+        source = budget.get("source")
+        freshness = budget.get("freshness")
+        trusted_budget = (
+            source == CURRENT_DIRECT_OFFICIAL_SOURCE and freshness == "fresh"
+        ) or source == DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE
+        if not trusted_budget:
+            return without_context_budget()
+        guard_window = positive_int(budget.get("model_context_window"))
+        if guard_window is None:
+            guard_window = positive_int(budget.get("context_window"))
+        effective_percent = positive_int(budget.get("effective_context_window_percent"))
+        effective_window = positive_int(budget.get("effective_context_window"))
+        auto_compact_limit = positive_int(budget.get("model_auto_compact_token_limit"))
+        if (
+            guard_window is None
+            or effective_percent is None
+            or effective_percent > 100
+            or effective_window is None
+            or effective_window > guard_window
+            or auto_compact_limit is None
+            or auto_compact_limit > effective_window
+        ):
+            # An incomplete or interrupted resolved snapshot must not keep a
+            # larger stale catalog value visible to an Official caller.
+            return without_context_budget()
+        if require_published_snapshot:
+            if not isinstance(published_budgets, Mapping):
+                return without_context_budget()
+            model_id = str(model.get("slug", "")).removeprefix("openai/")
+            upstream_model = metadata.get("upstream_model")
+            expected = published_budgets.get(model_id)
+            if expected is None and isinstance(upstream_model, str):
+                expected = published_budgets.get(upstream_model.removeprefix("openai/"))
+            if not isinstance(expected, Mapping) or any(
+                expected.get(key) != budget.get(key)
+                for key in (
+                    "model_context_window",
+                    "effective_context_window_percent",
+                    "effective_context_window",
+                    "model_auto_compact_token_limit",
+                )
+            ):
+                return without_context_budget()
+        reported_windows = [
+            value
+            for value in (
+                positive_int(model.get("context_window")),
+                positive_int(model.get("max_context_window")),
+            )
+            if value is not None
+        ]
+        guarded_window = min(guard_window, *reported_windows) if reported_windows else guard_window
         return {
             **model,
             "context_window": guarded_window,
             "max_context_window": guarded_window,
+            "effective_context_window_percent": effective_percent,
         }
 
     updated = dict(catalog)

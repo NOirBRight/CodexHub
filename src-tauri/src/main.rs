@@ -12,6 +12,7 @@ mod gateway;
 mod history;
 mod models;
 mod openai_usage;
+mod official_refresh;
 mod proxy;
 mod runtime_paths;
 mod safe_file;
@@ -19,7 +20,7 @@ mod web_bridge;
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tauri::{AppHandle, Manager, Window, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Window, WindowEvent};
 
 #[cfg(desktop)]
 use tauri::{
@@ -34,6 +35,13 @@ const TRAY_START_GATEWAY: &str = "start_gateway";
 const TRAY_STOP_GATEWAY: &str = "stop_gateway";
 const TRAY_RESTART_GATEWAY: &str = "restart_gateway";
 const TRAY_EXIT: &str = "exit";
+const TRAY_TOAST_EVENT: &str = "codexhub:toast";
+
+#[derive(Debug, Clone, Serialize)]
+struct TrayToast {
+    text: String,
+    tone: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
@@ -300,11 +308,15 @@ async fn get_status() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> Result<AppStatus, String> {
+    if mode == "custom" {
+        official_refresh::refresh_before_official_activation()?;
+    }
     config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
 }
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
+    official_refresh::refresh_before_official_activation()?;
     proxy::start()
 }
 
@@ -315,6 +327,7 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
+    official_refresh::refresh_before_official_activation()?;
     proxy::restart()
 }
 
@@ -354,8 +367,8 @@ fn set_codex_context_guard(enabled: bool) -> Result<config::CodexContextGuardSta
 }
 
 #[tauri::command]
-async fn refresh_official_models() -> Result<Vec<Model>, String> {
-    run_blocking("refresh_official_models", models::refresh_official_models).await
+async fn refresh_official_models() -> Result<official_refresh::OfficialRefreshResult, String> {
+    run_blocking("refresh_official_models", official_refresh::refresh_manual).await
 }
 
 #[tauri::command]
@@ -719,22 +732,50 @@ fn run_tray_action(app: &AppHandle, id: &str) {
     match id {
         TRAY_SHOW => show_main_window(app),
         TRAY_CONNECT_OFFICIAL => {
-            let _ = config::switch_mode("official", false);
+            report_tray_action(
+                app,
+                "Connect Codex to Official",
+                switch_mode("official".to_string(), false, None),
+            );
         }
         TRAY_CONNECT_HUB => {
-            let _ = config::switch_mode("custom", false);
+            report_tray_action(
+                app,
+                "Connect Codex to CodexHub",
+                switch_mode("custom".to_string(), false, None),
+            );
         }
         TRAY_START_GATEWAY => {
-            let _ = proxy::start();
+            report_tray_action(app, "Start Gateway", start_proxy());
         }
         TRAY_STOP_GATEWAY => {
-            let _ = proxy::stop();
+            report_tray_action(app, "Stop Gateway", proxy::stop());
         }
         TRAY_RESTART_GATEWAY => {
-            let _ = proxy::restart();
+            report_tray_action(app, "Restart Gateway", restart_proxy());
         }
         TRAY_EXIT => app.exit(0),
         _ => {}
+    }
+}
+
+fn report_tray_action(app: &AppHandle, action: &str, result: Result<AppStatus, String>) {
+    let toast = tray_toast_for(action, result);
+    if let Err(error) = app.emit(TRAY_TOAST_EVENT, toast) {
+        log::warn!("failed to emit tray action feedback: {error}");
+    }
+}
+
+fn tray_toast_for(action: &str, result: Result<AppStatus, String>) -> TrayToast {
+    match result {
+        Ok(status) => TrayToast {
+            text: format!("{action}: {}", status.message),
+            tone: "success".to_string(),
+        },
+        Err(error) => TrayToast {
+            text: format!("{action} failed: {error}"),
+            tone: "error".to_string(),
+        },
     }
 }
 
@@ -841,7 +882,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_gui() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
@@ -929,22 +970,54 @@ fn run_gui() {
             window_toggle_maximize,
             window_close_to_tray
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running CodexHub Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building CodexHub Tauri application");
+
+    app.run(|_app, event| {
+            if matches!(event, RunEvent::Resumed) {
+                tauri::async_runtime::spawn_blocking(|| {
+                    if let Err(error) = official_refresh::refresh_after_resume() {
+                        log::warn!("overdue Official model refresh after resume failed: {error}");
+                    }
+                });
+            }
+        });
 }
 
 fn start_gateway_on_launch() {
     tauri::async_runtime::spawn_blocking(|| {
+        if let Err(error) = official_refresh::refresh_at_startup() {
+            log::warn!("startup Official model refresh failed: {error}");
+        }
+        official_refresh::start_scheduled_refresh_loop();
         let Ok(settings) = config::get_settings() else {
             return;
         };
-        if !settings.auto_start_gateway {
-            return;
-        }
-        if let Err(error) = proxy::start() {
+        if let Err(error) = start_gateway_after_startup(
+            settings.auto_start_gateway,
+            official_refresh::refresh_before_official_activation,
+            proxy::start,
+        ) {
             eprintln!("failed to start CodexHub gateway on app launch: {error}");
         }
     });
+}
+
+fn start_gateway_after_startup<ActivateOfficial, StartGateway>(
+    auto_start_gateway: bool,
+    activate_official: ActivateOfficial,
+    start_gateway: StartGateway,
+) -> Result<bool, String>
+where
+    ActivateOfficial: FnOnce() -> Result<(), String>,
+    StartGateway: FnOnce() -> Result<AppStatus, String>,
+{
+    if !auto_start_gateway {
+        return Ok(false);
+    }
+    activate_official()?;
+    start_gateway()?;
+    Ok(true)
 }
 
 fn main() {
@@ -960,4 +1033,53 @@ fn main() {
     }
 
     run_gui();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{start_gateway_after_startup, tray_toast_for, AppStatus};
+    use std::cell::Cell;
+
+    #[test]
+    fn auto_start_refuses_to_launch_the_gateway_without_a_safe_official_snapshot() {
+        let starts = Cell::new(0);
+        let error = start_gateway_after_startup(
+            true,
+            || Err("safe Official snapshot is unavailable".to_string()),
+            || {
+                starts.set(starts.get() + 1);
+                Ok(status())
+            },
+        )
+        .expect_err("unsafe Official activation must block auto-start");
+
+        assert!(error.contains("safe Official snapshot"));
+        assert_eq!(starts.get(), 0);
+    }
+
+    #[test]
+    fn tray_state_actions_always_produce_success_or_error_feedback() {
+        let success = tray_toast_for("Start Gateway", Ok(status()));
+        assert_eq!(success.tone, "success");
+        assert!(success.text.contains("Start Gateway"));
+
+        let failure = tray_toast_for(
+            "Start Gateway",
+            Err("safe snapshot unavailable".to_string()),
+        );
+        assert_eq!(failure.tone, "error");
+        assert!(failure.text.contains("safe snapshot unavailable"));
+    }
+
+    fn status() -> AppStatus {
+        AppStatus {
+            mode: "custom".to_string(),
+            proxy_running: false,
+            proxy_port: 9099,
+            proxy_build: None,
+            message: "Gateway state updated".to_string(),
+            history_sync_status: None,
+            history_sync_message: None,
+        }
+    }
 }
