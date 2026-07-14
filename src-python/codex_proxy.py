@@ -7640,6 +7640,7 @@ APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS = frozenset(
 APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS = frozenset(
     {"type", "call_id", "output"}
 )
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS = frozenset({"id"})
 
 
 class _ApplyPatchAdapterFailure(ValueError):
@@ -7792,6 +7793,20 @@ def _raise_apply_patch_history_adapter_failure(
     )
 
 
+def _has_exact_apply_patch_custom_tool_history_fields(
+    item: Mapping[str, Any],
+    required_fields: frozenset[str],
+) -> bool:
+    fields = set(item)
+    if fields == required_fields:
+        return True
+    return (
+        fields == required_fields | APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS
+        and isinstance(item.get("id"), str)
+        and bool(item["id"])
+    )
+
+
 def _adapt_apply_patch_custom_tool_history(
     input_items: list[Any],
     *,
@@ -7825,7 +7840,10 @@ def _adapt_apply_patch_custom_tool_history(
         call_id = raw_item.get("call_id")
         if _is_apply_patch_custom_tool_call(raw_item):
             if (
-                set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS
+                not _has_exact_apply_patch_custom_tool_history_fields(
+                    raw_item,
+                    APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS,
+                )
                 or raw_item.get("status") != "completed"
                 or not isinstance(call_id, str)
                 or not call_id
@@ -7858,7 +7876,10 @@ def _adapt_apply_patch_custom_tool_history(
 
         if item_type == "custom_tool_call_output":
             if isinstance(call_id, str) and call_id in pending_call_ids:
-                if set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS:
+                if not _has_exact_apply_patch_custom_tool_history_fields(
+                    raw_item,
+                    APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS,
+                ):
                     _raise_apply_patch_history_adapter_failure(event_context)
                 pending_call_ids.remove(call_id)
                 rewritten_items.append(

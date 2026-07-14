@@ -43,6 +43,11 @@ def _load_glm_apply_patch_retry_fixture():
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
+def _load_glm_apply_patch_history_native_ids_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_history_native_ids.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 class FakeWFile:
     def __init__(self, fail_on_write=None):
         self.writes = []
@@ -8650,6 +8655,43 @@ class RoutingTests(unittest.TestCase):
             {"type": "function_call_output", "call_id": "call_apply_patch", "output": patch_result},
         )
 
+    def test_responses_structured_provider_adapts_native_id_apply_patch_history_fixture(self):
+        fixture = _load_glm_apply_patch_history_native_ids_fixture()
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": fixture["model"],
+                    "input": fixture["input"],
+                    "tools": fixture["tools"],
+                },
+                ensure_ascii=True,
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0], fixture["input"][0])
+        self.assertEqual(payload["input"][1:3], fixture["expected_apply_patch_function_history"])
+        self.assertEqual(payload["input"][3], fixture["input"][3])
+        self.assertNotIn("id", payload["input"][1])
+        self.assertNotIn("id", payload["input"][2])
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("id", "call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
     def test_responses_structured_provider_preserves_body_originated_apply_patch_continuation(self):
         fixture = _load_glm_apply_patch_retry_fixture()
         function_item = {
@@ -8778,7 +8820,17 @@ class RoutingTests(unittest.TestCase):
             "output": "Success. Updated target.txt",
         }
         malformed_histories = (
-            ("unexpected_call_field", [{**custom_call, "id": "fc_call_patch"}, custom_output]),
+            ("unexpected_call_field", [{**custom_call, "unexpected": "field"}, custom_output]),
+            (
+                "native_call_id_with_unexpected_field",
+                [{**custom_call, "id": "ctc_sanitized_apply_patch", "unexpected": "field"}, custom_output],
+            ),
+            ("non_string_call_item_id", [{**custom_call, "id": 1}, custom_output]),
+            ("empty_output_item_id", [custom_call, {**custom_output, "id": ""}]),
+            (
+                "native_output_id_with_unexpected_field",
+                [custom_call, {**custom_output, "id": "ctco_sanitized_apply_patch", "unexpected": "field"}],
+            ),
             ("missing_completed_status", [{key: value for key, value in custom_call.items() if key != "status"}, custom_output]),
             ("empty_patch", [{**custom_call, "input": "  "}, custom_output]),
             ("unexpected_output_field", [custom_call, {**custom_output, "status": "completed"}]),

@@ -1,0 +1,51 @@
+{
+  "fixture_schema": "codexhub-glm-apply-patch-history-native-ids/v1",
+  "sanitized": true,
+  "source": "Sanitized structural reproduction of the #105 regression addendum; not a raw request capture.",
+  "model": "glm-5.2",
+  "input": [
+    {
+      "type": "message",
+      "role": "developer",
+      "content": "<sanitized-history-before-pair>"
+    },
+    {
+      "id": "ctc_sanitized_apply_patch",
+      "type": "custom_tool_call",
+      "status": "completed",
+      "call_id": "call_sanitized_apply_patch",
+      "name": "apply_patch",
+      "input": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n"
+    },
+    {
+      "id": "ctco_sanitized_apply_patch",
+      "type": "custom_tool_call_output",
+      "call_id": "call_sanitized_apply_patch",
+      "output": "<sanitized-success>"
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "<sanitized-continuation>"
+    }
+  ],
+  "tools": [
+    {
+      "type": "custom",
+      "name": "apply_patch"
+    }
+  ],
+  "expected_apply_patch_function_history": [
+    {
+      "type": "function_call",
+      "call_id": "call_sanitized_apply_patch",
+      "name": "apply_patch",
+      "arguments": "{\"patch\":\"*** Begin Patch\\n*** Update File: SANITIZED_TARGET\\n@@\\n-OLD\\n+NEW\\n*** End Patch\\n\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_sanitized_apply_patch",
+      "output": "<sanitized-success>"
+    }
+  ]
+}
