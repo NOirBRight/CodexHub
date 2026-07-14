@@ -1565,7 +1565,7 @@ mod tests {
         read_pid, read_pid_record, start_with_paths, start_with_paths_and_waiter, status_with_paths,
         stop_with_paths, stop_with_paths_and_controls, write_pid, InspectedProcess, ProcessInfo,
         ProcessInspector, ProcessKiller, ProxyPaths, ProxyPidMetadata, ProxyPidRecord,
-        StartupOutcome,
+        StartupOutcome, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
     use crate::Settings;
     use std::cell::RefCell;
