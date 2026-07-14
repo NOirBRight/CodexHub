@@ -147,12 +147,100 @@ test("optional/default fields: omitted fields equal their persisted default equi
   );
 });
 
-test("meaningful reorder: swapping model order produces dirty state", () => {
+test("semantic comparison ignores key insertion order at every object depth", () => {
+  const baseline = {
+    id: "prov-1",
+    name: "Test Provider",
+    base_url: "https://example.com",
+    enabled: true,
+    models: [{
+      id: "model-a",
+      display_name: "Model A",
+      upstream_model: "model-a",
+      enabled: true,
+      pricing: {
+        input_per_million: 1,
+        cached_input_per_million: 0.5,
+        output_per_million: 2,
+        currency: "USD",
+        source: "catalog",
+        estimate: false,
+      },
+      metadata_provenance: {
+        source: "catalog",
+        source_url: "https://example.com/catalog",
+        fetched_at: "2026-07-14T00:00:00Z",
+        confidence: "high",
+      },
+    }],
+  };
+  const draft = {
+    models: [{
+      metadata_provenance: {
+        confidence: "high",
+        fetched_at: "2026-07-14T00:00:00Z",
+        source_url: "https://example.com/catalog",
+        source: "catalog",
+      },
+      pricing: {
+        estimate: false,
+        source: "catalog",
+        currency: "USD",
+        output_per_million: 2,
+        cached_input_per_million: 0.5,
+        input_per_million: 1,
+      },
+      enabled: true,
+      upstream_model: "model-a",
+      display_name: "Model A",
+      id: "model-a",
+    }],
+    enabled: true,
+    base_url: "https://example.com",
+    name: "Test Provider",
+    id: "prov-1",
+  };
+  assert.ok(!isProviderDirty(baseline, draft), "key insertion order should not produce dirty state");
+});
+
+test("omitted model codex and Gateway flags equal their persisted true defaults", () => {
   const baseline = makeProvider({
-    models: [makeModel({ id: "a", display_name: "A" }), makeModel({ id: "b", display_name: "B" })],
+    models: [makeModel({ codex_enabled: undefined, gateway_exported: undefined })],
+  });
+  const draft = makeProvider({
+    models: [makeModel({ codex_enabled: true, gateway_exported: true })],
+  });
+  assert.ok(!isProviderDirty(baseline, draft), "omitted persisted-true flags should compare equal to true");
+});
+
+test("restoring visible model order ignores redundant sort_order metadata", () => {
+  const baseline = makeProvider({
+    models: [
+      makeModel({ id: "a", display_name: "A", sort_order: null }),
+      makeModel({ id: "b", display_name: "B" }),
+    ],
+  });
+  const draftRestored = makeProvider({
+    models: [
+      makeModel({ id: "a", display_name: "A", sort_order: 1 }),
+      makeModel({ id: "b", display_name: "B", sort_order: 2 }),
+    ],
+  });
+  assert.ok(!isProviderDirty(baseline, draftRestored), "redundant sequential sort_order should not be dirty");
+});
+
+test("actual model reorder remains dirty after sort_order canonicalization", () => {
+  const baseline = makeProvider({
+    models: [
+      makeModel({ id: "a", display_name: "A", sort_order: null }),
+      makeModel({ id: "b", display_name: "B" }),
+    ],
   });
   const draftReordered = makeProvider({
-    models: [makeModel({ id: "b", display_name: "B" }), makeModel({ id: "a", display_name: "A" })],
+    models: [
+      makeModel({ id: "b", display_name: "B", sort_order: 1 }),
+      makeModel({ id: "a", display_name: "A", sort_order: 2 }),
+    ],
   });
   assert.ok(isProviderDirty(baseline, draftReordered), "reordering models should be dirty");
 });

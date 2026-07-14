@@ -18,7 +18,7 @@ export function normalizeProviderForComparison(provider: Provider): Provider {
     display_prefix: endpointNormalized.display_prefix ?? null,
     sort_order: endpointNormalized.sort_order ?? null,
     locked: endpointNormalized.locked ?? false,
-    models: endpointNormalized.models.map(normalizeModelForComparison),
+    models: endpointNormalized.models.map((model, index) => normalizeModelForComparison(model, index)),
   };
 }
 
@@ -32,7 +32,7 @@ export function isProviderDirty(baseline: Provider, draft: Provider): boolean {
   return serializeProvider(baseline) !== serializeProvider(draft);
 }
 
-function normalizeModelForComparison(model: Model): Model {
+function normalizeModelForComparison(model: Model, index: number): Model {
   const normalized = normalizeModel(model);
   return {
     ...normalized,
@@ -41,20 +41,44 @@ function normalizeModelForComparison(model: Model): Model {
     tool_surface_strategy: normalized.tool_surface_strategy ?? null,
     source_kind: normalized.source_kind ?? null,
     locked: normalized.locked ?? false,
-    codex_enabled: normalized.codex_enabled ?? false,
-    gateway_exported: normalized.gateway_exported ?? false,
+    codex_enabled: normalized.codex_enabled ?? true,
+    gateway_exported: normalized.gateway_exported ?? true,
     max_context_window: normalized.max_context_window ?? null,
     effective_source: normalized.effective_source ?? null,
     max_source: normalized.max_source ?? null,
     confidence: normalized.confidence ?? null,
     verified_at: normalized.verified_at ?? null,
     max_output_tokens: normalized.max_output_tokens ?? null,
-    sort_order: normalized.sort_order ?? null,
+    sort_order: index + 1,
     pricing: normalized.pricing ?? null,
     metadata_provenance: normalized.metadata_provenance ?? null,
   };
 }
 
 function serializeProvider(provider: Provider): string {
-  return JSON.stringify(normalizeProviderForComparison(provider));
+  return JSON.stringify(canonicalizeForSerialization(normalizeProviderForComparison(provider)));
+}
+
+/**
+ * JSON stringification preserves insertion order for object keys. Canonicalize
+ * every object before comparison so equivalent persisted data has one stable
+ * representation, while keeping array order because model priority is meaningful.
+ */
+function canonicalizeForSerialization(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => item === undefined ? null : canonicalizeForSerialization(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const source = value as Record<string, unknown>;
+  const canonical: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) {
+    const nestedValue = source[key];
+    if (nestedValue !== undefined) {
+      canonical[key] = canonicalizeForSerialization(nestedValue);
+    }
+  }
+  return canonical;
 }
