@@ -12,6 +12,7 @@ mod gateway;
 mod history;
 mod models;
 mod openai_usage;
+mod official_refresh;
 mod proxy;
 mod runtime_paths;
 mod safe_file;
@@ -19,7 +20,7 @@ mod web_bridge;
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tauri::{AppHandle, Manager, Window, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, Window, WindowEvent};
 
 #[cfg(desktop)]
 use tauri::{
@@ -300,11 +301,15 @@ async fn get_status() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> Result<AppStatus, String> {
+    if mode == "custom" {
+        official_refresh::refresh_before_official_activation()?;
+    }
     config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
 }
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
+    official_refresh::refresh_before_official_activation()?;
     proxy::start()
 }
 
@@ -315,6 +320,7 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
+    official_refresh::refresh_before_official_activation()?;
     proxy::restart()
 }
 
@@ -355,7 +361,7 @@ fn set_codex_context_guard(enabled: bool) -> Result<config::CodexContextGuardSta
 
 #[tauri::command]
 async fn refresh_official_models() -> Result<Vec<Model>, String> {
-    run_blocking("refresh_official_models", models::refresh_official_models).await
+    run_blocking("refresh_official_models", official_refresh::refresh_manual).await
 }
 
 #[tauri::command]
@@ -719,19 +725,19 @@ fn run_tray_action(app: &AppHandle, id: &str) {
     match id {
         TRAY_SHOW => show_main_window(app),
         TRAY_CONNECT_OFFICIAL => {
-            let _ = config::switch_mode("official", false);
+            let _ = switch_mode("official".to_string(), false, None);
         }
         TRAY_CONNECT_HUB => {
-            let _ = config::switch_mode("custom", false);
+            let _ = switch_mode("custom".to_string(), false, None);
         }
         TRAY_START_GATEWAY => {
-            let _ = proxy::start();
+            let _ = start_proxy();
         }
         TRAY_STOP_GATEWAY => {
             let _ = proxy::stop();
         }
         TRAY_RESTART_GATEWAY => {
-            let _ = proxy::restart();
+            let _ = restart_proxy();
         }
         TRAY_EXIT => app.exit(0),
         _ => {}
@@ -841,7 +847,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_gui() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
@@ -929,12 +935,26 @@ fn run_gui() {
             window_toggle_maximize,
             window_close_to_tray
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running CodexHub Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building CodexHub Tauri application");
+
+    app.run(|_app, event| {
+            if matches!(event, RunEvent::Resumed) {
+                tauri::async_runtime::spawn_blocking(|| {
+                    if let Err(error) = official_refresh::refresh_after_resume() {
+                        log::warn!("overdue Official model refresh after resume failed: {error}");
+                    }
+                });
+            }
+        });
 }
 
 fn start_gateway_on_launch() {
     tauri::async_runtime::spawn_blocking(|| {
+        if let Err(error) = official_refresh::refresh_at_startup() {
+            log::warn!("startup Official model refresh failed: {error}");
+        }
+        official_refresh::start_scheduled_refresh_loop();
         let Ok(settings) = config::get_settings() else {
             return;
         };

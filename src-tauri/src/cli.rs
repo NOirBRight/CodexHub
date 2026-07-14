@@ -6,13 +6,13 @@ pub fn run(args: &[String]) -> i32 {
         Some("status") => print_result(proxy::status()),
         Some("switch") => {
             run_switch_command(&args[1..], config::get_settings, |mode, auto_sync| {
-                config::switch_mode(mode, auto_sync)
+                crate::switch_mode(mode.to_string(), auto_sync, None)
             })
         }
-        Some("start") => print_result(proxy::start()),
+        Some("start") => print_result(crate::start_proxy()),
         Some("stop") => print_result(proxy::stop()),
-        Some("restart") => print_result(proxy::restart()),
-        Some("refresh-models") => print_result(models::refresh_official_models()),
+        Some("restart") => print_result(crate::restart_proxy()),
+        Some("refresh-models") => print_result(crate::official_refresh::refresh_manual()),
         Some("sync-history") => print_result(history::sync_history(None)),
         Some("sync-catalog") => print_result(catalog::sync_catalog()),
         Some("list-providers") => print_result(config::get_providers()),

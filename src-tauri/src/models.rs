@@ -52,10 +52,32 @@ const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/models",
 ];
 
-pub fn refresh_official_models() -> Result<Vec<Model>, String> {
+/// Acquire a new Direct Official snapshot.  Callers that need to make refresh
+/// scheduling decisions must use this path so a cache fallback is never
+/// mistaken for a successful Direct acquisition.
+pub(crate) fn refresh_official_models_direct() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
     let runner = ProcessAppServerModelListRunner;
-    refresh_official_models_with_runner(&paths, &runner)
+    refresh_official_models_direct_with_runner(&paths, &runner)
+}
+
+pub(crate) fn list_cached_official_models() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    read_official_subscription_models_from_cache(&paths)
+}
+
+pub(crate) fn cached_official_snapshot_timestamp() -> Option<u64> {
+    let paths = ModelPaths::runtime().ok()?;
+    let payload = load_json_file(&paths.official_subscription_cache_path()).ok()?;
+    payload
+        .get("fetched_at")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            payload
+                .get("fetched_at")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+        })
 }
 
 pub fn discover_provider_models(base_url: &str, api_key: &str) -> Result<Vec<Model>, String> {
@@ -308,25 +330,30 @@ impl AppServerModelListRunner for ProcessAppServerModelListRunner {
     }
 }
 
+#[cfg(test)]
 fn refresh_official_models_with_runner(
     paths: &ModelPaths,
     runner: &dyn AppServerModelListRunner,
 ) -> Result<Vec<Model>, String> {
-    match runner
-        .read_model_list()
-        .and_then(|payload| subscription_models_from_app_server_payload(&payload))
-    {
-        Ok(subscription_models) => {
-            let models = subscription_models_to_metadata_models(&subscription_models);
-            write_official_subscription_caches(paths, &subscription_models, &models)?;
-            Ok(models)
-        }
-        Err(error) => read_official_subscription_models_from_cache(paths).map_err(|cache_error| {
+    refresh_official_models_direct_with_runner(paths, runner).or_else(|error| {
+        read_official_subscription_models_from_cache(paths).map_err(|cache_error| {
             format!(
                 "Codex subscription model list unavailable: {error}; cached official models unavailable: {cache_error}"
             )
-        }),
-    }
+        })
+    })
+}
+
+fn refresh_official_models_direct_with_runner(
+    paths: &ModelPaths,
+    runner: &dyn AppServerModelListRunner,
+) -> Result<Vec<Model>, String> {
+    let subscription_models = runner
+        .read_model_list()
+        .and_then(|payload| subscription_models_from_app_server_payload(&payload))?;
+    let models = subscription_models_to_metadata_models(&subscription_models);
+    write_official_subscription_caches(paths, &subscription_models, &models)?;
+    Ok(models)
 }
 
 fn read_codex_app_server_model_list() -> Result<Value, String> {

@@ -9,8 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src-python"))
 
 from model_limits import (
-    OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT,
-    OFFICIAL_CONTEXT_FALLBACK_WINDOW,
     CURRENT_DIRECT_OFFICIAL_SOURCE,
     apply_resolved_model_limits,
     load_resolved_model_limits,
@@ -55,6 +53,8 @@ class ResolvedModelLimitsTests(unittest.TestCase):
         budget = resolve_official_context_budget(
             direct_context_window=272_000,
             direct_max_context_window=1_050_000,
+            direct_effective_context_window_percent=95,
+            direct_auto_compact_token_limit=240_000,
             direct_freshness="fresh",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
             fallback_context_window=353_400,
@@ -70,34 +70,96 @@ class ResolvedModelLimitsTests(unittest.TestCase):
         self.assertEqual(budget.freshness, "fresh")
         self.assertLess(budget.model_auto_compact_token_limit, 249_433)
 
+    def test_direct_snapshot_uses_its_dynamic_effective_and_compaction_fields(self):
+        budget = resolve_official_context_budget(
+            direct_context_window=300_000,
+            direct_max_context_window=900_000,
+            direct_effective_context_window_percent=80,
+            direct_auto_compact_token_limit=210_000,
+            direct_freshness="fresh",
+            direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
+        )
+
+        self.assertEqual(budget.context_window, 300_000)
+        self.assertEqual(budget.max_context_window, 300_000)
+        self.assertEqual(budget.effective_context_window_percent, 80)
+        self.assertEqual(budget.effective_context_window, 240_000)
+        self.assertEqual(budget.model_auto_compact_token_limit, 210_000)
+
+    def test_missing_direct_compact_threshold_uses_native_ninety_percent_bound(self):
+        budget = resolve_official_context_budget(
+            direct_context_window=272_000,
+            direct_effective_context_window_percent=95,
+            direct_freshness="fresh",
+            direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
+        )
+
+        self.assertEqual(budget.effective_context_window, 258_400)
+        self.assertEqual(budget.model_auto_compact_token_limit, 244_800)
+        self.assertLess(budget.model_auto_compact_token_limit, 249_433)
+
+    def test_missing_direct_effective_percent_cannot_expand_a_budget(self):
+        fallback = {
+            "fallback_context_window": 272_000,
+            "fallback_effective_context_window_percent": 95,
+            "fallback_auto_compact_token_limit": 240_000,
+        }
+
+        missing_without_prior = resolve_official_context_budget(
+            direct_context_window=400_000,
+            direct_freshness="fresh",
+            direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
+        )
+        missing_with_prior = resolve_official_context_budget(
+            direct_context_window=400_000,
+            direct_freshness="fresh",
+            direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
+            **fallback,
+        )
+
+        self.assertIsNone(missing_without_prior)
+        self.assertEqual(missing_with_prior.context_window, 272_000)
+        self.assertEqual(missing_with_prior.effective_context_window_percent, 95)
+        self.assertEqual(missing_with_prior.source, "degraded_last_known_official")
+        self.assertEqual(missing_with_prior.freshness, "missing")
+
     def test_missing_stale_and_contradictory_direct_contexts_fail_safe(self):
+        self.assertIsNone(
+            resolve_official_context_budget(
+                direct_context_window=None,
+                direct_freshness="missing",
+                direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
+            )
+        )
+        fallback = {
+            "fallback_context_window": 272_000,
+            "fallback_effective_context_window_percent": 95,
+            "fallback_auto_compact_token_limit": 240_000,
+        }
         missing = resolve_official_context_budget(
             direct_context_window=None,
             direct_freshness="missing",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
-            fallback_context_window=353_400,
+            **fallback,
         )
         stale = resolve_official_context_budget(
             direct_context_window=353_400,
             direct_freshness="stale",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
-            fallback_context_window=353_400,
+            **fallback,
         )
         contradictory = resolve_official_context_budget(
             direct_context_window=400_000,
             direct_max_context_window=200_000,
             direct_freshness="fresh",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
-            fallback_context_window=353_400,
+            **fallback,
         )
 
         for budget in (missing, stale, contradictory):
-            self.assertLessEqual(budget.context_window, OFFICIAL_CONTEXT_FALLBACK_WINDOW)
-            self.assertLessEqual(
-                budget.model_auto_compact_token_limit,
-                OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT,
-            )
-            self.assertEqual(budget.source, "conservative_fallback")
+            self.assertLessEqual(budget.context_window, 272_000)
+            self.assertLessEqual(budget.model_auto_compact_token_limit, 240_000)
+            self.assertEqual(budget.source, "degraded_last_known_official")
 
         self.assertEqual(contradictory.freshness, "contradictory")
 
@@ -105,41 +167,47 @@ class ResolvedModelLimitsTests(unittest.TestCase):
             direct_context_window=200_000,
             direct_freshness="stale",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
-            fallback_context_window=353_400,
+            **fallback,
         )
         self.assertEqual(lower_stale.context_window, 200_000)
-        self.assertEqual(lower_stale.source, "conservative_fallback")
+        self.assertEqual(lower_stale.source, "degraded_last_known_official")
 
     def test_future_higher_context_requires_a_fresh_direct_signal(self):
         fresh = resolve_official_context_budget(
             direct_context_window=400_000,
             direct_max_context_window=1_050_000,
+            direct_effective_context_window_percent=100,
             direct_freshness="fresh",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
-            fallback_context_window=353_400,
+            fallback_context_window=272_000,
+            fallback_effective_context_window_percent=95,
         )
         stale = resolve_official_context_budget(
             direct_context_window=400_000,
             direct_max_context_window=1_050_000,
+            direct_effective_context_window_percent=100,
             direct_freshness="stale",
             direct_source=CURRENT_DIRECT_OFFICIAL_SOURCE,
-            fallback_context_window=353_400,
+            fallback_context_window=272_000,
+            fallback_effective_context_window_percent=95,
         )
 
         self.assertEqual(fresh.context_window, 400_000)
         self.assertEqual(fresh.source, "current_direct_official")
-        self.assertEqual(stale.context_window, OFFICIAL_CONTEXT_FALLBACK_WINDOW)
-        self.assertEqual(stale.source, "conservative_fallback")
+        self.assertEqual(stale.context_window, 272_000)
+        self.assertEqual(stale.source, "degraded_last_known_official")
 
         untrusted = resolve_official_context_budget(
             direct_context_window=400_000,
             direct_max_context_window=1_050_000,
+            direct_effective_context_window_percent=100,
             direct_freshness="fresh",
             direct_source="bundled_seed",
-            fallback_context_window=353_400,
+            fallback_context_window=272_000,
+            fallback_effective_context_window_percent=95,
         )
-        self.assertEqual(untrusted.context_window, OFFICIAL_CONTEXT_FALLBACK_WINDOW)
-        self.assertEqual(untrusted.source, "conservative_fallback")
+        self.assertEqual(untrusted.context_window, 272_000)
+        self.assertEqual(untrusted.source, "degraded_last_known_official")
 
 
 if __name__ == "__main__":

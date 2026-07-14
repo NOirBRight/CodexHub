@@ -51,10 +51,6 @@ pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus,
     set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
 }
 
-pub fn switch_mode(mode: &str, auto_sync: bool) -> Result<AppStatus, String> {
-    switch_mode_with_takeover(mode, auto_sync, false)
-}
-
 pub fn switch_mode_with_takeover(
     mode: &str,
     auto_sync: bool,
@@ -609,6 +605,11 @@ fn get_codex_context_guard_status_with_paths(
             "context-guard-status".to_string(),
             "--config".to_string(),
             paths.codex_config_path().to_string_lossy().into_owned(),
+            "--state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
         ],
         runner,
     )?;
@@ -651,6 +652,8 @@ fn set_codex_context_guard_with_paths(
                 .context_guard_state_path()
                 .to_string_lossy()
                 .into_owned(),
+            "--catalog".to_string(),
+            paths.generated_catalog_path().to_string_lossy().into_owned(),
             "--enabled".to_string(),
             value.to_string(),
         ]
@@ -1045,11 +1048,6 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn public_switch_mode_exposes_auto_sync_parameter() {
-        let _switch: fn(&str, bool) -> Result<crate::AppStatus, String> = super::switch_mode;
-    }
 
     #[test]
     fn providers_toml_roundtrip_preserves_all_provider_and_model_fields() {
@@ -1762,6 +1760,31 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         fs::write(
             stable_paths.codex_config_path(),
             b"model = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        let catalog_path = stable_paths.generated_catalog_path();
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            catalog_path,
+            r#"{
+  "models": [
+    {
+      "slug": "gpt-5.4",
+      "codex_proxy_metadata": {
+        "provider": "openai",
+        "upstream_name": "official",
+        "official_context_budget": {
+          "source": "current_direct_official",
+          "freshness": "fresh",
+          "model_context_window": 300000,
+          "effective_context_window_percent": 100,
+          "effective_context_window": 300000,
+          "model_auto_compact_token_limit": 270000
+        }
+      }
+    }
+  ]
+}"#,
         )
         .unwrap();
         save_settings_with_paths(Settings::default(), &stable_paths).unwrap();

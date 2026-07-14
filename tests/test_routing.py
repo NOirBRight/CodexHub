@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
+import catalog_sync
 import codex_proxy
 from subagent_state import build_subagent_state
 from codex_proxy import (
@@ -4535,7 +4536,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(disabled_by_slug["glm-5.2"]["input_modalities"], ["text"])
         self.assertNotIn("input_modalities", disabled_by_slug["text-model-without-modalities"])
 
-    def test_current_catalog_data_applies_context_guard_only_to_openai_models(self):
+    def test_current_catalog_data_applies_published_context_budget_only_to_official_models(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_proxy_dir = Path(tmpdir) / "proxy"
             runtime_proxy_dir.mkdir()
@@ -4552,11 +4553,35 @@ class RoutingTests(unittest.TestCase):
                                 "slug": "gpt-5.6-sol",
                                 "context_window": 353_000,
                                 "max_context_window": 353_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 272_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 258_400,
+                                        "model_auto_compact_token_limit": 240_000,
+                                    },
+                                },
                             },
                             {
                                 "slug": "gpt-5.3-codex-spark",
                                 "context_window": 128_000,
                                 "max_context_window": 128_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 128_000,
+                                        "effective_context_window_percent": 100,
+                                        "effective_context_window": 128_000,
+                                        "model_auto_compact_token_limit": 115_200,
+                                    },
+                                },
                             },
                             {
                                 "slug": "glm-5.2",
@@ -4586,12 +4611,114 @@ class RoutingTests(unittest.TestCase):
                 unguarded_catalog = codex_proxy.current_catalog_data()
 
         guarded_by_slug = {model["slug"]: model for model in guarded_catalog["models"]}
-        unguarded_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
+        disabled_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
         self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
         self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["max_context_window"], 272_000)
         self.assertEqual(guarded_by_slug["gpt-5.3-codex-spark"]["context_window"], 128_000)
         self.assertEqual(guarded_by_slug["glm-5.2"]["context_window"], 1_000_000)
-        self.assertEqual(unguarded_by_slug["gpt-5.6-sol"]["context_window"], 353_000)
+        self.assertEqual(disabled_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
+
+    def test_context_guard_consumes_the_published_official_budget_not_a_fixed_cap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_proxy_dir = Path(tmpdir) / "proxy"
+            runtime_proxy_dir.mkdir()
+            (runtime_proxy_dir / "settings.json").write_text(
+                json.dumps({"openai_context_guard_enabled": True}),
+                encoding="utf-8",
+            )
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-sol",
+                                "context_window": 400_000,
+                                "max_context_window": 400_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 300_000,
+                                        "effective_context_window_percent": 80,
+                                        "effective_context_window": 240_000,
+                                        "model_auto_compact_token_limit": 210_000,
+                                    },
+                                },
+                            },
+                            {
+                                "slug": "volc/glm-5.2",
+                                "context_window": 1_000_000,
+                                "max_context_window": 1_000_000,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+            ):
+                catalog = codex_proxy.current_catalog_data()
+
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["gpt-5.6-sol"]["context_window"], 300_000)
+        self.assertEqual(by_slug["gpt-5.6-sol"]["max_context_window"], 300_000)
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_context_guard_hides_incomplete_or_untrusted_official_budget(self):
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 400_000,
+                    "max_context_window": 400_000,
+                    "effective_context_window_percent": 100,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "current_direct_official",
+                            "freshness": "stale",
+                            "model_context_window": 400_000,
+                            "effective_context_window_percent": 100,
+                            "effective_context_window": 400_000,
+                            "model_auto_compact_token_limit": 360_000,
+                        },
+                    },
+                },
+                {
+                    "slug": "volc/glm-5.2",
+                    "context_window": 1_000_000,
+                    "max_context_window": 1_000_000,
+                },
+            ]
+        }
+
+        guarded = codex_proxy.catalog_with_openai_context_guard(catalog)
+        by_slug = {model["slug"]: model for model in guarded["models"]}
+
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("effective_context_window_percent", by_slug["gpt-5.6-sol"])
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_catalog_request_consumes_the_published_snapshot_without_discovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(json.dumps({"models": []}), encoding="utf-8")
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch.object(catalog_sync, "sync_catalog") as sync_catalog,
+            ):
+                self.assertEqual(codex_proxy.current_catalog_data(), {"models": []})
+
+        sync_catalog.assert_not_called()
 
     def test_current_catalog_data_dedupes_official_aliases_without_touching_third_party_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

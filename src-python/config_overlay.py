@@ -8,9 +8,7 @@ from pathlib import Path
 from atomic_io import atomic_write_text
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
-    OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT,
-    OFFICIAL_CONTEXT_FALLBACK_WINDOW,
-    OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+    DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
 )
 import re
 import sys
@@ -32,8 +30,7 @@ STALE_PROXY_PROVIDER_SECTIONS = (
     "model_providers.custom",
     "model_providers.codex_proxy",
 )
-CONTEXT_GUARD_CONTEXT_WINDOW = OFFICIAL_CONTEXT_FALLBACK_WINDOW
-CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT = OFFICIAL_AUTO_COMPACT_TOKEN_LIMIT
+NATIVE_AUTO_COMPACT_PERCENT = 90
 CONTEXT_GUARD_KEYS = {
     "model_context_window",
     "model_auto_compact_token_limit",
@@ -129,33 +126,32 @@ def _top_level_positive_int(text: str, key: str) -> int | None:
     return value if value > 0 else None
 
 
-def context_guard_status(config_path: Path) -> dict[str, int | bool | None]:
+def context_guard_status(
+    config_path: Path,
+    state_path: Path | None = None,
+) -> dict[str, int | bool | None]:
     text = read_text_preserving_newlines(config_path) if config_path.exists() else ""
     context_window = _top_level_positive_int(text, "model_context_window")
     auto_compact_token_limit = _top_level_positive_int(
         text,
         "model_auto_compact_token_limit",
     )
+    state = _read_context_guard_state(state_path) if state_path is not None else None
+    managed_values = (state or {}).get("config", {}).get("managed", {})
+    enabled = bool(managed_values) and all(
+        managed_values.get(key) is not None
+        and top_level_value(text, key) == managed_values[key]
+        for key in CONTEXT_GUARD_KEYS
+    )
     return {
-        "enabled": (
-            context_window == CONTEXT_GUARD_CONTEXT_WINDOW
-            and auto_compact_token_limit == CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
-        ),
+        "enabled": enabled,
         "model_context_window": context_window,
         "model_auto_compact_token_limit": auto_compact_token_limit,
     }
 
 
 def _context_guard_previous_values(text: str) -> dict[str, str | None]:
-    previous = {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
-    if (
-        _top_level_positive_int(text, "model_context_window")
-        == CONTEXT_GUARD_CONTEXT_WINDOW
-        and _top_level_positive_int(text, "model_auto_compact_token_limit")
-        == CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
-    ):
-        return {key: None for key in CONTEXT_GUARD_KEYS}
-    return previous
+    return {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
 
 
 def _normalized_context_guard_values(payload: object) -> dict[str, str | None]:
@@ -169,24 +165,30 @@ def _normalized_context_guard_values(payload: object) -> dict[str, str | None]:
 
 def _read_context_guard_state(
     state_path: Path,
-) -> dict[str, dict[str, str | None]] | None:
+) -> dict[str, dict[str, dict[str, str | None]]] | None:
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
-    if "config" in payload or "backup" in payload:
-        return {
-            target: _normalized_context_guard_values(values)
-            for target, values in payload.items()
-            if target in {"config", "backup"}
-        }
-
-    # Read the pre-release single-snapshot shape conservatively if a test build
-    # created state before live and backup values were tracked independently.
-    legacy_values = _normalized_context_guard_values(payload)
-    return {"config": legacy_values, "backup": legacy_values}
+    entries: dict[str, dict[str, dict[str, str | None]]] = {}
+    for target, values in payload.items():
+        if target not in {"config", "backup"} or not isinstance(values, dict):
+            continue
+        if "previous" in values or "managed" in values:
+            entries[target] = {
+                "previous": _normalized_context_guard_values(values.get("previous")),
+                "managed": _normalized_context_guard_values(values.get("managed")),
+            }
+        else:
+            # Older state cannot identify the dynamic value it installed.  Do
+            # not remove a potentially user-managed value during disable.
+            entries[target] = {
+                "previous": _normalized_context_guard_values(values),
+                "managed": {key: None for key in CONTEXT_GUARD_KEYS},
+            }
+    return entries or None
 
 
 def set_context_guard(
@@ -195,51 +197,69 @@ def set_context_guard(
     state_path: Path,
     *,
     enabled: bool,
+    catalog_path: Path | None = None,
 ) -> dict[str, int | bool | None]:
-    managed_values = {
-        "model_context_window": str(CONTEXT_GUARD_CONTEXT_WINDOW),
-        "model_auto_compact_token_limit": str(CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT),
-    }
     target_paths = {"config": config_path}
     if backup_path.exists():
         target_paths["backup"] = backup_path
     if enabled:
-        if not state_path.exists():
-            previous = {
-                target: _context_guard_previous_values(
-                    read_text_preserving_newlines(path) if path.exists() else ""
-                )
-                for target, path in target_paths.items()
-            }
-            atomic_write_text(
-                state_path,
-                json.dumps(previous, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+        selected_model = top_level_value(
+            read_text_preserving_newlines(config_path) if config_path.exists() else "",
+            "model",
+        )
+        budget = (
+            _selected_official_context_budget(catalog_path, selected_model)
+            if catalog_path is not None
+            else None
+        )
+        if budget is None:
+            selected = selected_model.strip() if isinstance(selected_model, str) else ""
+            if selected.removeprefix("openai/").startswith("gpt-"):
+                raise ValueError("safe current Official context budget is unavailable")
+            return context_guard_status(config_path, state_path)
 
-        for path in target_paths.values():
+        managed_values = {
+            "model_context_window": str(budget[0]),
+            "model_auto_compact_token_limit": str(budget[1]),
+        }
+        state = _read_context_guard_state(state_path) or {}
+        for target, path in target_paths.items():
+            entry = state.get(target)
+            if entry is None:
+                entry = {
+                    "previous": _context_guard_previous_values(
+                        read_text_preserving_newlines(path) if path.exists() else ""
+                    ),
+                    "managed": {},
+                }
+                state[target] = entry
+            entry["managed"] = dict(managed_values)
             text = read_text_preserving_newlines(path) if path.exists() else ""
             atomic_write_text(path, set_top_level_values(text, managed_values), encoding="utf-8")
+        atomic_write_text(
+            state_path,
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     else:
-        previous_by_target = _read_context_guard_state(state_path) or {}
+        state_by_target = _read_context_guard_state(state_path) or {}
         for target, path in target_paths.items():
             if not path.exists():
                 continue
-            previous = previous_by_target.get(
-                target,
-                {key: None for key in CONTEXT_GUARD_KEYS},
-            )
+            entry = state_by_target.get(target, {})
+            previous = entry.get("previous", {key: None for key in CONTEXT_GUARD_KEYS})
+            managed = entry.get("managed", {key: None for key in CONTEXT_GUARD_KEYS})
             text = read_text_preserving_newlines(path)
             updates = {
                 key: previous.get(key)
-                for key, managed_value in managed_values.items()
-                if top_level_value(text, key) == managed_value
+                for key, managed_value in managed.items()
+                if managed_value is not None and top_level_value(text, key) == managed_value
             }
             if updates:
                 atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
         state_path.unlink(missing_ok=True)
 
-    return context_guard_status(config_path)
+    return context_guard_status(config_path, state_path)
 
 
 def section_key_values(text: str, section_name: str) -> dict[str, str] | None:
@@ -432,7 +452,7 @@ def _positive_catalog_int(value: object) -> int | None:
 
 
 def _selected_official_context_budget(
-    catalog_path: Path,
+    catalog_path: Path | None,
     selected_model: str | None,
 ) -> tuple[int, int] | None:
     """Return the selected Official model's safe Codex configuration cap.
@@ -443,6 +463,8 @@ def _selected_official_context_budget(
     third-party selection deliberately receives no new global Codex cap.
     """
 
+    if catalog_path is None:
+        return None
     try:
         payload = json.loads(catalog_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
@@ -479,45 +501,49 @@ def _selected_official_context_budget(
         budget = next(iter(official_budgets.values()))
 
     if budget is None:
-        return (
-            CONTEXT_GUARD_CONTEXT_WINDOW,
-            CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
-        )
+        return None
+
+    source = budget.get("source")
+    freshness = budget.get("freshness")
+    if source == CURRENT_DIRECT_OFFICIAL_SOURCE:
+        if freshness != "fresh":
+            return None
+    elif source != DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE:
+        return None
 
     context_window = _positive_catalog_int(budget.get("model_context_window"))
     if context_window is None:
         context_window = _positive_catalog_int(budget.get("context_window"))
     if context_window is None:
-        return (
-            CONTEXT_GUARD_CONTEXT_WINDOW,
-            CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
+        return None
+
+    effective_window = _positive_catalog_int(budget.get("effective_context_window"))
+    if effective_window is not None:
+        if effective_window > context_window:
+            return None
+    else:
+        effective_percent = _positive_catalog_int(
+            budget.get("effective_context_window_percent")
         )
-
-    trusted_current_direct = (
-        budget.get("source") == CURRENT_DIRECT_OFFICIAL_SOURCE
-        and budget.get("freshness") == "fresh"
-    )
-    if not trusted_current_direct:
-        context_window = min(context_window, CONTEXT_GUARD_CONTEXT_WINDOW)
-
-    effective_window = max(
-        1,
-        context_window * OFFICIAL_EFFECTIVE_CONTEXT_WINDOW_PERCENT // 100,
-    )
+        if effective_percent is None or effective_percent > 100:
+            return None
+        effective_window = max(1, context_window * effective_percent // 100)
     auto_compact_token_limit = _positive_catalog_int(
         budget.get("model_auto_compact_token_limit")
     )
     if auto_compact_token_limit is None:
-        auto_compact_token_limit = CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT
+        auto_compact_token_limit = context_window * NATIVE_AUTO_COMPACT_PERCENT // 100
 
     return (
         context_window,
-        min(
-            auto_compact_token_limit,
-            CONTEXT_GUARD_AUTO_COMPACT_TOKEN_LIMIT,
-            effective_window,
-        ),
+        min(auto_compact_token_limit, effective_window),
     )
+
+
+def _selected_model_is_official(selected_model: str | None) -> bool:
+    if not isinstance(selected_model, str):
+        return False
+    return selected_model.strip().removeprefix("openai/").startswith("gpt-")
 
 
 def build_overlay(
@@ -629,10 +655,10 @@ def apply_overlay(
         custom_section == unified_official_provider_values() or is_managed_gateway_provider(custom_section)
     ):
         raise ValueError("refusing to overwrite unknown custom provider")
-    context_budget = _selected_official_context_budget(
-        catalog_path,
-        top_level_value(original, "model"),
-    )
+    selected_model = top_level_value(original, "model")
+    context_budget = _selected_official_context_budget(catalog_path, selected_model)
+    if context_budget is None and _selected_model_is_official(selected_model):
+        raise ValueError("safe current Official context budget is unavailable")
     cleaned = strip_marked_overlay(original)
     active_owner = overlay_owner(original)
     cross_owner_takeover = takeover and active_owner != owner
@@ -719,11 +745,13 @@ def main(argv: list[str] | None = None) -> int:
 
     context_status_parser = subparsers.add_parser("context-guard-status")
     context_status_parser.add_argument("--config", required=True, type=Path)
+    context_status_parser.add_argument("--state", type=Path)
 
     context_set_parser = subparsers.add_parser("context-guard-set")
     context_set_parser.add_argument("--config", required=True, type=Path)
     context_set_parser.add_argument("--backup", required=True, type=Path)
     context_set_parser.add_argument("--state", required=True, type=Path)
+    context_set_parser.add_argument("--catalog", required=True, type=Path)
     context_set_parser.add_argument("--enabled", required=True, choices=("true", "false"))
 
     args = parser.parse_args(argv)
@@ -742,7 +770,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif args.command == "context-guard-status":
-        print(json.dumps(context_guard_status(args.config), ensure_ascii=False))
+        print(json.dumps(context_guard_status(args.config, args.state), ensure_ascii=False))
     elif args.command == "context-guard-set":
         print(
             json.dumps(
@@ -751,6 +779,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.backup,
                     args.state,
                     enabled=args.enabled == "true",
+                    catalog_path=args.catalog,
                 ),
                 ensure_ascii=False,
             )
