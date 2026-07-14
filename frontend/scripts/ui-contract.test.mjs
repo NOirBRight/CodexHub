@@ -9,6 +9,7 @@ const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
 const buildWindowsPortablePath = new URL("../../scripts/build-windows-portable.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
+const debugDiagnosticsPanelPath = new URL("../src/components/DebugDiagnosticsPanel.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
@@ -2994,4 +2995,33 @@ test("legacy provider hidden capability is removed from model/provider UI state"
   assert.doesNotMatch(formatSource, /hidden:/);
   assert.doesNotMatch(appSource, /provider\.hidden/);
   assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false|label="Hidden"|hidden: checked/);
+});
+
+test("debug diagnostics are compile-selected, content-free, and expose bounded controls", async () => {
+  const [gatewaySource, panelSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(debugDiagnosticsPanelPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /DebugDiagnosticsPanel/);
+  assert.match(gatewaySource, /appFlavor\?\.build\.flavor === "debug"/);
+  assert.match(gatewaySource, /appFlavor\.build\.diagnostics_enabled/);
+  assert.match(panelSource, /api\.diagnosticsStatus\(\)/);
+  assert.match(panelSource, /api\.diagnosticsManualMark\(\)/);
+  assert.match(panelSource, /api\.diagnosticsPause\(\)/);
+  assert.match(panelSource, /api\.diagnosticsResume\(\)/);
+  assert.match(panelSource, /api\.diagnosticsDeleteIncident\(incidentId\)/);
+  assert.doesNotMatch(panelSource, /diagnosticsRead|zip|artifact/i);
+  assert.match(tauriSource, /diagnostics_status/);
+  assert.match(tauriSource, /diagnostics_manual_mark/);
+  assert.match(tauriSource, /diagnostics_delete_incident/);
+  assert.match(typesSource, /export interface DiagnosticsStatus/);
+  assert.match(typesSource, /incident_ids: string\[\]/);
+  assert.match(enSource, /diagnostics: \{/);
+  assert.match(enSource, /Gateway traffic continues; no restart is required/);
+  assert.match(zhSource, /diagnostics: \{/);
 });

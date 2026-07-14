@@ -1,6 +1,6 @@
 use crate::AppStatus;
 use crate::Settings;
-use crate::{runtime_paths, safe_file};
+use crate::{build_info, runtime_paths, safe_file};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -23,6 +23,10 @@ const PID_FILE_VERSION: u32 = 1;
 const START_OUTPUT_CAPTURE_LIMIT: usize = 8 * 1024;
 const MANAGED_OVERLAY_MARKER_BEGIN: &str = "# BEGIN CODEX PROXY SESSION CONFIG";
 const MANAGED_OVERLAY_MARKER_END: &str = "# END CODEX PROXY SESSION CONFIG";
+// This is intentionally reached only from the compile-selected Rust debug
+// build. It initializes the recorder in the existing Gateway child, then
+// invokes the unchanged proxy entry point with its original command arguments.
+const DEBUG_DIAGNOSTIC_BOOTSTRAP: &str = "import atexit, os, sys; from pathlib import Path; import codex_proxy, diagnostic_recorder; from diagnostic_control import DiagnosticControlBridge; runtime_home = Path(os.environ['CODEXHUB_DIAGNOSTICS_RUNTIME_HOME']); recorder = diagnostic_recorder.for_compile_flavor(runtime_home, 'debug'); codex_proxy.GATEWAY_DIAGNOSTIC_RECORDER = recorder; control = DiagnosticControlBridge(recorder, runtime_home); control.start(); atexit.register(recorder.shutdown); atexit.register(control.shutdown); raise SystemExit(codex_proxy.main(sys.argv[2:]))";
 
 pub fn status() -> Result<AppStatus, String> {
     status_with_paths(&ProxyPaths::runtime()?)
@@ -713,8 +717,18 @@ fn build_start_command(
     settings: &Settings,
 ) -> Command {
     let mut command = Command::new(python);
+    if build_info::current().diagnostics_enabled {
+        command
+            .arg("-c")
+            .arg(DEBUG_DIAGNOSTIC_BOOTSTRAP)
+            // Keep the real script path on the child command line so managed
+            // PID verification continues to identify the one Gateway process.
+            .arg(script)
+            .env("CODEXHUB_DIAGNOSTICS_RUNTIME_HOME", paths.codex_dir.clone());
+    } else {
+        command.arg(script);
+    }
     command
-        .arg(script)
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
@@ -1941,6 +1955,72 @@ time.sleep(10)
         );
     }
 
+    #[cfg(feature = "debug-diagnostics")]
+    #[test]
+    fn debug_start_command_bootstraps_diagnostics_in_the_existing_gateway_child() {
+        let root = temp_root("debug-diagnostic-bootstrap");
+        let paths = test_paths(&root);
+        let command = build_start_command(
+            Path::new("python-test"),
+            &paths.proxy_script_path(),
+            &paths,
+            &Settings::default(),
+        );
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let script = paths.proxy_script_path().to_string_lossy().into_owned();
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|item| item.to_os_string()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(args.first().map(String::as_str), Some("-c"));
+        assert!(args.iter().any(|arg| arg == DEBUG_DIAGNOSTIC_BOOTSTRAP));
+        assert!(args.iter().any(|arg| arg == &script));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--port" && pair[1] == "9099"));
+        assert_eq!(
+            envs.get("CODEXHUB_DIAGNOSTICS_RUNTIME_HOME")
+                .and_then(|value| value.as_ref())
+                .map(PathBuf::from),
+            Some(paths.codex_dir.clone())
+        );
+    }
+
+    #[cfg(not(feature = "debug-diagnostics"))]
+    #[test]
+    fn normal_start_command_has_no_diagnostic_bootstrap_or_runtime_switch() {
+        let root = temp_root("normal-diagnostic-bootstrap");
+        let paths = test_paths(&root);
+        let command = build_start_command(
+            Path::new("python-test"),
+            &paths.proxy_script_path(),
+            &paths,
+            &Settings::default(),
+        );
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args.first().map(String::as_str),
+            paths.proxy_script_path().to_str()
+        );
+        assert!(!args.iter().any(|arg| arg == DEBUG_DIAGNOSTIC_BOOTSTRAP));
+        assert!(!command
+            .get_envs()
+            .any(|(key, _)| key == "CODEXHUB_DIAGNOSTICS_RUNTIME_HOME"));
+    }
+
     #[test]
     fn beta_style_start_command_separates_runtime_and_codex_target_homes() {
         let root = temp_root("isolated-start-homes");
@@ -1983,6 +2063,20 @@ time.sleep(10)
                 "start status should include proxy build",
             )?;
             ensure(read_pid(&paths)?.is_some(), "start should write a PID")?;
+
+            #[cfg(feature = "debug-diagnostics")]
+            ensure(
+                paths
+                    .codex_dir
+                    .join("diagnostics/control/status.json")
+                    .is_file(),
+                "debug Gateway should activate its recorder in the existing child",
+            )?;
+            #[cfg(not(feature = "debug-diagnostics"))]
+            ensure(
+                !paths.codex_dir.join("diagnostics").exists(),
+                "normal Gateway should not create a diagnostic runtime subtree",
+            )?;
 
             let running_status = status_with_paths(&paths)?;
             ensure(running_status.proxy_running, "status should be running")?;

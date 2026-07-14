@@ -305,11 +305,13 @@ class DiagnosticRecorderTests(TestCase):
             '"request":"r000001","prompt":"forbidden-recovered-prompt"}\n',
             encoding="utf-8",
         )
-        recorder = self._recorder(root, clock, incident_tail_seconds=1)
-
-        recorder.mark_incident("manual")
-        clock.advance(1)
-        self.assertEqual(recorder.process_due_incidents(), 1)
+        # This recovery/privacy assertion drives the freeze synchronously so a
+        # daemon wake-up cannot race the fake clock used by the fixture.
+        with patch.object(diagnostic_recorder.DiagnosticRecorder, "_ensure_control_thread_locked"):
+            recorder = self._recorder(root, clock, incident_tail_seconds=1)
+            recorder.mark_incident("manual")
+            clock.advance(1)
+            self.assertEqual(recorder.process_due_incidents(), 1)
         artifact = recorder.read_incident("i000001")
         self.assertIsNotNone(artifact)
         assert artifact is not None

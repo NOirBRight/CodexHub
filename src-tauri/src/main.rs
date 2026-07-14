@@ -7,6 +7,7 @@ mod build_info;
 mod catalog;
 mod cli;
 mod config;
+mod diagnostics;
 mod gateway;
 mod history;
 mod models;
@@ -404,6 +405,36 @@ fn test_model_endpoint(
 #[tauri::command]
 async fn gateway_status() -> Result<gateway::GatewayStatus, String> {
     run_blocking("gateway_status", gateway::gateway_status).await
+}
+
+#[tauri::command]
+async fn diagnostics_status() -> Result<diagnostics::DiagnosticsStatus, String> {
+    run_blocking("diagnostics_status", diagnostics::status).await
+}
+
+#[tauri::command]
+async fn diagnostics_manual_mark() -> Result<diagnostics::DiagnosticsActionResult, String> {
+    run_blocking("diagnostics_manual_mark", diagnostics::manual_mark).await
+}
+
+#[tauri::command]
+async fn diagnostics_pause() -> Result<diagnostics::DiagnosticsActionResult, String> {
+    run_blocking("diagnostics_pause", diagnostics::pause).await
+}
+
+#[tauri::command]
+async fn diagnostics_resume() -> Result<diagnostics::DiagnosticsActionResult, String> {
+    run_blocking("diagnostics_resume", diagnostics::resume).await
+}
+
+#[tauri::command]
+async fn diagnostics_delete_incident(
+    incident_id: String,
+) -> Result<diagnostics::DiagnosticsActionResult, String> {
+    run_blocking("diagnostics_delete_incident", move || {
+        diagnostics::delete_incident(incident_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -859,6 +890,11 @@ fn run_gui() {
             provider_probe_upstream_format,
             test_model_endpoint,
             gateway_status,
+            diagnostics_status,
+            diagnostics_manual_mark,
+            diagnostics_pause,
+            diagnostics_resume,
+            diagnostics_delete_incident,
             gateway_test_request,
             gateway_recent_events,
             gateway_usage_summary,

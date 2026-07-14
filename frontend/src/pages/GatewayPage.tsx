@@ -1,6 +1,7 @@
 import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, RefreshCcw, Save, Server, X } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DebugDiagnosticsPanel } from "../components/DebugDiagnosticsPanel";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
@@ -565,6 +566,11 @@ function GatewayPageImpl({
           disabled={Boolean(busy) || autoRetryBusy || !settings}
           events={recentEvents}
           onToggle={(enabled) => void toggleGatewayAutoRetry(enabled)}
+        />
+
+        <DebugDiagnosticsPanel
+          enabled={Boolean(appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled)}
+          gatewayRunning={running}
         />
 
         <StackedUsageChartShell

@@ -135,6 +135,7 @@ class RecorderStatus:
     rolling_bytes: int
     rolling_window_seconds: int
     incident_count: int
+    incident_ids: tuple[str, ...]
     last_marker_category: str | None
     last_marker_at_ms: int | None
     rolling_evicted_segments: int
@@ -238,6 +239,7 @@ class DisabledDiagnosticRecorder:
             rolling_bytes=0,
             rolling_window_seconds=0,
             incident_count=0,
+            incident_ids=(),
             last_marker_category=None,
             last_marker_at_ms=None,
             rolling_evicted_segments=0,
@@ -659,6 +661,7 @@ class DiagnosticRecorder:
                 rolling_bytes=sink_status.rolling_bytes,
                 rolling_window_seconds=sink_status.rolling_window_seconds,
                 incident_count=len(self._incident_ids),
+                incident_ids=tuple(sorted(self._incident_ids)),
                 last_marker_category=self._last_marker_category,
                 last_marker_at_ms=self._last_marker_at_ms,
                 rolling_evicted_segments=sink_status.evicted_segments,

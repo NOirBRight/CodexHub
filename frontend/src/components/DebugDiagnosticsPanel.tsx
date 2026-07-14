@@ -1,0 +1,185 @@
+import { Flag, Pause, Play, RefreshCcw, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { api, messageFromError } from "../lib/tauri";
+import type { DiagnosticsActionResult, DiagnosticsStatus } from "../lib/types";
+import { useToasts } from "./PageToast";
+
+interface DebugDiagnosticsPanelProps {
+  enabled: boolean;
+  gatewayRunning: boolean;
+}
+
+export function DebugDiagnosticsPanel({ enabled, gatewayRunning }: DebugDiagnosticsPanelProps) {
+  const { t } = useTranslation();
+  const { showToast, updateToast } = useToasts();
+  const [status, setStatus] = useState<DiagnosticsStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh(silent = false) {
+    if (!enabled || !gatewayRunning) {
+      setStatus(null);
+      return;
+    }
+    try {
+      setStatus(await api.diagnosticsStatus());
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+      if (!silent) {
+        showToast(t("diagnostics.statusFailed"), "error");
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!enabled || !gatewayRunning) {
+      setStatus(null);
+      setError(null);
+      return;
+    }
+    void refresh(true);
+    const interval = window.setInterval(() => void refresh(true), 5_000);
+    return () => window.clearInterval(interval);
+  }, [enabled, gatewayRunning]);
+
+  async function runAction(
+    name: "mark" | "pause" | "resume" | "delete",
+    action: () => Promise<DiagnosticsActionResult>,
+    incidentId?: string,
+  ) {
+    if (busy) {
+      return;
+    }
+    setBusy(name === "delete" ? `${name}:${incidentId}` : name);
+    const toastId = showToast(t(`diagnostics.${name}Loading`, { incident: incidentId ?? "" }), "loading");
+    try {
+      const result = await action();
+      setStatus(result.status);
+      setError(null);
+      const text =
+        name === "mark" && result.accepted === false
+          ? t("diagnostics.markUnavailable")
+          : name === "delete" && result.deleted === false
+            ? t("diagnostics.deleteMissing", { incident: incidentId })
+            : t(`diagnostics.${name}Done`, { incident: incidentId ?? result.incident_id ?? "" });
+      updateToast(toastId, {
+        action: null,
+        text,
+        tone: name === "mark" && result.accepted === false ? "error" : "success",
+      });
+    } catch (err) {
+      setError(messageFromError(err));
+      updateToast(toastId, {
+        action: null,
+        text: t("diagnostics.actionFailed"),
+        tone: "error",
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!enabled) {
+    return null;
+  }
+
+  const active = Boolean(status?.active);
+  const paused = Boolean(status?.paused);
+  const controlsAvailable = gatewayRunning && Boolean(status) && !busy;
+  const rollingHours = Math.floor((status?.rolling_window_seconds ?? 0) / 3600);
+
+  return (
+    <section className="grid min-w-0 gap-2 rounded-panel bg-surface p-2.5 shadow-card">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-ink">
+            <Flag size={15} className="shrink-0 text-amber-700" />
+            {t("diagnostics.title")}
+          </h2>
+          <p className="mt-0.5 text-[11px] text-slate-500">{t("diagnostics.subtitle")}</p>
+        </div>
+        <span
+          className={`rounded-control px-2 py-1 text-[10px] font-semibold ${
+            paused
+              ? "bg-amber-100 text-amber-800"
+              : active
+                ? "bg-emerald-100 text-emerald-800"
+                : "bg-slate-100 text-slate-600"
+          }`}
+        >
+          {paused ? t("diagnostics.paused") : active ? t("diagnostics.active") : t("diagnostics.unavailable")}
+        </span>
+      </div>
+
+      {!gatewayRunning ? (
+        <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-slate-600">{t("diagnostics.gatewayRequired")}</p>
+      ) : error ? (
+        <p className="rounded-inner bg-amber-50 px-2 py-1.5 text-xs text-amber-800">{t("diagnostics.statusDelayed")}</p>
+      ) : status ? (
+        <div className="grid gap-1 rounded-inner bg-panel p-2 text-xs text-slate-600">
+          <span>{t("diagnostics.rolling", { hours: rollingHours, bytes: status.rolling_bytes })}</span>
+          <span>{t("diagnostics.incidents", { count: status.incident_count })}</span>
+          <span>{t("diagnostics.noRestartRequired")}</span>
+        </div>
+      ) : (
+        <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-slate-500">{t("diagnostics.loading")}</p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          className="focus-ring inline-flex h-8 items-center gap-1 rounded-control bg-ink px-2 text-[11px] font-semibold text-white shadow-control transition hover:bg-slate-800 disabled:bg-slate-300"
+          disabled={!controlsAvailable || paused}
+          onClick={() => void runAction("mark", () => api.diagnosticsManualMark())}
+        >
+          <Flag size={13} />
+          {t("diagnostics.mark")}
+        </button>
+        <button
+          type="button"
+          className="focus-ring inline-flex h-8 items-center gap-1 rounded-control bg-panel px-2 text-[11px] font-semibold text-slate-700 shadow-control transition hover:bg-white disabled:text-slate-300"
+          disabled={!controlsAvailable}
+          onClick={() =>
+            void runAction(paused ? "resume" : "pause", () =>
+              paused ? api.diagnosticsResume() : api.diagnosticsPause(),
+            )
+          }
+        >
+          {paused ? <Play size={13} /> : <Pause size={13} />}
+          {paused ? t("diagnostics.resume") : t("diagnostics.pause")}
+        </button>
+        <button
+          type="button"
+          className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition hover:bg-white disabled:text-slate-300"
+          disabled={!gatewayRunning || Boolean(busy)}
+          aria-label={t("diagnostics.refresh")}
+          title={t("diagnostics.refresh")}
+          onClick={() => void refresh()}
+        >
+          <RefreshCcw size={13} />
+        </button>
+      </div>
+
+      {status?.incident_ids.length ? (
+        <div className="grid gap-1 border-t border-line pt-2">
+          {status.incident_ids.map((incidentId) => (
+            <div key={incidentId} className="flex items-center justify-between gap-2 rounded-inner bg-panel px-2 py-1 text-xs text-slate-600">
+              <span className="font-mono">{incidentId}</span>
+              <button
+                type="button"
+                className="focus-ring inline-flex h-6 items-center gap-1 rounded-control px-1.5 text-[11px] font-semibold text-danger hover:bg-red-50 disabled:text-slate-300"
+                disabled={!controlsAvailable}
+                onClick={() => void runAction("delete", () => api.diagnosticsDeleteIncident(incidentId), incidentId)}
+              >
+                <Trash2 size={12} />
+                {t("diagnostics.delete")}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
