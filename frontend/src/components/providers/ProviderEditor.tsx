@@ -19,6 +19,7 @@ import {
 } from "../../lib/providerEndpoint";
 import { endpointSelectionOptions, type AddProviderForm, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
+import { isProviderDirty } from "../../lib/providerComparison";
 import { cx, displayModel, renumberModels } from "../../lib/format";
 import { api, messageFromError } from "../../lib/tauri";
 import type { Model, Provider, ToolProtocol, UpstreamFormat, UpstreamFormatProbeResult } from "../../lib/types";
@@ -53,7 +54,7 @@ export function ProviderDetail({
   const normalizedProvider = useMemo(() => normalizeProviderEndpointSelection(provider), [provider]);
   const [draft, setDraft] = useState(() => normalizedProvider);
   const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
-  const dirty = JSON.stringify(draft) !== JSON.stringify(normalizedProvider);
+  const dirty = isProviderDirty(normalizedProvider, draft);
 
   useEffect(() => {
     setDraft(normalizedProvider);
