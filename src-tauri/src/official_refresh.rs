@@ -50,6 +50,10 @@ struct OfficialRefreshState {
     // acquisition and true only after the catalog and managed Codex runtime
     // overlay have both published successfully.
     publication_ready: bool,
+    // Codex App has no supported restart-observation seam.  Once a managed
+    // runtime projection changes, retain this durable disclosure requirement
+    // so a later same-budget manual refresh cannot hide it.
+    outstanding_restart_required: bool,
     // Retained for a conservative one-time migration from state written by
     // earlier builds that only tracked the raw context window.
     published_context_windows: BTreeMap<String, u32>,
@@ -248,7 +252,7 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
             trigger,
             snapshot_available: current_published_snapshot_available(&state),
             models,
-            restart_required: false,
+            restart_required: state.outstanding_restart_required,
         });
     }
 
@@ -344,6 +348,7 @@ where
     let runtime_changed = project_runtime()?;
     update_published_context_budgets(state, next_budgets);
     state.publication_ready = true;
+    state.outstanding_restart_required |= runtime_changed;
     state.last_attempt_success = Some(direct_success);
     if direct_success {
         // Direct success is durable only after both catalog and runtime
@@ -352,7 +357,7 @@ where
         state.last_success_at = Some(now);
     }
     Ok(PublicationOutcome {
-        restart_required: runtime_changed,
+        restart_required: state.outstanding_restart_required,
     })
 }
 
@@ -429,7 +434,7 @@ fn record_attempt(
     now: u64,
     success: bool,
 ) {
-    state.schema_version = 2;
+    state.schema_version = 3;
     state.last_attempt_at = Some(now);
     state.last_attempt_trigger = Some(trigger.as_str().to_string());
     state.last_attempt_success = Some(success);
@@ -838,7 +843,50 @@ mod tests {
         assert_eq!(state.last_success_at, Some(2_000));
         assert_eq!(state.last_attempt_success, Some(true));
         assert!(state.publication_ready);
-        assert_eq!(state.schema_version, 2);
+        assert_eq!(state.schema_version, 3);
+    }
+
+    #[test]
+    fn scheduled_runtime_change_persists_restart_requirement_for_later_manual_same_budget_refresh() {
+        let root = temp_root("scheduled-restart-requirement");
+        let path = root.join("official-refresh-state.json");
+        fs::create_dir_all(&root).unwrap();
+        let mut state = OfficialRefreshState::default();
+        update_published_context_budgets(
+            &mut state,
+            budget_map("gpt-5.6-terra", 353_000, 100, 353_000, 300_000),
+        );
+
+        record_attempt(&mut state, RefreshTrigger::Scheduled, 2_000, false);
+        let scheduled = finalize_published_snapshot(
+            &mut state,
+            2_000,
+            true,
+            || Ok(()),
+            || Ok(budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000)),
+            || Ok(true),
+        )
+        .expect("scheduled refresh publishes the lower managed budget");
+
+        assert!(scheduled.restart_required);
+        assert!(state.outstanding_restart_required);
+        write_state(&path, &state).expect("persist scheduled restart requirement");
+
+        let mut resumed_state = read_state(&path);
+        assert!(resumed_state.outstanding_restart_required);
+        record_attempt(&mut resumed_state, RefreshTrigger::Manual, 2_001, false);
+        let manual = finalize_published_snapshot(
+            &mut resumed_state,
+            2_001,
+            true,
+            || Ok(()),
+            || Ok(budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000)),
+            || Ok(false),
+        )
+        .expect("manual same-budget refresh publishes without another file delta");
+
+        assert!(manual.restart_required);
+        assert!(resumed_state.outstanding_restart_required);
     }
 
     #[test]
