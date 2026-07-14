@@ -39,7 +39,9 @@ const PINNED_OFFICIAL_MODEL_COMMON_FIELDS: &[&str] = &[
 ];
 const PINNED_OFFICIAL_MODEL_LIMIT_FIELDS: &[&str] =
     &["context_window", "max_context_window"];
-static PINNED_OFFICIAL_CATALOG_METADATA: OnceLock<Result<HashMap<String, Map<String, Value>>, String>> =
+type PinnedOfficialCatalogMetadata = HashMap<String, Map<String, Value>>;
+type PinnedOfficialCatalogMetadataResult = Result<PinnedOfficialCatalogMetadata, String>;
+static PINNED_OFFICIAL_CATALOG_METADATA: OnceLock<PinnedOfficialCatalogMetadataResult> =
     OnceLock::new();
 const RESPONSE_ENDPOINT_SUFFIXES: &[&str] = &["/responses", "/response"];
 const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
@@ -608,14 +610,14 @@ fn apply_pinned_official_catalog_metadata_to_seed(
     Ok(())
 }
 
-fn pinned_official_catalog_metadata() -> Result<&'static HashMap<String, Map<String, Value>>, String> {
+fn pinned_official_catalog_metadata() -> Result<&'static PinnedOfficialCatalogMetadata, String> {
     PINNED_OFFICIAL_CATALOG_METADATA
         .get_or_init(parse_pinned_official_catalog_metadata)
         .as_ref()
         .map_err(|error| error.clone())
 }
 
-fn parse_pinned_official_catalog_metadata() -> Result<HashMap<String, Map<String, Value>>, String> {
+fn parse_pinned_official_catalog_metadata() -> PinnedOfficialCatalogMetadataResult {
     let document: Value = serde_json::from_str(OFFICIAL_CATALOG_METADATA_JSON)
         .map_err(|error| format!("official catalog metadata is unreadable: {error}"))?;
     if document.get("schema_version") != Some(&json!(1)) {
