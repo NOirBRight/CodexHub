@@ -37,7 +37,9 @@ class ProvidersConfigTests(unittest.TestCase):
         )
         self.assertEqual(configured_models, ["glm-5.2"])
 
-    def test_bundled_ollama_glm_selects_the_only_strict_apply_patch_native_responses_codec(self):
+    def test_bundled_ollama_models_select_the_exact_strict_apply_patch_native_responses_codec_whitelist(
+        self,
+    ):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         configured, index = build_ollama_cloud_model_index(providers, require_api_key=False)
         configured_models = [
@@ -48,10 +50,19 @@ class ProvidersConfigTests(unittest.TestCase):
         ]
 
         self.assertTrue(configured)
-        self.assertEqual(configured_models, ["glm-5.2"])
+        self.assertEqual(configured_models, ["glm-5.2", "kimi-k2.6"])
         self.assertEqual(index["glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
         self.assertEqual(index["ollama-cloud/glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(index["kimi-k2.6"]["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(
+            index["ollama-cloud/kimi-k2.6"]["native_responses_tool_codec"],
+            "strict_apply_patch",
+        )
         self.assertEqual(index["minimax-m3"]["native_responses_tool_codec"], "none")
+
+        external_index = build_external_model_index(providers, require_api_key=False)
+        self.assertEqual(external_index["volc/kimi-k2.6"]["native_responses_tool_codec"], "none")
+        self.assertEqual(external_index["minimax-cn/minimax-m3"]["native_responses_tool_codec"], "none")
 
     def test_discover_official_models_fetches_gpt_models_sorted_with_limits(self):
         payload = {
@@ -366,7 +377,7 @@ api_key = "ollama-secret"
         self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
         self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
 
-    def test_runtime_omission_inherits_bundled_native_responses_tool_codec_for_ollama_glm_aliases(self):
+    def test_runtime_omission_inherits_only_the_bundled_ollama_codec_whitelist_for_aliases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
             path.write_text(
@@ -379,21 +390,71 @@ api_key = "ollama-secret"
 
   [[providers.models]]
   id = "glm-5.2"
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+
+  [[providers.models]]
+  id = "minimax-m3"
+
+  [[providers.models]]
+  id = "kimi-k2.7-code"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            resolved = {}
+            for model_id in ("glm-5.2", "kimi-k2.6", "minimax-m3", "kimi-k2.7-code"):
+                configured, unqualified = resolve_ollama_cloud_model(
+                    model_id, providers_path=path, require_api_key=False
+                )
+                qualified_configured, qualified = resolve_ollama_cloud_model(
+                    f"ollama-cloud/{model_id}", providers_path=path, require_api_key=False
+                )
+                self.assertTrue(configured)
+                self.assertTrue(qualified_configured)
+                resolved[model_id] = (unqualified, qualified)
+
+        for model_id in ("glm-5.2", "kimi-k2.6"):
+            with self.subTest(model_id=model_id):
+                unqualified, qualified = resolved[model_id]
+                self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
+                self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
+        for model_id in ("minimax-m3", "kimi-k2.7-code"):
+            with self.subTest(model_id=model_id):
+                unqualified, qualified = resolved[model_id]
+                self.assertEqual(unqualified["native_responses_tool_codec"], "none")
+                self.assertEqual(qualified["native_responses_tool_codec"], "none")
+
+    def test_explicit_runtime_model_none_overrides_the_bundled_ollama_codec_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+  native_responses_tool_codec = "none"
 """.lstrip(),
                 encoding="utf-8",
             )
 
             configured, unqualified = resolve_ollama_cloud_model(
-                "glm-5.2", providers_path=path, require_api_key=False
+                "kimi-k2.6", providers_path=path, require_api_key=False
             )
             qualified_configured, qualified = resolve_ollama_cloud_model(
-                "ollama-cloud/glm-5.2", providers_path=path, require_api_key=False
+                "ollama-cloud/kimi-k2.6", providers_path=path, require_api_key=False
             )
 
         self.assertTrue(configured)
         self.assertTrue(qualified_configured)
-        self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
-        self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(unqualified["native_responses_tool_codec"], "none")
+        self.assertEqual(qualified["native_responses_tool_codec"], "none")
 
     def test_inherited_ollama_strategy_prepares_a_deferred_core_tool_surface(self):
         with tempfile.TemporaryDirectory() as tmpdir:
