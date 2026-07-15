@@ -321,6 +321,104 @@ enabled = true
         self.assertEqual(ollama["ollama-cloud/glm-5.2"]["tool_surface_strategy"], "deferred_core")
         self.assertEqual(ollama["minimax-m3"]["tool_surface_strategy"], "eager")
 
+    def test_runtime_omission_inherits_bundled_model_strategy_for_ollama_cloud_aliases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+
+  [[providers.models]]
+  id = "glm-5.2"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            configured, unqualified = resolve_ollama_cloud_model(
+                "glm-5.2", providers_path=path, require_api_key=False
+            )
+            qualified_configured, qualified = resolve_ollama_cloud_model(
+                "ollama-cloud/glm-5.2", providers_path=path, require_api_key=False
+            )
+
+        self.assertTrue(configured)
+        self.assertTrue(qualified_configured)
+        self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
+
+    def test_runtime_omission_inherits_bundled_provider_strategy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bundled_path = root / "bundled-providers.toml"
+            runtime_path = root / "runtime-providers.toml"
+            bundled_path.write_text(
+                """
+[[providers]]
+id = "generic-provider"
+name = "Generic Provider"
+base_url = "https://bundled.example.test/v1"
+api_key = "bundled-secret"
+tool_surface_strategy = "deferred_core"
+
+  [[providers.models]]
+  id = "generic-model"
+""".lstrip(),
+                encoding="utf-8",
+            )
+            runtime_path.write_text(
+                """
+[[providers]]
+id = "generic-provider"
+name = "Generic Provider"
+base_url = "https://runtime.example.test/v1"
+api_key = "runtime-secret"
+
+  [[providers.models]]
+  id = "generic-model"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            with patch("providers_config.DEFAULT_PROVIDERS_PATH", bundled_path):
+                index = build_external_model_index(load_providers(runtime_path), require_api_key=False)
+
+        self.assertEqual(index["generic-provider/generic-model"]["tool_surface_strategy"], "deferred_core")
+
+    def test_runtime_explicit_strategies_override_bundled_model_default(self):
+        for label, provider_strategy, model_strategy in (
+            ("provider", "eager", None),
+            ("model", None, "eager"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "providers.toml"
+                provider_line = (
+                    f'tool_surface_strategy = "{provider_strategy}"\n' if provider_strategy else ""
+                )
+                model_line = f'  tool_surface_strategy = "{model_strategy}"\n' if model_strategy else ""
+                path.write_text(
+                    f"""
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+{provider_line}
+  [[providers.models]]
+  id = "glm-5.2"
+{model_line}""".lstrip(),
+                    encoding="utf-8",
+                )
+
+                _, resolved = resolve_ollama_cloud_model(
+                    "glm-5.2", providers_path=path, require_api_key=False
+                )
+
+            self.assertEqual(resolved["tool_surface_strategy"], "eager")
+
     def test_tool_surface_strategy_rejects_invalid_provider_and_model_configuration(self):
         for provider_strategy, model_strategy in (("unknown", None), ("eager", "unknown")):
             with self.subTest(provider_strategy=provider_strategy, model_strategy=model_strategy):

@@ -357,6 +357,8 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
         return []
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    if path.resolve() != DEFAULT_PROVIDERS_PATH.resolve():
+        _inherit_missing_tool_surface_strategies_from_bundled_defaults(data)
     raw_providers = data.get("providers", [])
     if not isinstance(raw_providers, list):
         raise ValueError("providers must be an array of tables")
@@ -414,6 +416,68 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
         indexed_providers.append((provider_index, provider))
 
     return _sort_by_order(indexed_providers)
+
+
+def _inherit_missing_tool_surface_strategies_from_bundled_defaults(runtime_data: dict[str, Any]) -> None:
+    """Fill omitted runtime strategies from matching bundled provider/model defaults.
+
+    A runtime provider-level strategy is an explicit selection, so it wins over
+    every bundled default for that provider. Otherwise, matching bundled model
+    overrides retain their existing precedence over bundled provider defaults.
+    """
+    if not DEFAULT_PROVIDERS_PATH.exists():
+        return
+
+    runtime_providers = runtime_data.get("providers")
+    if not isinstance(runtime_providers, list):
+        return
+
+    bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+    bundled_providers = bundled_data.get("providers")
+    if not isinstance(bundled_providers, list):
+        return
+
+    bundled_by_id: dict[str, dict[str, Any]] = {}
+    for bundled_provider in bundled_providers:
+        if not isinstance(bundled_provider, dict):
+            continue
+        provider_id = canonical_model_id(_string_field(bundled_provider.get("id")))
+        if provider_id:
+            bundled_by_id.setdefault(provider_id, bundled_provider)
+
+    for runtime_provider in runtime_providers:
+        if not isinstance(runtime_provider, dict):
+            continue
+        provider_id = canonical_model_id(_string_field(runtime_provider.get("id")))
+        bundled_provider = bundled_by_id.get(provider_id)
+        if bundled_provider is None:
+            continue
+        if "tool_surface_strategy" in runtime_provider:
+            continue
+
+        if "tool_surface_strategy" in bundled_provider:
+            runtime_provider["tool_surface_strategy"] = bundled_provider["tool_surface_strategy"]
+
+        runtime_models = runtime_provider.get("models")
+        bundled_models = bundled_provider.get("models")
+        if not isinstance(runtime_models, list) or not isinstance(bundled_models, list):
+            continue
+
+        bundled_models_by_id: dict[str, dict[str, Any]] = {}
+        for bundled_model in bundled_models:
+            if not isinstance(bundled_model, dict):
+                continue
+            model_id = canonical_model_id(_string_field(bundled_model.get("id")))
+            if model_id:
+                bundled_models_by_id.setdefault(model_id, bundled_model)
+
+        for runtime_model in runtime_models:
+            if not isinstance(runtime_model, dict) or "tool_surface_strategy" in runtime_model:
+                continue
+            model_id = canonical_model_id(_string_field(runtime_model.get("id")))
+            bundled_model = bundled_models_by_id.get(model_id)
+            if bundled_model is not None and "tool_surface_strategy" in bundled_model:
+                runtime_model["tool_surface_strategy"] = bundled_model["tool_surface_strategy"]
 
 
 def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PROVIDERS_PATH) -> None:
