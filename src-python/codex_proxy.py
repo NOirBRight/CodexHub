@@ -11326,6 +11326,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             proxy_request_context["raw_provider_probe"] = True
         model = None
         model_requested = None
+        upstream: Mapping[str, Any] | None = None
         upstream_name = None
         upstream_format = "responses"
         reports_cached_input_tokens = False
@@ -11334,6 +11335,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         route_policy_event_fields: dict[str, Any] = {}
         vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
+        response_lifecycle_state: dict[str, str] = {}
         caller_body = b""
         caller_request_observability: dict[str, Any] = {}
         request_observability: dict[str, Any] = {}
@@ -11860,6 +11862,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     request_kind=request_kind,
                                     defer_stream_errors=relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
+                                    response_lifecycle_state=response_lifecycle_state,
                                     behavior_profile=behavior_profile,
                                 )
                             break
@@ -12142,6 +12145,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             error_status = 400
             json_error_type = "invalid_request_error" if is_apply_patch_adapter_error else error_code
             sse_error_type = "invalid_request_error" if is_apply_patch_adapter_error else "upstream_error"
+            selected_native_responses_tool_codec = (
+                upstream.get("native_responses_tool_codec", "none")
+                if isinstance(upstream, Mapping)
+                else "none"
+            )
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -12159,7 +12167,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                if is_apply_patch_adapter_error and inbound_format == "responses":
+                if (
+                    is_apply_patch_adapter_error
+                    and inbound_format == "responses"
+                    and selected_native_responses_tool_codec == "strict_apply_patch"
+                ):
                     self._write_sse_event(
                         "response.failed",
                         _responses_failed_event_for_stream_error(
@@ -12169,6 +12181,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             exc=exc,
                             error=error_code,
                             detail=detail,
+                            response_id=response_lifecycle_state.get("response_id"),
                         ),
                     )
                     write_proxy_event(
@@ -12176,6 +12189,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         request_id=request_id,
                         model=canonical_model_id(model) if model else None,
                         upstream=upstream_name,
+                        codec=selected_native_responses_tool_codec,
                         disposition="response.failed",
                         failure_class=RETRY_FAILURE_PERMANENT,
                         retry_count=0,
@@ -13308,6 +13322,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
         defer_stream_errors: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
+        response_lifecycle_state: dict[str, str] | None = None,
         behavior_profile: str | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
@@ -13333,6 +13348,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         def observe_diagnostic_sse_line(line: bytes) -> None:
             _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+
+        def remember_response_id(payload: Mapping[str, Any]) -> None:
+            if response_lifecycle_state is None:
+                return
+            response_payload = payload.get("response")
+            if not isinstance(response_payload, Mapping):
+                return
+            response_id = response_payload.get("id")
+            if isinstance(response_id, str) and response_id:
+                response_lifecycle_state["response_id"] = response_id
 
         if (
             behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
@@ -14293,6 +14318,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                         usage_payload = _parse_sse_json_payload(line)
                         if isinstance(usage_payload, Mapping):
+                            remember_response_id(usage_payload)
                             event_type = usage_payload.get("type")
                             if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                                 saw_response_event = True
@@ -14576,6 +14602,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     usage_payload = _parse_sse_json_payload(line)
                     buffer_current_line = False
                     if isinstance(usage_payload, Mapping):
+                        remember_response_id(usage_payload)
                         event_type = usage_payload.get("type")
                         if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                             last_response_event_type = event_type

@@ -7107,7 +7107,7 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("arguments_not_exact", rendered_payload)
         self.assertNotIn(private_patch, rendered_payload)
 
-    def test_apply_patch_adapter_rejection_is_nonretryable_sse_without_replay(self):
+    def test_apply_patch_adapter_rejection_sse_terminal_is_codec_scoped_and_preserves_response_id(self):
         private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
         malformed_item = {
             "id": "fc_apply_patch",
@@ -7121,9 +7121,6 @@ class RoutingTests(unittest.TestCase):
             {"type": "response.created", "response": {"id": "resp_apply_patch", "output": []}},
             {"type": "response.output_item.done", "output_index": 0, "item": malformed_item},
         ]
-        response = FakeSseResponse(
-            [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in upstream_events] + [b""]
-        )
         request_body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -7131,51 +7128,103 @@ class RoutingTests(unittest.TestCase):
                 "stream": True,
             }
         ).encode("utf-8")
-        handler, fake = post_handler("/v1/responses", request_body)
+        cases = (
+            ("unselected", "none", b"event: error\n"),
+            ("selected", "strict_apply_patch", b"event: response.failed\n"),
+        )
+        for case, codec, expected_prefix in cases:
+            with self.subTest(case=case):
+                self.write_proxy_event.reset_mock()
+                response = FakeSseResponse(
+                    [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in upstream_events]
+                    + [b""]
+                )
+                handler, fake = post_handler("/v1/responses", request_body)
+                with (
+                    patch.dict(
+                        self.external_model,
+                        {"native_responses_tool_codec": codec},
+                    ),
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        return_value=response,
+                    ) as open_upstream,
+                ):
+                    CodexProxyHandler._proxy_post_request(
+                        handler,
+                        inbound_format="responses",
+                    )
 
-        with patch("codex_proxy._open_upstream_response", return_value=response) as open_upstream:
-            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+                self.assertEqual(open_upstream.call_count, 1)
+                event_names = [
+                    call.args[0]
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args
+                ]
+                self.assertNotIn("upstream_retry", event_names)
+                self.assertNotIn("sse_retry_notice", event_names)
+                self.assertEqual(fake.status, 200)
+                frames = b"".join(fake.wfile.writes).split(b"\n\n")
+                terminal_frames = [
+                    frame for frame in frames if frame.startswith(expected_prefix)
+                ]
+                self.assertEqual(len(terminal_frames), 1)
 
-        self.assertEqual(open_upstream.call_count, 1)
-        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
-        self.assertNotIn("upstream_retry", event_names)
-        self.assertNotIn("sse_retry_notice", event_names)
-        self.assertEqual(fake.status, 200)
-        frames = b"".join(fake.wfile.writes).split(b"\n\n")
-        failed_frames = [
-            frame for frame in frames if frame.startswith(b"event: response.failed\n")
-        ]
-        self.assertEqual(len(failed_frames), 1)
-        self.assertFalse(any(frame.startswith(b"event: error\n") for frame in frames))
-        failed_line = next(
-            line for line in failed_frames[0].splitlines() if line.startswith(b"data: ")
-        )
-        payload = json.loads(failed_line.removeprefix(b"data: "))
-        self.assertEqual(payload["type"], "response.failed")
-        self.assertEqual(payload["response"]["status"], "failed")
-        self.assertEqual(
-            payload["response"]["error"]["code"],
-            "invalid_apply_patch_function_call",
-        )
-        self.assertEqual(
-            payload["response"]["error"]["failure_class"],
-            codex_proxy.RETRY_FAILURE_PERMANENT,
-        )
-        self.assertFalse(payload["response"]["error"]["retryable"])
-        self.assertNotIn("arguments_not_exact", json.dumps(payload))
-        self.assertNotIn(private_patch, json.dumps(payload))
-        terminal_event = next(
-            call.kwargs
-            for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "third_party_apply_patch_terminal"
-        )
-        self.assertEqual(terminal_event["disposition"], "response.failed")
-        self.assertEqual(
-            terminal_event["failure_class"], codex_proxy.RETRY_FAILURE_PERMANENT
-        )
-        self.assertEqual(terminal_event["retry_count"], 0)
-        for forbidden in ("arguments", "input", "patch", "path", "content", "pattern"):
-            self.assertNotIn(forbidden, terminal_event)
+                if codec == "none":
+                    self.assertFalse(
+                        any(
+                            frame.startswith(b"event: response.failed\n")
+                            for frame in frames
+                        )
+                    )
+                    self.assertNotIn("third_party_apply_patch_terminal", event_names)
+                    continue
+
+                self.assertFalse(
+                    any(frame.startswith(b"event: error\n") for frame in frames)
+                )
+                failed_line = next(
+                    line
+                    for line in terminal_frames[0].splitlines()
+                    if line.startswith(b"data: ")
+                )
+                payload = json.loads(failed_line.removeprefix(b"data: "))
+                self.assertEqual(payload["type"], "response.failed")
+                self.assertEqual(payload["response"]["id"], "resp_apply_patch")
+                self.assertEqual(payload["response"]["status"], "failed")
+                self.assertEqual(
+                    payload["response"]["error"]["code"],
+                    "invalid_apply_patch_function_call",
+                )
+                self.assertEqual(
+                    payload["response"]["error"]["failure_class"],
+                    codex_proxy.RETRY_FAILURE_PERMANENT,
+                )
+                self.assertFalse(payload["response"]["error"]["retryable"])
+                self.assertNotIn("arguments_not_exact", json.dumps(payload))
+                self.assertNotIn(private_patch, json.dumps(payload))
+                terminal_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_terminal"
+                )
+                self.assertEqual(terminal_event["codec"], "strict_apply_patch")
+                self.assertEqual(terminal_event["disposition"], "response.failed")
+                self.assertEqual(
+                    terminal_event["failure_class"],
+                    codex_proxy.RETRY_FAILURE_PERMANENT,
+                )
+                self.assertEqual(terminal_event["retry_count"], 0)
+                for forbidden in (
+                    "arguments",
+                    "input",
+                    "patch",
+                    "path",
+                    "content",
+                    "pattern",
+                    "response_id",
+                ):
+                    self.assertNotIn(forbidden, terminal_event)
 
     def test_unrelated_protocol_translation_error_is_nonretryable_json_client_error(self):
         translation_error = codex_proxy.UpstreamProtocolTranslationError(
