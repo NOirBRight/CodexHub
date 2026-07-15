@@ -9,6 +9,7 @@ from atomic_io import atomic_write_text
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
     DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
+    FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
 )
 import re
 import sys
@@ -572,7 +573,10 @@ def _selected_official_context_budget(
 
     source = budget.get("source")
     freshness = budget.get("freshness")
-    if source == CURRENT_DIRECT_OFFICIAL_SOURCE:
+    if source in {
+        CURRENT_DIRECT_OFFICIAL_SOURCE,
+        FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+    }:
         if freshness != "fresh":
             return None
     elif source != DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE:

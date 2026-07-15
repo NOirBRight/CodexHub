@@ -2727,6 +2727,68 @@ mod tests {
     }
 
     #[test]
+    fn codex_0_144_2_model_list_without_numeric_context_fields_preserves_that_absence() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/codex_0_144_2_model_list_without_context_fields.json"
+        ))
+        .expect("current Codex model/list fixture");
+        let expected_slugs = [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+        ];
+        let numeric_context_fields = [
+            "context_window",
+            "max_context_window",
+            "contextWindow",
+            "maxContextWindow",
+            "effective_context_window_percent",
+            "effectiveContextWindowPercent",
+            "auto_compact_token_limit",
+            "autoCompactTokenLimit",
+            "model_auto_compact_token_limit",
+            "modelAutoCompactTokenLimit",
+        ];
+
+        let raw_models = fixture["data"].as_array().expect("fixture model list");
+        assert_eq!(raw_models.len(), expected_slugs.len());
+        for raw_model in raw_models {
+            for &field in &numeric_context_fields {
+                assert!(
+                    raw_model.get(field).is_none(),
+                    "fixture must omit {field} from the Direct Official response"
+                );
+            }
+        }
+
+        let subscription_models =
+            subscription_models_from_payload(&fixture).expect("subscription models");
+        assert_eq!(
+            subscription_models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            expected_slugs
+        );
+
+        for seed in subscription_models
+            .iter()
+            .map(super::official_subscription_seed_model)
+        {
+            for &field in &numeric_context_fields {
+                assert!(
+                    seed.get(field).is_none(),
+                    "seed must not invent a numeric {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn subscription_seed_does_not_overwrite_or_default_raw_app_metadata() {
         let subscription_models = subscription_models_from_payload(&json!({
             "data": [

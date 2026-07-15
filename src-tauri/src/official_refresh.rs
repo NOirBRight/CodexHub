@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) const OFFICIAL_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
 const REFRESH_STATE_FILE: &str = "official-refresh-state.json";
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+const FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE: &str =
+    "fresh_direct_official_cache_authority";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshTrigger {
@@ -277,17 +279,14 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
                     persist_failed_publication(
                         &state_path,
                         &mut state,
-                        format!(
-                            "Direct Official refresh failed: {direct_error}; failed to publish a degraded safe snapshot: \
-                             {publication_error}"
+                        direct_official_refresh_failure_message(
+                            &direct_error,
+                            Some(&publication_error),
                         ),
                     )
                 })?;
             if !current_published_snapshot_available(&state) {
-                return Err(format!(
-                    "Direct Official refresh failed and no previous safe snapshot is available: \
-                     {direct_error}"
-                ));
+                return Err(direct_official_refresh_failure_message(&direct_error, None));
             }
             Ok(RefreshOutcome {
                 trigger,
@@ -376,12 +375,51 @@ fn persist_failed_publication(
     }
 }
 
+fn direct_official_refresh_failure_message(
+    direct_error: &str,
+    publication_error: Option<&str>,
+) -> String {
+    let normalized = direct_error.to_ascii_lowercase();
+    if [
+        "not signed in",
+        "not authenticated",
+        "login",
+        "logged in",
+        "auth unavailable",
+        "auth required",
+        "authentication required",
+        "unauthorized",
+    ]
+        .iter()
+        .any(|marker| normalized.contains(*marker))
+    {
+        return "Codex sign-in is required before a safe CodexHub Official snapshot can be published."
+            .to_string();
+    }
+    match publication_error {
+        Some(publication_error) => format!(
+            "Direct Official refresh failed: {direct_error}; failed to publish a degraded safe snapshot: {publication_error}"
+        ),
+        None => format!(
+            "Direct Official refresh failed and no previous safe snapshot is available: {direct_error}"
+        ),
+    }
+}
+
 fn should_attempt(trigger: RefreshTrigger, state: &OfficialRefreshState, now: u64) -> bool {
     match trigger {
         RefreshTrigger::Startup | RefreshTrigger::Manual => true,
-        RefreshTrigger::Activation | RefreshTrigger::Scheduled | RefreshTrigger::Resume => {
-            automatic_refresh_due(state, now)
+        // Activation is a user-initiated safety gate.  An earlier background
+        // attempt that could not publish a safe snapshot (for example before
+        // the user signs in) must not make the route unavailable for 12h.
+        // Scheduled and resume attempts remain bounded below to avoid a
+        // background retry loop.
+        RefreshTrigger::Activation => {
+            !state.publication_ready
+                || state.published_context_budgets.is_empty()
+                || automatic_refresh_due(state, now)
         }
+        RefreshTrigger::Scheduled | RefreshTrigger::Resume => automatic_refresh_due(state, now),
     }
 }
 
@@ -480,6 +518,12 @@ fn published_context_budgets_from_catalog(
             catalog_path.display()
         )
     })?;
+    published_context_budgets_from_catalog_payload(&payload)
+}
+
+fn published_context_budgets_from_catalog_payload(
+    payload: &Value,
+) -> Result<BTreeMap<String, PublishedOfficialBudget>, String> {
     let models = payload
         .get("models")
         .and_then(Value::as_array)
@@ -515,6 +559,7 @@ fn published_context_budgets_from_catalog(
         let trusted = matches!(
             (source, freshness),
             (Some("current_direct_official"), Some("fresh"))
+                | (Some(FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE), Some("fresh"))
                 | (Some("degraded_last_known_official"), _)
         );
         if !trusted {
@@ -609,10 +654,13 @@ fn unix_timestamp() -> u64 {
 mod tests {
     use super::{
         automatic_refresh_due, finalize_published_snapshot, read_state, record_attempt,
-        refresh_with_flight, should_attempt, update_published_context_budgets, write_state,
-        OfficialRefreshState, PublishedOfficialBudget, RefreshOutcome, RefreshTrigger,
-        SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        published_context_budgets_from_catalog_payload, refresh_with_flight, should_attempt,
+        direct_official_refresh_failure_message, update_published_context_budgets, write_state,
+        OfficialRefreshState,
+        PublishedOfficialBudget, RefreshOutcome, RefreshTrigger, SingleFlight,
+        OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -624,9 +672,17 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn startup_and_manual_are_bounded_triggers_but_activation_waits_twelve_hours() {
+    fn startup_and_manual_are_bounded_triggers_but_activation_waits_with_safe_snapshot() {
         let state = OfficialRefreshState {
             last_success_at: Some(1_000),
+            publication_ready: true,
+            published_context_budgets: budget_map(
+                "gpt-5.6-terra",
+                272_000,
+                95,
+                258_400,
+                240_000,
+            ),
             ..OfficialRefreshState::default()
         };
         let before_due = 1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS - 1;
@@ -670,16 +726,38 @@ mod tests {
     }
 
     #[test]
-    fn activation_honors_the_failed_automatic_attempt_bound() {
+    fn activation_retries_after_auth_required_startup_without_background_retry_loop() {
         let mut state = OfficialRefreshState::default();
-        record_attempt(&mut state, RefreshTrigger::Scheduled, 1_000, false);
+        record_attempt(&mut state, RefreshTrigger::Startup, 1_000, false);
 
-        assert!(!should_attempt(RefreshTrigger::Activation, &state, 1_001));
-        assert!(should_attempt(
-            RefreshTrigger::Activation,
-            &state,
-            1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS,
-        ));
+        assert_eq!(state.last_automatic_attempt_at, Some(1_000));
+        assert!(!state.publication_ready);
+        assert!(!automatic_refresh_due(&state, 1_001));
+        assert!(!should_attempt(RefreshTrigger::Scheduled, &state, 1_001));
+        assert!(!should_attempt(RefreshTrigger::Resume, &state, 1_001));
+        assert!(should_attempt(RefreshTrigger::Activation, &state, 1_001));
+    }
+
+    #[test]
+    fn direct_refresh_failure_classifies_auth_required_without_hiding_other_failures() {
+        assert_eq!(
+            direct_official_refresh_failure_message(
+                "Codex auth unavailable",
+                Some("missing safe snapshot"),
+            ),
+            "Codex sign-in is required before a safe CodexHub Official snapshot can be published."
+        );
+        assert_eq!(
+            direct_official_refresh_failure_message("app-server unavailable", None),
+            "Direct Official refresh failed and no previous safe snapshot is available: app-server unavailable"
+        );
+        assert_eq!(
+            direct_official_refresh_failure_message(
+                "app-server unavailable",
+                Some("catalog publication failed"),
+            ),
+            "Direct Official refresh failed: app-server unavailable; failed to publish a degraded safe snapshot: catalog publication failed"
+        );
     }
 
     #[test]
@@ -822,6 +900,92 @@ mod tests {
         assert!(!state.publication_ready);
         assert!(should_attempt(RefreshTrigger::Startup, &state, 2_001));
         assert!(should_attempt(RefreshTrigger::Manual, &state, 2_001));
+    }
+
+    #[test]
+    fn codex_0_144_2_model_list_without_numeric_context_fields_fails_publication_closed() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/codex_0_144_2_model_list_without_context_fields.json"
+        ))
+        .expect("current Codex model/list fixture");
+        let models = fixture["data"].as_array().expect("fixture model list");
+        assert_eq!(models.len(), 7);
+        assert!(models.iter().all(|model| {
+            [
+                "context_window",
+                "max_context_window",
+                "contextWindow",
+                "maxContextWindow",
+                "effective_context_window_percent",
+                "effectiveContextWindowPercent",
+                "auto_compact_token_limit",
+                "autoCompactTokenLimit",
+            ]
+            .iter()
+            .all(|field| model.get(*field).is_none())
+        }));
+
+        let mut state = OfficialRefreshState::default();
+        record_attempt(&mut state, RefreshTrigger::Manual, 2_000, false);
+        let error = finalize_published_snapshot(
+            &mut state,
+            2_000,
+            true,
+            || Ok(()),
+            || Ok(BTreeMap::new()),
+            || panic!("runtime projection must not run without a safe budget"),
+        )
+        .expect_err("missing numeric context authority must fail publication closed");
+
+        assert_eq!(
+            error,
+            "published Official catalog contains no safe resolved context budget"
+        );
+        assert!(!state.publication_ready);
+        assert_eq!(state.last_success_at, None);
+    }
+
+    #[test]
+    fn fresh_direct_cache_authority_budget_is_admitted_after_sanitized_catalog_projection() {
+        let payload = json!({
+            "models": [
+                {
+                    "slug": "gpt-5.6-terra",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "fresh_direct_official_cache_authority",
+                            "freshness": "fresh",
+                            "model_context_window": 272000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258400,
+                            "model_auto_compact_token_limit": 244800
+                        }
+                    }
+                }
+            ]
+        });
+
+        let budgets = published_context_budgets_from_catalog_payload(&payload)
+            .expect("sanitized fresh Direct cache authority budget");
+
+        assert_eq!(
+            budgets.get("gpt-5.6-terra"),
+            Some(&PublishedOfficialBudget {
+                model_context_window: 272000,
+                effective_context_window_percent: 95,
+                effective_context_window: 258400,
+                model_auto_compact_token_limit: 244800,
+            })
+        );
+
+        let mut stale = payload;
+        stale["models"][0]["codex_proxy_metadata"]["official_context_budget"]["freshness"] =
+            json!("stale");
+        assert!(published_context_budgets_from_catalog_payload(&stale)
+            .expect("stale cache authority catalog")
+            .is_empty());
     }
 
     #[test]

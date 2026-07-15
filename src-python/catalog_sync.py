@@ -32,6 +32,8 @@ from providers_config import (
 )
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
+    DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
+    FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
     OfficialContextBudget,
     apply_resolved_model_limits,
     load_resolved_model_limits,
@@ -54,6 +56,18 @@ def _runtime_codex_dir() -> Path:
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 BUNDLED_MODEL_CATALOG_DIR = REPO_ROOT / "model-catalogs"
 RUNTIME_MODEL_CATALOG_DIR = RUNTIME_CODEX_DIR / "model-catalogs"
+CODEX_TARGET_HOME_ENV = "CODEXHUB_CODEX_TARGET_HOME"
+
+
+def _direct_official_models_cache_path() -> Path:
+    """Use the Direct Codex target home without changing runtime state paths."""
+
+    target_home_env = os.environ.get(CODEX_TARGET_HOME_ENV)
+    target_home = Path(target_home_env) if target_home_env else RUNTIME_CODEX_DIR
+    return target_home / "models_cache.json"
+
+
+DIRECT_OFFICIAL_MODELS_CACHE_PATH = _direct_official_models_cache_path()
 
 POLICY_PATH = REPO_ROOT / "config" / "catalog_policy.toml"
 OFFICIAL_SEED_PATH = BUNDLED_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
@@ -75,6 +89,7 @@ OLLAMA_SHOW_URL = "https://ollama.com/api/show"
 DEFAULT_CLIENT_VERSION = "0.142.0"
 OLLAMA_PRIORITY_BASE = 100
 DIRECT_OFFICIAL_CONTEXT_MAX_AGE_SECONDS = 12 * 60 * 60
+DIRECT_OFFICIAL_CACHE_STATUS_SOURCE = "direct_official_cache"
 OFFICIAL_PROXY_PROVIDER_ALIAS = "openai"
 
 
@@ -370,6 +385,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         POLICY_PATH,
         OFFICIAL_SEED_PATH,
         RUNTIME_OFFICIAL_SEED_PATH,
+        DIRECT_OFFICIAL_MODELS_CACHE_PATH,
         OLLAMA_FALLBACK_PATH,
         SETTINGS_PATH,
         DEFAULT_PROVIDERS_PATH,
@@ -495,6 +511,219 @@ def load_official_seed_snapshot(
     return OfficialSeedSnapshot(models=[], source="missing", context_freshness="missing")
 
 
+@dataclass(frozen=True)
+class DirectOfficialCacheAuthority:
+    """Sanitized numeric evidence joined to one current Official model list."""
+
+    context_by_slug: dict[str, dict[str, int]]
+    source: str
+    freshness: str
+
+
+def _unavailable_direct_official_cache_authority(
+    freshness: str,
+) -> DirectOfficialCacheAuthority:
+    return DirectOfficialCacheAuthority(
+        context_by_slug={},
+        source=DIRECT_OFFICIAL_CACHE_STATUS_SOURCE,
+        freshness=freshness,
+    )
+
+
+def _nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _direct_official_model_identity(model: Any) -> str | None:
+    if not isinstance(model, dict):
+        return None
+    identities: list[str] = []
+    for key in ("slug", "model", "id"):
+        if key not in model:
+            continue
+        value = model.get(key)
+        if not _nonempty_string(value):
+            return None
+        slug = canonical_model_id(value)
+        if slug.startswith("openai/gpt-"):
+            slug = slug.removeprefix("openai/")
+        if not slug.startswith("gpt-"):
+            return None
+        identities.append(slug)
+    if not identities or len(set(identities)) != 1:
+        return None
+    return identities[0]
+
+
+def _direct_official_model_index(
+    models: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]] | None:
+    indexed: dict[str, dict[str, Any]] = {}
+    for model in models:
+        slug = _direct_official_model_identity(model)
+        if slug is None or slug in indexed:
+            return None
+        indexed[slug] = model
+    return indexed
+
+
+def _positive_context_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _validated_cache_context_values(model: dict[str, Any]) -> dict[str, int] | None:
+    raw_context = model.get("context_window")
+    raw_max_context = model.get("max_context_window")
+    raw_effective_percent = model.get("effective_context_window_percent")
+    if all(value is None for value in (raw_context, raw_max_context, raw_effective_percent)):
+        return {}
+
+    context_window = _positive_context_int(raw_context)
+    max_context_window = _positive_context_int(raw_max_context)
+    effective_percent = _positive_context_int(raw_effective_percent)
+    if (
+        context_window is None
+        or max_context_window is None
+        or max_context_window < context_window
+        or effective_percent is None
+        or effective_percent > 100
+    ):
+        return None
+
+    values = {
+        "context_window": context_window,
+        "max_context_window": max_context_window,
+        "effective_context_window_percent": effective_percent,
+    }
+    if "auto_compact_token_limit" in model:
+        auto_compact_token_limit = _positive_context_int(model.get("auto_compact_token_limit"))
+        if auto_compact_token_limit is None:
+            return None
+        values["auto_compact_token_limit"] = auto_compact_token_limit
+    return values
+
+
+def _load_stable_json_object(path: Path) -> dict[str, Any] | None:
+    """Read one stable view of an atomically published cache file.
+
+    Native Codex writes this cache as a replacement.  If its metadata changes
+    while it is read, discard the observation rather than accepting a mixed
+    write.  Deliberately return no error detail so diagnostics never expose a
+    local path or cache contents.
+    """
+
+    try:
+        if not path.is_file() or path.is_symlink():
+            return None
+        before = path.stat()
+        text = path.read_text(encoding="utf-8-sig")
+        after = path.stat()
+    except (OSError, UnicodeError):
+        return None
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def load_fresh_direct_official_cache_authority(
+    snapshot: OfficialSeedSnapshot,
+    cache_path: Path = DIRECT_OFFICIAL_MODELS_CACHE_PATH,
+    *,
+    now_timestamp: float | None = None,
+) -> DirectOfficialCacheAuthority:
+    """Return only numeric Direct-cache evidence proven safe for this list.
+
+    The cache is never a bundled fallback: it is usable solely alongside a
+    fresh current app-server model list whose visible model identities agree
+    with the cache.  ETag/configuration markers prove provenance internally
+    and are intentionally omitted from the returned authority.
+    """
+
+    if (
+        snapshot.source != CURRENT_DIRECT_OFFICIAL_SOURCE
+        or snapshot.context_freshness != "fresh"
+    ):
+        return _unavailable_direct_official_cache_authority(snapshot.context_freshness)
+
+    payload = _load_stable_json_object(cache_path)
+    if payload is None:
+        return _unavailable_direct_official_cache_authority("missing")
+    freshness = _direct_catalog_context_freshness(payload, now_timestamp)
+    if freshness != "fresh":
+        return _unavailable_direct_official_cache_authority(freshness)
+    if not _nonempty_string(payload.get("etag")) or not _nonempty_string(
+        payload.get("client_version")
+    ):
+        return _unavailable_direct_official_cache_authority("missing")
+
+    cache_models = payload.get("models")
+    if not isinstance(cache_models, list):
+        return _unavailable_direct_official_cache_authority("missing")
+    current_by_slug = _direct_official_model_index(snapshot.models)
+    cache_by_slug = _direct_official_model_index(
+        [model for model in cache_models if isinstance(model, dict)]
+    )
+    if current_by_slug is None or cache_by_slug is None or not current_by_slug:
+        return _unavailable_direct_official_cache_authority("contradictory")
+    if len(cache_models) != len(cache_by_slug) or not set(current_by_slug).issubset(cache_by_slug):
+        return _unavailable_direct_official_cache_authority("contradictory")
+
+    context_by_slug: dict[str, dict[str, int]] = {}
+    for slug in current_by_slug:
+        cached_model = cache_by_slug[slug]
+        if not _nonempty_string(cached_model.get("comp_hash")):
+            return _unavailable_direct_official_cache_authority("missing")
+        values = _validated_cache_context_values(cached_model)
+        if values is None:
+            return _unavailable_direct_official_cache_authority("contradictory")
+        if values:
+            context_by_slug[slug] = values
+
+    if not context_by_slug:
+        return _unavailable_direct_official_cache_authority("missing")
+    return DirectOfficialCacheAuthority(
+        context_by_slug=context_by_slug,
+        source=FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+        freshness="fresh",
+    )
+
+
+def _previous_official_context_budget_is_safe(budget: dict[str, Any]) -> bool:
+    source = budget.get("source")
+    freshness = budget.get("freshness")
+    if source == DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE:
+        pass
+    elif source in {
+        CURRENT_DIRECT_OFFICIAL_SOURCE,
+        FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+    } and freshness == "fresh":
+        pass
+    else:
+        return False
+
+    context_window = _positive_context_int(
+        budget.get("model_context_window", budget.get("context_window"))
+    )
+    effective_percent = _positive_context_int(budget.get("effective_context_window_percent"))
+    effective_window = _positive_context_int(budget.get("effective_context_window"))
+    auto_compact_token_limit = _positive_context_int(
+        budget.get("model_auto_compact_token_limit")
+    )
+    return bool(
+        context_window is not None
+        and effective_percent is not None
+        and effective_percent <= 100
+        and effective_window is not None
+        and effective_window <= context_window
+        and auto_compact_token_limit is not None
+        and auto_compact_token_limit <= effective_window
+    )
+
+
 def load_previous_official_context_budgets(
     path: Path = GENERATED_CATALOG_PATH,
 ) -> dict[str, dict[str, Any]]:
@@ -524,7 +753,7 @@ def load_previous_official_context_budgets(
         ):
             continue
         budget = metadata.get("official_context_budget")
-        if isinstance(budget, dict):
+        if isinstance(budget, dict) and _previous_official_context_budget_is_safe(budget):
             budgets[slug] = dict(budget)
     return budgets
 
@@ -539,6 +768,8 @@ def _first_present_value(model: dict[str, Any], *keys: str) -> Any:
 def official_context_signals_from_snapshot(
     snapshot: OfficialSeedSnapshot,
     previous_budgets: dict[str, dict[str, Any]] | None = None,
+    *,
+    direct_cache_authority: DirectOfficialCacheAuthority | None = None,
 ) -> dict[str, dict[str, Any]]:
     signals: dict[str, dict[str, Any]] = {}
     for model in snapshot.models:
@@ -547,31 +778,68 @@ def official_context_signals_from_snapshot(
         if not slug:
             continue
         previous = (previous_budgets or {}).get(slug, {})
+        context_window = _first_present_value(
+            model,
+            "context_window",
+            "contextWindow",
+        )
+        max_context_window = _first_present_value(
+            model,
+            "max_context_window",
+            "maxContextWindow",
+        )
+        effective_context_window_percent = _first_present_value(
+            model,
+            "effective_context_window_percent",
+            "effectiveContextWindowPercent",
+        )
+        auto_compact_token_limit = _first_present_value(
+            model,
+            "auto_compact_token_limit",
+            "model_auto_compact_token_limit",
+            "autoCompactTokenLimit",
+            "modelAutoCompactTokenLimit",
+        )
+        source = snapshot.source
+        freshness = snapshot.context_freshness
+        if (
+            direct_cache_authority is not None
+            and snapshot.source == CURRENT_DIRECT_OFFICIAL_SOURCE
+            and snapshot.context_freshness == "fresh"
+            and all(
+                value is None
+                for value in (
+                    context_window,
+                    max_context_window,
+                    effective_context_window_percent,
+                    auto_compact_token_limit,
+                )
+            )
+        ):
+            cache_values = direct_cache_authority.context_by_slug.get(slug)
+            if cache_values:
+                context_window = cache_values["context_window"]
+                max_context_window = cache_values["max_context_window"]
+                effective_context_window_percent = cache_values[
+                    "effective_context_window_percent"
+                ]
+                auto_compact_token_limit = cache_values.get("auto_compact_token_limit")
+                source = direct_cache_authority.source
+                freshness = direct_cache_authority.freshness
+            else:
+                source = DIRECT_OFFICIAL_CACHE_STATUS_SOURCE
+                freshness = (
+                    direct_cache_authority.freshness
+                    if direct_cache_authority.source == DIRECT_OFFICIAL_CACHE_STATUS_SOURCE
+                    else "missing"
+                )
         signals[slug] = {
-            "context_window": _first_present_value(
-                model,
-                "context_window",
-                "contextWindow",
-            ),
-            "max_context_window": _first_present_value(
-                model,
-                "max_context_window",
-                "maxContextWindow",
-            ),
-            "effective_context_window_percent": _first_present_value(
-                model,
-                "effective_context_window_percent",
-                "effectiveContextWindowPercent",
-            ),
-            "auto_compact_token_limit": _first_present_value(
-                model,
-                "auto_compact_token_limit",
-                "model_auto_compact_token_limit",
-                "autoCompactTokenLimit",
-                "modelAutoCompactTokenLimit",
-            ),
-            "freshness": snapshot.context_freshness,
-            "source": snapshot.source,
+            "context_window": context_window,
+            "max_context_window": max_context_window,
+            "effective_context_window_percent": effective_context_window_percent,
+            "auto_compact_token_limit": auto_compact_token_limit,
+            "freshness": freshness,
+            "source": source,
             "fallback_context_window": previous.get("model_context_window"),
             "fallback_effective_context_window_percent": previous.get(
                 "effective_context_window_percent"
@@ -1361,9 +1629,15 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     )
     official_models = official_snapshot.models
     previous_official_context_budgets = load_previous_official_context_budgets()
+    direct_cache_authority = (
+        load_fresh_direct_official_cache_authority(official_snapshot)
+        if include_official
+        else None
+    )
     official_context_signals = official_context_signals_from_snapshot(
         official_snapshot,
         previous_official_context_budgets,
+        direct_cache_authority=direct_cache_authority,
     )
     fallback_models = load_fallback_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)

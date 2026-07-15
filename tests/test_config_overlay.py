@@ -23,6 +23,7 @@ from config_overlay import (
     strip_top_level_keys,
     top_level_value,
 )
+from model_limits import FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE
 
 
 class DeterministicCompactionReplay:
@@ -455,6 +456,73 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("model_context_window = 400000", restarted)
             self.assertIn("model_auto_compact_token_limit = 380000", restarted)
 
+    def test_overlay_adopts_fresh_direct_cache_authority_and_rejects_a_stale_expansion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-terra",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+                                        "freshness": "fresh",
+                                        "model_context_window": 272_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 258_400,
+                                    },
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            activated = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_context_window = 272000", activated)
+            self.assertIn("model_auto_compact_token_limit = 244800", activated)
+            self.assertLess(244_800, 249_433)
+
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-terra",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+                                        "freshness": "stale",
+                                        "model_context_window": 400_000,
+                                        "effective_context_window_percent": 100,
+                                        "effective_context_window": 400_000,
+                                        "model_auto_compact_token_limit": 380_000,
+                                    },
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
+                apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            self.assertEqual(config_path.read_text(encoding="utf-8"), activated)
+
     def test_overlay_preserves_an_explicit_third_party_context_budget(self):
         original = "\n".join(
             [
@@ -481,7 +549,7 @@ class ConfigOverlayTests(unittest.TestCase):
                                     "provider": "openai",
                                     "upstream_name": "official",
                                     "official_context_budget": {
-                                        "source": "current_direct_official",
+                                        "source": FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
                                         "freshness": "fresh",
                                         "model_context_window": 272_000,
                                         "effective_context_window_percent": 100,

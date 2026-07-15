@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+const CODEX_TARGET_HOME_ENV: &str = "CODEXHUB_CODEX_TARGET_HOME";
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     models::generate_catalog()
@@ -36,7 +37,13 @@ fn sync_catalog_with_paths(
         paths.catalog_sync_script().to_string_lossy().into_owned(),
         "--sync".to_string(),
     ];
-    let env = vec![("CODEX_HOME".to_string(), paths.codex_dir.clone())];
+    let env = vec![
+        ("CODEX_HOME".to_string(), paths.codex_dir.clone()),
+        (
+            CODEX_TARGET_HOME_ENV.to_string(),
+            paths.codex_target_dir.clone(),
+        ),
+    ];
     let outcome = runner
         .run(python, &args, &env)
         .map_err(|error| format!("catalog sync failed to start: {error}"))?;
@@ -56,20 +63,27 @@ fn sync_catalog_with_paths(
 #[derive(Debug, Clone)]
 struct CatalogPaths {
     codex_dir: PathBuf,
+    codex_target_dir: PathBuf,
     repo_root: PathBuf,
 }
 
 impl CatalogPaths {
     fn runtime() -> Result<Self, String> {
         let codex_dir = runtime_paths::codex_home_dir()?;
+        let codex_target_dir = runtime_paths::codex_target_home_dir()?;
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, repo_root))
+        Ok(Self::new(codex_dir, codex_target_dir, repo_root))
     }
 
-    fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+    fn new(
+        codex_dir: impl Into<PathBuf>,
+        codex_target_dir: impl Into<PathBuf>,
+        repo_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             codex_dir: codex_dir.into(),
+            codex_target_dir: codex_target_dir.into(),
             repo_root: repo_root.into(),
         }
     }
@@ -128,7 +142,7 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
 mod tests {
     use super::{
         sync_catalog_with_paths, CatalogCommandOutcome, CatalogPaths, CatalogSyncCommandRunner,
-        GENERATED_CATALOG_FILE,
+        CODEX_TARGET_HOME_ENV, GENERATED_CATALOG_FILE,
     };
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -137,13 +151,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn sync_catalog_sets_codex_home_creates_output_dir_and_returns_runtime_catalog_path() {
+    fn sync_catalog_preserves_runtime_and_target_homes_and_returns_runtime_catalog_path() {
         let root = temp_root("catalog-sync");
-        let codex_home = root.join("codex-home");
+        let runtime_home = root.join("runtime-home");
+        let target_home = root.join("codex-target-home");
         let repo_root = root.join("repo-root");
-        let paths = test_paths(&root);
+        let paths = CatalogPaths::new(&runtime_home, &target_home, &repo_root);
         write_fake_catalog_script(&repo_root);
-        let catalog_path = codex_home
+        let catalog_path = runtime_home
             .join("model-catalogs")
             .join(GENERATED_CATALOG_FILE);
         let runner = RecordingCatalogRunner::successful("catalog written\n", catalog_path.clone());
@@ -174,7 +189,15 @@ mod tests {
                 "--sync".to_string()
             ]
         );
-        assert_eq!(commands[0].env.get("CODEX_HOME"), Some(&codex_home));
+        assert_eq!(commands[0].env.get("CODEX_HOME"), Some(&runtime_home));
+        assert_eq!(
+            commands[0].env.get(CODEX_TARGET_HOME_ENV),
+            Some(&target_home)
+        );
+        assert_ne!(
+            commands[0].env.get("CODEX_HOME"),
+            commands[0].env.get(CODEX_TARGET_HOME_ENV)
+        );
     }
 
     #[test]
@@ -259,7 +282,11 @@ mod tests {
     }
 
     fn test_paths(root: &Path) -> CatalogPaths {
-        CatalogPaths::new(root.join("codex-home"), root.join("repo-root"))
+        CatalogPaths::new(
+            root.join("runtime-home"),
+            root.join("codex-target-home"),
+            root.join("repo-root"),
+        )
     }
 
     fn write_fake_catalog_script(repo_root: &Path) {

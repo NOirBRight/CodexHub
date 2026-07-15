@@ -7,8 +7,15 @@ from typing import Any
 
 
 CURRENT_DIRECT_OFFICIAL_SOURCE = "current_direct_official"
+FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE = "fresh_direct_official_cache_authority"
 DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE = "degraded_last_known_official"
 NATIVE_AUTO_COMPACT_PERCENT = 90
+TRUSTED_FRESH_OFFICIAL_CONTEXT_SOURCES = frozenset(
+    {
+        CURRENT_DIRECT_OFFICIAL_SOURCE,
+        FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,7 @@ def _auto_compact_limit(
     native_limit = context_window * NATIVE_AUTO_COMPACT_PERCENT // 100
     return min(
         requested_limit if requested_limit is not None else native_limit,
+        native_limit,
         effective_context_window,
     )
 
@@ -61,10 +69,11 @@ def resolve_official_context_budget(
 ) -> OfficialContextBudget | None:
     """Resolve an Official usable-context budget without trusting stale probes.
 
-    A current Direct Official snapshot is the only evidence that may expand a
-    budget.  A degraded snapshot requires a previously resolved safe value and
-    can only hold or tighten it.  Returning ``None`` deliberately fails closed
-    when neither source can establish a safe Official cap.
+    A current Direct Official snapshot or a provenance-checked fresh Direct
+    Official cache authority may expand a budget.  A degraded snapshot requires
+    a previously resolved safe value and can only hold or tighten it.  Returning
+    ``None`` deliberately fails closed when neither source can establish a safe
+    Official cap.
     """
     direct_context = _positive_int(direct_context_window)
     direct_max = _positive_int(direct_max_context_window)
@@ -84,15 +93,15 @@ def resolve_official_context_budget(
         direct_auto_compact_token_limit is not None
         and direct_auto_compact is None
     )
-    trusted_current_direct = (
-        direct_source == CURRENT_DIRECT_OFFICIAL_SOURCE
+    trusted_fresh_direct = (
+        direct_source in TRUSTED_FRESH_OFFICIAL_CONTEXT_SOURCES
         and freshness == "fresh"
         and direct_context is not None
         and direct_percent is not None
         and not direct_is_contradictory
     )
 
-    if trusted_current_direct:
+    if trusted_fresh_direct:
         effective_percent = direct_percent
         effective_window = max(1, direct_context * effective_percent // 100)
         auto_compact_limit = _auto_compact_limit(
@@ -107,7 +116,7 @@ def resolve_official_context_budget(
             effective_context_window=effective_window,
             model_context_window=direct_context,
             model_auto_compact_token_limit=auto_compact_limit,
-            source=CURRENT_DIRECT_OFFICIAL_SOURCE,
+            source=direct_source,
             freshness="fresh",
         )
 
