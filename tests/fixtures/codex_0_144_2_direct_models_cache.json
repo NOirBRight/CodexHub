@@ -1,8 +1,8 @@
 {
   "fixture_version": 1,
-  "description": "Sanitized fresh Direct Official models cache shape paired with the Codex 0.144.2 no-numeric model/list fixture. Provenance markers are placeholders only and never become catalog diagnostics.",
+  "description": "Sanitized fresh Direct Official models cache shape paired with the Codex 0.144.2 no-numeric model/list fixture, including its unrelated internal entry. Provenance markers are placeholders only and never become catalog diagnostics.",
   "etag": "sanitized-direct-cache-etag",
-  "client_version": "0.144.1",
+  "client_version": "0.144.2",
   "fetched_at": "2026-07-15T03:21:42.227236100Z",
   "models": [
     {
@@ -28,23 +28,34 @@
     },
     {
       "slug": "gpt-5.5",
+      "context_window": 272000,
+      "max_context_window": 272000,
+      "effective_context_window_percent": 95,
       "comp_hash": "sanitized-config-marker-5-5"
     },
     {
       "slug": "gpt-5.4",
+      "context_window": 272000,
+      "max_context_window": 1000000,
+      "effective_context_window_percent": 95,
       "comp_hash": "sanitized-config-marker-5-4"
     },
     {
       "slug": "gpt-5.4-mini",
+      "context_window": 272000,
+      "max_context_window": 272000,
+      "effective_context_window_percent": 95,
       "comp_hash": "sanitized-config-marker-5-4-mini"
     },
     {
       "slug": "gpt-5.3-codex-spark",
+      "context_window": 128000,
+      "max_context_window": 128000,
+      "effective_context_window_percent": 95,
       "comp_hash": "sanitized-config-marker-spark"
     },
     {
-      "slug": "gpt-5.6-extra",
-      "comp_hash": "sanitized-config-marker-extra"
+      "slug": "codex-auto-review"
     }
   ]
 }
