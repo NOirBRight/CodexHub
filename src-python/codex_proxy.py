@@ -141,6 +141,30 @@ OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
 OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
 OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
+_OFFICIAL_ATTEMPT_CONNECTION_STATE = threading.local()
+
+
+def _reset_official_attempt_connection_disposition() -> None:
+    """Clear the per-thread lease label before a new Official pool request."""
+
+    _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = "unobserved"
+
+
+def _set_official_attempt_connection_disposition(disposition: str) -> None:
+    if disposition in {"new", "reused"}:
+        _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = disposition
+
+
+def _official_attempt_connection_disposition() -> str:
+    disposition = getattr(_OFFICIAL_ATTEMPT_CONNECTION_STATE, "disposition", "unobserved")
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _clear_official_attempt_connection_disposition() -> None:
+    try:
+        del _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition
+    except AttributeError:
+        pass
 
 
 def _official_socket_options() -> list[tuple[int, int, int]]:
@@ -198,6 +222,7 @@ class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
             connection._codexhub_diagnostic_connection_disposition = disposition
         except Exception:
             pass
+        _set_official_attempt_connection_disposition(disposition)
         return connection
 
     def _put_conn(self, connection: Any) -> None:
@@ -371,6 +396,7 @@ def _stdlib_transport_error(exc: BaseException) -> BaseException:
 def _official_urlopen(request: Request, *, timeout: float) -> Any:
     manager = _official_pool_manager(request.full_url)
     headers = {key: value for key, value in request.header_items() if key.lower() != "connection"}
+    _reset_official_attempt_connection_disposition()
     try:
         response = manager.request(
             request.get_method(),
@@ -386,7 +412,15 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
         )
     except urllib3.exceptions.HTTPError as exc:
         translated = _stdlib_transport_error(exc)
+        disposition = _official_attempt_connection_disposition()
+        if disposition != "unobserved":
+            try:
+                setattr(translated, "_codexhub_diagnostic_connection_disposition", disposition)
+            except Exception:
+                pass
         raise translated from exc
+    finally:
+        _clear_official_attempt_connection_disposition()
 
     pooled_response = _OfficialPooledResponse(response)
     if response.status >= 400:
@@ -1441,6 +1475,16 @@ def _diagnostic_response_metadata(response: Any) -> tuple[Any, Any]:
 def _diagnostic_connection_disposition(response: Any) -> str:
     try:
         disposition = getattr(response, "connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _diagnostic_error_connection_disposition(exc: BaseException) -> str:
+    """Read only the safe lease label attached to an Official transport error."""
+
+    try:
+        disposition = getattr(exc, "_codexhub_diagnostic_connection_disposition", "unobserved")
     except Exception:
         return "unobserved"
     return disposition if disposition in {"new", "reused"} else "unobserved"
@@ -10844,6 +10888,7 @@ def _open_upstream_response(
             return response
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            connection_disposition = _diagnostic_error_connection_disposition(exc)
             try:
                 failure_phase = transport_failure_phase(exc)
             except Exception:
@@ -10871,7 +10916,7 @@ def _open_upstream_response(
                     elapsed_ms=elapsed_ms,
                     outcome="error",
                     failure_phase=failure_phase,
-                    connection_disposition="unobserved",
+                    connection_disposition=connection_disposition,
                     provider=upstream_name,
                     model=diagnostic_model,
                 )
@@ -10891,7 +10936,7 @@ def _open_upstream_response(
                 elapsed_ms=elapsed_ms,
                 outcome="error",
                 failure_phase=failure_phase,
-                connection_disposition="unobserved",
+                connection_disposition=connection_disposition,
                 provider=upstream_name,
                 model=diagnostic_model,
             )
