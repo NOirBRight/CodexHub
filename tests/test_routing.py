@@ -7028,6 +7028,205 @@ class RoutingTests(unittest.TestCase):
                 self.assertNotIn("input", adapter_event)
                 self.assertNotIn("patch", adapter_event)
 
+    def test_apply_patch_adapter_rejection_is_nonretryable_json_without_replay(self):
+        private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
+        malformed_item = {
+            "id": "fc_apply_patch",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "arguments": json.dumps({"patch": private_patch, "unexpected": True}),
+        }
+        upstream_body = json.dumps({"id": "resp_apply_patch", "output": [malformed_item]}).encode("utf-8")
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Apply the patch."}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        client_attempts = 0
+        with patch(
+            "codex_proxy._open_upstream_response",
+            side_effect=[FakeContextResponse(upstream_body) for _ in range(6)],
+        ) as open_upstream:
+            for _ in range(6):
+                client_attempts += 1
+                handler, fake = post_handler("/v1/responses", request_body)
+                CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+                payload = json.loads(b"".join(fake.wfile.writes))
+                if fake.status not in codex_proxy.TRANSIENT_HTTP_RETRY_STATUSES:
+                    break
+
+        self.assertEqual(client_attempts, 1)
+        self.assertEqual(open_upstream.call_count, 1)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("upstream_retry", event_names)
+        self.assertNotIn("sse_retry_notice", event_names)
+        self.assertEqual(fake.status, 400)
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["error"],
+            "invalid_apply_patch_function_call",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["failure_class"],
+            codex_proxy.RETRY_FAILURE_PERMANENT,
+        )
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+        rendered_payload = json.dumps(payload)
+        self.assertNotIn("arguments_not_exact", rendered_payload)
+        self.assertNotIn(private_patch, rendered_payload)
+
+    def test_apply_patch_adapter_rejection_is_nonretryable_sse_without_replay(self):
+        private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
+        malformed_item = {
+            "id": "fc_apply_patch",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "arguments": json.dumps({"patch": private_patch, "unexpected": True}),
+        }
+        upstream_events = [
+            {"type": "response.created", "response": {"id": "resp_apply_patch", "output": []}},
+            {"type": "response.output_item.done", "output_index": 0, "item": malformed_item},
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in upstream_events] + [b""]
+        )
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Apply the patch."}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", request_body)
+
+        with patch("codex_proxy._open_upstream_response", return_value=response) as open_upstream:
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(open_upstream.call_count, 1)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("upstream_retry", event_names)
+        self.assertNotIn("sse_retry_notice", event_names)
+        self.assertEqual(fake.status, 200)
+        frames = b"".join(fake.wfile.writes).split(b"\n\n")
+        error_frame = next(frame for frame in frames if frame.startswith(b"event: error\n"))
+        error_line = next(line for line in error_frame.splitlines() if line.startswith(b"data: "))
+        payload = json.loads(error_line.removeprefix(b"data: "))
+        self.assertEqual(payload["type"], "invalid_request_error")
+        self.assertEqual(payload["status"], 400)
+        self.assertEqual(payload["error"], "invalid_apply_patch_function_call")
+        self.assertEqual(payload["failure_class"], codex_proxy.RETRY_FAILURE_PERMANENT)
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+        self.assertNotIn("arguments_not_exact", json.dumps(payload))
+        self.assertNotIn(private_patch, json.dumps(payload))
+
+    def test_unrelated_protocol_translation_error_is_nonretryable_json_client_error(self):
+        translation_error = codex_proxy.UpstreamProtocolTranslationError(
+            codex_proxy.UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Unsupported response semantics.",
+            )
+        )
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Return a response."}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", request_body)
+
+        with (
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b"{}"),
+            ) as open_upstream,
+            patch.object(
+                CodexProxyHandler,
+                "_relay_upstream_response",
+                side_effect=translation_error,
+            ) as relay_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(open_upstream.call_count, 1)
+        relay_upstream.assert_called_once()
+        self.assertEqual(fake.status, 400)
+        payload = json.loads(b"".join(fake.wfile.writes))
+        self.assertEqual(payload["codexhub_error"]["code"], "upstream.error")
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["error"],
+            "unsupported_protocol_semantics",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["type"],
+            "unsupported_protocol_semantics",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["failure_class"],
+            codex_proxy.RETRY_FAILURE_PERMANENT,
+        )
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+
+    def test_unrelated_protocol_translation_sse_keeps_stream_error_envelope(self):
+        translation_error = codex_proxy.UpstreamProtocolTranslationError(
+            codex_proxy.UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Unsupported response semantics.",
+            )
+        )
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Return a response."}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", request_body)
+
+        def relay_after_sse_headers(*args, **kwargs):
+            CodexProxyHandler._send_sse_headers(handler, 200, "volcengine")
+            kwargs["mark_downstream_sse_started"]()
+            raise translation_error
+
+        with (
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b"{}"),
+            ) as open_upstream,
+            patch.object(
+                CodexProxyHandler,
+                "_relay_upstream_response",
+                side_effect=relay_after_sse_headers,
+            ) as relay_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(open_upstream.call_count, 1)
+        relay_upstream.assert_called_once()
+        self.assertEqual(fake.status, 200)
+        frames = b"".join(fake.wfile.writes).split(b"\n\n")
+        error_frame = next(frame for frame in frames if frame.startswith(b"event: error\n"))
+        error_line = next(line for line in error_frame.splitlines() if line.startswith(b"data: "))
+        payload = json.loads(error_line.removeprefix(b"data: "))
+        self.assertEqual(payload["type"], "upstream_stream_error")
+        self.assertEqual(payload["status"], 400)
+        self.assertEqual(payload["error"], "unsupported_protocol_semantics")
+        self.assertEqual(payload["retry_owner"], "client")
+        self.assertEqual(payload["failure_class"], codex_proxy.RETRY_FAILURE_PERMANENT)
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["codexhub_error"]["code"], "upstream.error")
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["type"],
+            "upstream_stream_error",
+        )
+
     def test_apply_patch_adapter_rejects_conflicting_item_fields_and_custom_call_id_collisions(self):
         fixture = _load_glm_apply_patch_retry_fixture()
         arguments = json.dumps({"patch": fixture["patch"]})
