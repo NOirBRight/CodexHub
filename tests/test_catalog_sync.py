@@ -643,6 +643,62 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(snapshot.context_freshness, "stale")
         self.assertNotEqual(snapshot.source, "current_direct_official")
 
+    def test_codex_0_144_2_seven_model_fixture_without_numeric_context_fails_closed(self):
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_0_144_2_model_list_without_context_fields.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        raw_models = fixture["data"]
+        seed_models = [
+            {
+                **model,
+                "slug": model["model"],
+                "display_name": model["displayName"],
+            }
+            for model in raw_models
+        ]
+        snapshot = catalog_sync.OfficialSeedSnapshot(
+            models=seed_models,
+            source="current_direct_official",
+            context_freshness="fresh",
+        )
+        signals = catalog_sync.official_context_signals_from_snapshot(snapshot)
+        catalog = build_codex_catalog(
+            snapshot.models,
+            [],
+            catalog_sync.load_policy(catalog_sync.POLICY_PATH),
+            "0.144.2",
+            official_context_signals=signals,
+        )
+        expected_slugs = [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+        ]
+        numeric_context_fields = (
+            "context_window",
+            "max_context_window",
+            "effective_context_window_percent",
+            "auto_compact_token_limit",
+        )
+
+        self.assertEqual([model["slug"] for model in catalog["models"]], expected_slugs)
+        for slug in expected_slugs:
+            with self.subTest(slug=slug):
+                self.assertTrue(all(signals[slug][field] is None for field in numeric_context_fields))
+                model = next(model for model in catalog["models"] if model["slug"] == slug)
+                self.assertTrue(all(field not in model for field in numeric_context_fields))
+                self.assertEqual(
+                    model["codex_proxy_metadata"]["official_context_budget"],
+                    {"source": "current_direct_official", "freshness": "fresh"},
+                )
+
     def test_stale_direct_snapshot_can_only_reuse_a_previously_resolved_budget(self):
         snapshot = catalog_sync.OfficialSeedSnapshot(
             models=[{"slug": "gpt-5.5", "context_window": 400_000}],

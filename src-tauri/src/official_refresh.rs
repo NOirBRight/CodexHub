@@ -825,6 +825,49 @@ mod tests {
     }
 
     #[test]
+    fn codex_0_144_2_model_list_without_numeric_context_fields_fails_publication_closed() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/codex_0_144_2_model_list_without_context_fields.json"
+        ))
+        .expect("current Codex model/list fixture");
+        let models = fixture["data"].as_array().expect("fixture model list");
+        assert_eq!(models.len(), 7);
+        assert!(models.iter().all(|model| {
+            [
+                "context_window",
+                "max_context_window",
+                "contextWindow",
+                "maxContextWindow",
+                "effective_context_window_percent",
+                "effectiveContextWindowPercent",
+                "auto_compact_token_limit",
+                "autoCompactTokenLimit",
+            ]
+            .iter()
+            .all(|field| model.get(*field).is_none())
+        }));
+
+        let mut state = OfficialRefreshState::default();
+        record_attempt(&mut state, RefreshTrigger::Manual, 2_000, false);
+        let error = finalize_published_snapshot(
+            &mut state,
+            2_000,
+            true,
+            || Ok(()),
+            BTreeMap::new,
+            || panic!("runtime projection must not run without a safe budget"),
+        )
+        .expect_err("missing numeric context authority must fail publication closed");
+
+        assert_eq!(
+            error,
+            "published Official catalog contains no safe resolved context budget"
+        );
+        assert!(!state.publication_ready);
+        assert_eq!(state.last_success_at, None);
+    }
+
+    #[test]
     fn publication_finalization_updates_runtime_before_marking_the_snapshot_current() {
         let mut state = OfficialRefreshState::default();
         record_attempt(&mut state, RefreshTrigger::Manual, 2_000, false);
