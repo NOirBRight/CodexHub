@@ -62,6 +62,9 @@ class ModelConfig:
     supported_reasoning_levels: tuple[str, ...] = ()
     default_reasoning_level: str | None = None
     tool_surface_strategy: str | None = None
+    _bundled_tool_surface_strategy: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     sort_order: int = 0
     enabled: bool = True
     codex_enabled: bool = True
@@ -78,6 +81,12 @@ class ProviderConfig:
     available_upstream_formats: tuple[str, ...] = ()
     tool_protocol: str = "auto"
     tool_surface_strategy: str = "eager"
+    _tool_surface_strategy_explicit: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
+    _bundled_tool_surface_strategy: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     reports_cached_input_tokens: bool = False
     display_prefix: str | None = None
     sort_order: int = 0
@@ -357,6 +366,13 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
         return []
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    providers = _providers_from_data(data)
+    if path.resolve() != DEFAULT_PROVIDERS_PATH.resolve():
+        _apply_bundled_tool_surface_strategy_defaults(providers)
+    return providers
+
+
+def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
     raw_providers = data.get("providers", [])
     if not isinstance(raw_providers, list):
         raise ValueError("providers must be an array of tables")
@@ -394,6 +410,10 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             )
             indexed_models.append((model_index, model))
 
+        provider_tool_surface_strategy = _tool_surface_strategy_field(
+            raw_provider.get("tool_surface_strategy"), default="eager"
+        )
+        assert provider_tool_surface_strategy is not None
         provider = ProviderConfig(
             id=_string_field(raw_provider.get("id")),
             name=_string_field(raw_provider.get("name")),
@@ -402,18 +422,103 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
             upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
             available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
             tool_protocol=_tool_protocol_field(raw_provider.get("tool_protocol")),
-            tool_surface_strategy=_tool_surface_strategy_field(
-                raw_provider.get("tool_surface_strategy"), default="eager"
-            ),
+            tool_surface_strategy=provider_tool_surface_strategy,
             reports_cached_input_tokens=_bool_field(raw_provider.get("reports_cached_input_tokens"), False),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
             models=_sort_by_order(indexed_models),
         )
+        provider._tool_surface_strategy_explicit = "tool_surface_strategy" in raw_provider
         indexed_providers.append((provider_index, provider))
 
     return _sort_by_order(indexed_providers)
+
+
+def _apply_bundled_tool_surface_strategy_defaults(runtime_providers: Iterable[ProviderConfig]) -> None:
+    runtime_providers = list(runtime_providers)
+    if not _providers_require_bundled_tool_surface_defaults(runtime_providers):
+        return
+
+    try:
+        bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+        bundled_providers = _providers_from_data(bundled_data)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "bundled providers configuration is required to resolve omitted tool_surface_strategy"
+        ) from exc
+
+    bundled_by_id = _provider_config_index_by_id(bundled_providers)
+    for runtime_provider in runtime_providers:
+        bundled_provider = bundled_by_id.get(_canonical_config_identifier(runtime_provider.id))
+        if bundled_provider is None:
+            continue
+
+        if not _provider_tool_surface_strategy_is_explicit(runtime_provider):
+            runtime_provider._bundled_tool_surface_strategy = _bundled_provider_tool_surface_strategy(
+                bundled_provider
+            )
+
+        bundled_models_by_id = _model_config_index_by_identifier(bundled_provider.models)
+        for runtime_model in runtime_provider.models:
+            if runtime_model.tool_surface_strategy is not None:
+                continue
+            bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
+            if bundled_model is not None:
+                runtime_model._bundled_tool_surface_strategy = bundled_model.tool_surface_strategy
+
+
+def _providers_require_bundled_tool_surface_defaults(providers: Iterable[ProviderConfig]) -> bool:
+    return any(model.tool_surface_strategy is None for provider in providers for model in provider.models)
+
+
+def _provider_tool_surface_strategy_is_explicit(provider: ProviderConfig) -> bool:
+    strategy = _tool_surface_strategy_field(provider.tool_surface_strategy, default="eager")
+    assert strategy is not None
+    return provider._tool_surface_strategy_explicit or strategy != "eager"
+
+
+def _bundled_provider_tool_surface_strategy(provider: ProviderConfig) -> str | None:
+    if not _provider_tool_surface_strategy_is_explicit(provider):
+        return None
+    return _tool_surface_strategy_field(provider.tool_surface_strategy, default=None)
+
+
+def _canonical_config_identifier(value: Any) -> str:
+    return canonical_model_id(_string_field(value))
+
+
+def _canonical_config_identifiers(values: Iterable[Any]) -> tuple[str, ...]:
+    identifiers: list[str] = []
+    for value in values:
+        identifier = _canonical_config_identifier(value)
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
+    return tuple(identifiers)
+
+
+def _provider_config_index_by_id(providers: Iterable[ProviderConfig]) -> dict[str, ProviderConfig]:
+    result: dict[str, ProviderConfig] = {}
+    for provider in providers:
+        for identifier in _canonical_config_identifiers((provider.id,)):
+            result.setdefault(identifier, provider)
+    return result
+
+
+def _model_config_index_by_identifier(models: Iterable[ModelConfig]) -> dict[str, ModelConfig]:
+    result: dict[str, ModelConfig] = {}
+    for model in models:
+        for identifier in _canonical_config_identifiers((model.id, *model.aliases)):
+            result.setdefault(identifier, model)
+    return result
+
+
+def _matching_model_config(model: ModelConfig, index: dict[str, ModelConfig]) -> ModelConfig | None:
+    for identifier in _canonical_config_identifiers((model.id, *model.aliases)):
+        bundled_model = index.get(identifier)
+        if bundled_model is not None:
+            return bundled_model
+    return None
 
 
 def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PROVIDERS_PATH) -> None:
@@ -444,7 +549,7 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
         provider_tool_surface_strategy = _tool_surface_strategy_field(
             provider.tool_surface_strategy, default="eager"
         )
-        if provider_tool_surface_strategy != "eager":
+        if provider._tool_surface_strategy_explicit or provider_tool_surface_strategy != "eager":
             chunks.append(_toml_string_line("tool_surface_strategy", provider_tool_surface_strategy))
         if provider.reports_cached_input_tokens:
             chunks.append(_toml_bool_line("reports_cached_input_tokens", provider.reports_cached_input_tokens))
@@ -636,8 +741,20 @@ def _resolved_tool_surface_strategy(provider: ProviderConfig, model: ModelConfig
     model_strategy = _tool_surface_strategy_field(model.tool_surface_strategy, default=None)
     if model_strategy is not None:
         return model_strategy
+    bundled_model_strategy = _tool_surface_strategy_field(
+        model._bundled_tool_surface_strategy, default=None
+    )
+    if bundled_model_strategy is not None:
+        return bundled_model_strategy
     provider_strategy = _tool_surface_strategy_field(provider.tool_surface_strategy, default="eager")
     assert provider_strategy is not None
+    if _provider_tool_surface_strategy_is_explicit(provider):
+        return provider_strategy
+    bundled_provider_strategy = _tool_surface_strategy_field(
+        provider._bundled_tool_surface_strategy, default=None
+    )
+    if bundled_provider_strategy is not None:
+        return bundled_provider_strategy
     return provider_strategy
 
 
