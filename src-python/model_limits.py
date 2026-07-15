@@ -50,6 +50,7 @@ def _auto_compact_limit(
     native_limit = context_window * NATIVE_AUTO_COMPACT_PERCENT // 100
     return min(
         requested_limit if requested_limit is not None else native_limit,
+        native_limit,
         effective_context_window,
     )
 

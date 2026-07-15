@@ -99,6 +99,35 @@ class ResolvedModelLimitsTests(unittest.TestCase):
         self.assertEqual(budget.model_auto_compact_token_limit, 244_800)
         self.assertLess(budget.model_auto_compact_token_limit, 249_433)
 
+    def test_explicit_direct_compact_threshold_cannot_expand_past_native_ninety_percent(self):
+        for source in (
+            CURRENT_DIRECT_OFFICIAL_SOURCE,
+            FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+        ):
+            with self.subTest(source=source):
+                budget = resolve_official_context_budget(
+                    direct_context_window=272_000,
+                    direct_max_context_window=272_000,
+                    direct_effective_context_window_percent=95,
+                    direct_auto_compact_token_limit=258_400,
+                    direct_freshness="fresh",
+                    direct_source=source,
+                )
+
+                self.assertEqual(budget.source, source)
+                self.assertEqual(budget.effective_context_window, 258_400)
+                self.assertEqual(budget.model_auto_compact_token_limit, 244_800)
+
+        lower_explicit = resolve_official_context_budget(
+            direct_context_window=272_000,
+            direct_max_context_window=272_000,
+            direct_effective_context_window_percent=95,
+            direct_auto_compact_token_limit=200_000,
+            direct_freshness="fresh",
+            direct_source=FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+        )
+        self.assertEqual(lower_explicit.model_auto_compact_token_limit, 200_000)
+
     def test_fresh_direct_cache_authority_can_tighten_or_adopt_a_higher_budget(self):
         lower = resolve_official_context_budget(
             direct_context_window=272_000,
