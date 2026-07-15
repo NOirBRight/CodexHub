@@ -51,6 +51,7 @@ const tauriConfigSourcePath = new URL("../../src-tauri/src/config.rs", import.me
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
 const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
+const tauriOfficialRefreshPath = new URL("../../src-tauri/src/official_refresh.rs", import.meta.url);
 const tauriWebBridgePath = new URL("../../src-tauri/src/web_bridge.rs", import.meta.url);
 const i18nIndexPath = new URL("../src/i18n/index.ts", import.meta.url);
 const enLocalePath = new URL("../src/i18n/locales/en-US.ts", import.meta.url);
@@ -2099,6 +2100,85 @@ test("official alias merge keeps all-false disabled and ORs any true", async () 
     assert.equal(merged.length, 1, item.name);
     assert.equal(merged[0].enabled, item.expected, item.name);
   }
+});
+
+test("published Official catalog context limits outrank stale metadata after refresh", async () => {
+  const [providersSource, settingsSource] = await Promise.all([
+    readProviderContractSource(),
+    readFile(settingsLibPath, "utf8"),
+  ]);
+  const functionNames = [
+    "mergeOfficialModelSources",
+    "officialModelIdSet",
+    "isOfficialModel",
+    "filterCodexVisibleOfficialModels",
+    "isOfficialGatewayFastVariant",
+  ];
+  const blocks = functionNames.map((name) => {
+    const block = providersSource.match(new RegExp(`function ${name}\\([\\s\\S]*?^}`, "m"))?.[0];
+    assert.ok(block, `${name} source`);
+    return block;
+  });
+  const normalizeSource = settingsSource.match(/export function normalizeOfficialModelId[\s\S]*?^}/m)?.[0] ?? "";
+  const javascript = ts.transpileModule(
+    `${normalizeSource}\n${blocks.join("\n")}\nexport { mergeOfficialModelSources };`,
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { mergeOfficialModelSources } = await import(moduleUrl);
+
+  const [model] = mergeOfficialModelSources(
+    [{
+      id: "openai/gpt-5.6-terra",
+      context_window: 272000,
+      max_context_window: 272000,
+      effective_source: "fresh_direct_official_cache_authority",
+      max_source: "fresh_direct_official_cache_authority",
+      confidence: "verified",
+      verified_at: "2026-07-15T03:21:42Z",
+      display_name: "Published Terra",
+      enabled: false,
+    }],
+    [{
+      id: "gpt-5.6-terra",
+      context_window: 353400,
+      max_context_window: 353400,
+      effective_source: "pinned_metadata",
+      max_source: "pinned_metadata",
+      confidence: "fallback",
+      verified_at: "2025-01-01T00:00:00Z",
+      display_name: "Fresh metadata Terra",
+      default_reasoning_level: "high",
+      enabled: true,
+    }],
+  );
+
+  assert.equal(model.id, "gpt-5.6-terra");
+  assert.equal(model.context_window, 272000);
+  assert.equal(model.max_context_window, 272000);
+  assert.equal(model.effective_source, "fresh_direct_official_cache_authority");
+  assert.equal(model.max_source, "fresh_direct_official_cache_authority");
+  assert.equal(model.confidence, "verified");
+  assert.equal(model.verified_at, "2026-07-15T03:21:42Z");
+  assert.equal(model.display_name, "Fresh metadata Terra");
+  assert.equal(model.default_reasoning_level, "high");
+  assert.equal(model.enabled, true);
+});
+
+test("manual and quiet Official refresh expose only the post-publication catalog", async () => {
+  const [actionsSource, refreshSource] = await Promise.all([
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(tauriOfficialRefreshPath, "utf8"),
+  ]);
+  const refreshAction = actionsSource.match(/async function refreshOfficialModels[\s\S]*?(?=async function discoverForForm)/)?.[0] ?? "";
+  const refreshManual = refreshSource.match(/pub\(crate\) fn refresh_manual[\s\S]*?(?=pub\(crate\) fn refresh_after_resume)/)?.[0] ?? "";
+  const manualResultModels = refreshSource.match(/fn manual_refresh_models[\s\S]*?(?=fn published_official_catalog_models)/)?.[0] ?? "";
+
+  assert.match(refreshAction, /const quiet = options\?\.quiet \?\? false;/);
+  assert.match(refreshAction, /const refreshResult = await api\.refreshOfficialModels\(\);/);
+  assert.match(refreshManual, /let outcome = refresh\(RefreshTrigger::Manual\)\?;/);
+  assert.match(refreshManual, /models: manual_refresh_models\([\s\S]*?outcome\.snapshot_available,[\s\S]*?outcome\.models,[\s\S]*?published_official_catalog_models,/);
+  assert.match(manualResultModels, /if snapshot_available \{[\s\S]*?load_published_catalog\(\)[\s\S]*?\} else \{[\s\S]*?Ok\(outcome_models\)/);
 });
 
 test("official OpenAI controls are locked while Codex auth is missing", async () => {

@@ -183,10 +183,55 @@ pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
 }
 
 pub(crate) fn refresh_manual() -> Result<OfficialRefreshResult, String> {
-    refresh(RefreshTrigger::Manual).map(|outcome| OfficialRefreshResult {
-        models: outcome.models,
-        restart_required: outcome.restart_required,
+    let outcome = refresh(RefreshTrigger::Manual)?;
+    let restart_required = outcome.restart_required;
+    Ok(OfficialRefreshResult {
+        // The generated catalog is atomically published before refresh()
+        // succeeds.  Never let the raw acquisition vector (which can retain
+        // stale metadata defaults) bypass that resolved snapshot in the UI.
+        models: manual_refresh_models(
+            outcome.snapshot_available,
+            outcome.models,
+            published_official_catalog_models,
+        )?,
+        restart_required,
     })
+}
+
+fn manual_refresh_models<LoadPublishedCatalog>(
+    snapshot_available: bool,
+    outcome_models: Vec<Model>,
+    load_published_catalog: LoadPublishedCatalog,
+) -> Result<Vec<Model>, String>
+where
+    LoadPublishedCatalog: FnOnce() -> Result<Vec<Model>, String>,
+{
+    if snapshot_available {
+        load_published_catalog()
+    } else {
+        Ok(outcome_models)
+    }
+}
+
+fn published_official_catalog_models() -> Result<Vec<Model>, String> {
+    let models = models::list_models()
+        .map_err(|_| "failed to reload the published Official catalog".to_string())?;
+    published_official_models_from_catalog(models)
+}
+
+fn published_official_models_from_catalog(models: Vec<Model>) -> Result<Vec<Model>, String> {
+    let official_models = models
+        .into_iter()
+        .filter(|model| {
+            let id = model.id.trim();
+            let id = id.strip_prefix("openai/").unwrap_or(id);
+            id.starts_with("gpt-")
+        })
+        .collect::<Vec<_>>();
+    if official_models.is_empty() {
+        return Err("published Official catalog contains no current Official models".to_string());
+    }
+    Ok(official_models)
 }
 
 pub(crate) fn refresh_after_resume() -> Result<(), String> {
@@ -653,13 +698,15 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_refresh_due, finalize_published_snapshot, read_state, record_attempt,
-        published_context_budgets_from_catalog_payload, refresh_with_flight, should_attempt,
+        automatic_refresh_due, finalize_published_snapshot, manual_refresh_models, read_state,
+        record_attempt, published_context_budgets_from_catalog_payload,
+        published_official_models_from_catalog, refresh_with_flight, should_attempt,
         direct_official_refresh_failure_message, update_published_context_budgets, write_state,
         OfficialRefreshState,
         PublishedOfficialBudget, RefreshOutcome, RefreshTrigger, SingleFlight,
         OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
+    use crate::Model;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
@@ -758,6 +805,52 @@ mod tests {
             ),
             "Direct Official refresh failed: app-server unavailable; failed to publish a degraded safe snapshot: catalog publication failed"
         );
+    }
+
+    #[test]
+    fn manual_refresh_result_reloads_only_the_published_official_catalog_models() {
+        let prepublication_model = Model {
+            id: "gpt-5.6-terra".to_string(),
+            context_window: Some(353_400),
+            max_context_window: Some(353_400),
+            ..Model::default()
+        };
+        let catalog_models = vec![
+            Model {
+                id: "openai/gpt-5.6-terra".to_string(),
+                context_window: Some(272_000),
+                max_context_window: Some(272_000),
+                ..Model::default()
+            },
+            Model {
+                id: "anthropic/claude-test".to_string(),
+                context_window: Some(400_000),
+                max_context_window: Some(400_000),
+                ..Model::default()
+            },
+        ];
+
+        let models = manual_refresh_models(true, vec![prepublication_model.clone()], || {
+            published_official_models_from_catalog(catalog_models)
+        })
+        .expect("published Official catalog models");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "openai/gpt-5.6-terra");
+        assert_eq!(models[0].context_window, Some(272_000));
+        assert_eq!(models[0].max_context_window, Some(272_000));
+        assert_ne!(models[0].context_window, prepublication_model.context_window);
+        assert_ne!(models[0].max_context_window, prepublication_model.max_context_window);
+    }
+
+    #[test]
+    fn manual_refresh_preserves_disabled_official_models_as_an_empty_result() {
+        let models = manual_refresh_models(false, Vec::new(), || {
+            Err("disabled Official models must not reload a prior catalog".to_string())
+        })
+        .expect("disabled Official models preserve the original refresh outcome");
+
+        assert!(models.is_empty());
     }
 
     #[test]
