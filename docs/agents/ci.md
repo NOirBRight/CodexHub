@@ -1,6 +1,6 @@
 # CI and manual verification
 
-GitHub Actions runs the required PR validation for branches targeting `dev` and `main`.
+GitHub Actions runs the required PR validation for branches targeting `dev` and `main`. Local candidate checks are selected by `docs/agents/verification-policy.md`; they do not duplicate every CI job by default.
 
 ## CI jobs
 
@@ -11,9 +11,9 @@ GitHub Actions runs the required PR validation for branches targeting `dev` and 
 
 The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` file during CI because Tauri's resource glob requires at least one runtime Python resource file. The placeholder is not committed.
 
-## Manual fallback
+## Full manual fallback
 
-Use these commands when GitHub Actions is unavailable or before opening a PR:
+Use all of these commands when GitHub Actions is unavailable and the change must be integrated. Before opening a normal PR, run only the local suites selected by the verification policy:
 
 ```powershell
 python -m pytest -q

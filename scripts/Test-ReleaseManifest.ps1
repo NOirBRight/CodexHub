@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("stable", "beta")]
+    [ValidateSet("normal", "debug")]
     [string]$Flavor,
     [Parameter(Mandatory = $true)]
     [string]$Version,
@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
 
-Assert-ReleaseChannelVersion -Flavor $Flavor -Version $Version
+Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $Version
 
 foreach ($path in @($ManifestPath, $InstallerPath, $SignaturePath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -27,9 +27,8 @@ foreach ($path in @($ManifestPath, $InstallerPath, $SignaturePath)) {
 
 $manifestName = [System.IO.Path]::GetFileName($ManifestPath)
 $installerName = [System.IO.Path]::GetFileName($InstallerPath)
-$expectedManifestName = if ($Flavor -eq "beta") { "latest-beta.json" } else { "latest.json" }
-$expectedPrefix = if ($Flavor -eq "beta") { "CodexHubBeta" } else { "CodexHub" }
-$expectedInstallerName = "${expectedPrefix}_${Version}_x64-setup.exe"
+$expectedManifestName = Get-ReleaseManifestName -Flavor $Flavor
+$expectedInstallerName = Get-ReleaseArtifactName -Flavor $Flavor -Version $Version
 
 if ($manifestName -ne $expectedManifestName) {
     throw "$Flavor release manifest must be named $expectedManifestName."
@@ -45,6 +44,9 @@ $platform = $manifest.platforms."windows-x86_64"
 $signature = (Get-Content -Raw -LiteralPath $SignaturePath).Trim()
 if ($manifest.version -ne $Version) {
     throw "Manifest version does not match $Version."
+}
+if ($manifest.codexhub_flavor -ne $Flavor) {
+    throw "Manifest flavor does not match $Flavor."
 }
 if ([string]::IsNullOrWhiteSpace($signature) -or $platform.signature -ne $signature) {
     throw "Manifest signature does not match the paired signature artifact."

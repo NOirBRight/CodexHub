@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("stable", "beta")]
-    [string]$Flavor = "stable",
+    [ValidateSet("normal", "debug")]
+    [string]$Flavor = "normal",
     [string]$PrivateKeyPath = (Join-Path $env:USERPROFILE ".codexhub\codexhub-updater.key"),
     [string]$PrivateKeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
     [string]$ReleaseBaseUrl = "",
@@ -24,6 +24,7 @@ if ($null -eq $flavorConfig) {
 }
 $generatedTauriConfigPath = (& (Join-Path $PSScriptRoot "Build-TauriConfig.ps1") -Flavor $Flavor -RepoRoot $repoRoot).Trim()
 $tauriConfigPath = $generatedTauriConfigPath
+. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
 
 if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
     throw "Updater private key was not found: $PrivateKeyPath"
@@ -32,12 +33,14 @@ if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
 $tauriConfig = Get-Content -Raw -LiteralPath $tauriConfigPath | ConvertFrom-Json
 $productName = [string]$tauriConfig.productName
 $version = [string]$tauriConfig.version
+Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $version
 if ([string]::IsNullOrWhiteSpace($ReleaseBaseUrl)) {
     $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/download/v$version"
 }
-$bundleDir = Join-Path $tauriDir "target\release\bundle\nsis"
+$targetRoot = Get-FlavorTargetRoot -TauriDir $tauriDir -Flavor $Flavor
+$bundleDir = Join-Path $targetRoot "release\bundle\nsis"
 $assetPrefix = [string]$flavorConfig.releaseAssetPrefix
-$canonicalInstallerName = "{0}_{1}_x64-setup.exe" -f $assetPrefix, $version
+$canonicalInstallerName = Get-ReleaseArtifactName -Flavor $Flavor -Version $version
 
 $installerNameCandidates = [System.Collections.Generic.List[string]]::new()
 foreach ($nameCandidate in @(
@@ -100,6 +103,7 @@ $previousSigningKey = $env:TAURI_SIGNING_PRIVATE_KEY
 $previousSigningPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 $previousBuildFlavor = $env:CODEXHUB_BUILD_FLAVOR
 $previousTauriConfig = $env:TAURI_CONFIG
+$previousCargoTarget = $env:CARGO_TARGET_DIR
 
 try {
     $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path -LiteralPath $PrivateKeyPath).Path
@@ -111,6 +115,7 @@ try {
     }
     $env:CODEXHUB_BUILD_FLAVOR = $Flavor
     $env:TAURI_CONFIG = $generatedTauriConfigPath
+    $env:CARGO_TARGET_DIR = $targetRoot
 
     if (Test-Path -LiteralPath $bundleDir -PathType Container) {
         foreach ($installerName in $installerNameCandidates) {
@@ -122,7 +127,11 @@ try {
 
     Push-Location $tauriDir
     try {
-        & cargo tauri build --config $generatedTauriConfigPath --bundles nsis --ci
+        $tauriBuildArgs = @("tauri", "build", "--config", $generatedTauriConfigPath, "--bundles", "nsis", "--ci")
+        if ($Flavor -eq "debug") {
+            $tauriBuildArgs += @("--features", "debug-diagnostics")
+        }
+        & cargo @tauriBuildArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Tauri Windows release build failed with exit code $LASTEXITCODE."
         }
@@ -158,6 +167,13 @@ finally {
     }
     else {
         $env:TAURI_CONFIG = $previousTauriConfig
+    }
+
+    if ($null -eq $previousCargoTarget) {
+        Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:CARGO_TARGET_DIR = $previousCargoTarget
     }
 }
 
@@ -209,8 +225,14 @@ if ([string]::IsNullOrWhiteSpace($Notes)) {
 }
 
 $releaseBaseUrl = $ReleaseBaseUrl.TrimEnd("/")
+$sourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceRevision)) {
+    throw "Unable to resolve release build commit."
+}
 $manifest = [ordered]@{
     version = $version
+    codexhub_flavor = $Flavor
+    codexhub_source_revision = $sourceRevision
     notes = $Notes
     pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
     platforms = [ordered]@{
@@ -221,7 +243,7 @@ $manifest = [ordered]@{
     }
 }
 
-$manifestPath = Join-Path $bundleDir ([string]$flavorConfig.updaterManifestName)
+$manifestPath = Join-Path $bundleDir (Get-ReleaseManifestName -Flavor $Flavor)
 $manifestName = [System.IO.Path]::GetFileName($manifestPath)
 $manifestJson = $manifest | ConvertTo-Json -Depth 8
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false

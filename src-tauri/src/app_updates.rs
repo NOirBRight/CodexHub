@@ -1,4 +1,7 @@
-use crate::{runtime_paths, safe_file};
+use crate::{
+    build_info::{self, BuildFlavor},
+    runtime_paths, safe_file,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -7,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::AppHandle;
-use tauri_plugin_updater::{Error as UpdaterError, Updater, UpdaterExt};
+use tauri_plugin_updater::{Error as UpdaterError, Update, Updater, UpdaterExt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppVersionInfo {
@@ -67,6 +70,20 @@ struct UpdateCandidate {
     date: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct FlavorUpdateManifest {
+    version: String,
+    #[serde(default)]
+    codexhub_flavor: Option<BuildFlavor>,
+    platforms: std::collections::BTreeMap<String, FlavorUpdatePlatform>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlavorUpdatePlatform {
+    signature: String,
+    url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingUpdate {
     target_version: String,
@@ -84,20 +101,19 @@ pub fn get_app_version(app: AppHandle) -> AppVersionInfo {
 pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateStatus, String> {
     let current = current_version(&app);
     let checked_at = checked_at_now();
-    let update = updater(&app, "check for updates")?
-        .check()
-        .await
-        .map(|update| {
-            update.map(|update| UpdateCandidate {
+    let flavor = build_info::current().flavor;
+    let update = match updater(&app, "check for updates")?.check().await {
+        Ok(Some(update)) => {
+            validate_checked_update(&update, flavor)?;
+            Ok(Some(UpdateCandidate {
                 version: update.version.clone(),
                 notes: update.body.clone(),
                 date: update.date.as_ref().map(ToString::to_string),
-            })
-        });
-
-    if update_feed_is_missing(&update).await {
-        return Ok(no_update_status(current, checked_at));
-    }
+            }))
+        }
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
 
     status_from_update_check(current, checked_at, update)
 }
@@ -163,29 +179,172 @@ fn version_info(current_version: impl Into<String>) -> AppVersionInfo {
     }
 }
 
-#[cfg(debug_assertions)]
 fn updater(app: &AppHandle, action: &str) -> Result<Updater, String> {
-    let mut builder = app.updater_builder();
-    if let Ok(endpoint) = std::env::var("CODEXHUB_UPDATE_E2E_ENDPOINT") {
-        let endpoint = endpoint.trim();
-        if !endpoint.is_empty() {
-            let endpoint = endpoint
-                .parse()
-                .map_err(|error| operation_error(action, error))?;
-            builder = builder
-                .endpoints(vec![endpoint])
-                .map_err(|error| operation_error(action, error))?;
-        }
-    }
-    builder
+    let endpoints = configured_updater_endpoints()?;
+    app.updater_builder()
+        .endpoints(endpoints)
+        .map_err(|error| operation_error(action, error))?
         .build()
         .map_err(|error| updater_setup_error(action, error))
 }
 
-#[cfg(not(debug_assertions))]
-fn updater(app: &AppHandle, action: &str) -> Result<Updater, String> {
-    app.updater()
-        .map_err(|error| updater_setup_error(action, error))
+fn configured_updater_endpoints() -> Result<Vec<reqwest::Url>, String> {
+    #[cfg(debug_assertions)]
+    if let Some(endpoint) =
+        std::env::var_os("CODEXHUB_UPDATE_E2E_ENDPOINT").filter(|value| !value.is_empty())
+    {
+        let endpoint = endpoint.to_string_lossy().trim().to_string();
+        return endpoint
+            .parse()
+            .map(|endpoint| vec![endpoint])
+            .map_err(|error| operation_error("configure update endpoint", error));
+    }
+
+    build_info::current()
+        .flavor
+        .updater_endpoint()
+        .parse()
+        .map(|endpoint| vec![endpoint])
+        .map_err(|error| operation_error("configure update endpoint", error))
+}
+
+async fn checked_update(app: &AppHandle, action: &str) -> Result<Option<Update>, String> {
+    match updater(app, action)?.check().await {
+        Ok(update) => Ok(update),
+        Err(UpdaterError::ReleaseNotFound) => Ok(None),
+        Err(error) => Err(operation_error(action, error)),
+    }
+}
+
+fn parse_flavor_manifest(
+    manifest: &str,
+    expected_flavor: BuildFlavor,
+) -> Result<FlavorUpdateManifest, String> {
+    serde_json::from_str(manifest).map_err(|error| {
+        format!(
+            "Rejected {} update manifest: invalid JSON or flavor metadata: {error}",
+            expected_flavor.as_str()
+        )
+    })
+}
+
+#[cfg(test)]
+fn validate_flavor_manifest(manifest: &str, expected_flavor: BuildFlavor) -> Result<(), String> {
+    let manifest = parse_flavor_manifest(manifest, expected_flavor)?;
+    validate_flavor_manifest_data(&manifest, expected_flavor)
+}
+
+fn validate_flavor_manifest_data(
+    manifest: &FlavorUpdateManifest,
+    expected_flavor: BuildFlavor,
+) -> Result<(), String> {
+    let version = manifest.version.trim();
+    if version.is_empty() {
+        return Err(format!(
+            "Rejected {} update manifest: version is empty.",
+            expected_flavor.as_str()
+        ));
+    }
+
+    match manifest.codexhub_flavor {
+        Some(actual_flavor) if actual_flavor == expected_flavor => {}
+        Some(actual_flavor) => {
+            return Err(format!(
+                "Rejected {} update manifest: manifest declares {}.",
+                expected_flavor.as_str(),
+                actual_flavor.as_str()
+            ));
+        }
+        None if expected_flavor.accepts_legacy_flavorless_manifest() => {}
+        None => {
+            return Err(format!(
+                "Rejected {} update manifest: codexhub_flavor is required.",
+                expected_flavor.as_str()
+            ));
+        }
+    }
+
+    let platform = manifest.platforms.get("windows-x86_64").ok_or_else(|| {
+        format!(
+            "Rejected {} update manifest: windows-x86_64 artifact is missing.",
+            expected_flavor.as_str()
+        )
+    })?;
+    if platform.signature.trim().is_empty() {
+        return Err(format!(
+            "Rejected {} update manifest: artifact signature is empty.",
+            expected_flavor.as_str()
+        ));
+    }
+
+    let url: reqwest::Url = platform.url.parse().map_err(|error| {
+        format!(
+            "Rejected {} update manifest: artifact URL is invalid: {error}",
+            expected_flavor.as_str()
+        )
+    })?;
+    let expected_name = expected_flavor.installer_name(version);
+    if !url.path().ends_with(&format!("/{expected_name}")) {
+        return Err(format!(
+            "Rejected {} update manifest: expected artifact {expected_name}, got {}.",
+            expected_flavor.as_str(),
+            url.path()
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_checked_update(update: &Update, expected_flavor: BuildFlavor) -> Result<(), String> {
+    let raw_manifest = serde_json::to_string(&update.raw_json).map_err(|error| {
+        format!(
+            "Rejected {} update manifest: unable to encode updater response: {error}",
+            expected_flavor.as_str()
+        )
+    })?;
+    validate_checked_update_payload(
+        &raw_manifest,
+        &update.version,
+        update.download_url.as_str(),
+        expected_flavor,
+    )
+}
+
+fn validate_checked_update_payload(
+    raw_manifest: &str,
+    selected_version: &str,
+    selected_download_url: &str,
+    expected_flavor: BuildFlavor,
+) -> Result<(), String> {
+    let manifest = parse_flavor_manifest(raw_manifest, expected_flavor)?;
+    validate_flavor_manifest_data(&manifest, expected_flavor)?;
+
+    let manifest_version = manifest.version.trim();
+    if manifest_version != selected_version.trim() {
+        return Err(format!(
+            "Rejected {} update: updater selected version {}, but its checked manifest declares {}.",
+            expected_flavor.as_str(),
+            selected_version,
+            manifest.version
+        ));
+    }
+
+    let selected_url: reqwest::Url = selected_download_url.parse().map_err(|error| {
+        format!(
+            "Rejected {} update: updater selected an invalid artifact URL: {error}",
+            expected_flavor.as_str()
+        )
+    })?;
+    let expected_name = expected_flavor.installer_name(manifest_version);
+    if !selected_url.path().ends_with(&format!("/{expected_name}")) {
+        return Err(format!(
+            "Rejected {} update: updater selected {}, expected {expected_name}.",
+            expected_flavor.as_str(),
+            selected_url.path()
+        ));
+    }
+
+    Ok(())
 }
 
 fn no_update_status(
@@ -235,17 +394,14 @@ fn status_from_update_check(
 
 async fn run_app_update_install(app: AppHandle) -> Result<(), String> {
     let current = current_version(&app);
-    let Some(update) = updater(&app, "install update")?
-        .check()
-        .await
-        .map_err(|error| operation_error("install update", error))?
-    else {
+    let Some(update) = checked_update(&app, "install update").await? else {
         set_install_status(install_status_idle_with_message(
             current,
             "CodexHub is already up to date.",
         ));
         return Ok(());
     };
+    validate_checked_update(&update, build_info::current().flavor)?;
 
     let target = update.version.clone();
     set_install_status(AppUpdateInstallStatus {
@@ -491,45 +647,6 @@ fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-async fn update_feed_is_missing(update: &Result<Option<UpdateCandidate>, UpdaterError>) -> bool {
-    let Err(error) = update else {
-        return false;
-    };
-    if matches!(error, UpdaterError::ReleaseNotFound) {
-        return true;
-    }
-    let Some(url) = update_error_url(error) else {
-        return false;
-    };
-    if !is_github_latest_update_manifest_url(&url) {
-        return false;
-    }
-    update_manifest_returns_not_found(&url).await
-}
-
-fn update_error_url(error: &UpdaterError) -> Option<String> {
-    match error {
-        UpdaterError::Reqwest(error) => error.url().map(ToString::to_string),
-        _ => None,
-    }
-}
-
-fn is_github_latest_update_manifest_url(url: &str) -> bool {
-    url.starts_with("https://github.com/") && url.contains("/releases/latest/download/latest.json")
-}
-
-async fn update_manifest_returns_not_found(url: &str) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-    else {
-        return false;
-    };
-    response.status() == reqwest::StatusCode::NOT_FOUND
-}
-
 fn operation_error(action: &str, error: impl std::fmt::Display) -> String {
     format!("Failed to {action}: {error}")
 }
@@ -629,16 +746,97 @@ mod tests {
     }
 
     #[test]
-    fn missing_feed_probe_is_limited_to_github_latest_update_manifests() {
-        assert!(is_github_latest_update_manifest_url(
-            "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
-        ));
-        assert!(!is_github_latest_update_manifest_url(
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.0/latest.json",
-        ));
-        assert!(!is_github_latest_update_manifest_url(
-            "https://example.com/releases/latest/download/latest.json",
-        ));
+    fn normal_manifest_keeps_flavorless_latest_json_backward_compatibility() {
+        let manifest = flavor_manifest(
+            None,
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+        );
+
+        assert_eq!(
+            validate_flavor_manifest(&manifest, BuildFlavor::Normal),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn debug_manifest_requires_matching_flavor_metadata_and_artifact_name() {
+        let manifest = flavor_manifest(
+            Some("debug"),
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
+        );
+
+        assert_eq!(
+            validate_flavor_manifest(&manifest, BuildFlavor::Debug),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn updater_rejects_cross_flavor_manifest_before_download() {
+        let manifest = flavor_manifest(
+            Some("normal"),
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+        );
+
+        let error = validate_flavor_manifest(&manifest, BuildFlavor::Debug)
+            .expect_err("debug must reject a normal manifest");
+
+        assert!(error.contains("manifest declares normal"));
+    }
+
+    #[test]
+    fn updater_rejects_mismatched_artifact_even_when_flavor_metadata_matches() {
+        let manifest = flavor_manifest(
+            Some("debug"),
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+        );
+
+        let error = validate_flavor_manifest(&manifest, BuildFlavor::Debug)
+            .expect_err("debug must reject a normal installer artifact");
+
+        assert!(error.contains("expected artifact CodexHub_0.1.5_debug_x64-setup.exe"));
+    }
+
+    #[test]
+    fn updater_binds_the_checked_manifest_to_the_selected_download_artifact() {
+        let manifest = flavor_manifest(
+            Some("debug"),
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
+        );
+
+        let error = validate_checked_update_payload(
+            &manifest,
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            BuildFlavor::Debug,
+        )
+        .expect_err("debug must reject a checked update that selects the normal artifact");
+
+        assert!(error.contains("updater selected"));
+    }
+
+    #[test]
+    fn normal_checked_update_keeps_flavorless_latest_json_compatibility() {
+        let manifest = flavor_manifest(
+            None,
+            "0.1.5",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+        );
+
+        assert_eq!(
+            validate_checked_update_payload(
+                &manifest,
+                "0.1.5",
+                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+                BuildFlavor::Normal,
+            ),
+            Ok(())
+        );
     }
 
     #[test]
@@ -763,6 +961,22 @@ mod tests {
     #[test]
     fn checked_at_now_is_unix_timestamp_string() {
         assert!(checked_at_now().starts_with("unix:"));
+    }
+
+    fn flavor_manifest(flavor: Option<&str>, version: &str, url: &str) -> String {
+        let mut manifest = serde_json::json!({
+            "version": version,
+            "platforms": {
+                "windows-x86_64": {
+                    "signature": "signed-value",
+                    "url": url,
+                }
+            }
+        });
+        if let Some(flavor) = flavor {
+            manifest["codexhub_flavor"] = serde_json::Value::String(flavor.to_string());
+        }
+        serde_json::to_string(&manifest).expect("serialize flavor manifest")
     }
 
     fn stale_lock_path(path: &std::path::Path) -> std::path::PathBuf {

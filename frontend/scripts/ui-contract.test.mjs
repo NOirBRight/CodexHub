@@ -9,6 +9,7 @@ const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
 const buildWindowsPortablePath = new URL("../../scripts/build-windows-portable.ps1", import.meta.url);
 const endpointRowPath = new URL("../src/components/EndpointRow.tsx", import.meta.url);
+const debugDiagnosticsPanelPath = new URL("../src/components/DebugDiagnosticsPanel.tsx", import.meta.url);
 const gatewayClientCardPath = new URL("../src/components/GatewayClientCard.tsx", import.meta.url);
 const segmentedSwitchPath = new URL("../src/components/SegmentedSwitch.tsx", import.meta.url);
 const gatewayPagePath = new URL("../src/pages/GatewayPage.tsx", import.meta.url);
@@ -482,7 +483,7 @@ test("Windows release build vendors a pinned Python runtime", async () => {
   assert.match(prepareScript, /src-python\\codex_proxy\.py/);
 });
 
-test("release build scripts support stable and beta flavor configuration", async () => {
+test("release build scripts support normal and debug flavor configuration", async () => {
   const [buildScript, packageSource, viteSource] = await Promise.all([
     readFile(buildWindowsReleasePath, "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -491,36 +492,42 @@ test("release build scripts support stable and beta flavor configuration", async
   const packageJson = JSON.parse(packageSource);
   const flavorManifest = JSON.parse(await readFile(new URL("../../config/build-flavors.json", import.meta.url), "utf8"));
 
-  assert.deepEqual(Object.keys(flavorManifest).sort(), ["beta", "stable"]);
-  assert.equal(flavorManifest.stable.productName, "CodexHub");
-  assert.equal(flavorManifest.stable.identifier, "com.codexhub.app");
-  assert.equal(flavorManifest.stable.frontendPort, 1420);
-  assert.equal(flavorManifest.stable.bridgePort, 1421);
-  assert.equal(flavorManifest.stable.gatewayPort, 9099);
-  assert.equal(flavorManifest.stable.routingOwner, "release");
-  assert.equal(flavorManifest.beta.productName, "CodexHub Beta");
-  assert.equal(flavorManifest.beta.identifier, "com.codexhub.beta");
-  assert.equal(flavorManifest.beta.frontendPort, 1430);
-  assert.equal(flavorManifest.beta.bridgePort, 1431);
-  assert.equal(flavorManifest.beta.gatewayPort, 9109);
-  assert.equal(flavorManifest.beta.routingOwner, "beta");
-  assert.equal(flavorManifest.beta.updaterManifestName, "latest-beta.json");
-  assert.match(buildScript, /ValidateSet\("stable",\s*"beta"\)/);
+  assert.deepEqual(Object.keys(flavorManifest).sort(), ["debug", "normal"]);
+  assert.equal(flavorManifest.normal.productName, "CodexHub");
+  assert.equal(flavorManifest.normal.identifier, "com.codexhub.app");
+  assert.equal(flavorManifest.normal.frontendPort, 1420);
+  assert.equal(flavorManifest.normal.bridgePort, 1421);
+  assert.equal(flavorManifest.normal.gatewayPort, 9099);
+  assert.equal(flavorManifest.normal.routingOwner, "release");
+  assert.equal(flavorManifest.debug.productName, flavorManifest.normal.productName);
+  assert.equal(flavorManifest.debug.identifier, flavorManifest.normal.identifier);
+  assert.equal(flavorManifest.debug.frontendPort, flavorManifest.normal.frontendPort);
+  assert.equal(flavorManifest.debug.bridgePort, flavorManifest.normal.bridgePort);
+  assert.equal(flavorManifest.debug.gatewayPort, flavorManifest.normal.gatewayPort);
+  assert.equal(flavorManifest.debug.routingOwner, flavorManifest.normal.routingOwner);
+  assert.equal(flavorManifest.normal.updaterManifestName, "latest.json");
+  assert.equal(flavorManifest.debug.updaterManifestName, "latest-debug.json");
+  assert.equal(flavorManifest.normal.releaseAssetSuffix, "");
+  assert.equal(flavorManifest.debug.releaseAssetSuffix, "_debug");
+  assert.match(buildScript, /ValidateSet\("normal",\s*"debug"\)/);
   assert.match(buildScript, /Build-TauriConfig\.ps1/);
   assert.match(buildScript, /CODEXHUB_BUILD_FLAVOR/);
+  assert.match(buildScript, /debug-diagnostics/);
+  assert.match(buildScript, /CARGO_TARGET_DIR/);
   assert.match(buildScript, /CODEXHUB_FRONTEND_PORT/);
-  assert.match(buildScript, /cargo tauri build --config \$generatedTauriConfigPath --bundles nsis --ci/);
+  assert.match(buildScript, /cargo @tauriBuildArgs/);
   assert.match(buildScript, /releaseAssetPrefix/);
+  assert.match(buildScript, /Get-ReleaseArtifactName/);
+  assert.match(buildScript, /Get-ReleaseManifestName/);
   assert.match(buildScript, /\$installerNameCandidates = \[System\.Collections\.Generic\.List\[string\]\]::new\(\)/);
   assert.match(buildScript, /foreach \(\$nameCandidate in @\(\s*\$assetPrefix,\s*\$productName,\s*\(\$productName -replace "\\s\+", ""\),\s*\(\$productName -replace "\\s\+", "_"\)\s*\)\)/s);
-  assert.match(buildScript, /\$installerName = "\{0\}_\{1\}_x64-setup\.exe" -f \$nameCandidate, \$version/);
   assert.match(buildScript, /Remove-Item -LiteralPath \$artifactPath -Force -ErrorAction SilentlyContinue/);
   assert.match(buildScript, /Remove-Item -LiteralPath "\$artifactPath\.sig" -Force -ErrorAction SilentlyContinue/);
   assert.match(buildScript, /\$expectedCandidateList = \(\$installerNameCandidates \| ForEach-Object \{ "\$_ \(\+ \.sig\)" \}\) -join ", "/);
   assert.match(buildScript, /\$resolvedInstaller = foreach \(\$installerName in \$installerNameCandidates\)/);
   assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.InstallerPath -Destination \$installerPath -Force/);
   assert.match(buildScript, /Move-Item -LiteralPath \$resolvedInstaller\.SignaturePath -Destination \$signaturePath -Force/);
-  assert.match(buildScript, /throw "Expected NSIS installer\/signature pair was not generated for flavor '\$Flavor'\. Looked for: \$expectedCandidateList"/);
+  assert.match(buildScript, /Expected NSIS installer\/signature pair was not generated for flavor/);
   assert.match(buildScript, /\$manifestName = \[System\.IO\.Path\]::GetFileName\(\$manifestPath\)/);
   assert.match(buildScript, /throw "Generated \$manifestName failed validation: \$manifestPath"/);
   assert.doesNotMatch(buildScript, /if \(\(-not \(Test-Path -LiteralPath \$installerPath -PathType Leaf\)\) -or \(-not \(Test-Path -LiteralPath \$signaturePath -PathType Leaf\)\)\) \{/);
@@ -716,16 +723,25 @@ test("gateway empty states are localized outside the static contract", async () 
   assert.match(usageSource, /t\("usage\.pendingData"\)/);
 });
 
-test("Beta empty usage state explains isolated Gateway telemetry", async () => {
-  const [gatewaySource, enSource, zhSource] = await Promise.all([
+test("debug builds expose a localized diagnostics badge without changing Gateway telemetry", async () => {
+  const [gatewaySource, runtimeSource, typesSource, enSource, zhSource] = await Promise.all([
     readFile(gatewayPagePath, "utf8"),
+    readFile(runtimeBarPath, "utf8"),
+    readFile(typesPath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /appFlavor\?\.flavor === "beta"[\s\S]*t\("gateway\.betaUsageIsolated"\)/);
-  assert.match(enSource, /betaUsageIsolated: "Beta uses isolated Gateway usage data/);
-  assert.match(zhSource, /betaUsageIsolated: "Beta 使用独立的 Gateway 用量数据/);
+  assert.match(typesSource, /export type BuildFlavor = "normal" \| "debug"/);
+  assert.match(typesSource, /export interface BuildInfo/);
+  assert.match(typesSource, /diagnostics_enabled: boolean/);
+  assert.match(runtimeSource, /appFlavor\?\.build\.flavor === "debug"/);
+  assert.match(runtimeSource, /appFlavor\.build\.diagnostics_enabled/);
+  assert.match(runtimeSource, /t\("runtime\.debugDiagnostics"\)/);
+  assert.match(enSource, /debugDiagnostics: "Debug diagnostics"/);
+  assert.match(zhSource, /debugDiagnostics: "调试诊断"/);
+  assert.doesNotMatch(gatewaySource, /appFlavor\?\.flavor === "beta"/);
+  assert.doesNotMatch(gatewaySource, /gateway\.betaUsageIsolated/);
 });
 
 test("gateway page is wired to real usage and client backend APIs", async () => {
@@ -1205,7 +1221,7 @@ test("gateway recovery panel stays compact and labels actual observed requests",
   assert.match(gatewaySource, /grid-cols-\[repeat\(3,minmax\(0,0\.72fr\)\)_minmax\(210px,1\.7fr\)\]/);
   assert.match(gatewaySource, /const routeText = event \? \(client \? `\$\{client\} → \$\{provider\}` : provider\) : t\("gateway\.recoveryEmpty"\)/);
   assert.match(gatewaySource, /title=\{event \? recoveryEventTitle\(event\) : t\("gateway\.recoveryOverviewTitle"\)\}/);
-  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/);
+  assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
   assert.match(gatewaySource, /<RecoveryEventRow[\s\S]*event=\{latestEvent\}[\s\S]*onOverview=\{\(\) => void openOverview\(\)\}/);
   assert.match(gatewaySource, /aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/);
   assert.match(gatewaySource, /className="focus-ring grid h-7 w-7 shrink-0 place-items-center/);
@@ -1835,8 +1851,9 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(catalogActionsSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(catalogActionsSource, /updateToast\(toastId, \{[\s\S]*providers\.probeCompleted/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
-  assert.match(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(normalizedProvider\);/);
-  assert.doesNotMatch(providerDetail, /const dirty = JSON\.stringify\(draft\) !== JSON\.stringify\(provider\);/);
+  assert.match(providerDetail, /const dirty = isProviderDirty\(normalizedProvider, draft\);/);
+  assert.doesNotMatch(providerDetail, /JSON\.stringify\(draft\)/);
+  assert.match(providerEditorSource, /import \{ isProviderDirty \} from "\.\.\/\.\.\/lib\/providerComparison";/);
   assert.match(providerDetail, /setDraft\(\(current\) => applyProviderProbeResult\(current, result\)\);/);
   assert.match(providerDetail, /current\.id === provider\.id[\s\S]*available_upstream_formats: availableFormats/);
   assert.doesNotMatch(providerDetail, /const upstreamFormat = normalizedEndpointFormat\(provider\.upstream_format\);/);
@@ -2615,7 +2632,8 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
   const portableScript = await readFile(buildWindowsPortablePath, "utf8");
 
   assert.match(portableScript, /Prepare-PythonRuntime\.ps1/);
-  assert.match(portableScript, /cargo tauri build --config \$generatedTauriConfigPath --no-bundle --ci/);
+  assert.match(portableScript, /\$tauriBuildArgs = @\("tauri", "build", "--config", \$generatedTauriConfigPath, "--no-bundle", "--ci"\)/);
+  assert.match(portableScript, /& cargo @tauriBuildArgs/);
   assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
@@ -2809,19 +2827,27 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(script, /windows-x86_64-nsis/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_ENDPOINT/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_SKIP_INSTALL/);
+  assert.match(appUpdatesSource, /configured_updater_endpoints/);
+  assert.match(appUpdatesSource, /validate_checked_update/);
+  assert.match(appUpdatesSource, /update\.raw_json/);
+  assert.doesNotMatch(appUpdatesSource, /validate_configured_flavor_manifest/);
+  assert.match(appUpdatesSource, /validate_flavor_manifest/);
+  assert.match(appUpdatesSource, /codexhub_flavor/);
   assert.match(appUpdatesSource, /app\.updater_builder\(\)/);
-  assert.match(appUpdatesSource, /builder[\s\S]*\.endpoints\(vec!\[endpoint\]\)/);
+  assert.match(appUpdatesSource, /\.endpoints\(endpoints\)/);
   assert.match(appUpdatesSource, /cfg\(debug_assertions\)/);
 });
 
-test("app update e2e script supports beta manifest and bridge ports", async () => {
+test("app update e2e script supports normal and debug manifests", async () => {
   const script = await readFile(appUpdateE2ePath, "utf8");
 
-  assert.match(script, /ValidateSet\("stable",\s*"beta"\)/);
-  assert.match(script, /latest-beta\.json/);
-  assert.match(script, /CodexHubBeta_/);
-  assert.match(script, /1421/);
-  assert.match(script, /1431/);
+  assert.match(script, /ValidateSet\("normal",\s*"debug"\)/);
+  assert.match(script, /Get-ReleaseManifestName/);
+  assert.match(script, /Get-ReleaseArtifactName/);
+  assert.match(script, /Get-FlavorTargetRoot/);
+  assert.match(script, /codexhub_flavor = \$Flavor/);
+  assert.match(script, /flavorConfig\.bridgePort/);
+  assert.doesNotMatch(script, /latest-beta\.json/);
 });
 
 test("settings drawer places version updates at the bottom and keeps backdrop blur", async () => {
@@ -2923,6 +2949,26 @@ test("route and context changes disclose the exact Codex restart requirement", a
   assert.match(zhSource, /Gateway 更改已实时生效；请重启 Codex App/);
 });
 
+test("manual Official refresh carries and discloses a Codex restart requirement", async () => {
+  const [actionsSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(typesSource, /export interface OfficialRefreshResult[\s\S]*restart_required: boolean/);
+  assert.match(tauriSource, /refreshOfficialModels: \(\) => call<OfficialRefreshResult>\("refresh_official_models"\)/);
+  assert.match(actionsSource, /const refreshResult = await api\.refreshOfficialModels\(\)/);
+  assert.match(actionsSource, /refreshResult\.restart_required[\s\S]*officialContextLimitsRestartCodex/);
+  const refresh = actionsSource.match(/async function refreshOfficialModels[\s\S]*?async function discoverForForm/)?.[0] ?? "";
+  assert.match(refresh, /catalogAlreadyPublished: true/);
+  assert.doesNotMatch(refresh, /api\.generateCatalog\(\)/);
+  assert.match(enSource, /officialContextLimitsRestartCodex: "Official context limits changed\. Restart Codex App to apply them\."/);
+  assert.match(zhSource, /officialContextLimitsRestartCodex: "官方上下文限制已更新。请重启 Codex App 以应用它们。"/);
+});
+
 test("persistent state changes follow the project toast and restart-disclosure standard", async () => {
   const [agentsSource, standardSource] = await Promise.all([
     readFile(new URL("../../AGENTS.md", import.meta.url), "utf8"),
@@ -2970,4 +3016,93 @@ test("legacy provider hidden capability is removed from model/provider UI state"
   assert.doesNotMatch(formatSource, /hidden:/);
   assert.doesNotMatch(appSource, /provider\.hidden/);
   assert.doesNotMatch(providersSource, /provider\.hidden|model\.hidden|hidden: false|label="Hidden"|hidden: checked/);
+});
+
+test("debug diagnostics are compile-selected, content-free, and expose bounded controls", async () => {
+  const [gatewaySource, panelSource, tauriSource, typesSource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(debugDiagnosticsPanelPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+
+  assert.match(gatewaySource, /DebugDiagnosticsOverlay/);
+  assert.match(gatewaySource, /appFlavor\?\.build\.flavor === "debug"/);
+  assert.match(gatewaySource, /appFlavor\.build\.diagnostics_enabled/);
+  assert.match(panelSource, /api\.diagnosticsStatus\(\)/);
+  assert.match(panelSource, /api\.diagnosticsManualMark\(\)/);
+  assert.match(panelSource, /api\.diagnosticsPause\(\)/);
+  assert.match(panelSource, /api\.diagnosticsResume\(\)/);
+  assert.match(panelSource, /api\.diagnosticsDeleteIncident\(incidentId\)/);
+  assert.doesNotMatch(panelSource, /diagnosticsRead|zip|artifact/i);
+  assert.match(tauriSource, /diagnostics_status/);
+  assert.match(tauriSource, /diagnostics_manual_mark/);
+  assert.match(tauriSource, /diagnostics_delete_incident/);
+  assert.match(typesSource, /export interface DiagnosticsStatus/);
+  assert.match(typesSource, /incident_ids: string\[\]/);
+  assert.match(enSource, /diagnostics: \{/);
+  assert.match(enSource, /Gateway traffic continues; no restart is required/);
+  assert.match(zhSource, /diagnostics: \{/);
+});
+
+test("debug diagnostics open from Recovery in a localized accessible overlay", async () => {
+  const [gatewaySource, panelSource, enSource, zhSource] = await Promise.all([
+    readFile(gatewayPagePath, "utf8"),
+    readFile(debugDiagnosticsPanelPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const recoveryEventRow = gatewaySource.match(/function RecoveryEventRow\([\s\S]*?function RecoveryOverviewModal/)?.[0] ?? "";
+
+  assert.match(
+    gatewaySource,
+    /const diagnosticsEnabled = Boolean\(appFlavor\?\.build\.flavor === "debug" && appFlavor\.build\.diagnostics_enabled\)/,
+  );
+  assert.match(
+    gatewaySource,
+    /<DebugDiagnosticsOverlay[\s\S]*enabled=\{diagnosticsEnabled\}[\s\S]*open=\{diagnosticsOpen\}[\s\S]*onClose=\{\(\) => setDiagnosticsOpen\(false\)\}/,
+  );
+  assert.match(gatewaySource, /onOpenDiagnostics=\{diagnosticsEnabled \? onOpenDiagnostics : undefined\}/);
+  assert.match(
+    recoveryEventRow,
+    /\{onOpenDiagnostics \? \([\s\S]*aria-label=\{t\("diagnostics\.open"\)\}[\s\S]*<Activity size=\{13\} \/>[\s\S]*aria-label=\{t\("gateway\.recoveryOverviewTitle"\)\}/,
+  );
+  assert.match(recoveryEventRow, /h-7 w-7/);
+  assert.match(recoveryEventRow, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
+  assert.match(panelSource, /if \(!enabled \|\| !open\) \{\s*return null;/);
+  assert.match(panelSource, /aria-modal="true"/);
+  assert.match(panelSource, /role="dialog"/);
+  assert.match(panelSource, /event\.key === "Escape"/);
+  assert.match(panelSource, /aria-label=\{t\("common\.close"\)\}/);
+  assert.match(panelSource, /if \(!enabled \|\| !gatewayRunning \|\| !open\)/);
+  assert.match(panelSource, /window\.setInterval\(\(\) => void refresh\(true\), 5_000\)/);
+  assert.match(
+    panelSource,
+    /t\("diagnostics\.summary", \{[\s\S]*hours: rollingHours,[\s\S]*bytes: status\?\.rolling_bytes \?\? 0,[\s\S]*count: status\?\.incident_count \?\? 0,[\s\S]*\}\)/,
+  );
+  assert.match(panelSource, /t\("diagnostics\.subtitle"\)/);
+  assert.match(panelSource, /t\("diagnostics\.mark"\)/);
+  assert.match(panelSource, /t\("diagnostics\.pause"\)/);
+  assert.match(panelSource, /t\("diagnostics\.resume"\)/);
+  assert.match(panelSource, /t\("diagnostics\.refresh"\)/);
+  assert.match(panelSource, /t\("diagnostics\.delete"\)/);
+  assert.doesNotMatch(panelSource, /ChevronDown|setExpanded|aria-expanded/);
+  assert.match(enSource, /open: "Open debug diagnostics"/);
+  assert.match(zhSource, /open: "打开调试诊断"/);
+  assert.match(enSource, /summary: "\{\{hours\}\}h · \{\{bytes\}\} bytes · \{\{count\}\} incidents"/);
+  assert.match(zhSource, /summary: "\{\{hours\}\} 小时 · \{\{bytes\}\} 字节 · \{\{count\}\} 个事件"/);
+});
+
+test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {
+  const gatewaySource = await readFile(gatewayPagePath, "utf8");
+  const leftColumn = gatewaySource.match(
+    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
+  )?.[0] ?? "";
+
+  assert.ok(leftColumn, "Gateway left column should restore three rows");
+  assert.match(leftColumn, /<RecoveryActivityPanel[\s\S]*?<StackedUsageChartShell/);
+  assert.doesNotMatch(leftColumn, /DebugDiagnosticsPanel|DebugDiagnosticsOverlay/);
+  assert.doesNotMatch(gatewaySource, /grid-rows-\[auto_auto_auto_minmax\(320px,1fr\)\]/);
 });

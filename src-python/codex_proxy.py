@@ -96,7 +96,10 @@ from catalog_sync import (
     existing_generated_catalog_path,
     known_official_model_ids as catalog_known_official_model_ids,
     official_short_display_name,
-    sync_catalog,
+)
+from model_limits import (
+    CURRENT_DIRECT_OFFICIAL_SOURCE,
+    DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
 )
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
@@ -118,6 +121,8 @@ from websocket_transport import (
     write_frame,
 )
 import proxy_telemetry
+import bounded_event_writer
+import diagnostic_recorder
 
 try:
     import zstandard
@@ -176,12 +181,23 @@ class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     def _get_conn(self, timeout: float | None = None) -> Any:
         connection = super()._get_conn(timeout)
         released_at = getattr(connection, "_codexhub_released_at", None)
+        try:
+            disposition = (
+                "reused" if isinstance(released_at, (int, float)) and getattr(connection, "sock", None) else "new"
+            )
+        except Exception:
+            disposition = "unobserved"
         idle_seconds = time.monotonic() - released_at if isinstance(released_at, (int, float)) else None
         max_idle_seconds = (
             OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS if self.proxy is not None else OFFICIAL_POOL_MAX_IDLE_SECONDS
         )
         if idle_seconds is not None and idle_seconds >= max_idle_seconds:
             connection.close()
+            disposition = "new"
+        try:
+            connection._codexhub_diagnostic_connection_disposition = disposition
+        except Exception:
+            pass
         return connection
 
     def _put_conn(self, connection: Any) -> None:
@@ -198,6 +214,7 @@ class _OfficialPooledResponse:
         self.status = response.status
         self.reason = response.reason
         self.headers = response.headers
+        self.connection_disposition = _connection_disposition(getattr(response, "connection", None))
         self._terminal_drain_socket: Any = None
         self._terminal_drain_original_timeout: float | None = None
 
@@ -264,6 +281,14 @@ class _OfficialPooledResponse:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
         self.close()
         return False
+
+
+def _connection_disposition(connection: Any) -> str:
+    try:
+        disposition = getattr(connection, "_codexhub_diagnostic_connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
 
 
 def _official_proxy_url(url: str) -> str | None:
@@ -646,15 +671,48 @@ def _runtime_codex_dir() -> Path:
 
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
-PROXY_EVENT_LOG_LOCK = threading.Lock()
-PROXY_EVENT_QUEUE_MAXSIZE = _env_positive_int("CODEX_PROXY_EVENT_QUEUE_MAXSIZE", 4096)
-PROXY_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=PROXY_EVENT_QUEUE_MAXSIZE)
-PROXY_EVENT_WRITER_LOCK = threading.Lock()
-PROXY_EVENT_WRITER_THREAD: threading.Thread | None = None
-PROXY_EVENT_DROPPED_COUNT = 0
-PROXY_EVENT_DROPPED_LOCK = threading.Lock()
+# Both limits apply to serialized Gateway telemetry still awaiting a sink write,
+# including an in-flight batch, so slow storage cannot grow request memory.
+GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
+GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
+GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _gateway_event_writer_recovery_record(
+    summary: bounded_event_writer.RecoverySummary,
+) -> Mapping[str, Any]:
+    return proxy_telemetry.prepare_event_payload(
+        "telemetry_writer_recovered",
+        {
+            "overflow_records": summary.overflow_records,
+            "overflow_bytes": summary.overflow_bytes,
+            "failed_records": summary.failed_records,
+            "failure_count": summary.failure_count,
+            "failure_categories": list(summary.failure_categories),
+        },
+        RUNTIME_CODEX_DIR,
+    )
+
+
+_previous_gateway_event_writer = globals().get("GATEWAY_EVENT_WRITER")
+if isinstance(_previous_gateway_event_writer, bounded_event_writer.BoundedEventWriter):
+    _previous_gateway_event_writer.shutdown(timeout=1.0)
+
+
+GATEWAY_EVENT_WRITER = bounded_event_writer.BoundedEventWriter(
+    bounded_event_writer.JsonlFileSink(PROXY_EVENT_LOG_PATH),
+    max_records=GATEWAY_EVENT_QUEUE_MAX_RECORDS,
+    max_bytes=GATEWAY_EVENT_QUEUE_MAX_BYTES,
+    recovery_record_factory=_gateway_event_writer_recovery_record,
+    thread_name="codex-gateway-event-writer",
+)
+# The compile-selected debug flavor will install a recorder in the later
+# Tauri/runtime slice. Normal builds intentionally have no recorder object,
+# settings toggle, or environment switch that could activate persistence.
+GATEWAY_DIAGNOSTIC_RECORDER: diagnostic_recorder.DiagnosticRecorderProtocol | None = None
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
@@ -662,7 +720,6 @@ DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEO
 DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
-OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
@@ -1328,14 +1385,6 @@ def gateway_image_proxy_model() -> str:
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
 
 
-def openai_context_guard_enabled() -> bool:
-    return _env_or_settings_flag(
-        "CODEX_PROXY_OPENAI_CONTEXT_GUARD_ENABLED",
-        "openai_context_guard_enabled",
-        False,
-    )
-
-
 def gateway_transparent_vision_proxy_enabled() -> bool:
     settings_value = _runtime_settings_value("gateway_transparent_vision_proxy_enabled")
     if isinstance(settings_value, bool):
@@ -1348,64 +1397,76 @@ def gateway_transparent_vision_proxy_enabled() -> bool:
     return gateway_image_proxy_enabled()
 
 
+def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
+    """Keep optional recorder failures out of Gateway request behavior."""
+
+    recorder = GATEWAY_DIAGNOSTIC_RECORDER
+    if recorder is None:
+        return
+    try:
+        observation = getattr(recorder, method, None)
+        if callable(observation):
+            observation(*args, **kwargs)
+    except Exception:
+        return
+
+
+def _diagnostic_context_value(event_context: Mapping[str, Any] | None, key: str) -> Any:
+    """Read optional diagnostic context without changing a request on failure."""
+
+    if event_context is None:
+        return None
+    try:
+        return event_context.get(key)
+    except Exception:
+        return None
+
+
+def _diagnostic_response_metadata(response: Any) -> tuple[Any, Any]:
+    """Snapshot only optional header summaries for the failure-contained hook."""
+
+    try:
+        status = getattr(response, "status", None)
+        if not status:
+            status = getattr(response, "code", None)
+    except Exception:
+        status = None
+    try:
+        headers = getattr(response, "headers", None)
+    except Exception:
+        headers = None
+    return status, headers
+
+
+def _diagnostic_connection_disposition(response: Any) -> str:
+    try:
+        disposition = getattr(response, "connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
+    return {
+        "dns": "upstream_dns",
+        "tcp_connect": "upstream_tcp",
+        "tls": "upstream_tls",
+        "request_write": "upstream_request_write",
+    }.get(failure_phase)
+
+
 def write_proxy_event(event: str, **fields: Any) -> None:
+    _observe_gateway_diagnostic("observe_proxy_event", event, fields)
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
-    _enqueue_proxy_event_payload(payload)
+    _enqueue_gateway_event_payload(payload)
 
 
-def _enqueue_proxy_event_payload(payload: dict[str, Any]) -> bool:
-    global PROXY_EVENT_DROPPED_COUNT
-    _ensure_proxy_event_writer_started()
-    try:
-        PROXY_EVENT_QUEUE.put_nowait(payload)
-        return True
-    except queue.Full:
-        with PROXY_EVENT_DROPPED_LOCK:
-            PROXY_EVENT_DROPPED_COUNT += 1
-        return False
-
-
-def _ensure_proxy_event_writer_started() -> None:
-    global PROXY_EVENT_WRITER_THREAD
-    with PROXY_EVENT_WRITER_LOCK:
-        if PROXY_EVENT_WRITER_THREAD is not None and PROXY_EVENT_WRITER_THREAD.is_alive():
-            return
-        PROXY_EVENT_WRITER_THREAD = threading.Thread(
-            target=_proxy_event_writer_loop,
-            name="codex-proxy-event-writer",
-            daemon=True,
-        )
-        PROXY_EVENT_WRITER_THREAD.start()
-
-
-def _proxy_event_writer_loop() -> None:
-    while True:
-        payload = PROXY_EVENT_QUEUE.get()
-        try:
-            _write_proxy_event_payload_to_log(payload)
-        finally:
-            PROXY_EVENT_QUEUE.task_done()
-
-
-def _write_proxy_event_payload_to_log(payload: Mapping[str, Any]) -> None:
-    line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    try:
-        with PROXY_EVENT_LOG_LOCK:
-            PROXY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with PROXY_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-    except OSError as exc:
-        logger.warning("failed to write proxy event log: %s", type(exc).__name__)
+def _enqueue_gateway_event_payload(payload: Mapping[str, Any]) -> bool:
+    return GATEWAY_EVENT_WRITER.enqueue(payload)
 
 
 def flush_proxy_event_writer(timeout: float = 5.0) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout)
-    while PROXY_EVENT_QUEUE.unfinished_tasks:
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.01)
-    return True
+    return GATEWAY_EVENT_WRITER.flush(timeout).completed
 
 
 def _usage_int(value: Any) -> int | None:
@@ -7658,6 +7719,7 @@ APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS = frozenset(
 APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS = frozenset(
     {"type", "call_id", "output"}
 )
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS = frozenset({"id"})
 
 
 class _ApplyPatchAdapterFailure(ValueError):
@@ -7810,6 +7872,20 @@ def _raise_apply_patch_history_adapter_failure(
     )
 
 
+def _has_exact_apply_patch_custom_tool_history_fields(
+    item: Mapping[str, Any],
+    required_fields: frozenset[str],
+) -> bool:
+    fields = set(item)
+    if fields == required_fields:
+        return True
+    return (
+        fields == required_fields | APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS
+        and isinstance(item.get("id"), str)
+        and bool(item["id"])
+    )
+
+
 def _adapt_apply_patch_custom_tool_history(
     input_items: list[Any],
     *,
@@ -7843,7 +7919,10 @@ def _adapt_apply_patch_custom_tool_history(
         call_id = raw_item.get("call_id")
         if _is_apply_patch_custom_tool_call(raw_item):
             if (
-                set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS
+                not _has_exact_apply_patch_custom_tool_history_fields(
+                    raw_item,
+                    APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS,
+                )
                 or raw_item.get("status") != "completed"
                 or not isinstance(call_id, str)
                 or not call_id
@@ -7876,7 +7955,10 @@ def _adapt_apply_patch_custom_tool_history(
 
         if item_type == "custom_tool_call_output":
             if isinstance(call_id, str) and call_id in pending_call_ids:
-                if set(raw_item) != APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS:
+                if not _has_exact_apply_patch_custom_tool_history_fields(
+                    raw_item,
+                    APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS,
+                ):
                     _raise_apply_patch_history_adapter_failure(event_context)
                 pending_call_ids.remove(call_id)
                 rewritten_items.append(
@@ -8917,49 +8999,142 @@ def upstream_headers(
     return outgoing
 
 
-def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
-    if sync_first:
-        try:
-            sync_catalog()
-        except Exception as exc:
-            logger.warning("catalog sync failed before /v1/models: %s", type(exc).__name__)
+def current_catalog_data() -> dict[str, Any]:
+    """Read the atomically published catalog without launching discovery.
 
+    Tauri owns Official acquisition and catalog refresh.  The Gateway only
+    consumes the published snapshot at request handling time.
+    """
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
+    published_budgets = published_official_context_budgets(catalog_path)
     return catalog_with_vision_proxy_capabilities(
         catalog_with_openai_context_guard(
-            catalog_with_official_fast_variants(
-                json.loads(catalog_path.read_text(encoding="utf-8-sig"))
-            )
+            catalog_with_official_fast_variants(json.loads(catalog_path.read_text(encoding="utf-8-sig"))),
+            published_budgets,
+            require_published_snapshot=True,
         )
     )
 
 
-def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]:
-    if not openai_context_guard_enabled():
-        return catalog
+def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
+    """Read the Rust publication fence that commits an Official budget.
 
+    The catalog and Codex runtime overlay are separate atomic files.  The
+    refresh coordinator clears this fence before it begins an update, then
+    commits it only after both files agree.  A missing, interrupted, or
+    mismatched fence is therefore not a safe current Official snapshot.
+    """
+
+    state_path = catalog_path.parent / OFFICIAL_REFRESH_STATE_FILENAME
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, Mapping) or payload.get("publication_ready") is not True:
+        return {}
+    budgets = payload.get("published_context_budgets")
+    if not isinstance(budgets, Mapping):
+        return {}
+    return {
+        str(model_id): budget
+        for model_id, budget in budgets.items()
+        if isinstance(model_id, str) and isinstance(budget, Mapping)
+    }
+
+
+def catalog_with_openai_context_guard(
+    catalog: dict[str, Any],
+    published_budgets: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    require_published_snapshot: bool = False,
+) -> dict[str, Any]:
+    # The Direct Official budget is a safety invariant, not an optional
+    # presentation preference.  Gateway request handling only projects the
+    # atomically published resolver result and never refreshes it itself.
     models = catalog.get("models")
     if not isinstance(models, list):
         return catalog
 
+    def positive_int(value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
     def guarded_model(model: Any) -> Any:
+        def without_context_budget() -> dict[str, Any]:
+            updated = dict(model)
+            updated.pop("context_window", None)
+            updated.pop("max_context_window", None)
+            updated.pop("effective_context_window_percent", None)
+            return updated
+
         if not isinstance(model, Mapping):
             return model
-        slug = canonical_model_id(str(model.get("slug", "")))
-        if not slug.startswith("gpt-"):
+        metadata = model.get("codex_proxy_metadata")
+        if not isinstance(metadata, Mapping):
             return model
-        context_window = model.get("context_window")
-        guarded_window = (
-            min(context_window, OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW)
-            if isinstance(context_window, int) and context_window > 0
-            else OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW
-        )
+        if metadata.get("provider") != "openai" or metadata.get("upstream_name") != "official":
+            return model
+        budget = metadata.get("official_context_budget")
+        if not isinstance(budget, Mapping):
+            return without_context_budget()
+        source = budget.get("source")
+        freshness = budget.get("freshness")
+        trusted_budget = (
+            source == CURRENT_DIRECT_OFFICIAL_SOURCE and freshness == "fresh"
+        ) or source == DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE
+        if not trusted_budget:
+            return without_context_budget()
+        guard_window = positive_int(budget.get("model_context_window"))
+        if guard_window is None:
+            guard_window = positive_int(budget.get("context_window"))
+        effective_percent = positive_int(budget.get("effective_context_window_percent"))
+        effective_window = positive_int(budget.get("effective_context_window"))
+        auto_compact_limit = positive_int(budget.get("model_auto_compact_token_limit"))
+        if (
+            guard_window is None
+            or effective_percent is None
+            or effective_percent > 100
+            or effective_window is None
+            or effective_window > guard_window
+            or auto_compact_limit is None
+            or auto_compact_limit > effective_window
+        ):
+            # An incomplete or interrupted resolved snapshot must not keep a
+            # larger stale catalog value visible to an Official caller.
+            return without_context_budget()
+        if require_published_snapshot:
+            if not isinstance(published_budgets, Mapping):
+                return without_context_budget()
+            model_id = str(model.get("slug", "")).removeprefix("openai/")
+            upstream_model = metadata.get("upstream_model")
+            expected = published_budgets.get(model_id)
+            if expected is None and isinstance(upstream_model, str):
+                expected = published_budgets.get(upstream_model.removeprefix("openai/"))
+            if not isinstance(expected, Mapping) or any(
+                expected.get(key) != budget.get(key)
+                for key in (
+                    "model_context_window",
+                    "effective_context_window_percent",
+                    "effective_context_window",
+                    "model_auto_compact_token_limit",
+                )
+            ):
+                return without_context_budget()
+        reported_windows = [
+            value
+            for value in (
+                positive_int(model.get("context_window")),
+                positive_int(model.get("max_context_window")),
+            )
+            if value is not None
+        ]
+        guarded_window = min(guard_window, *reported_windows) if reported_windows else guard_window
         return {
             **model,
             "context_window": guarded_window,
             "max_context_window": guarded_window,
+            "effective_context_window_percent": effective_percent,
         }
 
     updated = dict(catalog)
@@ -10619,16 +10794,87 @@ def _open_upstream_response(
     explicit_max_attempts = max_attempts is not None
     base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
     retry_started_at = time.monotonic()
+    diagnostic_request_key = _diagnostic_context_value(event_context, "request_id")
+    diagnostic_model = _diagnostic_context_value(event_context, "model")
     attempt = 1
     while True:
+        attempt_started_at = time.monotonic()
         try:
-            return _open_upstream_once(
+            response = _open_upstream_once(
                 request,
                 upstream_name=upstream_name,
                 timeout=timeout,
             )
+            elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            connection_disposition = _diagnostic_connection_disposition(response)
+            # A returned response proves this Gateway attempt reached response
+            # completion after writing its request. It cannot prove DNS, TCP,
+            # or TLS occurred for this attempt (especially on a reused lease),
+            # so those success phases remain absent unless a lower-level seam
+            # later exposes them.
+            _observe_gateway_diagnostic(
+                "observe_upstream_phase",
+                diagnostic_request_key,
+                phase="upstream_request_write",
+                attempt=attempt,
+                retry_budget=base_retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="ok",
+                provider=upstream_name,
+                model=diagnostic_model,
+            )
+            _observe_gateway_diagnostic(
+                "observe_upstream_attempt",
+                diagnostic_request_key,
+                attempt=attempt,
+                retry_budget=base_retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="ok",
+                connection_disposition=connection_disposition,
+                provider=upstream_name,
+                model=diagnostic_model,
+            )
+            diagnostic_status, diagnostic_headers = _diagnostic_response_metadata(response)
+            _observe_gateway_diagnostic(
+                "observe_upstream_headers",
+                diagnostic_request_key,
+                status=diagnostic_status,
+                headers=diagnostic_headers,
+            )
+            return response
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
+            elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            try:
+                failure_phase = transport_failure_phase(exc)
+            except Exception:
+                failure_phase = "unknown"
+            diagnostic_phase = _diagnostic_transport_phase(failure_phase)
+            if diagnostic_phase is not None:
+                _observe_gateway_diagnostic(
+                    "observe_upstream_phase",
+                    diagnostic_request_key,
+                    phase=diagnostic_phase,
+                    attempt=attempt,
+                    retry_budget=base_retry_attempts,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase=failure_phase,
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
             if isinstance(exc, HTTPError) and not retry_http_errors:
+                _observe_gateway_diagnostic(
+                    "observe_upstream_attempt",
+                    diagnostic_request_key,
+                    attempt=attempt,
+                    retry_budget=attempt,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase=failure_phase,
+                    connection_disposition="unobserved",
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
                 raise
             failure_class = _upstream_failure_class(exc)
             retry_attempts = _retry_attempts_for_failure_class(
@@ -10636,6 +10882,18 @@ def _open_upstream_response(
                 base_attempts=base_retry_attempts,
                 failure_class=failure_class,
                 explicit_max_attempts=explicit_max_attempts,
+            )
+            _observe_gateway_diagnostic(
+                "observe_upstream_attempt",
+                diagnostic_request_key,
+                attempt=attempt,
+                retry_budget=retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="error",
+                failure_phase=failure_phase,
+                connection_disposition="unobserved",
+                provider=upstream_name,
+                model=diagnostic_model,
             )
             if attempt >= retry_attempts or failure_class == RETRY_FAILURE_PERMANENT:
                 raise
@@ -10675,6 +10933,30 @@ def _open_upstream_response(
 
 class CodexProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def handle_one_request(self) -> None:
+        self._diagnostic_request_id: str | None = None
+        try:
+            super().handle_one_request()
+        finally:
+            self._diagnostic_request_id = None
+
+    def _observe_downstream_phase(self, event: str, *, status: int | None = None) -> None:
+        request_id = getattr(self, "_diagnostic_request_id", None)
+        if not isinstance(request_id, str) or not request_id:
+            return
+        fields: dict[str, Any] = {"request_id": request_id}
+        if isinstance(status, int):
+            fields["status"] = status
+        _observe_gateway_diagnostic("observe_proxy_event", event, fields)
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        super().send_response(code, message)
+        self._observe_downstream_phase("downstream_response_open", status=code)
+
+    def end_headers(self) -> None:
+        super().end_headers()
+        self._observe_downstream_phase("downstream_headers")
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -10745,6 +11027,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         Completions format before being returned to the caller.
         """
         request_id = uuid.uuid4().hex[:12]
+        self._diagnostic_request_id = request_id
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
@@ -12126,7 +12409,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         *,
         downstream_output_started: Callable[[], bool] | None = None,
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
+        on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
+        def observe_line(line: bytes) -> None:
+            if not line or on_line is None:
+                return
+            try:
+                on_line(line)
+            except Exception:
+                return
+
         keepalive_interval = sse_keepalive_seconds()
         transport_timeout_seconds = transport_sse_idle_timeout_seconds()
         model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
@@ -12135,6 +12427,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if keepalive_interval <= 0 and not transport_idle_guard_enabled and not model_event_idle_guard_enabled:
             while True:
                 line = response.readline()
+                observe_line(line)
                 yield line
                 if not line:
                     return
@@ -12215,6 +12508,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 last_transport_at = now
                 if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
                     last_model_event_at = now
+                observe_line(value)
             yield value
             if not value:
                 return
@@ -12375,6 +12669,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         failure_side = "upstream_read"
         sse_stats = PassthroughSseSemanticStats()
         terminal_drain_timeout_shortened = False
+        diagnostic_terminal_observed = False
         try:
             while True:
                 failure_side = "upstream_read"
@@ -12386,11 +12681,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 send_downstream_headers_once()
                 last_upstream_byte_at = time.monotonic()
                 failure_side = "downstream_write"
+                _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+                sse_stats.observe_line(line)
+                terminal_observed_now = sse_stats.terminal_event_seen and not diagnostic_terminal_observed
+                if terminal_observed_now:
+                    diagnostic_terminal_observed = True
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=False)
                 self.wfile.write(line)
                 self.wfile.flush()
                 lines_streamed += 1
                 bytes_streamed += len(line)
-                sse_stats.observe_line(line)
+                if terminal_observed_now:
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=True)
                 _offer_official_passthrough_usage_line(usage_context, line)
                 if sse_stats.terminal_event_seen and not terminal_drain_timeout_shortened:
                     shorten_terminal_drain_timeout = getattr(response, "shorten_terminal_drain_timeout", None)
@@ -12565,6 +12867,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     return 502
                 if not line:
                     break
+                _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
                 if defer_stream_errors and not headers_sent:
                     pending_lines.append(line)
                     payload_bytes = _sse_payload_bytes(line)
@@ -12723,6 +13026,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format=upstream_format,
             inbound_format=inbound_format,
         )
+
+        def observe_diagnostic_sse_line(line: bytes) -> None:
+            _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+
         if (
             behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
             and upstream_format == inbound_format
@@ -13063,6 +13370,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13194,6 +13502,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13323,6 +13632,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13443,6 +13753,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13671,6 +13982,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13939,6 +14251,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 for line in self._iter_upstream_sse_lines(
                     response,
                     line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                    on_line=observe_diagnostic_sse_line,
                 ):
                     if not line:
                         break
@@ -13984,6 +14297,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             _capture_usage(usage_capture, None, missing_reason="stream_error_event")
                             return 502
                         if _responses_events_have_terminal([usage_payload]):
+                            if not saw_terminal_event:
+                                _observe_gateway_diagnostic(
+                                    "observe_terminal",
+                                    request_id,
+                                    forwarded=False,
+                                )
                             saw_terminal_event = True
                         if event_type == "response.completed":
                             saw_completed_event = True
@@ -14061,6 +14380,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 buffer=not flush_terminal,
                                 force=flush_terminal,
                             )
+                            if flush_terminal:
+                                _observe_gateway_diagnostic(
+                                    "observe_terminal",
+                                    request_id,
+                                    forwarded=True,
+                                )
                     if saw_terminal_event:
                         break
             except UpstreamStreamIdleTimeoutError as exc:
@@ -14236,7 +14561,20 @@ def run_server(host: str, port: int) -> None:
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
     logger.info("serving Codex proxy on %s:%s", host, port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        writer_result = GATEWAY_EVENT_WRITER.shutdown(
+            timeout=GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        if not writer_result.completed:
+            logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
+        try:
+            diagnostic_shutdown = getattr(GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
+            if callable(diagnostic_shutdown) and not diagnostic_shutdown(GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS):
+                logger.warning("Gateway diagnostic recorder shutdown did not drain")
+        except Exception:
+            logger.warning("Gateway diagnostic recorder shutdown failed")
 
 
 def main(argv: list[str] | None = None) -> int:

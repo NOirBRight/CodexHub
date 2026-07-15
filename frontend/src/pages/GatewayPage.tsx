@@ -1,6 +1,7 @@
 import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, RefreshCcw, Save, Server, X } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DebugDiagnosticsOverlay } from "../components/DebugDiagnosticsPanel";
 import { EndpointRow } from "../components/EndpointRow";
 import { GatewayClientCard } from "../components/GatewayClientCard";
 import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
@@ -86,9 +87,11 @@ function GatewayPageImpl({
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [autoRetryBusy, setAutoRetryBusy] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
   const running = status?.proxy_running ?? false;
+  const diagnosticsEnabled = Boolean(appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled);
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
@@ -561,26 +564,22 @@ function GatewayPageImpl({
         </section>
 
         <RecoveryActivityPanel
+          diagnosticsEnabled={diagnosticsEnabled}
           enabled={Boolean(settings?.gateway_auto_retry_enabled)}
           disabled={Boolean(busy) || autoRetryBusy || !settings}
           events={recentEvents}
+          onOpenDiagnostics={() => setDiagnosticsOpen(true)}
           onToggle={(enabled) => void toggleGatewayAutoRetry(enabled)}
         />
 
         <StackedUsageChartShell
           events={usageEvents}
           onWindowChange={onUsageWindowChange}
-          pendingMessage={
-            pending?.usage ??
-            (appFlavor?.flavor === "beta"
-              ? t("gateway.betaUsageIsolated")
-              : t("gateway.pendingUsage"))
-          }
+          pendingMessage={pending?.usage ?? t("gateway.pendingUsage")}
           providers={providers}
           summary={usageSummary}
           telemetryStatus={usageStatus}
         />
-
       </section>
 
       <aside className="grid h-full min-h-[704px] min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
@@ -638,6 +637,12 @@ function GatewayPageImpl({
           </div>
         </div>
       </aside>
+      <DebugDiagnosticsOverlay
+        enabled={diagnosticsEnabled}
+        gatewayRunning={running}
+        open={diagnosticsOpen}
+        onClose={() => setDiagnosticsOpen(false)}
+      />
     </main>
   );
 }
@@ -660,14 +665,18 @@ const RECOVERY_OVERVIEW_LIMIT = 5_000;
 const RECOVERY_OVERVIEW_PAGE_SIZE = 50;
 
 function RecoveryActivityPanel({
+  diagnosticsEnabled,
   disabled,
   enabled,
   events,
+  onOpenDiagnostics,
   onToggle,
 }: {
+  diagnosticsEnabled: boolean;
   disabled?: boolean;
   enabled: boolean;
   events: GatewayEvent[];
+  onOpenDiagnostics: () => void;
   onToggle: (enabled: boolean) => void;
 }) {
   const { t } = useTranslation();
@@ -749,6 +758,7 @@ function RecoveryActivityPanel({
         <RecoveryEventRow
           active={summary.activeEvents[0] === latestEvent}
           event={latestEvent}
+          onOpenDiagnostics={diagnosticsEnabled ? onOpenDiagnostics : undefined}
           onOverview={() => void openOverview()}
         />
       </div>
@@ -779,10 +789,12 @@ function RecoveryMetric({ label, value }: { label: string; value: number }) {
 function RecoveryEventRow({
   active,
   event,
+  onOpenDiagnostics,
   onOverview,
 }: {
   active: boolean;
   event: GatewayEvent | null;
+  onOpenDiagnostics?: () => void;
   onOverview: () => void;
 }) {
   const { t } = useTranslation();
@@ -795,7 +807,7 @@ function RecoveryEventRow({
 
   return (
     <div
-      className="grid min-h-[40px] min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-inner bg-panel px-2.5 py-1.5 text-[11px] shadow-control"
+      className="grid min-h-[40px] min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-inner bg-panel px-2.5 py-1.5 text-[11px] shadow-control"
       title={event ? recoveryEventTitle(event) : t("gateway.recoveryOverviewTitle")}
     >
       <CheckCircle2 size={13} className={cx("shrink-0", active ? "text-ok" : "text-slate-400")} />
@@ -807,6 +819,17 @@ function RecoveryEventRow({
         ) : null}
         <span className="min-w-0 truncate font-semibold text-ink">{routeText}</span>
       </div>
+      {onOpenDiagnostics ? (
+        <button
+          type="button"
+          aria-label={t("diagnostics.open")}
+          className="focus-ring grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+          onClick={onOpenDiagnostics}
+          title={t("diagnostics.open")}
+        >
+          <Activity size={13} />
+        </button>
+      ) : null}
       <button
         type="button"
         aria-label={t("gateway.recoveryOverviewTitle")}

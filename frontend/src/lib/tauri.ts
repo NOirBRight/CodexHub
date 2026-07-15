@@ -9,6 +9,8 @@ import type {
   AppVersionInfo,
   CodexContextGuardStatus,
   CodexHubError,
+  DiagnosticsActionResult,
+  DiagnosticsStatus,
   GatewayClientConfig,
   GatewayClientApplyResult,
   GatewayClientConfigPreview,
@@ -23,6 +25,7 @@ import type {
   GatewayUsageSummary,
   Model,
   ModelEndpointTestResult,
+  OfficialRefreshResult,
   OpenAIUsageQueryWindow,
   OpenAIUsageSnapshot,
   Provider,
@@ -203,7 +206,7 @@ export const api = {
     call<CodexContextGuardStatus>("get_codex_context_guard_status"),
   setCodexContextGuard: (enabled: boolean) =>
     call<CodexContextGuardStatus>("set_codex_context_guard", { enabled }),
-  refreshOfficialModels: () => call<Model[]>("refresh_official_models"),
+  refreshOfficialModels: () => call<OfficialRefreshResult>("refresh_official_models"),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
     call<OpenAIUsageSnapshot>("openai_usage_completions", openaiUsageWindowArgs(window)),
   discoverProviderModels: (baseUrl: string, apiKey: string) =>
@@ -227,6 +230,15 @@ export const api = {
       upstreamFormat,
     }),
   gatewayStatus: () => call<GatewayStatus>("gateway_status"),
+  diagnosticsStatus: () => call<DiagnosticsStatus>("diagnostics_status"),
+  diagnosticsManualMark: () => call<DiagnosticsActionResult>("diagnostics_manual_mark"),
+  diagnosticsPause: () => call<DiagnosticsActionResult>("diagnostics_pause"),
+  diagnosticsResume: () => call<DiagnosticsActionResult>("diagnostics_resume"),
+  diagnosticsDeleteIncident: (incidentId: string) =>
+    call<DiagnosticsActionResult>("diagnostics_delete_incident", {
+      incidentId,
+      incident_id: incidentId,
+    }),
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>
     call<GatewayTestResult>("gateway_test_request", { kind, model: model ?? null }),
   gatewayRecentEvents: (

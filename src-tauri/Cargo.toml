@@ -6,6 +6,9 @@ authors = ["CodexHub"]
 license = "MIT"
 edition = "2021"
 
+[features]
+debug-diagnostics = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

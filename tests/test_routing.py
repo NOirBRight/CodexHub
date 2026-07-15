@@ -14,6 +14,7 @@ from unittest.mock import Mock, call, patch
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
+import catalog_sync
 import codex_proxy
 from subagent_state import build_subagent_state
 from codex_proxy import (
@@ -41,6 +42,11 @@ from codex_proxy import (
 
 def _load_glm_apply_patch_retry_fixture():
     fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_retry_loop.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _load_glm_apply_patch_history_native_ids_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_history_native_ids.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
@@ -371,6 +377,24 @@ class RoutingTests(unittest.TestCase):
         }
         event_names = {call.args[0] for call in self.write_proxy_event.call_args_list if call.args}
         self.assertFalse(blocked & event_names, blocked & event_names)
+
+    def _write_official_publication_fence(
+        self,
+        catalog_path: Path,
+        budgets: dict[str, dict[str, int]],
+        *,
+        ready: bool = True,
+    ) -> None:
+        (catalog_path.parent / "official-refresh-state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "publication_ready": ready,
+                    "published_context_budgets": budgets,
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def test_gateway_auto_retry_settings_default_to_enabled_thirty_attempts(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -4602,7 +4626,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(disabled_by_slug["glm-5.2"]["input_modalities"], ["text"])
         self.assertNotIn("input_modalities", disabled_by_slug["text-model-without-modalities"])
 
-    def test_current_catalog_data_applies_context_guard_only_to_openai_models(self):
+    def test_current_catalog_data_applies_published_context_budget_only_to_official_models(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_proxy_dir = Path(tmpdir) / "proxy"
             runtime_proxy_dir.mkdir()
@@ -4619,11 +4643,35 @@ class RoutingTests(unittest.TestCase):
                                 "slug": "gpt-5.6-sol",
                                 "context_window": 353_000,
                                 "max_context_window": 353_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 272_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 258_400,
+                                        "model_auto_compact_token_limit": 240_000,
+                                    },
+                                },
                             },
                             {
                                 "slug": "gpt-5.3-codex-spark",
                                 "context_window": 128_000,
                                 "max_context_window": 128_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 128_000,
+                                        "effective_context_window_percent": 100,
+                                        "effective_context_window": 128_000,
+                                        "model_auto_compact_token_limit": 115_200,
+                                    },
+                                },
                             },
                             {
                                 "slug": "glm-5.2",
@@ -4634,6 +4682,23 @@ class RoutingTests(unittest.TestCase):
                     }
                 ),
                 encoding="utf-8",
+            )
+            self._write_official_publication_fence(
+                catalog_path,
+                {
+                    "gpt-5.6-sol": {
+                        "model_context_window": 272_000,
+                        "effective_context_window_percent": 95,
+                        "effective_context_window": 258_400,
+                        "model_auto_compact_token_limit": 240_000,
+                    },
+                    "gpt-5.3-codex-spark": {
+                        "model_context_window": 128_000,
+                        "effective_context_window_percent": 100,
+                        "effective_context_window": 128_000,
+                        "model_auto_compact_token_limit": 115_200,
+                    },
+                },
             )
 
             with (
@@ -4653,12 +4718,160 @@ class RoutingTests(unittest.TestCase):
                 unguarded_catalog = codex_proxy.current_catalog_data()
 
         guarded_by_slug = {model["slug"]: model for model in guarded_catalog["models"]}
-        unguarded_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
+        disabled_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
         self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
         self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["max_context_window"], 272_000)
         self.assertEqual(guarded_by_slug["gpt-5.3-codex-spark"]["context_window"], 128_000)
         self.assertEqual(guarded_by_slug["glm-5.2"]["context_window"], 1_000_000)
-        self.assertEqual(unguarded_by_slug["gpt-5.6-sol"]["context_window"], 353_000)
+        self.assertEqual(disabled_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
+
+    def test_context_guard_consumes_the_published_official_budget_not_a_fixed_cap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_proxy_dir = Path(tmpdir) / "proxy"
+            runtime_proxy_dir.mkdir()
+            (runtime_proxy_dir / "settings.json").write_text(
+                json.dumps({"openai_context_guard_enabled": True}),
+                encoding="utf-8",
+            )
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-sol",
+                                "context_window": 400_000,
+                                "max_context_window": 400_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 300_000,
+                                        "effective_context_window_percent": 80,
+                                        "effective_context_window": 240_000,
+                                        "model_auto_compact_token_limit": 210_000,
+                                    },
+                                },
+                            },
+                            {
+                                "slug": "volc/glm-5.2",
+                                "context_window": 1_000_000,
+                                "max_context_window": 1_000_000,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._write_official_publication_fence(
+                catalog_path,
+                {
+                    "gpt-5.6-sol": {
+                        "model_context_window": 300_000,
+                        "effective_context_window_percent": 80,
+                        "effective_context_window": 240_000,
+                        "model_auto_compact_token_limit": 210_000,
+                    },
+                },
+            )
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+            ):
+                catalog = codex_proxy.current_catalog_data()
+
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["gpt-5.6-sol"]["context_window"], 300_000)
+        self.assertEqual(by_slug["gpt-5.6-sol"]["max_context_window"], 300_000)
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_context_guard_hides_official_limits_while_publication_is_interrupted(self):
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 353_000,
+                    "max_context_window": 353_000,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "current_direct_official",
+                            "freshness": "fresh",
+                            "model_context_window": 272_000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258_400,
+                            "model_auto_compact_token_limit": 240_000,
+                        },
+                    },
+                },
+                {"slug": "volc/glm-5.2", "context_window": 1_000_000},
+            ]
+        }
+
+        guarded = codex_proxy.catalog_with_openai_context_guard(
+            catalog,
+            {},
+            require_published_snapshot=True,
+        )
+        by_slug = {model["slug"]: model for model in guarded["models"]}
+
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-sol"])
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_context_guard_hides_incomplete_or_untrusted_official_budget(self):
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 400_000,
+                    "max_context_window": 400_000,
+                    "effective_context_window_percent": 100,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "current_direct_official",
+                            "freshness": "stale",
+                            "model_context_window": 400_000,
+                            "effective_context_window_percent": 100,
+                            "effective_context_window": 400_000,
+                            "model_auto_compact_token_limit": 360_000,
+                        },
+                    },
+                },
+                {
+                    "slug": "volc/glm-5.2",
+                    "context_window": 1_000_000,
+                    "max_context_window": 1_000_000,
+                },
+            ]
+        }
+
+        guarded = codex_proxy.catalog_with_openai_context_guard(catalog)
+        by_slug = {model["slug"]: model for model in guarded["models"]}
+
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("effective_context_window_percent", by_slug["gpt-5.6-sol"])
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_catalog_request_consumes_the_published_snapshot_without_discovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(json.dumps({"models": []}), encoding="utf-8")
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch.object(catalog_sync, "sync_catalog") as sync_catalog,
+            ):
+                self.assertEqual(codex_proxy.current_catalog_data(), {"models": []})
+
+        sync_catalog.assert_not_called()
 
     def test_current_catalog_data_dedupes_official_aliases_without_touching_third_party_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -8722,6 +8935,43 @@ class RoutingTests(unittest.TestCase):
             {"type": "function_call_output", "call_id": "call_apply_patch", "output": patch_result},
         )
 
+    def test_responses_structured_provider_adapts_native_id_apply_patch_history_fixture(self):
+        fixture = _load_glm_apply_patch_history_native_ids_fixture()
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": fixture["model"],
+                    "input": fixture["input"],
+                    "tools": fixture["tools"],
+                },
+                ensure_ascii=True,
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0], fixture["input"][0])
+        self.assertEqual(payload["input"][1:3], fixture["expected_apply_patch_function_history"])
+        self.assertEqual(payload["input"][3], fixture["input"][3])
+        self.assertNotIn("id", payload["input"][1])
+        self.assertNotIn("id", payload["input"][2])
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("id", "call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
     def test_responses_structured_provider_preserves_body_originated_apply_patch_continuation(self):
         fixture = _load_glm_apply_patch_retry_fixture()
         function_item = {
@@ -8850,7 +9100,17 @@ class RoutingTests(unittest.TestCase):
             "output": "Success. Updated target.txt",
         }
         malformed_histories = (
-            ("unexpected_call_field", [{**custom_call, "id": "fc_call_patch"}, custom_output]),
+            ("unexpected_call_field", [{**custom_call, "unexpected": "field"}, custom_output]),
+            (
+                "native_call_id_with_unexpected_field",
+                [{**custom_call, "id": "ctc_sanitized_apply_patch", "unexpected": "field"}, custom_output],
+            ),
+            ("non_string_call_item_id", [{**custom_call, "id": 1}, custom_output]),
+            ("empty_output_item_id", [custom_call, {**custom_output, "id": ""}]),
+            (
+                "native_output_id_with_unexpected_field",
+                [custom_call, {**custom_output, "id": "ctco_sanitized_apply_patch", "unexpected": "field"}],
+            ),
             ("missing_completed_status", [{key: value for key, value in custom_call.items() if key != "status"}, custom_output]),
             ("empty_patch", [{**custom_call, "input": "  "}, custom_output]),
             ("unexpected_output_field", [custom_call, {**custom_output, "status": "completed"}]),
