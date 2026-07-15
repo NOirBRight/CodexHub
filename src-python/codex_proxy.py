@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import tomllib
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NoReturn
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
@@ -615,6 +615,9 @@ TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
 TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
+NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
+NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE = "invalid_native_responses_tool_codec"
+NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -1987,6 +1990,9 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
         "upstream_format": runtime_model.get("upstream_format", "responses"),
         "tool_protocol": runtime_model.get("tool_protocol", "auto"),
         "tool_surface_strategy": runtime_model.get("tool_surface_strategy", "eager"),
+        "native_responses_tool_codec": runtime_model.get(
+            "native_responses_tool_codec", "none"
+        ),
         "reports_cached_input_tokens": False,
         "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
     }
@@ -2088,6 +2094,9 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "upstream_format": external_model.get("upstream_format", "responses"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),
             "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
+            "native_responses_tool_codec": external_model.get(
+                "native_responses_tool_codec", "none"
+            ),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
@@ -4254,6 +4263,203 @@ def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
             "External tool surface strategy is invalid.",
         )
     )
+
+
+def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
+    configured = upstream.get("native_responses_tool_codec", "none")
+    if isinstance(configured, str) and configured in NATIVE_RESPONSES_TOOL_CODECS:
+        return configured
+    write_proxy_event("native_responses_tool_codec_rejected", reason="invalid_codec")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
+            "External native Responses tool codec is invalid.",
+        )
+    )
+
+
+STRICT_APPLY_PATCH_EXAMPLE = """*** Begin Patch
+*** Update File: example.txt
+@@
+-before
++after
+*** End Patch"""
+STRICT_APPLY_PATCH_CUSTOM_TOOL_FIELDS = frozenset(
+    {"type", "name", "description", "format"}
+)
+STRICT_APPLY_PATCH_FORMAT_FIELDS = frozenset(
+    {"type", "syntax", "definition"}
+)
+
+
+def _raise_native_responses_tool_contract_error(
+    event_context: Mapping[str, Any] | None,
+    *,
+    codec: str,
+    reason: str,
+    count: int = 1,
+) -> NoReturn:
+    _write_adapter_event(
+        event_context,
+        "native_responses_tool_codec",
+        codec=codec,
+        outcome="rejected",
+        count=count,
+        reason=reason,
+    )
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE,
+            "External native Responses apply_patch declaration is ambiguous or lossy.",
+        )
+    )
+
+
+def _validate_strict_apply_patch_custom_tool(
+    tool: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    codec: str,
+) -> None:
+    if set(tool) != STRICT_APPLY_PATCH_CUSTOM_TOOL_FIELDS:
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="custom_tool_fields_not_exact",
+        )
+    description = tool.get("description")
+    tool_format = tool.get("format")
+    if not isinstance(description, str) or not description.strip():
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="missing_description",
+        )
+    if not isinstance(tool_format, Mapping) or set(tool_format) != STRICT_APPLY_PATCH_FORMAT_FIELDS:
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="format_fields_not_exact",
+        )
+    if tool_format.get("type") != "grammar":
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="format_not_grammar",
+        )
+    if not isinstance(tool_format.get("syntax"), str) or not tool_format["syntax"].strip():
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="missing_grammar_syntax",
+        )
+    if not isinstance(tool_format.get("definition"), str) or not tool_format["definition"].strip():
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="missing_grammar_definition",
+        )
+
+
+def _strict_apply_patch_function_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    description_parts: list[str] = []
+    description = tool.get("description")
+    if isinstance(description, str) and description.strip():
+        description_parts.append(description.strip())
+    tool_format = tool.get("format")
+    if isinstance(tool_format, Mapping):
+        grammar = tool_format.get("definition")
+        if isinstance(grammar, str) and grammar.strip():
+            syntax = tool_format.get("syntax")
+            grammar_label = f"Original freeform grammar ({syntax}):" if isinstance(syntax, str) and syntax else "Original freeform grammar:"
+            description_parts.append(f"{grammar_label}\n{grammar.strip()}")
+    description_parts.append(
+        "Provide the complete patch in the required `patch` string. "
+        f"Example:\n{STRICT_APPLY_PATCH_EXAMPLE}"
+    )
+    return {
+        "type": "function",
+        "name": APPLY_PATCH_FUNCTION_NAME,
+        "description": "\n\n".join(description_parts),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"patch": {"type": "string", "minLength": 1}},
+            "required": ["patch"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _adapt_native_responses_tool_declarations(
+    payload: dict[str, Any],
+    upstream: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> bool:
+    codec = _external_native_responses_tool_codec(upstream)
+    if codec == "none":
+        return False
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+
+    apply_patch_tools = [
+        tool
+        for tool in tools
+        if isinstance(tool, Mapping) and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+    ]
+    if len(apply_patch_tools) > 1:
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="duplicate_declaration",
+            count=len(apply_patch_tools),
+        )
+    if not apply_patch_tools:
+        _write_adapter_event(
+            event_context,
+            "native_responses_tool_codec",
+            codec=codec,
+            outcome="untouched",
+            count=0,
+        )
+        return False
+    apply_patch_tool = apply_patch_tools[0]
+    if apply_patch_tool.get("type") != "custom":
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="declaration_not_custom",
+        )
+    _validate_strict_apply_patch_custom_tool(
+        apply_patch_tool,
+        event_context,
+        codec=codec,
+    )
+
+    rewritten_tools: list[Any] = []
+    adapted = 0
+    for tool in tools:
+        if (
+            isinstance(tool, Mapping)
+            and tool.get("type") == "custom"
+            and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+        ):
+            rewritten_tools.append(_strict_apply_patch_function_tool(tool))
+            adapted += 1
+        else:
+            rewritten_tools.append(tool)
+    if not adapted:
+        return False
+    payload["tools"] = rewritten_tools
+    _write_adapter_event(
+        event_context,
+        "native_responses_tool_codec",
+        codec=codec,
+        outcome="adapted",
+        count=adapted,
+    )
+    return True
 
 
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -7577,6 +7783,11 @@ def compatible_request_body(
         if not changed:
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if (
+        tool_protocol == "responses_structured"
+        and _adapt_native_responses_tool_declarations(payload, upstream, event_context)
+    ):
+        changed = True
     allow_codex_tools = tool_protocol != "none"
     if inject_codex_tools and allow_codex_tools and not raw_provider_probe:
         if lifecycle_complete:
@@ -11115,6 +11326,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             proxy_request_context["raw_provider_probe"] = True
         model = None
         model_requested = None
+        upstream: Mapping[str, Any] | None = None
         upstream_name = None
         upstream_format = "responses"
         reports_cached_input_tokens = False
@@ -11123,6 +11335,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         route_policy_event_fields: dict[str, Any] = {}
         vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
+        response_lifecycle_state: dict[str, str] = {}
         caller_body = b""
         caller_request_observability: dict[str, Any] = {}
         request_observability: dict[str, Any] = {}
@@ -11649,6 +11862,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     request_kind=request_kind,
                                     defer_stream_errors=relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
+                                    response_lifecycle_state=response_lifecycle_state,
                                     behavior_profile=behavior_profile,
                                 )
                             break
@@ -11931,6 +12145,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             error_status = 400
             json_error_type = "invalid_request_error" if is_apply_patch_adapter_error else error_code
             sse_error_type = "invalid_request_error" if is_apply_patch_adapter_error else "upstream_error"
+            selected_native_responses_tool_codec = (
+                upstream.get("native_responses_tool_codec", "none")
+                if isinstance(upstream, Mapping)
+                else "none"
+            )
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -11948,16 +12167,45 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
-                    inbound_format=inbound_format,
-                    upstream_name=upstream_name or "upstream_error",
-                    status=error_status,
-                    exc=exc,
-                    error=error_code,
-                    detail=detail,
-                    error_type=sse_error_type,
-                    preserve_explicit_error=True,
-                )
+                if (
+                    is_apply_patch_adapter_error
+                    and inbound_format == "responses"
+                    and selected_native_responses_tool_codec == "strict_apply_patch"
+                ):
+                    self._write_sse_event(
+                        "response.failed",
+                        _responses_failed_event_for_stream_error(
+                            upstream_name=upstream_name or "upstream_error",
+                            model=canonical_model_id(model) if model else None,
+                            status=error_status,
+                            exc=exc,
+                            error=error_code,
+                            detail=detail,
+                            response_id=response_lifecycle_state.get("response_id"),
+                        ),
+                    )
+                    write_proxy_event(
+                        "third_party_apply_patch_terminal",
+                        request_id=request_id,
+                        model=canonical_model_id(model) if model else None,
+                        upstream=upstream_name,
+                        codec=selected_native_responses_tool_codec,
+                        disposition="response.failed",
+                        failure_class=RETRY_FAILURE_PERMANENT,
+                        retry_count=0,
+                    )
+                    self.close_connection = True
+                else:
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name or "upstream_error",
+                        status=error_status,
+                        exc=exc,
+                        error=error_code,
+                        detail=detail,
+                        error_type=sse_error_type,
+                        preserve_explicit_error=True,
+                    )
                 return
             self._safe_send_downstream_json_error(
                 error_status,
@@ -13074,6 +13322,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
         defer_stream_errors: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
+        response_lifecycle_state: dict[str, str] | None = None,
         behavior_profile: str | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
@@ -13099,6 +13348,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         def observe_diagnostic_sse_line(line: bytes) -> None:
             _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+
+        def remember_response_id(payload: Mapping[str, Any]) -> None:
+            if response_lifecycle_state is None:
+                return
+            response_payload = payload.get("response")
+            if not isinstance(response_payload, Mapping):
+                return
+            response_id = response_payload.get("id")
+            if isinstance(response_id, str) and response_id:
+                response_lifecycle_state["response_id"] = response_id
 
         if (
             behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
@@ -14059,6 +14318,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                         usage_payload = _parse_sse_json_payload(line)
                         if isinstance(usage_payload, Mapping):
+                            remember_response_id(usage_payload)
                             event_type = usage_payload.get("type")
                             if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                                 saw_response_event = True
@@ -14342,6 +14602,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     usage_payload = _parse_sse_json_payload(line)
                     buffer_current_line = False
                     if isinstance(usage_payload, Mapping):
+                        remember_response_id(usage_payload)
                         event_type = usage_payload.get("type")
                         if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                             last_response_event_type = event_type

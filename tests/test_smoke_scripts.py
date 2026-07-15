@@ -663,6 +663,49 @@ def test_issue_108_qualification_rejects_retry_and_protocol_fallback_evidence():
     assert "qualification recorded an upstream protocol fallback" in source
 
 
+def test_issue_140_glm_qualification_does_not_coach_apply_patch_argument_shape():
+    source = (
+        ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "Decide the patch contents from the file you read and the requested replacement." in source
+    assert "argument named patch" not in source
+    assert "Do not use an empty argument name" not in source
+    assert "whose value is exactly this one-operation patch" not in source
+
+
+def test_issue_140_glm_qualification_requires_selected_codec_and_live_contract_evidence():
+    source = (
+        ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "native_responses_tool_codec" in source
+    assert "strict_apply_patch" in source
+    assert "native Responses tool codec never reported strict_apply_patch/adapted" in source
+    assert "caller apply_patch declaration did not expose the exact grammar contract" in source
+    assert "upstream apply_patch declaration did not expose the exact strict function contract" in source
+    assert "native_responses_tool_codec_adapted_count" in source
+    assert "caller_apply_patch_grammar_contract_count" in source
+    assert "upstream_strict_apply_patch_contract_count" in source
+    assert "Issue140NativeResponsesQualification" in source
+    assert "native_responses_contract_evidence_validated" in source
+
+
+def test_issue_140_glm_qualification_runs_two_independent_natural_tool_loops():
+    source = (
+        ROOT / "scripts" / "qualify-issue-140-glm-native-responses-tools.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "1..2" in source
+    assert "qualify-issue-108-glm-tool-surface.ps1" in source
+    assert "-ExternalIsolationQualification" in source
+    assert "-Issue140NativeResponsesQualification" in source
+    assert "completed_run_count" in source
+    assert "expected_run_count = 2" in source
+    assert "shell_command,apply_patch,shell_command" in source
+    assert "native_responses_tool_codec_adapted_count" in source
+
+
 def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_children():
     source = (
         ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"

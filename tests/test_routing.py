@@ -5023,6 +5023,28 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
         self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
 
+    def test_runtime_ollama_native_responses_tool_codec_is_copied_for_qualified_and_unqualified_routes(self):
+        runtime_model = {
+            "alias": "ollama-cloud/glm-5.2",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-runtime-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "tool_protocol": "auto",
+            "tool_surface_strategy": "deferred_core",
+            "native_responses_tool_codec": "strict_apply_patch",
+            "input_modalities": ("text",),
+        }
+
+        with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, runtime_model)):
+            unqualified = choose_upstream("glm-5.2")
+            qualified = choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
+
     def test_runtime_ollama_provider_rejects_disabled_model_despite_static_policy_allowlist(self):
         with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, None)):
             with self.assertRaises(ValueError) as context:
@@ -6996,6 +7018,12 @@ class RoutingTests(unittest.TestCase):
             "duplicate": '{"patch":"one","patch":"two"}',
             "extra": json.dumps({"patch": fixture["patch"], "extra": "unexpected"}),
         }
+        malformed_arguments.update(
+            {
+                f"observed_{shape}": json.dumps(arguments)
+                for shape, arguments in fixture["observed_incompatible_arguments"].items()
+            }
+        )
 
         for shape, arguments in malformed_arguments.items():
             with self.subTest(shape=shape):
@@ -7079,7 +7107,7 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("arguments_not_exact", rendered_payload)
         self.assertNotIn(private_patch, rendered_payload)
 
-    def test_apply_patch_adapter_rejection_is_nonretryable_sse_without_replay(self):
+    def test_apply_patch_adapter_rejection_sse_terminal_is_codec_scoped_and_preserves_response_id(self):
         private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
         malformed_item = {
             "id": "fc_apply_patch",
@@ -7093,9 +7121,6 @@ class RoutingTests(unittest.TestCase):
             {"type": "response.created", "response": {"id": "resp_apply_patch", "output": []}},
             {"type": "response.output_item.done", "output_index": 0, "item": malformed_item},
         ]
-        response = FakeSseResponse(
-            [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in upstream_events] + [b""]
-        )
         request_body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -7103,28 +7128,103 @@ class RoutingTests(unittest.TestCase):
                 "stream": True,
             }
         ).encode("utf-8")
-        handler, fake = post_handler("/v1/responses", request_body)
+        cases = (
+            ("unselected", "none", b"event: error\n"),
+            ("selected", "strict_apply_patch", b"event: response.failed\n"),
+        )
+        for case, codec, expected_prefix in cases:
+            with self.subTest(case=case):
+                self.write_proxy_event.reset_mock()
+                response = FakeSseResponse(
+                    [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in upstream_events]
+                    + [b""]
+                )
+                handler, fake = post_handler("/v1/responses", request_body)
+                with (
+                    patch.dict(
+                        self.external_model,
+                        {"native_responses_tool_codec": codec},
+                    ),
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        return_value=response,
+                    ) as open_upstream,
+                ):
+                    CodexProxyHandler._proxy_post_request(
+                        handler,
+                        inbound_format="responses",
+                    )
 
-        with patch("codex_proxy._open_upstream_response", return_value=response) as open_upstream:
-            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+                self.assertEqual(open_upstream.call_count, 1)
+                event_names = [
+                    call.args[0]
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args
+                ]
+                self.assertNotIn("upstream_retry", event_names)
+                self.assertNotIn("sse_retry_notice", event_names)
+                self.assertEqual(fake.status, 200)
+                frames = b"".join(fake.wfile.writes).split(b"\n\n")
+                terminal_frames = [
+                    frame for frame in frames if frame.startswith(expected_prefix)
+                ]
+                self.assertEqual(len(terminal_frames), 1)
 
-        self.assertEqual(open_upstream.call_count, 1)
-        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
-        self.assertNotIn("upstream_retry", event_names)
-        self.assertNotIn("sse_retry_notice", event_names)
-        self.assertEqual(fake.status, 200)
-        frames = b"".join(fake.wfile.writes).split(b"\n\n")
-        error_frame = next(frame for frame in frames if frame.startswith(b"event: error\n"))
-        error_line = next(line for line in error_frame.splitlines() if line.startswith(b"data: "))
-        payload = json.loads(error_line.removeprefix(b"data: "))
-        self.assertEqual(payload["type"], "invalid_request_error")
-        self.assertEqual(payload["status"], 400)
-        self.assertEqual(payload["error"], "invalid_apply_patch_function_call")
-        self.assertEqual(payload["failure_class"], codex_proxy.RETRY_FAILURE_PERMANENT)
-        self.assertFalse(payload["retryable"])
-        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
-        self.assertNotIn("arguments_not_exact", json.dumps(payload))
-        self.assertNotIn(private_patch, json.dumps(payload))
+                if codec == "none":
+                    self.assertFalse(
+                        any(
+                            frame.startswith(b"event: response.failed\n")
+                            for frame in frames
+                        )
+                    )
+                    self.assertNotIn("third_party_apply_patch_terminal", event_names)
+                    continue
+
+                self.assertFalse(
+                    any(frame.startswith(b"event: error\n") for frame in frames)
+                )
+                failed_line = next(
+                    line
+                    for line in terminal_frames[0].splitlines()
+                    if line.startswith(b"data: ")
+                )
+                payload = json.loads(failed_line.removeprefix(b"data: "))
+                self.assertEqual(payload["type"], "response.failed")
+                self.assertEqual(payload["response"]["id"], "resp_apply_patch")
+                self.assertEqual(payload["response"]["status"], "failed")
+                self.assertEqual(
+                    payload["response"]["error"]["code"],
+                    "invalid_apply_patch_function_call",
+                )
+                self.assertEqual(
+                    payload["response"]["error"]["failure_class"],
+                    codex_proxy.RETRY_FAILURE_PERMANENT,
+                )
+                self.assertFalse(payload["response"]["error"]["retryable"])
+                self.assertNotIn("arguments_not_exact", json.dumps(payload))
+                self.assertNotIn(private_patch, json.dumps(payload))
+                terminal_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_terminal"
+                )
+                self.assertEqual(terminal_event["codec"], "strict_apply_patch")
+                self.assertEqual(terminal_event["disposition"], "response.failed")
+                self.assertEqual(
+                    terminal_event["failure_class"],
+                    codex_proxy.RETRY_FAILURE_PERMANENT,
+                )
+                self.assertEqual(terminal_event["retry_count"], 0)
+                for forbidden in (
+                    "arguments",
+                    "input",
+                    "patch",
+                    "path",
+                    "content",
+                    "pattern",
+                    "response_id",
+                ):
+                    self.assertNotIn(forbidden, terminal_event)
 
     def test_unrelated_protocol_translation_error_is_nonretryable_json_client_error(self):
         translation_error = codex_proxy.UpstreamProtocolTranslationError(
@@ -9098,6 +9198,108 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(history_events[0]["count"], 1)
         for forbidden in ("id", "call_id", "name", "input", "output", "patch", "arguments"):
             self.assertNotIn(forbidden, history_events[0])
+
+    def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
+        fixture = _load_glm_apply_patch_history_native_ids_fixture()
+        apply_patch_tool = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply one patch using the caller grammar.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch update_file end_patch",
+            },
+        }
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "native_responses_tool_codec": "strict_apply_patch",
+        }
+        initial_request = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": [{"type": "message", "role": "user", "content": "Edit it."}],
+                        "tools": [apply_patch_tool],
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={"request_id": "request-initial"},
+                inject_codex_tools=False,
+            )
+        )
+        function_item = {
+            "id": "fc_sanitized_apply_patch",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_sanitized_apply_patch",
+            "name": "apply_patch",
+            "arguments": json.dumps(
+                {"patch": fixture["input"][1]["input"]},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        }
+        unrelated_item = {
+            "id": "fc_unrelated",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_unrelated",
+            "name": "shell_command",
+            "arguments": json.dumps({"command": "Get-Content target.txt"}),
+        }
+        caller_response = json.loads(
+            compatible_response_body(
+                json.dumps(
+                    {"id": "resp_sanitized", "output": [unrelated_item, function_item]}
+                ).encode("utf-8"),
+                "ollama_cloud",
+                event_context={"request_id": "request-initial"},
+            )
+        )
+        caller_apply_patch = caller_response["output"][1]
+        next_request = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": [
+                            caller_apply_patch,
+                            {
+                                "type": "custom_tool_call_output",
+                                "call_id": caller_apply_patch["call_id"],
+                                "output": "Success. Updated target.txt",
+                            },
+                            {"type": "message", "role": "user", "content": "Verify it."},
+                        ],
+                        "tools": [apply_patch_tool],
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={"request_id": "request-next"},
+                inject_codex_tools=False,
+            )
+        )
+
+        self.assertEqual(initial_request["tools"][0]["type"], "function")
+        self.assertEqual(
+            [item["id"] for item in caller_response["output"]],
+            ["fc_unrelated", "fc_sanitized_apply_patch"],
+        )
+        self.assertEqual(caller_apply_patch["type"], "custom_tool_call")
+        self.assertEqual(caller_apply_patch["id"], "fc_sanitized_apply_patch")
+        self.assertEqual(caller_apply_patch["call_id"], "call_sanitized_apply_patch")
+        self.assertEqual(caller_apply_patch["input"], fixture["input"][1]["input"])
+        self.assertEqual(
+            [item["type"] for item in next_request["input"]],
+            ["function_call", "function_call_output", "message"],
+        )
+        self.assertEqual(next_request["input"][0]["call_id"], "call_sanitized_apply_patch")
+        self.assertEqual(next_request["input"][1]["call_id"], "call_sanitized_apply_patch")
+        self.assertEqual(next_request["tools"][0]["type"], "function")
 
     def test_responses_structured_provider_preserves_body_originated_apply_patch_continuation(self):
         fixture = _load_glm_apply_patch_retry_fixture()
@@ -12166,6 +12368,121 @@ Execution constraints:
             "mcp__synthetic_namespace__deferred",
             {tool.get("name") for tool in payload["tools"] if isinstance(tool, dict)},
         )
+
+    def test_native_responses_apply_patch_codec_is_opt_in_and_emits_one_strict_patch_field(self):
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch using the caller's grammar.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch update_file end_patch",
+            },
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Make the requested edit."}],
+                "tools": [apply_patch],
+            }
+        ).encode("utf-8")
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+        }
+
+        unselected = json.loads(
+            compatible_request_body(body, upstream, inject_codex_tools=False)
+        )
+        selected = json.loads(
+            compatible_request_body(
+                body,
+                {**upstream, "native_responses_tool_codec": "strict_apply_patch"},
+                inject_codex_tools=False,
+            )
+        )
+
+        self.assertEqual(unselected["tools"], [apply_patch])
+        self.assertEqual(
+            selected["tools"][0],
+            {
+                "type": "function",
+                "name": "apply_patch",
+                "description": selected["tools"][0]["description"],
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"patch": {"type": "string", "minLength": 1}},
+                    "required": ["patch"],
+                    "additionalProperties": False,
+                },
+            },
+        )
+        description = selected["tools"][0]["description"]
+        self.assertIn(apply_patch["description"], description)
+        self.assertIn(apply_patch["format"]["definition"], description)
+        self.assertIn("*** Begin Patch", description)
+        self.assertIn("*** End Patch", description)
+
+    def test_native_responses_apply_patch_codec_rejects_ambiguous_or_lossy_custom_declarations(self):
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch using the caller's grammar.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch update_file end_patch",
+            },
+        }
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "native_responses_tool_codec": "strict_apply_patch",
+        }
+        malformed_tools = {
+            "duplicate": [apply_patch, dict(apply_patch)],
+            "unknown_field": [{**apply_patch, "unexpected": True}],
+            "missing_grammar": [{key: value for key, value in apply_patch.items() if key != "format"}],
+        }
+
+        for shape, tools in malformed_tools.items():
+            with self.subTest(shape=shape):
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    compatible_request_body(
+                        json.dumps(
+                            {"model": "glm-5.2", "input": "Edit the file.", "tools": tools}
+                        ).encode("utf-8"),
+                        upstream,
+                        event_context={"request_id": "<sanitized-request-id>"},
+                        inject_codex_tools=False,
+                    )
+
+                self.assertEqual(
+                    raised.exception.cause.code,
+                    "invalid_native_responses_tool_contract",
+                )
+                rejected = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "native_responses_tool_codec"
+                )
+                self.assertEqual(rejected["codec"], "strict_apply_patch")
+                self.assertEqual(rejected["outcome"], "rejected")
+                for forbidden in (
+                    "description",
+                    "format",
+                    "grammar",
+                    "patch",
+                    "arguments",
+                    "input",
+                ):
+                    self.assertNotIn(forbidden, rejected)
+                self.write_proxy_event.reset_mock()
 
     def test_external_tool_surface_preparation_telemetry_uses_sanitized_structural_counts(self):
         shell_command = {

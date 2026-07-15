@@ -14,6 +14,7 @@ param(
     [switch]$CaptureGatewayDigestReplay,
     [string]$EvidenceFixture = '',
     [switch]$ExternalIsolationQualification,
+    [switch]$Issue140NativeResponsesQualification,
     [int]$ReadinessTimeoutSeconds = 60,
     [string]$QualificationEvidenceOutput = '',
     [string]$QualificationFailureOutput = '',
@@ -635,6 +636,45 @@ function Get-AdaptedTelemetryCount {
         }
     }
     return $total
+}
+
+function Get-CapturedApplyPatchDeclarations {
+    param(
+        [object[]]$CaptureEvents,
+        [ValidateSet('caller', 'upstream')]
+        [string]$Surface
+    )
+
+    $stage = if ($Surface -eq 'caller') { 'before' } else { 'after' }
+    $declarations = [System.Collections.Generic.List[object]]::new()
+    foreach ($captureEvent in $CaptureEvents) {
+        if ($captureEvent.stage -ne $stage -or $null -eq $captureEvent.shape) {
+            continue
+        }
+        $tools = [System.Collections.Generic.List[object]]::new()
+        if ($Surface -eq 'caller') {
+            foreach ($inputItem in @($captureEvent.shape.input)) {
+                foreach ($tool in @($inputItem.tools)) {
+                    if ($null -ne $tool) {
+                        [void]$tools.Add($tool)
+                    }
+                }
+            }
+        }
+        else {
+            foreach ($tool in @($captureEvent.shape.tools)) {
+                if ($null -ne $tool) {
+                    [void]$tools.Add($tool)
+                }
+            }
+        }
+        foreach ($tool in $tools) {
+            if ($tool.name -eq 'apply_patch') {
+                [void]$declarations.Add($tool)
+            }
+        }
+    }
+    return $declarations.ToArray()
 }
 
 function Test-ExpectedGlmGatewayRoute {
@@ -1467,6 +1507,9 @@ if ($CaptureGatewayDigestReplay) {
 if ($HistoryAdapterNegativeControl -and -not $FailFastAfterFirstPostSuccessToolChoice) {
     throw 'The history-adapter negative control requires fail-fast tool-choice stopping.'
 }
+if ($Issue140NativeResponsesQualification -and -not $ExternalIsolationQualification) {
+    throw 'The Issue 140 native Responses qualification requires external isolation.'
+}
 
 $ollamaApiKey = [Environment]::GetEnvironmentVariable('OLLAMA_API_KEY')
 if ([string]::IsNullOrWhiteSpace($ollamaApiKey)) {
@@ -1529,7 +1572,7 @@ if ($ExternalIsolationQualification -and [string]::IsNullOrWhiteSpace($Qualifica
     $QualificationFailureOutput = Join-Path $OutputDir 'sanitized-qualification-failure.json'
 }
 $summary = [ordered]@{
-    mode = if ($HistoryAdapterNegativeControl) { 'history_adapter_disabled_negative_control' } elseif ($ExternalIsolationQualification) { 'external_isolation_qualification' } else { 'qualification' }
+    mode = if ($HistoryAdapterNegativeControl) { 'history_adapter_disabled_negative_control' } elseif ($Issue140NativeResponsesQualification) { 'issue140_native_responses_qualification' } elseif ($ExternalIsolationQualification) { 'external_isolation_qualification' } else { 'qualification' }
     model = 'ollama-cloud/glm-5.2'
     expected_upstream = 'ollama_cloud'
     expected_route_mode = 'codexhub'
@@ -1647,6 +1690,25 @@ def _tool_shape(tools):
             result.append({"kind": type(tool).__name__})
             continue
         item = {"type": tool.get("type"), "name": tool.get("name"), "keys": sorted(tool)}
+        if tool.get("name") == "apply_patch" and tool.get("type") == "custom":
+            tool_format = tool.get("format")
+            item["format_keys"] = sorted(tool_format) if isinstance(tool_format, dict) else None
+            item["format_type"] = tool_format.get("type") if isinstance(tool_format, dict) else None
+            item["format_syntax"] = tool_format.get("syntax") if isinstance(tool_format, dict) else None
+            definition = tool_format.get("definition") if isinstance(tool_format, dict) else None
+            item["definition_present"] = isinstance(definition, str) and bool(definition.strip())
+        elif tool.get("name") == "apply_patch" and tool.get("type") == "function":
+            parameters = tool.get("parameters")
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            patch_schema = properties.get("patch") if isinstance(properties, dict) else None
+            item["strict"] = tool.get("strict")
+            item["parameter_keys"] = sorted(parameters) if isinstance(parameters, dict) else None
+            item["property_names"] = sorted(properties) if isinstance(properties, dict) else None
+            item["patch_schema_keys"] = sorted(patch_schema) if isinstance(patch_schema, dict) else None
+            item["patch_type"] = patch_schema.get("type") if isinstance(patch_schema, dict) else None
+            item["patch_min_length"] = patch_schema.get("minLength") if isinstance(patch_schema, dict) else None
+            item["required"] = parameters.get("required") if isinstance(parameters, dict) else None
+            item["additional_properties"] = parameters.get("additionalProperties") if isinstance(parameters, dict) else None
         nested = tool.get("tools")
         if isinstance(nested, list):
             item["nested_tools"] = _tool_shape(nested)
@@ -2192,14 +2254,7 @@ Automated qualification: follow this exact tool sequence and use no other tools.
 2. Call apply_patch exactly once to replace only issue108-before with issue108-after in qualification-target.txt. Do not use shell to write the file.
 3. Call shell_command exactly once to read only qualification-target.txt and verify issue108-after.
 After a successful apply_patch result, step 2 is complete. Do not call apply_patch again for any reason: your next and only tool call must be the step-3 shell_command. Treat a repeated apply_patch call as an incorrect result.
-For the apply_patch action, emit exactly one upstream function-call argument named patch whose value is exactly this one-operation patch, with no duplicate hunks or additional file operations:
-*** Begin Patch
-*** Update File: qualification-target.txt
-@@
--issue108-before
-+issue108-after
-*** End Patch
-Do not use an empty argument name or additional arguments.
+Decide the patch contents from the file you read and the requested replacement.
 Do not call tool_search, collaboration tools, namespaces, or any other tool. Do not edit or create any other file. Finish with exactly: SENTINEL:issue108-shell-apply-shell
 '@
     $cli = Start-TrackedCodex -CommandPath $CodexCommand -Arguments $cliArguments -WorkingDirectory $testWorkspace -Environment $cliEnvironment
@@ -2304,11 +2359,21 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $surfaceEvents = @($events | Where-Object { $_.event -eq 'external_tool_surface_prepared' })
     $adapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_adapter' })
     $historyAdapterEvents = @($events | Where-Object { $_.event -eq 'third_party_apply_patch_freeform_history_adapter' })
+    $nativeResponsesToolCodecEvents = @($events | Where-Object { $_.event -eq 'native_responses_tool_codec' })
     $applyPatchAdapterAdaptedCount = Get-AdaptedTelemetryCount -Events $adapterEvents
     $applyPatchHistoryAdapterAdaptedCount = Get-AdaptedTelemetryCount -Events $historyAdapterEvents
+    $nativeResponsesToolCodecAdaptedCount = Get-AdaptedTelemetryCount -Events @(
+        $nativeResponsesToolCodecEvents | Where-Object { $_.codec -eq 'strict_apply_patch' }
+    )
     $requestErrors = @($events | Where-Object { $_.event -eq 'request_error' })
     $upstreamRetryEvents = @($events | Where-Object { $_.event -eq 'upstream_retry' })
     $upstreamProtocolFallbackEvents = @($events | Where-Object { $_.event -eq 'upstream_protocol_fallback' })
+    $callerApplyPatchDeclarations = @(
+        Get-CapturedApplyPatchDeclarations -CaptureEvents $captureEvents -Surface 'caller'
+    )
+    $upstreamApplyPatchDeclarations = @(
+        Get-CapturedApplyPatchDeclarations -CaptureEvents $captureEvents -Surface 'upstream'
+    )
     $postSuccessStructuredHistoryPairCounts = [System.Collections.Generic.List[int]]::new()
     for ($index = 0; $index -lt $captureEvents.Count; $index++) {
         if ($captureEvents[$index].stage -ne 'post_success_apply_patch_result') {
@@ -2401,6 +2466,35 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     if ($applyPatchAdapterAdaptedCount -le 0) {
         [void]$failures.Add('the third-party apply_patch freeform adapter never reported adapted')
     }
+    if ($nativeResponsesToolCodecAdaptedCount -le 0) {
+        [void]$failures.Add('native Responses tool codec never reported strict_apply_patch/adapted')
+    }
+    if ($callerApplyPatchDeclarations.Count -eq 0 -or @(
+        $callerApplyPatchDeclarations | Where-Object {
+            $_.type -ne 'custom' -or
+            (@($_.format_keys) -join ',') -ne 'definition,syntax,type' -or
+            $_.format_type -ne 'grammar' -or
+            $_.format_syntax -ne 'lark' -or
+            $_.definition_present -ne $true
+        }
+    ).Count -gt 0) {
+        [void]$failures.Add('caller apply_patch declaration did not expose the exact grammar contract')
+    }
+    if ($upstreamApplyPatchDeclarations.Count -eq 0 -or @(
+        $upstreamApplyPatchDeclarations | Where-Object {
+            $_.type -ne 'function' -or
+            $_.strict -ne $true -or
+            (@($_.parameter_keys) -join ',') -ne 'additionalProperties,properties,required,type' -or
+            (@($_.property_names) -join ',') -ne 'patch' -or
+            (@($_.patch_schema_keys) -join ',') -ne 'minLength,type' -or
+            $_.patch_type -ne 'string' -or
+            [int]$_.patch_min_length -ne 1 -or
+            (@($_.required) -join ',') -ne 'patch' -or
+            $_.additional_properties -ne $false
+        }
+    ).Count -gt 0) {
+        [void]$failures.Add('upstream apply_patch declaration did not expose the exact strict function contract')
+    }
     if ($HistoryAdapterNegativeControl) {
         if ($applyPatchHistoryAdapterAdaptedCount -ne 0) {
             [void]$failures.Add('history-adapter negative control unexpectedly reported adapted history')
@@ -2440,6 +2534,12 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $summary.apply_patch_history_adapter_outcomes = @($historyAdapterEvents | ForEach-Object { [string]$_.outcome })
     $summary.apply_patch_adapter_adapted_count = $applyPatchAdapterAdaptedCount
     $summary.apply_patch_history_adapter_adapted_count = $applyPatchHistoryAdapterAdaptedCount
+    $summary.native_responses_tool_codec_outcomes = @(
+        $nativeResponsesToolCodecEvents | ForEach-Object { '{0}/{1}' -f $_.codec, $_.outcome }
+    )
+    $summary.native_responses_tool_codec_adapted_count = $nativeResponsesToolCodecAdaptedCount
+    $summary.caller_apply_patch_grammar_contract_count = $callerApplyPatchDeclarations.Count
+    $summary.upstream_strict_apply_patch_contract_count = $upstreamApplyPatchDeclarations.Count
     $summary.post_success_tool_choice = $postSuccessToolChoice
     $summary.post_success_structured_history_pair_counts = @($postSuccessStructuredHistoryPairCounts)
     $summary.stopped_after_first_post_success_tool_choice = $stoppedForPostSuccessToolChoice
@@ -2447,10 +2547,19 @@ Do not call tool_search, collaboration tools, namespaces, or any other tool. Do 
     $summary.tool_search_call_count = $toolSearchChoiceEvents.Count
     $summary.upstream_retry_event_count = $upstreamRetryEvents.Count
     $summary.upstream_protocol_fallback_event_count = $upstreamProtocolFallbackEvents.Count
+    $summary.request_error_event_count = $requestErrors.Count
     $summary.git_status = @($statusLines)
     $summary.git_numstat = $numstat
     $summary.failures = @($failures)
     $summary.passed = $failures.Count -eq 0
+    $summary.native_responses_contract_evidence_validated = (
+        $nativeResponsesToolCodecAdaptedCount -gt 0 -and
+        $callerApplyPatchDeclarations.Count -gt 0 -and
+        $upstreamApplyPatchDeclarations.Count -gt 0 -and
+        $requestErrors.Count -eq 0 -and
+        $upstreamRetryEvents.Count -eq 0 -and
+        $upstreamProtocolFallbackEvents.Count -eq 0
+    )
 }
 catch {
     Add-SanitizedSummaryFailure -Summary $summary -Code (Get-SanitizedQualificationFailureCode -ErrorRecord $_)
@@ -2465,7 +2574,7 @@ finally {
     if ($null -ne $gateway) {
         Complete-TrackedProcess -Tracked $gateway -Name 'gateway' -StdoutPath $gatewayStdoutPath -StderrPath $gatewayStderrPath -Summary $summary
     }
-    if ($ExternalIsolationQualification) {
+    if ($ExternalIsolationQualification -and -not $Issue140NativeResponsesQualification) {
         $allArtifactGatewayEvents = @(Read-JsonLines -Path (Join-Path $runtimeHome 'proxy\codex-proxy-events.jsonl'))
         $allArtifactCaptureEvents = @(Read-JsonLines -Path $requestShapePath)
         $artifactCapturePhase = if ($summary.readiness_preflight_passed) { 'acceptance' } else { 'preflight' }

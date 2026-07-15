@@ -37,6 +37,22 @@ class ProvidersConfigTests(unittest.TestCase):
         )
         self.assertEqual(configured_models, ["glm-5.2"])
 
+    def test_bundled_ollama_glm_selects_the_only_strict_apply_patch_native_responses_codec(self):
+        providers = load_providers(DEFAULT_PROVIDERS_PATH)
+        configured, index = build_ollama_cloud_model_index(providers, require_api_key=False)
+        configured_models = [
+            model.id
+            for provider in providers
+            for model in provider.models
+            if model.native_responses_tool_codec is not None
+        ]
+
+        self.assertTrue(configured)
+        self.assertEqual(configured_models, ["glm-5.2"])
+        self.assertEqual(index["glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(index["ollama-cloud/glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(index["minimax-m3"]["native_responses_tool_codec"], "none")
+
     def test_discover_official_models_fetches_gpt_models_sorted_with_limits(self):
         payload = {
             "data": [
@@ -349,6 +365,35 @@ api_key = "ollama-secret"
         self.assertTrue(qualified_configured)
         self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
         self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
+
+    def test_runtime_omission_inherits_bundled_native_responses_tool_codec_for_ollama_glm_aliases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+
+  [[providers.models]]
+  id = "glm-5.2"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            configured, unqualified = resolve_ollama_cloud_model(
+                "glm-5.2", providers_path=path, require_api_key=False
+            )
+            qualified_configured, qualified = resolve_ollama_cloud_model(
+                "ollama-cloud/glm-5.2", providers_path=path, require_api_key=False
+            )
+
+        self.assertTrue(configured)
+        self.assertTrue(qualified_configured)
+        self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
 
     def test_inherited_ollama_strategy_prepares_a_deferred_core_tool_surface(self):
         with tempfile.TemporaryDirectory() as tmpdir:

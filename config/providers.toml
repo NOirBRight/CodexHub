@@ -24,6 +24,7 @@ enabled = true
   sort_order = 2
   enabled = true
   tool_surface_strategy = "deferred_core"
+  native_responses_tool_codec = "strict_apply_patch"
 
   [[providers.models]]
   id = "kimi-k2.6"
