@@ -10519,11 +10519,12 @@ def _downstream_stream_error_payload(
     exc: BaseException | None = None,
     error: str | None = None,
     detail: str | None = None,
+    error_type: str = "upstream_stream_error",
 ) -> dict[str, Any]:
-    error_type = error or (type(exc).__name__ if exc is not None else "UpstreamStreamError")
+    error_code = error or (type(exc).__name__ if exc is not None else "UpstreamStreamError")
     error_detail = detail or (safe_upstream_error_detail(exc) if exc is not None else "")
     failure_class = _upstream_failure_class(exc) if exc is not None else None
-    if failure_class is None and error_type in {
+    if failure_class is None and error_code in {
         "upstream_stream_idle_timeout",
         "upstream_stream_incomplete",
         "UpstreamStreamError",
@@ -10531,10 +10532,10 @@ def _downstream_stream_error_payload(
     }:
         failure_class = RETRY_FAILURE_QUICK_TRANSIENT
     payload = {
-        "type": "upstream_stream_error",
+        "type": error_type,
         "status": status,
         "upstream": upstream_name,
-        "error": error_type,
+        "error": error_code,
         "detail": error_detail,
         "retry_owner": "client",
     }
@@ -10543,17 +10544,20 @@ def _downstream_stream_error_payload(
         payload["retryable"] = failure_class != RETRY_FAILURE_PERMANENT
     payload["codexhub_error"] = _codexhub_error_payload(
         source=upstream_name,
-        message=error_detail or error_type,
+        message=error_detail or error_code,
         status=status,
         exc=exc,
-        error=error_type,
-        error_type="upstream_stream_error",
+        error=error_code,
+        error_type=error_type,
         failure_class=failure_class,
     )
     return payload
 
 
 def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec) -> dict[str, Any]:
+    error_type = error.error_type
+    if error_type == "upstream_error":
+        error_type = "upstream_stream_error"
     if error.inbound_format == "chat_completions":
         return _chat_completion_error_payload(
             upstream_name=error.upstream_name,
@@ -10561,15 +10565,25 @@ def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec)
             exc=error.exc,
             error=error.error,
             detail=error.detail,
-            error_type="upstream_stream_error",
+            error_type=error_type,
         )
     if error.exc is not None:
-        return _downstream_stream_error_payload(upstream_name=error.upstream_name, exc=error.exc)
+        if error.error_type == "upstream_error":
+            return _downstream_stream_error_payload(upstream_name=error.upstream_name, exc=error.exc)
+        return _downstream_stream_error_payload(
+            upstream_name=error.upstream_name,
+            status=error.status,
+            exc=error.exc,
+            error=error.error,
+            detail=error.detail,
+            error_type=error_type,
+        )
     return _downstream_stream_error_payload(
         upstream_name=error.upstream_name,
         status=error.status,
         error=error.error or "UpstreamProtocolError",
         detail=error.detail or error.error or "upstream stream failed",
+        error_type=error_type,
     )
 
 
@@ -11912,6 +11926,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         except UpstreamProtocolTranslationError as exc:
             detail = str(exc)
             error_code = exc.cause.code
+            error_status = 400 if error_code == APPLY_PATCH_ADAPTER_ERROR_CODE else 502
+            error_type = "invalid_request_error" if error_status == 400 else error_code
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -11922,7 +11938,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format=upstream_format,
                 behavior_profile=behavior_profile,
                 inbound_format=inbound_format,
-                status=502,
+                status=error_status,
                 error=error_code,
                 detail=detail[:300],
                 duration_ms=int((time.monotonic() - started_at) * 1000),
@@ -11932,21 +11948,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
-                    status=502,
+                    status=error_status,
                     exc=exc,
                     error=error_code,
                     detail=detail,
+                    error_type=error_type,
                 )
                 return
             self._safe_send_downstream_json_error(
-                502,
+                error_status,
                 inbound_format=inbound_format,
                 upstream_name=upstream_name or "upstream_error",
                 request_id=request_id,
                 exc=exc,
                 error=error_code,
                 detail=detail,
-                error_type=error_code,
+                error_type=error_type,
             )
         except ValueError as exc:
             write_proxy_event(
@@ -12579,6 +12596,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         exc: BaseException | None = None,
         error: str | None = None,
         detail: str | None = None,
+        error_type: str = "upstream_error",
     ) -> None:
         error_spec = DownstreamErrorSpec(
             inbound_format=inbound_format,
@@ -12587,6 +12605,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             exc=exc,
             error=error,
             detail=detail,
+            error_type=error_type,
         )
         if inbound_format == "chat_completions":
             self.wfile.write(
