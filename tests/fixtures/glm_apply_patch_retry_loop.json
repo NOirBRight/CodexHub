@@ -9,6 +9,20 @@
     "repeated_call_count": 2
   },
   "patch": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n",
+  "observed_incompatible_arguments": {
+    "empty_key": {
+      "": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n"
+    },
+    "content_path": {
+      "content": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n",
+      "path": "SANITIZED_TARGET"
+    },
+    "patch_path_pattern": {
+      "patch": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n",
+      "path": "SANITIZED_TARGET",
+      "pattern": "OLD"
+    }
+  },
   "body_response": {
     "id": "<chat-response-id>",
     "model": "<third-party-glm>",

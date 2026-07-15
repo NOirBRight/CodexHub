@@ -48,6 +48,7 @@ EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
 UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages"}
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
+NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
 
 
 @dataclass
@@ -62,7 +63,11 @@ class ModelConfig:
     supported_reasoning_levels: tuple[str, ...] = ()
     default_reasoning_level: str | None = None
     tool_surface_strategy: str | None = None
+    native_responses_tool_codec: str | None = None
     _bundled_tool_surface_strategy: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _bundled_native_responses_tool_codec: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
     sort_order: int = 0
@@ -81,10 +86,17 @@ class ProviderConfig:
     available_upstream_formats: tuple[str, ...] = ()
     tool_protocol: str = "auto"
     tool_surface_strategy: str = "eager"
+    native_responses_tool_codec: str = "none"
     _tool_surface_strategy_explicit: bool = field(
         default=False, init=False, repr=False, compare=False
     )
     _bundled_tool_surface_strategy: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _native_responses_tool_codec_explicit: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
+    _bundled_native_responses_tool_codec: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
     reports_cached_input_tokens: bool = False
@@ -208,6 +220,7 @@ def build_external_model_index(
 
             alias = canonical_model_id(f"{provider_id}/{model_id}")
             tool_surface_strategy = _resolved_tool_surface_strategy(provider, model)
+            native_responses_tool_codec = _resolved_native_responses_tool_codec(provider, model)
             entry = {
                 "alias": alias,
                 "provider_alias": provider_id,
@@ -218,6 +231,7 @@ def build_external_model_index(
                 "upstream_format": provider.upstream_format,
                 "tool_protocol": provider.tool_protocol,
                 "tool_surface_strategy": tool_surface_strategy,
+                "native_responses_tool_codec": native_responses_tool_codec,
                 "reports_cached_input_tokens": provider.reports_cached_input_tokens,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
@@ -287,6 +301,7 @@ def build_ollama_cloud_model_index(
 
             qualified_alias = canonical_model_id(f"{provider_id}/{model_id}")
             tool_surface_strategy = _resolved_tool_surface_strategy(provider, model)
+            native_responses_tool_codec = _resolved_native_responses_tool_codec(provider, model)
             entry = {
                 "alias": qualified_alias,
                 "provider_alias": provider_id,
@@ -297,6 +312,7 @@ def build_ollama_cloud_model_index(
                 "upstream_format": provider.upstream_format,
                 "tool_protocol": provider.tool_protocol,
                 "tool_surface_strategy": tool_surface_strategy,
+                "native_responses_tool_codec": native_responses_tool_codec,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -369,6 +385,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
     providers = _providers_from_data(data)
     if path.resolve() != DEFAULT_PROVIDERS_PATH.resolve():
         _apply_bundled_tool_surface_strategy_defaults(providers)
+        _apply_bundled_native_responses_tool_codec_defaults(providers)
     return providers
 
 
@@ -403,6 +420,9 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
                 tool_surface_strategy=_tool_surface_strategy_field(
                     raw_model.get("tool_surface_strategy"), default=None
                 ),
+                native_responses_tool_codec=_native_responses_tool_codec_field(
+                    raw_model.get("native_responses_tool_codec"), default=None
+                ),
                 sort_order=_int_field(raw_model.get("sort_order"), 0),
                 enabled=_bool_field(raw_model.get("enabled"), True),
                 codex_enabled=_bool_field(raw_model.get("codex_enabled"), True),
@@ -414,6 +434,10 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
             raw_provider.get("tool_surface_strategy"), default="eager"
         )
         assert provider_tool_surface_strategy is not None
+        provider_native_responses_tool_codec = _native_responses_tool_codec_field(
+            raw_provider.get("native_responses_tool_codec"), default="none"
+        )
+        assert provider_native_responses_tool_codec is not None
         provider = ProviderConfig(
             id=_string_field(raw_provider.get("id")),
             name=_string_field(raw_provider.get("name")),
@@ -423,6 +447,7 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
             available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
             tool_protocol=_tool_protocol_field(raw_provider.get("tool_protocol")),
             tool_surface_strategy=provider_tool_surface_strategy,
+            native_responses_tool_codec=provider_native_responses_tool_codec,
             reports_cached_input_tokens=_bool_field(raw_provider.get("reports_cached_input_tokens"), False),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
@@ -430,6 +455,9 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
             models=_sort_by_order(indexed_models),
         )
         provider._tool_surface_strategy_explicit = "tool_surface_strategy" in raw_provider
+        provider._native_responses_tool_codec_explicit = (
+            "native_responses_tool_codec" in raw_provider
+        )
         indexed_providers.append((provider_index, provider))
 
     return _sort_by_order(indexed_providers)
@@ -470,6 +498,65 @@ def _apply_bundled_tool_surface_strategy_defaults(runtime_providers: Iterable[Pr
 
 def _providers_require_bundled_tool_surface_defaults(providers: Iterable[ProviderConfig]) -> bool:
     return any(model.tool_surface_strategy is None for provider in providers for model in provider.models)
+
+
+def _apply_bundled_native_responses_tool_codec_defaults(
+    runtime_providers: Iterable[ProviderConfig],
+) -> None:
+    runtime_providers = list(runtime_providers)
+    if not any(
+        model.native_responses_tool_codec is None
+        for provider in runtime_providers
+        for model in provider.models
+    ):
+        return
+
+    try:
+        bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+        bundled_providers = _providers_from_data(bundled_data)
+    except (OSError, ValueError):
+        # No codec is the conservative compatibility default when bundled
+        # selection authority cannot be read.
+        return
+
+    bundled_by_id = _provider_config_index_by_id(bundled_providers)
+    for runtime_provider in runtime_providers:
+        bundled_provider = bundled_by_id.get(_canonical_config_identifier(runtime_provider.id))
+        if bundled_provider is None:
+            continue
+
+        if not _provider_native_responses_tool_codec_is_explicit(runtime_provider):
+            runtime_provider._bundled_native_responses_tool_codec = (
+                _bundled_provider_native_responses_tool_codec(bundled_provider)
+            )
+
+        bundled_models_by_id = _model_config_index_by_identifier(bundled_provider.models)
+        for runtime_model in runtime_provider.models:
+            if runtime_model.native_responses_tool_codec is not None:
+                continue
+            bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
+            if bundled_model is not None:
+                runtime_model._bundled_native_responses_tool_codec = (
+                    bundled_model.native_responses_tool_codec
+                )
+
+
+def _provider_native_responses_tool_codec_is_explicit(provider: ProviderConfig) -> bool:
+    codec = _native_responses_tool_codec_field(
+        provider.native_responses_tool_codec,
+        default="none",
+    )
+    assert codec is not None
+    return provider._native_responses_tool_codec_explicit or codec != "none"
+
+
+def _bundled_provider_native_responses_tool_codec(provider: ProviderConfig) -> str | None:
+    if not _provider_native_responses_tool_codec_is_explicit(provider):
+        return None
+    return _native_responses_tool_codec_field(
+        provider.native_responses_tool_codec,
+        default=None,
+    )
 
 
 def _provider_tool_surface_strategy_is_explicit(provider: ProviderConfig) -> bool:
@@ -551,6 +638,13 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
         )
         if provider._tool_surface_strategy_explicit or provider_tool_surface_strategy != "eager":
             chunks.append(_toml_string_line("tool_surface_strategy", provider_tool_surface_strategy))
+        provider_native_responses_tool_codec = _native_responses_tool_codec_field(
+            provider.native_responses_tool_codec, default="none"
+        )
+        if provider_native_responses_tool_codec != "none":
+            chunks.append(
+                _toml_string_line("native_responses_tool_codec", provider_native_responses_tool_codec)
+            )
         if provider.reports_cached_input_tokens:
             chunks.append(_toml_bool_line("reports_cached_input_tokens", provider.reports_cached_input_tokens))
         chunks.extend(
@@ -591,6 +685,17 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             if model_tool_surface_strategy is not None:
                 chunks.append(
                     _toml_string_line("tool_surface_strategy", model_tool_surface_strategy, indent="  ")
+                )
+            model_native_responses_tool_codec = _native_responses_tool_codec_field(
+                model.native_responses_tool_codec, default=None
+            )
+            if model_native_responses_tool_codec is not None:
+                chunks.append(
+                    _toml_string_line(
+                        "native_responses_tool_codec",
+                        model_native_responses_tool_codec,
+                        indent="  ",
+                    )
                 )
             chunks.extend(
                 [
@@ -756,6 +861,46 @@ def _resolved_tool_surface_strategy(provider: ProviderConfig, model: ModelConfig
     if bundled_provider_strategy is not None:
         return bundled_provider_strategy
     return provider_strategy
+
+
+def _native_responses_tool_codec_field(value: Any, *, default: str | None) -> str | None:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError("native_responses_tool_codec must be none or strict_apply_patch")
+    codec = value.strip().lower()
+    if codec not in NATIVE_RESPONSES_TOOL_CODECS:
+        raise ValueError("native_responses_tool_codec must be none or strict_apply_patch")
+    return codec
+
+
+def _resolved_native_responses_tool_codec(provider: ProviderConfig, model: ModelConfig) -> str:
+    model_codec = _native_responses_tool_codec_field(
+        model.native_responses_tool_codec,
+        default=None,
+    )
+    if model_codec is not None:
+        return model_codec
+    bundled_model_codec = _native_responses_tool_codec_field(
+        model._bundled_native_responses_tool_codec,
+        default=None,
+    )
+    if bundled_model_codec is not None:
+        return bundled_model_codec
+    provider_codec = _native_responses_tool_codec_field(
+        provider.native_responses_tool_codec,
+        default="none",
+    )
+    assert provider_codec is not None
+    if _provider_native_responses_tool_codec_is_explicit(provider):
+        return provider_codec
+    bundled_provider_codec = _native_responses_tool_codec_field(
+        provider._bundled_native_responses_tool_codec,
+        default=None,
+    )
+    if bundled_provider_codec is not None:
+        return bundled_provider_codec
+    return provider_codec
 
 
 def _int_field(value: Any, default: int) -> int:
