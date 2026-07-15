@@ -1,5 +1,6 @@
 import importlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -778,6 +779,180 @@ class CatalogSyncTests(unittest.TestCase):
                 self.assertNotIn("context_window", by_slug[slug])
         self.assertEqual(by_slug["glm-5.2"]["context_window"], 1_000_000)
         self.assertNotIn("353400", serialized_catalog)
+
+    def test_sync_catalog_reads_target_only_direct_cache_before_same_attempt_publication(self):
+        model_list_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_0_144_2_model_list_without_context_fields.json"
+        )
+        direct_cache_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_0_144_2_direct_models_cache.json"
+        )
+        raw_models = json.loads(model_list_path.read_text(encoding="utf-8"))["data"]
+        direct_cache = json.loads(direct_cache_path.read_text(encoding="utf-8"))
+        direct_cache["fetched_at"] = datetime.now(timezone.utc).isoformat()
+        direct_cache["etag"] = "target-cache-private-etag"
+        for model in direct_cache["models"]:
+            model["comp_hash"] = f"target-cache-private-hash-{model['slug']}"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_home = root / "runtime"
+            target_home = root / "target-home-must-not-leak"
+            runtime_seed = runtime_home / "model-catalogs" / "openai-plus-ollama-cloud.json"
+            target_cache = target_home / "models_cache.json"
+            runtime_seed.parent.mkdir(parents=True)
+            runtime_seed.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": direct_cache["fetched_at"],
+                        "client_version": "0.144.2",
+                        "models": [
+                            {
+                                **model,
+                                "slug": model["model"],
+                                "display_name": model["displayName"],
+                            }
+                            for model in raw_models
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse((runtime_home / "models_cache.json").exists())
+            self.assertFalse(target_cache.exists())
+            target_cache.parent.mkdir(parents=True)
+            target_cache.write_text(json.dumps(direct_cache), encoding="utf-8")
+
+            try:
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_HOME": str(runtime_home),
+                        "CODEXHUB_CODEX_TARGET_HOME": str(target_home),
+                    },
+                    clear=False,
+                ):
+                    importlib.reload(catalog_sync)
+                    self.assertEqual(catalog_sync.RUNTIME_CODEX_DIR, runtime_home)
+                    self.assertEqual(
+                        catalog_sync.DIRECT_OFFICIAL_MODELS_CACHE_PATH,
+                        target_cache,
+                    )
+                    with (
+                        patch.object(catalog_sync, "catalog_cache_is_fresh", return_value=False),
+                        patch.object(catalog_sync, "load_include_official_models", return_value=True),
+                        patch.object(catalog_sync, "load_official_model_sort_order", return_value=[]),
+                        patch.object(catalog_sync, "load_official_disabled_models", return_value=[]),
+                        patch.object(catalog_sync, "load_fallback_catalog_models", return_value=[]),
+                        patch.object(catalog_sync, "read_client_version", return_value="0.144.2"),
+                        patch.object(
+                            catalog_sync,
+                            "discover_ollama_ids",
+                            return_value=([], "test", "ok", ""),
+                        ),
+                        patch.object(catalog_sync, "load_providers", return_value=[]),
+                        patch.object(
+                            catalog_sync,
+                            "catalog_visible_ollama_cloud_models",
+                            return_value=(False, []),
+                        ),
+                        patch.object(catalog_sync, "catalog_visible_external_models", return_value=[]),
+                        patch.object(
+                            catalog_sync,
+                            "discover_ollama_model_metadata",
+                            return_value=({}, ""),
+                        ),
+                        patch.object(catalog_sync, "load_previous_visible_models", return_value=set()),
+                    ):
+                        state = catalog_sync.sync_catalog()
+            finally:
+                importlib.reload(catalog_sync)
+
+            generated_catalog = runtime_home / "model-catalogs" / "codexhub-model-catalog.json"
+            generated_state = runtime_home / "model-catalogs" / "codex-proxy-state.json"
+            self.assertTrue(generated_catalog.is_file())
+            self.assertTrue(generated_state.is_file())
+            self.assertFalse(
+                (target_home / "model-catalogs" / "codexhub-model-catalog.json").exists()
+            )
+            self.assertFalse((target_home / "model-catalogs" / "codex-proxy-state.json").exists())
+            self.assertEqual(state["visible_models"], [model["model"] for model in raw_models])
+
+            serialized_catalog = generated_catalog.read_text(encoding="utf-8")
+            generated = json.loads(serialized_catalog)
+            terra = next(model for model in generated["models"] if model["slug"] == "gpt-5.6-terra")
+            budget = terra["codex_proxy_metadata"]["official_context_budget"]
+            self.assertEqual(terra["context_window"], 272_000)
+            self.assertEqual(budget["source"], "fresh_direct_official_cache_authority")
+            self.assertEqual(budget["freshness"], "fresh")
+            self.assertLessEqual(budget["effective_context_window"], 258_400)
+            self.assertLessEqual(budget["model_auto_compact_token_limit"], 244_800)
+            serialized_state = generated_state.read_text(encoding="utf-8")
+            for generated_artifact in (serialized_catalog, serialized_state):
+                self.assertNotIn("target-cache-private-etag", generated_artifact)
+                self.assertNotIn("target-cache-private-hash", generated_artifact)
+                self.assertNotIn(target_home.name, generated_artifact)
+                self.assertNotIn(str(target_home), generated_artifact)
+                self.assertNotIn("models_cache.json", generated_artifact)
+
+    def test_direct_cache_path_uses_runtime_home_when_target_home_is_not_provided(self):
+        model_list_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_0_144_2_model_list_without_context_fields.json"
+        )
+        direct_cache_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_0_144_2_direct_models_cache.json"
+        )
+        raw_models = json.loads(model_list_path.read_text(encoding="utf-8"))["data"]
+        direct_cache = json.loads(direct_cache_path.read_text(encoding="utf-8"))
+        direct_cache["fetched_at"] = datetime.now(timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_home = Path(tmp) / "runtime"
+            runtime_cache = runtime_home / "models_cache.json"
+            runtime_home.mkdir(parents=True)
+            runtime_cache.write_text(json.dumps(direct_cache), encoding="utf-8")
+            try:
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_HOME": str(runtime_home),
+                        "CODEXHUB_CODEX_TARGET_HOME": "",
+                    },
+                    clear=False,
+                ):
+                    importlib.reload(catalog_sync)
+                    self.assertEqual(catalog_sync.RUNTIME_CODEX_DIR, runtime_home)
+                    self.assertEqual(
+                        catalog_sync.DIRECT_OFFICIAL_MODELS_CACHE_PATH,
+                        runtime_cache,
+                    )
+                    authority = catalog_sync.load_fresh_direct_official_cache_authority(
+                        catalog_sync.OfficialSeedSnapshot(
+                            models=[
+                                {
+                                    **model,
+                                    "slug": model["model"],
+                                    "display_name": model["displayName"],
+                                }
+                                for model in raw_models
+                            ],
+                            source="current_direct_official",
+                            context_freshness="fresh",
+                        )
+                    )
+                    self.assertEqual(
+                        authority.context_by_slug["gpt-5.6-terra"]["context_window"],
+                        272_000,
+                    )
+            finally:
+                importlib.reload(catalog_sync)
 
     def test_direct_cache_authority_rejects_invalid_provenance_identity_and_numeric_evidence(self):
         model_list_path = (

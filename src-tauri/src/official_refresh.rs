@@ -279,17 +279,14 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
                     persist_failed_publication(
                         &state_path,
                         &mut state,
-                        format!(
-                            "Direct Official refresh failed: {direct_error}; failed to publish a degraded safe snapshot: \
-                             {publication_error}"
+                        direct_official_refresh_failure_message(
+                            &direct_error,
+                            Some(&publication_error),
                         ),
                     )
                 })?;
             if !current_published_snapshot_available(&state) {
-                return Err(format!(
-                    "Direct Official refresh failed and no previous safe snapshot is available: \
-                     {direct_error}"
-                ));
+                return Err(direct_official_refresh_failure_message(&direct_error, None));
             }
             Ok(RefreshOutcome {
                 trigger,
@@ -378,12 +375,51 @@ fn persist_failed_publication(
     }
 }
 
+fn direct_official_refresh_failure_message(
+    direct_error: &str,
+    publication_error: Option<&str>,
+) -> String {
+    let normalized = direct_error.to_ascii_lowercase();
+    if [
+        "not signed in",
+        "not authenticated",
+        "login",
+        "logged in",
+        "auth unavailable",
+        "auth required",
+        "authentication required",
+        "unauthorized",
+    ]
+        .iter()
+        .any(|marker| normalized.contains(*marker))
+    {
+        return "Codex sign-in is required before a safe CodexHub Official snapshot can be published."
+            .to_string();
+    }
+    match publication_error {
+        Some(publication_error) => format!(
+            "Direct Official refresh failed: {direct_error}; failed to publish a degraded safe snapshot: {publication_error}"
+        ),
+        None => format!(
+            "Direct Official refresh failed and no previous safe snapshot is available: {direct_error}"
+        ),
+    }
+}
+
 fn should_attempt(trigger: RefreshTrigger, state: &OfficialRefreshState, now: u64) -> bool {
     match trigger {
         RefreshTrigger::Startup | RefreshTrigger::Manual => true,
-        RefreshTrigger::Activation | RefreshTrigger::Scheduled | RefreshTrigger::Resume => {
-            automatic_refresh_due(state, now)
+        // Activation is a user-initiated safety gate.  An earlier background
+        // attempt that could not publish a safe snapshot (for example before
+        // the user signs in) must not make the route unavailable for 12h.
+        // Scheduled and resume attempts remain bounded below to avoid a
+        // background retry loop.
+        RefreshTrigger::Activation => {
+            !state.publication_ready
+                || state.published_context_budgets.is_empty()
+                || automatic_refresh_due(state, now)
         }
+        RefreshTrigger::Scheduled | RefreshTrigger::Resume => automatic_refresh_due(state, now),
     }
 }
 
@@ -619,7 +655,8 @@ mod tests {
     use super::{
         automatic_refresh_due, finalize_published_snapshot, read_state, record_attempt,
         published_context_budgets_from_catalog_payload, refresh_with_flight, should_attempt,
-        update_published_context_budgets, write_state, OfficialRefreshState,
+        direct_official_refresh_failure_message, update_published_context_budgets, write_state,
+        OfficialRefreshState,
         PublishedOfficialBudget, RefreshOutcome, RefreshTrigger, SingleFlight,
         OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
@@ -635,9 +672,17 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn startup_and_manual_are_bounded_triggers_but_activation_waits_twelve_hours() {
+    fn startup_and_manual_are_bounded_triggers_but_activation_waits_with_safe_snapshot() {
         let state = OfficialRefreshState {
             last_success_at: Some(1_000),
+            publication_ready: true,
+            published_context_budgets: budget_map(
+                "gpt-5.6-terra",
+                272_000,
+                95,
+                258_400,
+                240_000,
+            ),
             ..OfficialRefreshState::default()
         };
         let before_due = 1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS - 1;
@@ -681,16 +726,38 @@ mod tests {
     }
 
     #[test]
-    fn activation_honors_the_failed_automatic_attempt_bound() {
+    fn activation_retries_after_auth_required_startup_without_background_retry_loop() {
         let mut state = OfficialRefreshState::default();
-        record_attempt(&mut state, RefreshTrigger::Scheduled, 1_000, false);
+        record_attempt(&mut state, RefreshTrigger::Startup, 1_000, false);
 
-        assert!(!should_attempt(RefreshTrigger::Activation, &state, 1_001));
-        assert!(should_attempt(
-            RefreshTrigger::Activation,
-            &state,
-            1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS,
-        ));
+        assert_eq!(state.last_automatic_attempt_at, Some(1_000));
+        assert!(!state.publication_ready);
+        assert!(!automatic_refresh_due(&state, 1_001));
+        assert!(!should_attempt(RefreshTrigger::Scheduled, &state, 1_001));
+        assert!(!should_attempt(RefreshTrigger::Resume, &state, 1_001));
+        assert!(should_attempt(RefreshTrigger::Activation, &state, 1_001));
+    }
+
+    #[test]
+    fn direct_refresh_failure_classifies_auth_required_without_hiding_other_failures() {
+        assert_eq!(
+            direct_official_refresh_failure_message(
+                "Codex auth unavailable",
+                Some("missing safe snapshot"),
+            ),
+            "Codex sign-in is required before a safe CodexHub Official snapshot can be published."
+        );
+        assert_eq!(
+            direct_official_refresh_failure_message("app-server unavailable", None),
+            "Direct Official refresh failed and no previous safe snapshot is available: app-server unavailable"
+        );
+        assert_eq!(
+            direct_official_refresh_failure_message(
+                "app-server unavailable",
+                Some("catalog publication failed"),
+            ),
+            "Direct Official refresh failed: app-server unavailable; failed to publish a degraded safe snapshot: catalog publication failed"
+        );
     }
 
     #[test]
@@ -865,7 +932,7 @@ mod tests {
             2_000,
             true,
             || Ok(()),
-            BTreeMap::new,
+            || Ok(BTreeMap::new()),
             || panic!("runtime projection must not run without a safe budget"),
         )
         .expect_err("missing numeric context authority must fail publication closed");

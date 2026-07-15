@@ -56,7 +56,18 @@ def _runtime_codex_dir() -> Path:
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 BUNDLED_MODEL_CATALOG_DIR = REPO_ROOT / "model-catalogs"
 RUNTIME_MODEL_CATALOG_DIR = RUNTIME_CODEX_DIR / "model-catalogs"
-DIRECT_OFFICIAL_MODELS_CACHE_PATH = RUNTIME_CODEX_DIR / "models_cache.json"
+CODEX_TARGET_HOME_ENV = "CODEXHUB_CODEX_TARGET_HOME"
+
+
+def _direct_official_models_cache_path() -> Path:
+    """Use the Direct Codex target home without changing runtime state paths."""
+
+    target_home_env = os.environ.get(CODEX_TARGET_HOME_ENV)
+    target_home = Path(target_home_env) if target_home_env else RUNTIME_CODEX_DIR
+    return target_home / "models_cache.json"
+
+
+DIRECT_OFFICIAL_MODELS_CACHE_PATH = _direct_official_models_cache_path()
 
 POLICY_PATH = REPO_ROOT / "config" / "catalog_policy.toml"
 OFFICIAL_SEED_PATH = BUNDLED_MODEL_CATALOG_DIR / "openai-plus-ollama-cloud.json"
