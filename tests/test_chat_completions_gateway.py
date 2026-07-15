@@ -951,8 +951,13 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         result = json.loads(b"".join(handler.wfile.writes))
-        self.assertEqual(handler._fake.status, 502)
+        self.assertEqual(handler._fake.status, 400)
         self.assertEqual(result["error"]["type"], "unsupported_protocol_semantics")
+        self.assertEqual(
+            result["codexhub_error"]["details"]["failure_class"],
+            codex_proxy.RETRY_FAILURE_PERMANENT,
+        )
+        self.assertFalse(result["codexhub_error"]["retryable"])
 
     def test_post_chat_completions_events_use_proxy_request_kind(self):
         body = json.dumps({
