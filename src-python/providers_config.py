@@ -881,12 +881,6 @@ def _resolved_native_responses_tool_codec(provider: ProviderConfig, model: Model
     )
     if model_codec is not None:
         return model_codec
-    bundled_model_codec = _native_responses_tool_codec_field(
-        model._bundled_native_responses_tool_codec,
-        default=None,
-    )
-    if bundled_model_codec is not None:
-        return bundled_model_codec
     provider_codec = _native_responses_tool_codec_field(
         provider.native_responses_tool_codec,
         default="none",
@@ -894,6 +888,12 @@ def _resolved_native_responses_tool_codec(provider: ProviderConfig, model: Model
     assert provider_codec is not None
     if _provider_native_responses_tool_codec_is_explicit(provider):
         return provider_codec
+    bundled_model_codec = _native_responses_tool_codec_field(
+        model._bundled_native_responses_tool_codec,
+        default=None,
+    )
+    if bundled_model_codec is not None:
+        return bundled_model_codec
     bundled_provider_codec = _native_responses_tool_codec_field(
         provider._bundled_native_responses_tool_codec,
         default=None,
