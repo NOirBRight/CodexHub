@@ -10424,6 +10424,7 @@ class DownstreamErrorSpec:
     error: str | None = None
     detail: str | None = None
     error_type: str = "upstream_error"
+    preserve_explicit_error: bool = False
 
 
 def _typed_error_code(
@@ -10568,7 +10569,7 @@ def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec)
             error_type=error_type,
         )
     if error.exc is not None:
-        if error.error_type == "upstream_error":
+        if not error.preserve_explicit_error:
             return _downstream_stream_error_payload(upstream_name=error.upstream_name, exc=error.exc)
         return _downstream_stream_error_payload(
             upstream_name=error.upstream_name,
@@ -11926,8 +11927,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         except UpstreamProtocolTranslationError as exc:
             detail = str(exc)
             error_code = exc.cause.code
-            error_status = 400 if error_code == APPLY_PATCH_ADAPTER_ERROR_CODE else 502
-            error_type = "invalid_request_error" if error_status == 400 else error_code
+            is_apply_patch_adapter_error = error_code == APPLY_PATCH_ADAPTER_ERROR_CODE
+            error_status = 400
+            json_error_type = "invalid_request_error" if is_apply_patch_adapter_error else error_code
+            sse_error_type = "invalid_request_error" if is_apply_patch_adapter_error else "upstream_error"
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -11952,7 +11955,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     exc=exc,
                     error=error_code,
                     detail=detail,
-                    error_type=error_type,
+                    error_type=sse_error_type,
+                    preserve_explicit_error=True,
                 )
                 return
             self._safe_send_downstream_json_error(
@@ -11963,7 +11967,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 exc=exc,
                 error=error_code,
                 detail=detail,
-                error_type=error_type,
+                error_type=json_error_type,
             )
         except ValueError as exc:
             write_proxy_event(
@@ -12597,6 +12601,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         error: str | None = None,
         detail: str | None = None,
         error_type: str = "upstream_error",
+        preserve_explicit_error: bool = False,
     ) -> None:
         error_spec = DownstreamErrorSpec(
             inbound_format=inbound_format,
@@ -12606,6 +12611,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             error=error,
             detail=detail,
             error_type=error_type,
+            preserve_explicit_error=preserve_explicit_error,
         )
         if inbound_format == "chat_completions":
             self.wfile.write(
