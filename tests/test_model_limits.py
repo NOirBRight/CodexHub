@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src-python"))
 
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
+    FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
     apply_resolved_model_limits,
     load_resolved_model_limits,
     resolve_official_context_budget,
@@ -97,6 +98,45 @@ class ResolvedModelLimitsTests(unittest.TestCase):
         self.assertEqual(budget.effective_context_window, 258_400)
         self.assertEqual(budget.model_auto_compact_token_limit, 244_800)
         self.assertLess(budget.model_auto_compact_token_limit, 249_433)
+
+    def test_fresh_direct_cache_authority_can_tighten_or_adopt_a_higher_budget(self):
+        lower = resolve_official_context_budget(
+            direct_context_window=272_000,
+            direct_max_context_window=272_000,
+            direct_effective_context_window_percent=95,
+            direct_freshness="fresh",
+            direct_source=FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+            fallback_context_window=353_400,
+            fallback_effective_context_window_percent=100,
+        )
+        higher = resolve_official_context_budget(
+            direct_context_window=400_000,
+            direct_max_context_window=400_000,
+            direct_effective_context_window_percent=100,
+            direct_freshness="fresh",
+            direct_source=FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+            fallback_context_window=272_000,
+            fallback_effective_context_window_percent=95,
+        )
+        stale_higher = resolve_official_context_budget(
+            direct_context_window=400_000,
+            direct_max_context_window=400_000,
+            direct_effective_context_window_percent=100,
+            direct_freshness="stale",
+            direct_source=FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+            fallback_context_window=272_000,
+            fallback_effective_context_window_percent=95,
+        )
+
+        self.assertEqual(lower.source, FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE)
+        self.assertEqual(lower.context_window, 272_000)
+        self.assertEqual(lower.effective_context_window, 258_400)
+        self.assertEqual(lower.model_auto_compact_token_limit, 244_800)
+        self.assertLess(lower.model_auto_compact_token_limit, 249_433)
+        self.assertEqual(higher.source, FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE)
+        self.assertEqual(higher.context_window, 400_000)
+        self.assertEqual(stale_higher.source, "degraded_last_known_official")
+        self.assertEqual(stale_higher.context_window, 272_000)
 
     def test_missing_direct_effective_percent_cannot_expand_a_budget(self):
         fallback = {

@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) const OFFICIAL_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
 const REFRESH_STATE_FILE: &str = "official-refresh-state.json";
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+const FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE: &str =
+    "fresh_direct_official_cache_authority";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshTrigger {
@@ -480,6 +482,12 @@ fn published_context_budgets_from_catalog(
             catalog_path.display()
         )
     })?;
+    published_context_budgets_from_catalog_payload(&payload)
+}
+
+fn published_context_budgets_from_catalog_payload(
+    payload: &Value,
+) -> Result<BTreeMap<String, PublishedOfficialBudget>, String> {
     let models = payload
         .get("models")
         .and_then(Value::as_array)
@@ -515,6 +523,7 @@ fn published_context_budgets_from_catalog(
         let trusted = matches!(
             (source, freshness),
             (Some("current_direct_official"), Some("fresh"))
+                | (Some(FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE), Some("fresh"))
                 | (Some("degraded_last_known_official"), _)
         );
         if !trusted {
@@ -609,10 +618,12 @@ fn unix_timestamp() -> u64 {
 mod tests {
     use super::{
         automatic_refresh_due, finalize_published_snapshot, read_state, record_attempt,
-        refresh_with_flight, should_attempt, update_published_context_budgets, write_state,
-        OfficialRefreshState, PublishedOfficialBudget, RefreshOutcome, RefreshTrigger,
-        SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        published_context_budgets_from_catalog_payload, refresh_with_flight, should_attempt,
+        update_published_context_budgets, write_state, OfficialRefreshState,
+        PublishedOfficialBudget, RefreshOutcome, RefreshTrigger, SingleFlight,
+        OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -865,6 +876,49 @@ mod tests {
         );
         assert!(!state.publication_ready);
         assert_eq!(state.last_success_at, None);
+    }
+
+    #[test]
+    fn fresh_direct_cache_authority_budget_is_admitted_after_sanitized_catalog_projection() {
+        let payload = json!({
+            "models": [
+                {
+                    "slug": "gpt-5.6-terra",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "fresh_direct_official_cache_authority",
+                            "freshness": "fresh",
+                            "model_context_window": 272000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258400,
+                            "model_auto_compact_token_limit": 244800
+                        }
+                    }
+                }
+            ]
+        });
+
+        let budgets = published_context_budgets_from_catalog_payload(&payload)
+            .expect("sanitized fresh Direct cache authority budget");
+
+        assert_eq!(
+            budgets.get("gpt-5.6-terra"),
+            Some(&PublishedOfficialBudget {
+                model_context_window: 272000,
+                effective_context_window_percent: 95,
+                effective_context_window: 258400,
+                model_auto_compact_token_limit: 244800,
+            })
+        );
+
+        let mut stale = payload;
+        stale["models"][0]["codex_proxy_metadata"]["official_context_budget"]["freshness"] =
+            json!("stale");
+        assert!(published_context_budgets_from_catalog_payload(&stale)
+            .expect("stale cache authority catalog")
+            .is_empty());
     }
 
     #[test]
