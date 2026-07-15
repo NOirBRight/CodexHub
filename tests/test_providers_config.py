@@ -456,6 +456,36 @@ api_key = "ollama-secret"
         self.assertEqual(unqualified["native_responses_tool_codec"], "none")
         self.assertEqual(qualified["native_responses_tool_codec"], "none")
 
+    def test_explicit_runtime_provider_none_overrides_the_bundled_ollama_codec_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+native_responses_tool_codec = "none"
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            configured, unqualified = resolve_ollama_cloud_model(
+                "kimi-k2.6", providers_path=path, require_api_key=False
+            )
+            qualified_configured, qualified = resolve_ollama_cloud_model(
+                "ollama-cloud/kimi-k2.6", providers_path=path, require_api_key=False
+            )
+
+        self.assertTrue(configured)
+        self.assertTrue(qualified_configured)
+        self.assertEqual(unqualified["native_responses_tool_codec"], "none")
+        self.assertEqual(qualified["native_responses_tool_codec"], "none")
+
     def test_inherited_ollama_strategy_prepares_a_deferred_core_tool_surface(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
