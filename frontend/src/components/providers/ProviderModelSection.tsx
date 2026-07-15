@@ -6,6 +6,7 @@ import { SortableList } from "../SortableList";
 import { useVerticalOverflow } from "../../hooks/useVerticalOverflow";
 import i18n from "../../i18n";
 import { cx, displayModel } from "../../lib/format";
+import { resolveOfficialModelContextWindow } from "../../lib/officialModels";
 import { normalizeOfficialModelId } from "../../lib/settings";
 import { reasoningLevelOptions, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
@@ -114,7 +115,10 @@ export function ModelSection({
   }
 
   function renderModelRow(model: Model) {
-    const contextWindow = contextById?.get(model.id) ?? model.context_window;
+    const contextWindow = resolveOfficialModelContextWindow(
+      model.context_window,
+      contextById?.get(model.id),
+    );
     const modelEnabled = disabled
       ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
       : model.enabled;

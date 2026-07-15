@@ -566,6 +566,17 @@ fn published_context_budgets_from_catalog(
     published_context_budgets_from_catalog_payload(&payload)
 }
 
+pub(crate) fn published_official_context_windows() -> Result<BTreeMap<String, u32>, String> {
+    let budgets = published_context_budgets_from_catalog()?;
+    if budgets.is_empty() {
+        return Err("published Official catalog contains no safe resolved context budget".to_string());
+    }
+    Ok(budgets
+        .into_iter()
+        .map(|(id, budget)| (id, budget.model_context_window))
+        .collect())
+}
+
 fn published_context_budgets_from_catalog_payload(
     payload: &Value,
 ) -> Result<BTreeMap<String, PublishedOfficialBudget>, String> {

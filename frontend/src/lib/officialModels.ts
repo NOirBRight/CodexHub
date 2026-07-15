@@ -136,6 +136,20 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
 }
 
+export function resolveOfficialModelContextWindow(
+  publishedContextWindow: number | null | undefined,
+  gatewayContextWindow: number | null | undefined,
+) {
+  const valid = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+  const published = valid(publishedContextWindow);
+  const gateway = valid(gatewayContextWindow);
+  if (published !== undefined && gateway !== undefined) {
+    return Math.min(published, gateway);
+  }
+  return published ?? gateway;
+}
+
 export function officialModelIdSet(...groups: Model[][]) {
   const known = new Set<string>();
   for (const model of groups.flatMap((group) => group).filter(isOfficialModel)) {
