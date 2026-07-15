@@ -608,7 +608,7 @@ api_key = "runtime-secret"
                     ):
                         load_providers(runtime_path)
 
-    def test_complete_runtime_strategies_do_not_require_bundled_defaults(self):
+    def test_explicit_runtime_model_strategy_does_not_require_bundled_defaults(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             bundled_path = root / "missing-bundled-providers.toml"
@@ -620,7 +620,6 @@ id = "runtime-provider"
 name = "Runtime Provider"
 base_url = "https://runtime.example.test/v1"
 api_key = "runtime-secret"
-tool_surface_strategy = "eager"
 
   [[providers.models]]
   id = "runtime-model"

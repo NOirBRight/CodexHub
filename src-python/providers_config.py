@@ -469,11 +469,7 @@ def _apply_bundled_tool_surface_strategy_defaults(runtime_providers: Iterable[Pr
 
 
 def _providers_require_bundled_tool_surface_defaults(providers: Iterable[ProviderConfig]) -> bool:
-    return any(
-        not _provider_tool_surface_strategy_is_explicit(provider)
-        or any(model.tool_surface_strategy is None for model in provider.models)
-        for provider in providers
-    )
+    return any(model.tool_surface_strategy is None for provider in providers for model in provider.models)
 
 
 def _provider_tool_surface_strategy_is_explicit(provider: ProviderConfig) -> bool:
