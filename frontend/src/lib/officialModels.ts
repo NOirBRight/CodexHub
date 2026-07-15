@@ -84,6 +84,14 @@ export function refreshedOfficialModelOrder(currentOrder: string[], refreshedMod
 
 export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   const knownOfficialIds = officialModelIdSet(catalog, metadata);
+  const resolvedCatalogLimitFields = [
+    "context_window",
+    "max_context_window",
+    "effective_source",
+    "max_source",
+    "confidence",
+    "verified_at",
+  ] as const;
   const merged = new Map<string, Model>();
   for (const model of catalog.filter(isOfficialModel)) {
     const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
@@ -100,20 +108,30 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
         : model.enabled ?? true,
     });
   }
+  const publishedCatalogModels = new Map(merged);
   for (const model of metadata.filter(isOfficialModel)) {
     const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
     if (!canonicalId) {
       continue;
     }
     const existing = merged.get(canonicalId);
-    merged.set(canonicalId, {
+    const mergedModel: Model = {
       ...existing,
       ...model,
       id: canonicalId,
       enabled: existing
         ? (existing.enabled ?? true) || (model.enabled ?? true)
         : model.enabled ?? true,
-    });
+    };
+    const catalogModel = publishedCatalogModels.get(canonicalId);
+    if (catalogModel) {
+      for (const field of resolvedCatalogLimitFields) {
+        if (Object.prototype.hasOwnProperty.call(catalogModel, field)) {
+          Object.assign(mergedModel, { [field]: catalogModel[field] });
+        }
+      }
+    }
+    merged.set(canonicalId, mergedModel);
   }
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
 }
