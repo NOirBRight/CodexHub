@@ -1,11 +1,11 @@
 use crate::{
-    app_flavor::RoutingOwner, config, models, runtime_paths, safe_file, Provider, Settings,
-    UpstreamFormat,
+    app_flavor::RoutingOwner, config, models, official_refresh, runtime_paths, safe_file,
+    Provider, Settings, UpstreamFormat,
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1712,13 +1712,22 @@ fn runtime_proxy_dir(home: &Path) -> PathBuf {
 }
 
 fn official_models(settings: &Settings) -> Vec<GatewayModel> {
-    let cached_models = models::list_cached_official_subscription_models().ok();
-    official_models_from_metadata(settings, cached_models)
+    // Numeric limits are only trustworthy after the catalog publication fence
+    // has resolved them. Subscription metadata remains useful for identity and
+    // descriptive fields, but must never reintroduce a builtin fallback limit.
+    let published_context_windows = official_refresh::published_official_context_windows()
+        .unwrap_or_default();
+    let source_models = models::list_cached_official_subscription_models()
+        .ok()
+        .filter(|models| !models.is_empty())
+        .or_else(|| models::list_models().ok().filter(|models| !models.is_empty()));
+    official_models_from_metadata(settings, source_models, &published_context_windows)
 }
 
 fn official_models_from_metadata(
     settings: &Settings,
     subscription_models: Option<Vec<crate::Model>>,
+    published_context_windows: &BTreeMap<String, u32>,
 ) -> Vec<GatewayModel> {
     let mut models: Vec<GatewayModel> =
         match subscription_models.filter(|models| !models.is_empty()) {
@@ -1730,8 +1739,11 @@ fn official_models_from_metadata(
                 for model in source_models {
                     let source_is_bare = !model.id.trim().starts_with("openai/");
                     let source_enabled = model.enabled;
-                    let Some(gateway_model) = official_gateway_model_from_metadata(settings, model)
-                    else {
+                    let Some(gateway_model) = official_gateway_model_from_metadata(
+                        settings,
+                        model,
+                        published_context_windows,
+                    ) else {
                         continue;
                     };
                     if let Some(position) = positions.get(&gateway_model.id).copied() {
@@ -1758,14 +1770,14 @@ fn official_models_from_metadata(
                 models.retain(|model| enabled_by_id.get(&model.id).copied().unwrap_or(true));
                 models
             }
-            None => fallback_official_gateway_models(settings),
+            None => fallback_official_gateway_models(settings, published_context_windows),
         };
 
     let base_ids = models
         .iter()
         .map(|model| model.id.clone())
         .collect::<HashSet<_>>();
-    for (base_id, id, display_name, context_window) in OFFICIAL_FAST_VARIANTS {
+    for (base_id, id, display_name, _) in OFFICIAL_FAST_VARIANTS {
         if !base_ids.contains(*base_id) || official_model_disabled(settings, base_id) {
             continue;
         }
@@ -1774,6 +1786,10 @@ fn official_models_from_metadata(
             .iter()
             .any(|value| value == base_id)
         {
+            let context_window = models
+                .iter()
+                .find(|model| model.id == *base_id)
+                .and_then(|model| model.context_window);
             models.push(GatewayModel {
                 id: (*id).to_string(),
                 display_name: (*display_name).to_string(),
@@ -1781,19 +1797,16 @@ fn official_models_from_metadata(
                 source_kind: "official".to_string(),
                 supports_responses: true,
                 supports_chat_completions: true,
-                context_window: Some(*context_window),
+                context_window,
             });
         }
     }
 
     if settings.openai_context_guard_enabled {
         for model in &mut models {
-            model.context_window = Some(
-                model
-                    .context_window
-                    .unwrap_or(OPENAI_CONTEXT_GUARD_WINDOW)
-                    .min(OPENAI_CONTEXT_GUARD_WINDOW),
-            );
+            model.context_window = model
+                .context_window
+                .map(|context_window| context_window.min(OPENAI_CONTEXT_GUARD_WINDOW));
         }
     }
 
@@ -1803,6 +1816,7 @@ fn official_models_from_metadata(
 fn official_gateway_model_from_metadata(
     settings: &Settings,
     model: crate::Model,
+    published_context_windows: &BTreeMap<String, u32>,
 ) -> Option<GatewayModel> {
     let id = official_gateway_model_id(&model.id)?;
     if official_model_disabled(settings, &id) || is_gateway_fast_variant_id(&id) {
@@ -1819,22 +1833,25 @@ fn official_gateway_model_from_metadata(
         source_kind: "official".to_string(),
         supports_responses: true,
         supports_chat_completions: true,
-        context_window: model.context_window,
+        context_window: published_context_windows.get(&id).copied(),
     })
 }
 
-fn fallback_official_gateway_models(settings: &Settings) -> Vec<GatewayModel> {
+fn fallback_official_gateway_models(
+    settings: &Settings,
+    published_context_windows: &BTreeMap<String, u32>,
+) -> Vec<GatewayModel> {
     OFFICIAL_MODELS
         .iter()
         .filter(|(id, _, _)| !official_model_disabled(settings, id))
-        .map(|(id, display_name, context_window)| GatewayModel {
+        .map(|(id, display_name, _)| GatewayModel {
             id: (*id).to_string(),
             display_name: (*display_name).to_string(),
             source: "Official Codex subscription".to_string(),
             source_kind: "official".to_string(),
             supports_responses: true,
             supports_chat_completions: true,
-            context_window: Some(*context_window),
+            context_window: published_context_windows.get(*id).copied(),
         })
         .collect()
 }
@@ -1862,10 +1879,18 @@ fn official_model_disabled(settings: &Settings, id: &str) -> bool {
 }
 
 fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Vec<GatewayModel> {
+    gateway_models_from_sources(settings, providers, official_models(settings))
+}
+
+fn gateway_models_from_sources(
+    settings: &Settings,
+    providers: &[Provider],
+    official_source_models: Vec<GatewayModel>,
+) -> Vec<GatewayModel> {
     let mut output = Vec::new();
     let mut exported_ids = HashSet::new();
     if settings.include_official_models {
-        for model in official_models(settings) {
+        for model in official_source_models {
             if exported_ids.insert(model.id.to_ascii_lowercase()) {
                 output.push(model);
             }
@@ -1953,19 +1978,28 @@ fn resolve_gateway_client_model_id(
     providers: &[Provider],
     requested: &str,
 ) -> Result<String, String> {
+    let exported = gateway_models_from_config(settings, providers);
+    resolve_gateway_client_model_id_from_exported(&exported, providers, requested)
+}
+
+fn resolve_gateway_client_model_id_from_exported(
+    exported_models: &[GatewayModel],
+    providers: &[Provider],
+    requested: &str,
+) -> Result<String, String> {
     let requested = requested.trim();
     if requested.is_empty() {
         return Err("Gateway model is required".to_string());
     }
-    let exported = gateway_models_from_config(settings, providers)
-        .into_iter()
-        .map(|model| model.id)
+    let exported = exported_models
+        .iter()
+        .map(|model| model.id.as_str())
         .collect::<HashSet<_>>();
     if exported.contains(requested) {
         return Ok(requested.to_string());
     }
     if let Some(canonical) = official_gateway_model_id(requested) {
-        if exported.contains(&canonical) {
+        if exported.contains(canonical.as_str()) {
             return Ok(canonical);
         }
     }
@@ -1975,15 +2009,16 @@ fn resolve_gateway_client_model_id(
     Err(format!("Gateway model is not exported: {requested}"))
 }
 
-fn gateway_client_models(
-    settings: &Settings,
+fn gateway_client_models_from_exported(
     providers: &[Provider],
     default_model: &str,
+    exported_models: Vec<GatewayModel>,
 ) -> Result<Vec<GatewayModel>, String> {
-    let default_model = resolve_gateway_client_model_id(settings, providers, default_model)?;
+    let default_model =
+        resolve_gateway_client_model_id_from_exported(&exported_models, providers, default_model)?;
     let mut seen = HashSet::new();
     let mut output = Vec::new();
-    for model in gateway_models_from_config(settings, providers) {
+    for model in exported_models {
         if seen.insert(model.id.clone()) {
             output.push(model);
         }
@@ -1995,18 +2030,7 @@ fn gateway_client_models(
             output.insert(0, selected);
         }
     } else {
-        output.insert(
-            0,
-            GatewayModel {
-                id: default_model.clone(),
-                display_name: gateway_model_display_name(&default_model),
-                source: "Gateway default".to_string(),
-                source_kind: "default".to_string(),
-                supports_responses: true,
-                supports_chat_completions: true,
-                context_window: known_gateway_model_context_window(&default_model),
-            },
-        );
+        return Err("Gateway model disappeared during client export".to_string());
     }
     Ok(output)
 }
@@ -2333,14 +2357,30 @@ fn gateway_client_provider_groups(
     providers: &[Provider],
     default_model: &str,
 ) -> Result<GatewayClientProviderGroups, String> {
-    let default_model = resolve_gateway_client_model_id(settings, providers, default_model)?;
+    let exported_models = gateway_models_from_config(settings, providers);
+    gateway_client_provider_groups_from_exported(
+        settings,
+        providers,
+        default_model,
+        exported_models,
+    )
+}
+
+fn gateway_client_provider_groups_from_exported(
+    settings: &Settings,
+    providers: &[Provider],
+    default_model: &str,
+    exported_models: Vec<GatewayModel>,
+) -> Result<GatewayClientProviderGroups, String> {
+    let default_model =
+        resolve_gateway_client_model_id_from_exported(&exported_models, providers, default_model)?;
     let (default_provider_id, default_model_id) = split_gateway_model_id(&default_model);
     let default_client_provider_id = codexhub_client_provider_id(&default_provider_id);
     let default_selector = format!("{default_client_provider_id}/{default_model_id}");
     let mut groups = Vec::<GatewayClientProviderGroup>::new();
     let mut group_indices = HashMap::<String, usize>::new();
 
-    for model in gateway_client_models(settings, providers, &default_model)? {
+    for model in gateway_client_models_from_exported(providers, &default_model, exported_models)? {
         let (provider_id, short_id) = split_gateway_model_id(&model.id);
         let group_index = if let Some(index) = group_indices.get(&provider_id) {
             *index
@@ -4993,29 +5033,6 @@ fn combined_named_text(files: &[(&str, &str)]) -> String {
         .join("\n")
 }
 
-fn known_gateway_model_context_window(model: &str) -> Option<u32> {
-    OFFICIAL_MODELS
-        .iter()
-        .find_map(|(id, _, context)| (*id == model).then_some(*context))
-        .or_else(|| {
-            OFFICIAL_FAST_VARIANTS
-                .iter()
-                .find_map(|(_, id, _, context)| (*id == model).then_some(*context))
-        })
-}
-
-fn gateway_model_display_name(model: &str) -> String {
-    OFFICIAL_MODELS
-        .iter()
-        .find_map(|(id, name, _)| (*id == model).then_some((*name).to_string()))
-        .or_else(|| {
-            OFFICIAL_FAST_VARIANTS
-                .iter()
-                .find_map(|(_, id, name, _)| (*id == model).then_some((*name).to_string()))
-        })
-        .unwrap_or_else(|| model.to_string())
-}
-
 fn gateway_base_without_v1(settings: &Settings) -> String {
     let base_url = endpoints(settings.proxy_port).base_url;
     base_url
@@ -5075,16 +5092,17 @@ fn has_nonempty_payload(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_opencode_config_with_paths, gateway_models_from_config,
-        official_models_from_metadata, omp_models_yml_text, opencode_config_text, pi_models_text,
-        pi_settings_text, read_usage_events_from_sqlite_path, read_usage_events_from_text,
+        apply_opencode_config_with_paths, gateway_client_provider_groups_from_exported,
+        gateway_models_from_config, gateway_models_from_sources, official_models_from_metadata,
+        omp_models_yml_text, opencode_config_text, pi_models_text, pi_settings_text,
+        read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
-        read_usage_summary_from_text_with_pricing, restore_latest_backup, sanitize_event,
-        sanitize_text, usage_pricing_by_model, zcode_catalog_text, runtime_proxy_dir, UsagePricing,
+        read_usage_summary_from_text_with_pricing, restore_latest_backup, runtime_proxy_dir,
+        sanitize_event, sanitize_text, usage_pricing_by_model, zcode_catalog_text, UsagePricing,
     };
     use crate::{Model, Provider, Settings, UpstreamFormat};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -5095,6 +5113,13 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn published_context_windows(entries: &[(&str, u32)]) -> BTreeMap<String, u32> {
+        entries
+            .iter()
+            .map(|(id, context_window)| ((*id).to_string(), *context_window))
+            .collect()
+    }
 
     #[test]
     fn runtime_artifacts_are_rooted_under_flavor_home() {
@@ -5847,8 +5872,9 @@ mod tests {
     }
 
     #[test]
-    fn official_gateway_models_use_subscription_metadata_when_available() {
+    fn official_gateway_models_use_subscription_metadata_for_display_and_published_limits() {
         let settings = Settings::default();
+        let published_contexts = published_context_windows(&[("gpt-5.6-sol", 272_000)]);
         let models = official_models_from_metadata(
             &settings,
             Some(vec![Model {
@@ -5857,12 +5883,74 @@ mod tests {
                 context_window: Some(400_000),
                 ..Model::default()
             }]),
+            &published_contexts,
         );
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
-        assert_eq!(models[0].context_window, Some(400_000));
+        assert_eq!(models[0].context_window, Some(272_000));
+    }
+
+    #[test]
+    fn published_official_context_limit_bounds_stale_subscription_metadata_for_status_and_exports() {
+        // The raw subscription record omitted its numeric context field; the
+        // metadata projection supplied this stale builtin fallback instead.
+        // A safely published Official catalog limit must still bound every
+        // downstream Gateway status and export consumer.
+        let published_contexts = published_context_windows(&[("gpt-5.6-terra", 272_000)]);
+        let models = official_models_from_metadata(
+            &Settings::default(),
+            Some(vec![Model {
+                id: "gpt-5.6-terra".to_string(),
+                context_window: Some(353_400),
+                ..Model::default()
+            }]),
+            &published_contexts,
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_window, Some(272_000));
+
+        let gateway_status_models =
+            gateway_models_from_sources(&Settings::default(), &[], models.clone());
+        assert_eq!(gateway_status_models[0].context_window, Some(272_000));
+
+        let groups = gateway_client_provider_groups_from_exported(
+            &Settings::default(),
+            &[],
+            "gpt-5.6-terra",
+            gateway_status_models,
+        )
+        .expect("Gateway client export groups");
+        let exported = groups
+            .providers
+            .iter()
+            .find(|provider| provider.client_provider_id == "codexhub-openai")
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == "gpt-5.6-terra")
+            })
+            .expect("exported Terra model");
+        assert_eq!(exported.context_window, Some(272_000));
+    }
+
+    #[test]
+    fn official_gateway_models_fail_closed_without_a_published_context_limit() {
+        let models = official_models_from_metadata(
+            &Settings::default(),
+            Some(vec![Model {
+                id: "gpt-5.6-terra".to_string(),
+                context_window: Some(353_400),
+                ..Model::default()
+            }]),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_window, None);
     }
 
     #[test]
@@ -5871,6 +5959,10 @@ mod tests {
             openai_context_guard_enabled: true,
             ..Settings::default()
         };
+        let published_contexts = published_context_windows(&[
+            ("gpt-5.6-sol", 272_000),
+            ("gpt-5.3-codex-spark", 128_000),
+        ]);
         let official = official_models_from_metadata(
             &settings,
             Some(vec![
@@ -5885,6 +5977,7 @@ mod tests {
                     ..Model::default()
                 },
             ]),
+            &published_contexts,
         );
 
         assert_eq!(official[0].context_window, Some(272_000));
@@ -5914,6 +6007,7 @@ mod tests {
 
     #[test]
     fn official_gateway_models_dedupe_legacy_alias_with_fresh_metadata_winning() {
+        let published_contexts = published_context_windows(&[("gpt-5.6-sol", 272_000)]);
         let models = official_models_from_metadata(
             &Settings::default(),
             Some(vec![
@@ -5930,16 +6024,18 @@ mod tests {
                     ..Model::default()
                 },
             ]),
+            &published_contexts,
         );
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
-        assert_eq!(models[0].context_window, Some(400_000));
+        assert_eq!(models[0].context_window, Some(272_000));
     }
 
     #[test]
     fn official_gateway_alias_merge_exports_only_when_any_record_is_enabled() {
+        let published_contexts = published_context_windows(&[("gpt-5.6-sol", 272_000)]);
         let merged = |legacy_enabled, bare_enabled| {
             official_models_from_metadata(
                 &Settings::default(),
@@ -5955,6 +6051,7 @@ mod tests {
                         ..Model::default()
                     },
                 ]),
+                &published_contexts,
             )
         };
 

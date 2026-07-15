@@ -2048,6 +2048,32 @@ test("frontend official merge canonicalizes aliases with fresh metadata winning"
   );
 });
 
+test("official model cards keep published limits while allowing Gateway to tighten", async () => {
+  const [modelSectionSource, officialModelsSource] = await Promise.all([
+    readFile(providerModelSectionPath, "utf8"),
+    readFile(officialModelsPath, "utf8"),
+  ]);
+  const functionSource = officialModelsSource.match(
+    /export function resolveOfficialModelContextWindow[\s\S]*?^}/m,
+  )?.[0] ?? "";
+  const javascript = ts.transpileModule(functionSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const { resolveOfficialModelContextWindow } = await import(moduleUrl);
+
+  assert.equal(resolveOfficialModelContextWindow(272_000, 353_400), 272_000);
+  assert.equal(resolveOfficialModelContextWindow(272_000, 128_000), 128_000);
+  assert.equal(resolveOfficialModelContextWindow(272_000, undefined), 272_000);
+  assert.equal(resolveOfficialModelContextWindow(undefined, 128_000), 128_000);
+  assert.equal(resolveOfficialModelContextWindow(0, 353_400), 353_400);
+  assert.match(
+    modelSectionSource,
+    /resolveOfficialModelContextWindow\(\s*model\.context_window,\s*contextById\?\.get\(model\.id\),/,
+  );
+  assert.doesNotMatch(modelSectionSource, /contextById\?\.get\(model\.id\) \?\? model\.context_window/);
+});
+
 test("unrelated settings snapshots preserve unsaved official model drafts", async () => {
   const providersSource = await readProviderContractSource();
   const pageSource = providersSource.match(/function ProvidersPageImpl[\s\S]*?function UnsavedProviderChangesDialog/)?.[0] ?? "";
