@@ -534,7 +534,7 @@ def _nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _direct_official_model_identity(model: Any) -> str | None:
+def _direct_official_model_identities(model: Any) -> list[str] | None:
     if not isinstance(model, dict):
         return None
     identities: list[str] = []
@@ -547,10 +547,17 @@ def _direct_official_model_identity(model: Any) -> str | None:
         slug = canonical_model_id(value)
         if slug.startswith("openai/gpt-"):
             slug = slug.removeprefix("openai/")
-        if not slug.startswith("gpt-"):
-            return None
         identities.append(slug)
-    if not identities or len(set(identities)) != 1:
+    return identities or None
+
+
+def _direct_official_model_identity(model: Any) -> str | None:
+    identities = _direct_official_model_identities(model)
+    if (
+        identities is None
+        or not all(identity.startswith("gpt-") for identity in identities)
+        or len(set(identities)) != 1
+    ):
         return None
     return identities[0]
 
@@ -560,6 +567,30 @@ def _direct_official_model_index(
 ) -> dict[str, dict[str, Any]] | None:
     indexed: dict[str, dict[str, Any]] = {}
     for model in models:
+        slug = _direct_official_model_identity(model)
+        if slug is None or slug in indexed:
+            return None
+        indexed[slug] = model
+    return indexed
+
+
+def _direct_official_cache_model_index(
+    models: Iterable[Any],
+) -> dict[str, dict[str, Any]] | None:
+    """Index cache entries relevant to the current Official GPT model list.
+
+    Native Direct caches may also contain internal non-GPT entries.  They carry
+    no authority for the Official GPT catalog and are ignored, while any entry
+    that names a GPT model must remain internally coherent and unique.
+    """
+
+    indexed: dict[str, dict[str, Any]] = {}
+    for model in models:
+        identities = _direct_official_model_identities(model)
+        if identities is None:
+            return None
+        if not any(identity.startswith("gpt-") for identity in identities):
+            continue
         slug = _direct_official_model_identity(model)
         if slug is None or slug in indexed:
             return None
@@ -664,12 +695,10 @@ def load_fresh_direct_official_cache_authority(
     if not isinstance(cache_models, list):
         return _unavailable_direct_official_cache_authority("missing")
     current_by_slug = _direct_official_model_index(snapshot.models)
-    cache_by_slug = _direct_official_model_index(
-        [model for model in cache_models if isinstance(model, dict)]
-    )
+    cache_by_slug = _direct_official_cache_model_index(cache_models)
     if current_by_slug is None or cache_by_slug is None or not current_by_slug:
         return _unavailable_direct_official_cache_authority("contradictory")
-    if len(cache_models) != len(cache_by_slug) or not set(current_by_slug).issubset(cache_by_slug):
+    if not set(current_by_slug).issubset(cache_by_slug):
         return _unavailable_direct_official_cache_authority("contradictory")
 
     context_by_slug: dict[str, dict[str, int]] = {}
@@ -680,8 +709,9 @@ def load_fresh_direct_official_cache_authority(
         values = _validated_cache_context_values(cached_model)
         if values is None:
             return _unavailable_direct_official_cache_authority("contradictory")
-        if values:
-            context_by_slug[slug] = values
+        if not values:
+            return _unavailable_direct_official_cache_authority("missing")
+        context_by_slug[slug] = values
 
     if not context_by_slug:
         return _unavailable_direct_official_cache_authority("missing")

@@ -713,6 +713,10 @@ class CatalogSyncTests(unittest.TestCase):
         )
         raw_models = json.loads(model_list_path.read_text(encoding="utf-8"))["data"]
         cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            next(model for model in cache_payload["models"] if model["slug"] == "codex-auto-review"),
+            {"slug": "codex-auto-review"},
+        )
         snapshot = catalog_sync.OfficialSeedSnapshot(
             models=[
                 {
@@ -753,30 +757,41 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertNotIn("sanitized-direct-cache-etag", serialized_catalog)
         self.assertNotIn("sanitized-config-marker", serialized_catalog)
         self.assertNotIn("models_cache.json", serialized_catalog)
+        self.assertNotIn("codex-auto-review", serialized_catalog)
 
-        for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        expected_context_windows = {
+            "gpt-5.6-sol": 272_000,
+            "gpt-5.6-terra": 272_000,
+            "gpt-5.6-luna": 272_000,
+            "gpt-5.5": 272_000,
+            "gpt-5.4": 272_000,
+            "gpt-5.4-mini": 272_000,
+            "gpt-5.3-codex-spark": 128_000,
+        }
+        self.assertEqual(set(authority.context_by_slug), set(expected_context_windows))
+        for slug, context_window in expected_context_windows.items():
             with self.subTest(slug=slug):
                 model = by_slug[slug]
                 budget = model["codex_proxy_metadata"]["official_context_budget"]
-                self.assertEqual(model["context_window"], 272_000)
-                self.assertEqual(model["max_context_window"], 272_000)
+                self.assertEqual(model["context_window"], context_window)
+                self.assertEqual(model["max_context_window"], context_window)
                 self.assertEqual(model["effective_context_window_percent"], 95)
                 self.assertEqual(
                     budget["source"],
                     "fresh_direct_official_cache_authority",
                 )
                 self.assertEqual(budget["freshness"], "fresh")
-                self.assertLessEqual(budget["effective_context_window"], 258_400)
-                self.assertLessEqual(budget["model_auto_compact_token_limit"], 244_800)
+                self.assertLessEqual(budget["effective_context_window"], context_window * 95 // 100)
+                self.assertLessEqual(
+                    budget["model_auto_compact_token_limit"],
+                    min(context_window * 90 // 100, context_window * 95 // 100),
+                )
                 self.assertLess(budget["model_auto_compact_token_limit"], 249_433)
                 serialized_budget = json.dumps(budget, sort_keys=True)
                 self.assertNotIn("sanitized-direct-cache-etag", serialized_budget)
                 self.assertNotIn("sanitized-config-marker", serialized_budget)
                 self.assertNotIn("models_cache.json", serialized_budget)
 
-        for slug in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"):
-            with self.subTest(slug=slug):
-                self.assertNotIn("context_window", by_slug[slug])
         self.assertEqual(by_slug["glm-5.2"]["context_window"], 1_000_000)
         self.assertNotIn("353400", serialized_catalog)
 
@@ -796,7 +811,8 @@ class CatalogSyncTests(unittest.TestCase):
         direct_cache["fetched_at"] = datetime.now(timezone.utc).isoformat()
         direct_cache["etag"] = "target-cache-private-etag"
         for model in direct_cache["models"]:
-            model["comp_hash"] = f"target-cache-private-hash-{model['slug']}"
+            if model["slug"].startswith("gpt-"):
+                model["comp_hash"] = f"target-cache-private-hash-{model['slug']}"
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -996,6 +1012,22 @@ class CatalogSyncTests(unittest.TestCase):
             payload = json.loads(json.dumps(fresh_cache))
             payload.pop(key)
             cases.append((label, payload, cache_timestamp + 1, "missing"))
+        missing_all_numeric = json.loads(json.dumps(fresh_cache))
+        missing_numeric_model = next(
+            model for model in missing_all_numeric["models"] if model["slug"] == "gpt-5.6-terra"
+        )
+        for key in (
+            "context_window",
+            "max_context_window",
+            "effective_context_window_percent",
+        ):
+            missing_numeric_model.pop(key)
+        cases.append(("missing_all_numeric", missing_all_numeric, cache_timestamp + 1, "missing"))
+        missing_context_window = json.loads(json.dumps(fresh_cache))
+        next(
+            model for model in missing_context_window["models"] if model["slug"] == "gpt-5.6-terra"
+        ).pop("context_window")
+        cases.append(("missing_context_window", missing_context_window, cache_timestamp + 1, "contradictory"))
         missing_marker = json.loads(json.dumps(fresh_cache))
         next(model for model in missing_marker["models"] if model["slug"] == "gpt-5.6-terra").pop(
             "comp_hash"
@@ -1006,6 +1038,11 @@ class CatalogSyncTests(unittest.TestCase):
             model for model in mismatched_identity["models"] if model["slug"] == "gpt-5.6-terra"
         )["slug"] = "gpt-cache-mismatch"
         cases.append(("mismatched_model_id", mismatched_identity, cache_timestamp + 1, "contradictory"))
+        mixed_gpt_identity = json.loads(json.dumps(fresh_cache))
+        next(
+            model for model in mixed_gpt_identity["models"] if model["slug"] == "gpt-5.6-terra"
+        )["model"] = "gpt-5.6-luna"
+        cases.append(("mixed_gpt_identity", mixed_gpt_identity, cache_timestamp + 1, "contradictory"))
         contradictory_numeric = json.loads(json.dumps(fresh_cache))
         next(
             model for model in contradictory_numeric["models"] if model["slug"] == "gpt-5.6-terra"
