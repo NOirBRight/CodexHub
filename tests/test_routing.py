@@ -15194,6 +15194,67 @@ Execution constraints:
             surface="sse",
         )
 
+    def test_responses_caller_chat_upstream_sse_relay_rejects_unsupported_selector_before_semantic_repair(self):
+        handler = FakeHandler()
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+            "subagent_exact_spawn_prompts": ["semantic repaired delegation"],
+        }
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                self._chat_spawn_sse_response(
+                    {"agent_type": "synthetic-unknown", "message": "delegate"},
+                    call_id="chat-semantic-unsupported-selector",
+                ),
+                "synthetic-provider",
+                upstream_format="chat_completions",
+                inbound_format="responses",
+                caller_stream=True,
+                event_context=event_context,
+            )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.assertEqual(handler.wfile.writes, [])
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="unsupported_selector",
+            surface="sse",
+        )
+
+    def test_responses_caller_chat_upstream_sse_relay_preserves_general_through_semantic_repair(self):
+        handler = FakeHandler()
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            self._chat_spawn_sse_response(
+                {"agent_type": "general", "message": "delegate"},
+                call_id="chat-semantic-general-selector",
+            ),
+            "synthetic-provider",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context={
+                "inbound_format": "responses",
+                "_spawn_selector_required": True,
+                "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+                "subagent_exact_spawn_prompts": ["semantic repaired delegation"],
+            },
+        )
+
+        events = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        call_item = next(event["item"] for event in events if event.get("type") == "response.output_item.done")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(call_item["arguments"])["agent_type"], "general")
+        self.assertNotIn("_codexhub_worker_requested_binding", call_item)
+
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(
             json.dumps(

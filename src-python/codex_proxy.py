@@ -7536,16 +7536,26 @@ def _required_subagent_call_item(spec: Mapping[str, Any], call_id: str | None = 
     }
 
 
+def _with_preserved_spawn_agent_type(
+    arguments: Mapping[str, Any],
+    original_arguments: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    rewritten = dict(arguments)
+    agent_type = original_arguments.get("agent_type") if original_arguments is not None else None
+    if agent_type in {"worker", "general"}:
+        rewritten["agent_type"] = agent_type
+    return rewritten
+
+
 def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
     if spec.get("tool_name") == "spawn_agent":
         original_arguments = _json_object_from_arguments(value.get("arguments"))
-        if original_arguments is not None and original_arguments.get("agent_type") == "worker":
-            spec = dict(spec)
-            required_arguments = spec.get("arguments")
-            spec["arguments"] = {
-                **(dict(required_arguments) if isinstance(required_arguments, Mapping) else {}),
-                "agent_type": "worker",
-            }
+        spec = dict(spec)
+        required_arguments = spec.get("arguments")
+        spec["arguments"] = _with_preserved_spawn_agent_type(
+            dict(required_arguments) if isinstance(required_arguments, Mapping) else {},
+            original_arguments,
+        )
     call_id = value.get("call_id")
     item = _required_subagent_call_item(spec, call_id=call_id if isinstance(call_id, str) and call_id else None)
     item_id = value.get("id")
@@ -7658,12 +7668,8 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
             return value, False
         original_arguments = _json_object_from_arguments(value.get("arguments"))
         expected_arguments = _json_object_from_arguments(expected)
-        if (
-            original_arguments is not None
-            and original_arguments.get("agent_type") == "worker"
-            and expected_arguments is not None
-        ):
-            expected_arguments["agent_type"] = "worker"
+        if expected_arguments is not None:
+            expected_arguments = _with_preserved_spawn_agent_type(expected_arguments, original_arguments)
             expected = json.dumps(expected_arguments, ensure_ascii=True, separators=(",", ":"))
             arguments_by_item_id[item_id] = expected
         if value.get("arguments") == expected:
@@ -7689,8 +7695,7 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
             expected_arguments = specs[next_index]
             state["next_index"] = next_index + 1
         original_arguments = _json_object_from_arguments(value.get("arguments"))
-        if original_arguments is not None and original_arguments.get("agent_type") == "worker":
-            expected_arguments = {**dict(expected_arguments), "agent_type": "worker"}
+        expected_arguments = _with_preserved_spawn_agent_type(expected_arguments, original_arguments)
         expected_json = json.dumps(dict(expected_arguments), ensure_ascii=True, separators=(",", ":"))
         if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
             arguments_by_item_id[item_id] = expected_json
@@ -7737,8 +7742,7 @@ def _coerce_required_subagent_tool_calls_inner(
         arguments = dict(spec.get("arguments")) if isinstance(spec.get("arguments"), Mapping) else {}
         original_arguments = _json_object_from_arguments(value.get("arguments"))
         if spec.get("tool_name") == "spawn_agent" and original_arguments is not None:
-            if original_arguments.get("agent_type") == "worker":
-                arguments["agent_type"] = "worker"
+            arguments = _with_preserved_spawn_agent_type(arguments, original_arguments)
         expected = json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":"))
         if value.get("arguments") != expected:
             rewritten = dict(value)
@@ -15024,6 +15028,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **_response_events_shape_summary(events),
                     )
                     events, _ = _guard_duplicate_multi_agent_spawn_calls(events, event_context)
+                    events, _ = _apply_external_worker_response_contract(
+                        events,
+                        compatibility_event_context,
+                        surface="sse",
+                        attach_sidecars=False,
+                    )
                     events, _ = _coerce_exact_spawn_prompt_tool_calls(events, event_context)
                     events, _ = _coerce_required_subagent_tool_calls(events, event_context)
                     events, _ = _reconcile_function_call_argument_events(events)
@@ -15032,6 +15042,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         events,
                         compatibility_event_context,
                         surface="sse",
+                        validate_selectors=False,
                     )
                     _write_adapter_event(
                         event_context,
