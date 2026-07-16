@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CodexHub",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "identifier": "com.codexhub.app",
   "build": {
     "frontendDist": "../frontend/dist",
@@ -29,6 +29,7 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "../config/*.toml": "config",
+      "../config/official_model_catalog_metadata.json": "config/official_model_catalog_metadata.json",
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
       "../src-python/vendor/*.whl": "src-python/vendor",

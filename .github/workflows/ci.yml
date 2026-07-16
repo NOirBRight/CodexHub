@@ -63,8 +63,16 @@ jobs:
         run: npm run test:ui-contract
 
   rust-tests:
-    name: Rust tests
+    name: Rust tests (${{ matrix.flavor }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor:
+          - normal
+          - debug
+    env:
+      CODEXHUB_BUILD_FLAVOR: ${{ matrix.flavor }}
     defaults:
       run:
         working-directory: src-tauri
@@ -92,7 +100,58 @@ jobs:
           Set-Content -Path resources/python/.ci-placeholder -Value ''
 
       - name: Run cargo tests
-        run: cargo test --locked
+        run: |
+          if ("${{ matrix.flavor }}" -eq "debug") {
+            cargo test --locked --features debug-diagnostics
+          } else {
+            cargo test --locked
+          }
+
+      - name: Build release-optimized flavor
+        run: |
+          if ("${{ matrix.flavor }}" -eq "debug") {
+            cargo build --release --locked --features debug-diagnostics
+          } else {
+            cargo build --release --locked
+          }
+
+  release-flavor-contract:
+    name: Release flavor contract
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify normal default and debug parity
+        shell: pwsh
+        run: |
+          $normalDefault = & scripts/build-windows-portable.ps1 -DryRun | ConvertFrom-Json
+          $normal = & scripts/build-windows-portable.ps1 -Flavor normal -DryRun | ConvertFrom-Json
+          $debug = & scripts/build-windows-portable.ps1 -Flavor debug -DryRun | ConvertFrom-Json
+          if ($normalDefault.flavor -ne "normal") { throw "Omitted -Flavor must produce normal." }
+          if ($normal.version -ne $debug.version -or $normal.source_revision -ne $debug.source_revision) {
+            throw "Normal and debug must come from the same version and source revision."
+          }
+          if ($normal.generated_config.productName -ne $debug.generated_config.productName -or
+              $normal.generated_config.identifier -ne $debug.generated_config.identifier -or
+              $normal.generated_config.title -ne $debug.generated_config.title) {
+            throw "Normal and debug must preserve one application identity."
+          }
+          if ($normal.updater_manifest -ne "latest.json" -or $debug.updater_manifest -ne "latest-debug.json") {
+            throw "Flavor updater manifests are not selected correctly."
+          }
+          if ($normal.installer_name -eq $debug.installer_name -or -not $debug.debug_diagnostics_enabled) {
+            throw "Debug artifact identity or diagnostic capability is missing."
+          }
+          $replacement = & scripts/Test-BuildFlavorReplacement.ps1 -DryRun | ConvertFrom-Json
+          if (($replacement.sequence -join ",") -ne "normal,debug,normal") {
+            throw "The same-version replacement sequence is not normal -> debug -> normal."
+          }
+          if ($replacement.application_identity.identifier -ne $normal.generated_config.identifier -or
+              $replacement.runtime.gateway_port -ne $normal.generated_config.gatewayPort -or
+              $replacement.runtime.expected_gateway_owner_count -ne 1) {
+            throw "Flavor replacement no longer preserves one application and Gateway owner."
+          }
 
   rust-clippy:
     name: Rust clippy

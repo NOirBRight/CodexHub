@@ -1,10 +1,13 @@
 [package]
 name = "codexhub"
-version = "0.1.4"
+version = "0.1.5"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
 edition = "2021"
+
+[features]
+debug-diagnostics = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

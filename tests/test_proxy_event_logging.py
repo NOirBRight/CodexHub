@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import queue
 import sqlite3
 import stat
 import tempfile
@@ -11,6 +10,7 @@ import threading
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
+from urllib.error import URLError
 
 import codex_proxy
 
@@ -33,6 +33,53 @@ class ProxyEventLoggingTests(TestCase):
                     payload = json.loads(codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip())
                     self.assertEqual(payload["event"], "request_complete")
                     self.assertEqual(payload["request_id"], "req-test")
+            finally:
+                importlib.reload(codex_proxy)
+
+    def test_upstream_open_retry_event_preserves_transport_failure_phase(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            try:
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                    importlib.reload(codex_proxy)
+                    request = codex_proxy.Request("https://example.test/v1/responses", data=b"{}", method="POST")
+                    success = object()
+
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                            },
+                            clear=False,
+                        ),
+                        patch(
+                            "codex_proxy._open_upstream_once",
+                            side_effect=[URLError(TimeoutError("upstream timed out")), success],
+                        ) as open_once,
+                        patch("codex_proxy.time.sleep"),
+                    ):
+                        response = codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="official",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req-open-seam", "model": "openai/gpt-5.5"},
+                        )
+
+                    self.assertIs(response, success)
+                    self.assertEqual(open_once.call_count, 2)
+                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
+                    payloads = [
+                        json.loads(line)
+                        for line in codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    retry = next(payload for payload in payloads if payload["event"] == "upstream_retry")
+                    self.assertEqual(retry["request_id"], "req-open-seam")
+                    self.assertEqual(retry["upstream"], "official")
+                    self.assertEqual(retry["failure_phase"], "tcp_connect")
             finally:
                 importlib.reload(codex_proxy)
 
@@ -484,21 +531,14 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 importlib.reload(codex_proxy)
 
-    def test_proxy_event_writer_queue_is_bounded_and_drops_without_blocking(self):
+    def test_gateway_event_writer_delegates_payloads_to_the_bounded_writer(self):
         payloads = [
             {"event": "request_start", "request_id": "req-one"},
             {"event": "request_complete", "request_id": "req-two"},
         ]
-        original_queue = codex_proxy.PROXY_EVENT_QUEUE
-        original_dropped = codex_proxy.PROXY_EVENT_DROPPED_COUNT
-        try:
-            codex_proxy.PROXY_EVENT_QUEUE = queue.Queue(maxsize=1)
-            codex_proxy.PROXY_EVENT_DROPPED_COUNT = 0
-            with patch("codex_proxy._ensure_proxy_event_writer_started"):
-                self.assertTrue(codex_proxy._enqueue_proxy_event_payload(payloads[0]))
-                self.assertFalse(codex_proxy._enqueue_proxy_event_payload(payloads[1]))
-            self.assertEqual(codex_proxy.PROXY_EVENT_QUEUE.qsize(), 1)
-            self.assertEqual(codex_proxy.PROXY_EVENT_DROPPED_COUNT, 1)
-        finally:
-            codex_proxy.PROXY_EVENT_QUEUE = original_queue
-            codex_proxy.PROXY_EVENT_DROPPED_COUNT = original_dropped
+        with patch.object(codex_proxy.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
+            self.assertTrue(codex_proxy._enqueue_gateway_event_payload(payloads[0]))
+            self.assertFalse(codex_proxy._enqueue_gateway_event_payload(payloads[1]))
+
+        self.assertEqual(enqueue.call_args_list[0].args, (payloads[0],))
+        self.assertEqual(enqueue.call_args_list[1].args, (payloads[1],))

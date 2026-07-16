@@ -1,8 +1,8 @@
-function Assert-ReleaseChannelVersion {
+function Assert-ReleaseFlavorVersion {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("stable", "beta")]
+        [ValidateSet("normal", "debug")]
         [string]$Flavor,
         [Parameter(Mandatory = $true)]
         [string]$Version
@@ -16,10 +16,51 @@ function Assert-ReleaseChannelVersion {
     }
 
     $hasPrerelease = $Matches.ContainsKey("prerelease") -and -not [string]::IsNullOrEmpty($Matches["prerelease"])
-    if ($Flavor -eq "stable" -and $hasPrerelease) {
-        throw "Stable release requires a version without a prerelease suffix."
+    if ($hasPrerelease) {
+        throw "Normal and debug release flavors require a version without a prerelease suffix."
     }
-    if ($Flavor -eq "beta" -and -not $hasPrerelease) {
-        throw "Beta release requires a prerelease version."
+}
+
+function Get-ReleaseArtifactName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("normal", "debug")]
+        [string]$Flavor,
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    $suffix = if ($Flavor -eq "debug") { "_debug" } else { "" }
+    return "CodexHub_${Version}${suffix}_x64-setup.exe"
+}
+
+function Get-ReleaseManifestName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("normal", "debug")]
+        [string]$Flavor
+    )
+
+    if ($Flavor -eq "debug") {
+        return "latest-debug.json"
     }
+    return "latest.json"
+}
+
+function Get-FlavorTargetRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TauriDir,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("normal", "debug")]
+        [string]$Flavor
+    )
+
+    if ($Flavor -eq "debug") {
+        return Join-Path $TauriDir "target\build-flavors\debug"
+    }
+    return Join-Path $TauriDir "target"
 }

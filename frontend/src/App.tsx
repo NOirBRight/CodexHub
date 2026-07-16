@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -6,8 +7,10 @@ import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
 import { historyIssueKey } from "./lib/history";
+import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
+import { isUpdateInstallActive, updateInstallToastText } from "./lib/updateStatus";
 import type {
   AppFlavorInfo,
   AppStatus,
@@ -41,6 +44,11 @@ type RuntimeSnapshot = {
   appFlavor: RuntimeCache<AppFlavorInfo>;
   appVersion: RuntimeCache<AppVersionInfo>;
   updateStatus: RuntimeCache<AppUpdateStatus>;
+};
+
+type TrayToastPayload = {
+  text: string;
+  tone: "success" | "error";
 };
 
 type LoadRuntimeOptions = {
@@ -86,18 +94,6 @@ function defaultUsageWindow(): UsageQueryWindow {
     startTs: addDays(end, -6).toISOString(),
     endTs: endOfDay(end).toISOString(),
   };
-}
-
-function startOfDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
-function endOfDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
-}
-
-function addDays(date: Date, days: number) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 }
 
 function runtimeCache<T>(data: T | null = null): RuntimeCache<T> {
@@ -764,6 +760,34 @@ export default function App() {
   }, [loadGatewayClients, refreshCoreRuntime, refreshRuntimeStatus]);
 
   useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<TrayToastPayload>("codexhub:toast", (event) => {
+      showToast({
+        text: event.payload.text,
+        tone: event.payload.tone,
+      });
+    })
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => {
+        // The bridge-only frontend has no native tray event surface.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [showToast]);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       setMountedTabs((current) => (current.gateway ? current : { ...current, gateway: true }));
     }, 250);
@@ -1129,45 +1153,6 @@ export default function App() {
       />
     </div>
   );
-}
-
-function isUpdateInstallActive(status: AppUpdateInstallStatus | null | undefined) {
-  return Boolean(
-    status &&
-      (status.phase === "checking" ||
-        status.phase === "downloading" ||
-        status.phase === "installing" ||
-        status.phase === "restarting"),
-  );
-}
-
-function updateInstallProgressPercent(status: AppUpdateInstallStatus) {
-  if (status.phase !== "downloading" || !status.total_bytes || status.total_bytes <= 0) {
-    return null;
-  }
-  return Math.max(0, Math.min(100, Math.round((status.downloaded_bytes / status.total_bytes) * 100)));
-}
-
-function updateInstallToastText(
-  status: AppUpdateInstallStatus,
-  t: (key: string, options?: Record<string, unknown>) => string,
-) {
-  if (status.phase === "checking") {
-    return t("settings.checkingUpdates");
-  }
-  if (status.phase === "downloading") {
-    const percent = updateInstallProgressPercent(status);
-    return percent === null
-      ? t("settings.downloadingUpdate")
-      : t("settings.downloadingUpdateProgress", { percent });
-  }
-  if (status.phase === "installing" || status.phase === "restarting") {
-    return t("settings.installingUpdateRestarting");
-  }
-  if (status.phase === "failed") {
-    return t("settings.updateInstallFailed", { message: status.message });
-  }
-  return status.target_version ? t("settings.installingUpdateRestarting") : t("settings.updateInstallUnavailable");
 }
 
 function failedUpdateInstallStatus(

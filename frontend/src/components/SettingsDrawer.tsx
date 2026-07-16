@@ -2,8 +2,10 @@ import { Check, ChevronDown, Download, RefreshCcw, Save, X } from "lucide-react"
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
+import { providerFromDisplayName, providerLabel, providerLabelMap } from "../lib/providerLabels";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
+import { formatUpdateDate, isUpdateInstallActive, updateInstallButtonLabel } from "../lib/updateStatus";
 import type {
   AppUpdateInstallStatus,
   AppUpdateStatus,
@@ -500,69 +502,12 @@ function VersionUpdateBlock({
   );
 }
 
-function isUpdateInstallActive(status: AppUpdateInstallStatus | null | undefined) {
-  return Boolean(
-    status &&
-      (status.phase === "checking" ||
-        status.phase === "downloading" ||
-        status.phase === "installing" ||
-        status.phase === "restarting"),
-  );
-}
-
-function updateInstallButtonLabel(
-  status: AppUpdateInstallStatus | null,
-  t: (key: string, options?: Record<string, unknown>) => string,
-) {
-  if (!status) {
-    return t("settings.installUpdate");
-  }
-  if (status.phase === "checking") {
-    return t("settings.checkingUpdates");
-  }
-  if (status.phase === "downloading") {
-    const percent = updateInstallProgressPercent(status);
-    return percent === null
-      ? t("settings.downloadingUpdate")
-      : t("settings.downloadingUpdateProgress", { percent });
-  }
-  if (status.phase === "installing") {
-    return t("settings.installingUpdate");
-  }
-  if (status.phase === "restarting") {
-    return t("settings.restartingUpdate");
-  }
-  return t("settings.installUpdate");
-}
-
-function updateInstallProgressPercent(status: AppUpdateInstallStatus) {
-  if (!status.total_bytes || status.total_bytes <= 0) {
-    return null;
-  }
-  return Math.max(0, Math.min(100, Math.round((status.downloaded_bytes / status.total_bytes) * 100)));
-}
-
 function clampRetryAttempts(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
     return 30;
   }
   return Math.max(1, Math.min(30, Math.round(parsed)));
-}
-
-function formatUpdateDate(value: string | null | undefined, locale: string) {
-  const raw = value?.trim();
-  if (!raw) {
-    return null;
-  }
-  const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) {
-    return raw;
-  }
-  return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
 }
 
 interface VisionModelParts {
@@ -588,66 +533,6 @@ function visionModelParts(model: Model, providerLabels: Map<string, string>): Vi
     provider,
     title: `${modelId} ${provider}`,
   };
-}
-
-function providerFromDisplayName(displayName: string | null | undefined, modelId: string) {
-  const name = displayName?.trim();
-  if (!name) {
-    return "";
-  }
-  const firstToken = name.split(/\s+/)[0]?.trim();
-  if (!firstToken || normalizeProviderToken(modelId).startsWith(normalizeProviderToken(firstToken))) {
-    return "";
-  }
-  return firstToken;
-}
-
-function providerLabel(value: string, providerLabels: Map<string, string>) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return "";
-  }
-  const known = providerLabels.get(normalized);
-  if (known) {
-    return known;
-  }
-  if (normalized === "official" || normalized === "official-openai" || normalized === "official_openai") {
-    return "OpenAI";
-  }
-  return value
-    .trim()
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map(formatProviderToken)
-    .join(" ");
-}
-
-function providerLabelMap(providers: Provider[]) {
-  const labels = new Map<string, string>();
-  for (const provider of providers) {
-    const name = provider.name.trim() || provider.id;
-    labels.set(provider.id.trim().toLowerCase(), name);
-    const displayPrefix = provider.display_prefix?.trim();
-    if (displayPrefix) {
-      labels.set(displayPrefix.toLowerCase(), name);
-    }
-  }
-  return labels;
-}
-
-function formatProviderToken(part: string) {
-  const lower = part.toLowerCase();
-  if (lower === "openai") {
-    return "OpenAI";
-  }
-  if (lower === "cn") {
-    return "CN";
-  }
-  return `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`;
-}
-
-function normalizeProviderToken(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function Toggle({
@@ -711,7 +596,10 @@ function VisionModelSelect({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
-  const providerLabels = providerLabelMap(providers);
+  const providerLabels = providerLabelMap(providers, {
+    includeDisplayPrefixes: true,
+    includeOfficialDashedAlias: true,
+  });
   const selectedModel = models.find((model) => model.id === value);
   const selectedParts = selectedModel ? visionModelParts(selectedModel, providerLabels) : null;
   const { t } = useTranslation();

@@ -2,6 +2,7 @@ export interface Model {
   id: string;
   display_name?: string | null;
   upstream_model?: string | null;
+  tool_surface_strategy?: ToolSurfaceStrategy | null;
   source_kind?: string | null;
   locked?: boolean;
   codex_enabled?: boolean;
@@ -22,6 +23,11 @@ export interface Model {
   enabled: boolean;
 }
 
+export interface OfficialRefreshResult {
+  models: Model[];
+  restart_required: boolean;
+}
+
 export interface ModelPricing {
   input_per_million?: number | null;
   cached_input_per_million?: number | null;
@@ -40,6 +46,7 @@ export interface MetadataProvenance {
 
 export type UpstreamFormat = "auto" | "responses" | "chat_completions" | "anthropic_messages";
 export type ToolProtocol = "auto" | "responses_structured" | "chat_tools" | "text_compat" | "none";
+export type ToolSurfaceStrategy = "eager" | "deferred_core";
 
 export interface Provider {
   id: string;
@@ -49,6 +56,7 @@ export interface Provider {
   upstream_format?: UpstreamFormat | null;
   available_upstream_formats?: UpstreamFormat[] | null;
   tool_protocol?: ToolProtocol | null;
+  tool_surface_strategy?: ToolSurfaceStrategy | null;
   reports_cached_input_tokens?: boolean | null;
   display_prefix?: string | null;
   sort_order?: number | null;
@@ -107,11 +115,18 @@ export interface AppVersionInfo {
   current_version: string;
 }
 
-export type RuntimeFlavor = "stable" | "beta";
+export type BuildFlavor = "normal" | "debug";
 export type RoutingOwner = "official" | "release" | "beta" | "unknown_external";
 
+export interface BuildInfo {
+  semantic_version: string;
+  flavor: BuildFlavor;
+  source_revision: string;
+  diagnostics_enabled: boolean;
+}
+
 export interface AppFlavorInfo {
-  flavor: RuntimeFlavor;
+  build: BuildInfo;
   routing_owner: RoutingOwner;
   product_name: string;
   bridge_port: number;
@@ -173,6 +188,31 @@ export interface GatewayStatus {
   endpoints: GatewayEndpoints;
   official_models: GatewayModel[];
   diagnostics: GatewayDiagnostic[];
+}
+
+export interface DiagnosticsStatus {
+  active: boolean;
+  paused: boolean;
+  flavor: "debug";
+  rolling_bytes: number;
+  rolling_window_seconds: number;
+  incident_count: number;
+  incident_ids: string[];
+  last_marker_category?: string | null;
+  last_marker_at_ms?: number | null;
+  rolling_evicted_segments: number;
+  incident_evicted_count: number;
+  truncated: boolean;
+  schema_version: number;
+  writer_failure_count: number;
+  writer_queue_dropped_records: number;
+}
+
+export interface DiagnosticsActionResult {
+  status: DiagnosticsStatus;
+  accepted?: boolean | null;
+  incident_id?: string | null;
+  deleted?: boolean | null;
 }
 
 export interface CodexAuthStatus {

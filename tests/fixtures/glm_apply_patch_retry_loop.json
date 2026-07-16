@@ -1,0 +1,118 @@
+{
+  "fixture_schema": "codexhub-glm-apply-patch-retry-loop/v1",
+  "sanitized": true,
+  "source": "synthetic structural reproduction; not a user-session capture",
+  "model": "<third-party-glm>",
+  "retry_loop_before_adapter": {
+    "function_call_name": "apply_patch",
+    "tool_result_observed": false,
+    "repeated_call_count": 2
+  },
+  "patch": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n",
+  "observed_incompatible_arguments": {
+    "empty_key": {
+      "": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n"
+    },
+    "content_path": {
+      "content": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n",
+      "path": "SANITIZED_TARGET"
+    },
+    "patch_path_pattern": {
+      "patch": "*** Begin Patch\n*** Update File: SANITIZED_TARGET\n@@\n-OLD\n+NEW\n*** End Patch\n",
+      "path": "SANITIZED_TARGET",
+      "pattern": "OLD"
+    }
+  },
+  "body_response": {
+    "id": "<chat-response-id>",
+    "model": "<third-party-glm>",
+    "choices": [
+      {
+        "message": {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_patch_fixture",
+              "type": "function",
+              "function": {
+                "name": "apply_patch",
+                "arguments": "{\"patch\":\"*** Begin Patch\\n*** Update File: SANITIZED_TARGET\\n@@\\n-OLD\\n+NEW\\n*** End Patch\\n\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ]
+  },
+  "stream_chunks": [
+    {
+      "id": "<chat-stream-id>",
+      "model": "<third-party-glm>",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call_patch_fixture",
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "arguments": ""
+                }
+              }
+            ]
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "<chat-stream-id>",
+      "model": "<third-party-glm>",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "function": {
+                  "arguments": "{\"patch\":\"*** Begin Patch\\n*** Update File: SANITIZED_TARGET\\n"
+                }
+              }
+            ]
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "<chat-stream-id>",
+      "model": "<third-party-glm>",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "function": {
+                  "arguments": "@@\\n-OLD\\n+NEW\\n*** End Patch\\n\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }
+      ]
+    }
+  ],
+  "paired_custom_tool_output": {
+    "type": "custom_tool_call_output",
+    "call_id": "call_patch_fixture",
+    "output": "<sanitized-success>"
+  }
+}

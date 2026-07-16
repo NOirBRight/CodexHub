@@ -60,13 +60,43 @@ The desktop app and Gateway have independent lifecycles. Closing the window hide
 
 Release installers include the runtime required for normal use. Normal users do not need to install Python, Node.js, or Rust separately. Source development still requires local Node.js, Rust/Tauri tooling, and Python.
 
-## Release And Beta Channels
+## Normal And Debug Build Flavors
 
-CodexHub release uses frontend port `1420`, bridge port `1421`, Gateway port `9099`, and `%USERPROFILE%\.codex` by default.
+Each release tag produces two release-optimized CodexHub artifacts from the same commit and semantic version:
 
-CodexHub Beta uses frontend port `1430`, bridge port `1431`, Gateway port `9109`, and `%USERPROFILE%\.codexhub-beta\codex-home` by default. Beta does not take over the release Codex config on first launch.
+- `normal` is the default build. It retains the existing `latest.json` update contract and `CodexHub_<version>_x64-setup.exe` installer name.
+- `debug` is selected explicitly at build time and enables diagnostic capability code. It uses `latest-debug.json` and `CodexHub_<version>_debug_x64-setup.exe`, so its updater cannot silently switch to `normal`.
 
-Client routing state is target-based: `Official`, `Release`, or `Beta`. If a target is managed by the other channel, the current app displays `Managed by Release` or `Managed by Beta` and requires explicit takeover confirmation before rewriting it.
+Both flavors share the same application identifier, installed application, ports (`1420`/`1421`/`9099`), `%USERPROFILE%\.codex` runtime home, settings, and Gateway owner. They are not separate products or Rust/Tauri development builds. Installing one flavor over the other at the same version replaces the installed app while preserving supported runtime data; do not run them as side-by-side installations.
+
+The build scripts reject unsupported flavor names before compilation. Use the normal default or select debug explicitly:
+
+```powershell
+# Portable build plans (no compilation)
+.\scripts\build-windows-portable.ps1 -DryRun
+.\scripts\build-windows-portable.ps1 -Flavor debug -DryRun
+
+# Signed, release-optimized installer builds
+.\scripts\build-windows-release.ps1 -Flavor normal
+.\scripts\build-windows-release.ps1 -Flavor debug
+```
+
+Both installer artifacts and both manifests belong to the same GitHub Release tag. Debug manifests declare their flavor and artifact name; a mismatch is rejected before download/install. A normal manifest without flavor metadata remains accepted only when it points to the historical normal artifact name, preserving installed normal-user update compatibility.
+
+For a packaged same-version replacement smoke, first inspect the contract, then run the explicit installer sequence only in a dedicated Windows test environment with a known settings fixture:
+
+```powershell
+.\scripts\Test-BuildFlavorReplacement.ps1 -DryRun
+.\scripts\Test-BuildFlavorReplacement.ps1 `
+  -Version 0.1.5 `
+  -NormalInstaller .\CodexHub_0.1.5_x64-setup.exe `
+  -DebugInstaller .\CodexHub_0.1.5_debug_x64-setup.exe `
+  -SettingsPath "$env:USERPROFILE\.codex\proxy\settings.json" `
+  -InstalledExe 'C:\path\to\CodexHub.exe' `
+  -RunInstall -LaunchAfterInstall
+```
+
+The smoke proves normal → debug → normal replacement preserves the supplied settings file and observes exactly one Gateway listener. It is intentionally opt-in because it runs signed installers.
 
 ## Usage
 

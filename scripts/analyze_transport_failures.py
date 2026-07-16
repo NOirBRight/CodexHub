@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,12 @@ REQUEST_METADATA_FIELDS = (
     "upstream",
     "model",
     "model_canonical",
-    "window_id",
     "content_length",
     "decoded_content_length",
     "is_stream",
 )
+
+DEFAULT_TIME_WINDOW_MINUTES = 5
 
 FAILURE_EVENTS = {
     "official_passthrough_stream_closed",
@@ -38,22 +40,42 @@ TRANSPORT_FAILURE_PHASES = {
     "downstream_write",
 }
 
-TRANSPORT_DETAIL_SIGNALS = (
-    "unexpected_eof",
-    "ssleoferror",
-    "eof occurred in violation",
-    "timed out",
-    "timeout",
-    "winerror 10060",
-    "connection reset",
-    "connectionreseterror",
-    "winerror 10054",
+LEGACY_TRANSPORT_FAILURES = (
+    (
+        ("unexpected_eof", "ssleoferror", "eof occurred in violation"),
+        "tls_handshake",
+        "tls_eof",
+    ),
+    (
+        (
+            "winerror 10060",
+            "connection attempt failed",
+            "connect timeout",
+            "connect timed out",
+            "tcp connect",
+        ),
+        "tcp_connect",
+        "connect_timeout",
+    ),
+    (
+        ("connection reset", "connectionreseterror", "winerror 10054"),
+        "request_write",
+        "connection_reset",
+    ),
+)
+
+CONNECT_PHASE_DETAIL_SIGNALS = (
     "connection refused",
     "winerror 10061",
     "name or service not known",
     "nodename nor servname provided",
     "temporary failure in name resolution",
     "getaddrinfo failed",
+)
+
+AMBIGUOUS_TIMEOUT_DETAIL_SIGNALS = (
+    "timed out",
+    "timeout",
 )
 
 GENERIC_TRANSPORT_ERRORS = {
@@ -135,26 +157,78 @@ def _provider_scope(provider_id: str, upstream: str | None = None) -> str:
     return "third_party"
 
 
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _event_error_detail(event: Mapping[str, Any]) -> str:
+    return f"{event.get('error', '')} {event.get('detail', '')}".lower()
+
+
+def _legacy_transport_failure(event: Mapping[str, Any]) -> tuple[str, str] | None:
+    detail = _event_error_detail(event)
+    for signals, phase, failure_class in LEGACY_TRANSPORT_FAILURES:
+        if any(signal in detail for signal in signals):
+            return phase, failure_class
+    return None
+
+
+def _has_connect_phase_detail(event: Mapping[str, Any]) -> bool:
+    detail = _event_error_detail(event)
+    return any(signal in detail for signal in CONNECT_PHASE_DETAIL_SIGNALS)
+
+
+def _has_ambiguous_timeout_detail(event: Mapping[str, Any]) -> bool:
+    detail = _event_error_detail(event)
+    return any(signal in detail for signal in AMBIGUOUS_TIMEOUT_DETAIL_SIGNALS)
+
+
+def _time_window(event: Mapping[str, Any], window_minutes: int) -> str:
+    timestamp = _parse_timestamp(_string(event.get("ts")))
+    if timestamp is None:
+        return "unknown"
+    window_seconds = window_minutes * 60
+    start_seconds = int(timestamp.timestamp()) // window_seconds * window_seconds
+    start = datetime.fromtimestamp(start_seconds, tz=timezone.utc)
+    end = start + timedelta(minutes=window_minutes)
+    return f"{_format_timestamp(start)}/{_format_timestamp(end)}"
+
+
 def _infer_failure_phase(event: Mapping[str, Any]) -> str:
     explicit = _string(event.get("failure_phase"))
     if explicit:
         return explicit
     event_name = _string(event.get("event"))
-    error_name = _string(event.get("error"))
-    detail = f"{event.get('error', '')} {event.get('detail', '')}".lower()
     if event_name == "official_passthrough_stream_closed":
         return "stream_body"
-    if "unexpected_eof" in detail or "ssleoferror" in detail or "eof occurred in violation" in detail:
-        return "tls_handshake"
-    if "timed out" in detail or "timeout" in detail or "winerror 10060" in detail:
+    legacy_failure = _legacy_transport_failure(event)
+    if legacy_failure is not None:
+        return legacy_failure[0]
+    if _has_connect_phase_detail(event):
         return "tcp_connect"
-    if "connection reset" in detail or "connectionreseterror" in detail or "winerror 10054" in detail:
-        return "request_write"
-    if (
-        event_name == "request_error"
-        and error_name in GENERIC_TRANSPORT_ERRORS
-    ):
-        return "tcp_connect"
+    return "unknown"
+
+
+def _infer_failure_class(event: Mapping[str, Any]) -> str:
+    explicit = _string(event.get("failure_class"))
+    if explicit and explicit.lower() != "unknown":
+        return explicit
+    legacy_failure = _legacy_transport_failure(event)
+    if legacy_failure is not None:
+        return legacy_failure[1]
     return "unknown"
 
 
@@ -167,21 +241,29 @@ def _infer_failure_side(event: Mapping[str, Any]) -> str:
     return "upstream_open"
 
 
+def _is_downstream_cancellation(event: Mapping[str, Any]) -> bool:
+    return (
+        _string(event.get("event")) == "official_passthrough_stream_closed"
+        and (_string(event.get("failure_side")) or "").lower() == "downstream_write"
+        and (_string(event.get("failure_class")) or "").lower() == "downstream_client_closed"
+        and _as_int(event.get("status")) == 499
+    )
+
+
 def _has_transport_detail_signal(event: Mapping[str, Any]) -> bool:
     explicit_phase = _string(event.get("failure_phase"))
     if explicit_phase in TRANSPORT_FAILURE_PHASES:
         return True
-    detail = f"{event.get('error', '')} {event.get('detail', '')}".lower()
-    if any(signal in detail for signal in TRANSPORT_DETAIL_SIGNALS):
+    if _legacy_transport_failure(event) is not None:
         return True
-    return False
+    return _has_connect_phase_detail(event)
 
 
 def _is_non_transport_capacity_retry(event: Mapping[str, Any]) -> bool:
     failure_class = (_string(event.get("failure_class")) or "").lower()
     if failure_class in NON_TRANSPORT_FAILURE_CLASSES:
         return True
-    detail = f"{event.get('error', '')} {event.get('detail', '')}".lower()
+    detail = _event_error_detail(event)
     return any(signal in detail for signal in NON_TRANSPORT_DETAIL_SIGNALS)
 
 
@@ -190,13 +272,13 @@ def _is_failure_event(event: Mapping[str, Any]) -> bool:
     if event_name not in FAILURE_EVENTS:
         return False
     if event_name == "official_passthrough_stream_closed":
-        return True
+        return not _is_downstream_cancellation(event)
     if event_name == "upstream_retry":
         if _string(event.get("failure_phase")) in TRANSPORT_FAILURE_PHASES:
             return True
         if _is_non_transport_capacity_retry(event):
             return False
-        return _has_transport_detail_signal(event)
+        return _has_transport_detail_signal(event) or _has_ambiguous_timeout_detail(event)
     if event_name == "request_error":
         error_name = _string(event.get("error"))
         if error_name in GENERIC_TRANSPORT_ERRORS:
@@ -205,15 +287,31 @@ def _is_failure_event(event: Mapping[str, Any]) -> bool:
     return False
 
 
-def _in_window(event: Mapping[str, Any], since: str | None, until: str | None) -> bool:
-    ts = _string(event.get("ts"))
-    if ts is None:
-        return True
-    if since is not None and ts < since:
-        return False
-    if until is not None and ts > until:
-        return False
-    return True
+def _parse_window_bound(value: str | None, name: str) -> datetime | None:
+    if value is None:
+        return None
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        raise ValueError(f"{name} must be a valid ISO 8601 timestamp")
+    return parsed
+
+
+def _window_status(
+    event: Mapping[str, Any],
+    since: datetime | None,
+    until: datetime | None,
+) -> str:
+    timestamp_text = _string(event.get("ts"))
+    if timestamp_text is None:
+        return "included" if since is None and until is None else "missing_timestamp"
+    timestamp = _parse_timestamp(timestamp_text)
+    if timestamp is None:
+        return "included" if since is None and until is None else "invalid_timestamp"
+    if since is not None and timestamp < since:
+        return "before_since"
+    if until is not None and timestamp > until:
+        return "after_until"
+    return "included"
 
 
 def _enrich(event: Mapping[str, Any], start_by_request: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -235,7 +333,14 @@ def analyze_events(
     *,
     since: str | None = None,
     until: str | None = None,
+    window_minutes: int = DEFAULT_TIME_WINDOW_MINUTES,
 ) -> dict[str, Any]:
+    if window_minutes < 1:
+        raise ValueError("window_minutes must be at least 1")
+    since_timestamp = _parse_window_bound(since, "since")
+    until_timestamp = _parse_window_bound(until, "until")
+    if since_timestamp is not None and until_timestamp is not None and since_timestamp > until_timestamp:
+        raise ValueError("since must not be after until")
     materialized = [dict(event) for event in events]
     start_by_request = {
         str(event["request_id"]): event
@@ -244,9 +349,26 @@ def analyze_events(
     }
     groups: dict[tuple[str, ...], dict[str, Any]] = {}
     failure_count = 0
+    excluded_downstream_cancellation_count = 0
+    skipped_out_of_window_count = 0
+    skipped_missing_timestamp_count = 0
+    skipped_invalid_timestamp_count = 0
 
     for raw_event in materialized:
-        if not _in_window(raw_event, since, until) or not _is_failure_event(raw_event):
+        if _is_downstream_cancellation(raw_event):
+            if _window_status(raw_event, since_timestamp, until_timestamp) == "included":
+                excluded_downstream_cancellation_count += 1
+            continue
+        if not _is_failure_event(raw_event):
+            continue
+        window_status = _window_status(raw_event, since_timestamp, until_timestamp)
+        if window_status != "included":
+            if window_status in {"before_since", "after_until"}:
+                skipped_out_of_window_count += 1
+            elif window_status == "missing_timestamp":
+                skipped_missing_timestamp_count += 1
+            else:
+                skipped_invalid_timestamp_count += 1
             continue
         event = _enrich(raw_event, start_by_request)
         provider_id = _string(event.get("provider_id")) or _string(event.get("upstream")) or "unknown"
@@ -256,13 +378,13 @@ def analyze_events(
         event_name = _string(event.get("event")) or "unknown"
         failure_phase = _infer_failure_phase(event)
         failure_side = _infer_failure_side(event)
-        failure_class = _string(event.get("failure_class")) or "unknown"
+        failure_class = _infer_failure_class(event)
         error = _string(event.get("error")) or "unknown"
+        time_window = _time_window(event, window_minutes)
         size_value = event.get("content_length")
         if size_value in (None, ""):
             size_value = event.get("decoded_content_length")
         size_bucket = _size_bucket(size_value)
-        window_id = _string(event.get("window_id")) or "unknown"
         key = (
             provider_scope,
             provider_id,
@@ -274,7 +396,7 @@ def analyze_events(
             failure_class,
             error,
             size_bucket,
-            window_id,
+            time_window,
         )
         group = groups.get(key)
         if group is None:
@@ -289,7 +411,7 @@ def analyze_events(
                 "failure_class": failure_class,
                 "error": error,
                 "size_bucket": size_bucket,
-                "window_id": window_id,
+                "time_window": time_window,
                 "count": 0,
                 "request_ids": [],
                 "statuses": [],
@@ -340,13 +462,18 @@ def analyze_events(
             item["failure_class"],
             item["error"],
             item["size_bucket"],
-            item["window_id"],
+            item["time_window"],
         ),
     )
     return {
         "since": since,
         "until": until,
+        "time_window_minutes": window_minutes,
         "failure_count": failure_count,
+        "excluded_downstream_cancellation_count": excluded_downstream_cancellation_count,
+        "skipped_out_of_window_count": skipped_out_of_window_count,
+        "skipped_missing_timestamp_count": skipped_missing_timestamp_count,
+        "skipped_invalid_timestamp_count": skipped_invalid_timestamp_count,
         "group_count": len(ordered_groups),
         "groups": ordered_groups,
     }
@@ -357,10 +484,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True, help="Telemetry JSONL file to analyze.")
     parser.add_argument("--since", default=None, help="Inclusive ISO timestamp lower bound.")
     parser.add_argument("--until", default=None, help="Inclusive ISO timestamp upper bound.")
+    parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=DEFAULT_TIME_WINDOW_MINUTES,
+        help="Group failures into UTC time windows of this size (default: 5).",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON. This is the default output.")
     args = parser.parse_args(argv)
 
-    report = analyze_events(load_jsonl(Path(args.input)), since=args.since, until=args.until)
+    if args.window_minutes < 1:
+        parser.error("--window-minutes must be at least 1")
+    try:
+        report = analyze_events(
+            load_jsonl(Path(args.input)),
+            since=args.since,
+            until=args.until,
+            window_minutes=args.window_minutes,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
 

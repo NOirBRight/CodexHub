@@ -23,6 +23,8 @@ enabled = true
   max_output_tokens = 131072
   sort_order = 2
   enabled = true
+  tool_surface_strategy = "deferred_core"
+  native_responses_tool_codec = "strict_apply_patch"
 
   [[providers.models]]
   id = "kimi-k2.6"
@@ -31,6 +33,7 @@ enabled = true
   max_output_tokens = 32768
   sort_order = 3
   enabled = true
+  native_responses_tool_codec = "strict_apply_patch"
 
 [[providers]]
 id = "volc"

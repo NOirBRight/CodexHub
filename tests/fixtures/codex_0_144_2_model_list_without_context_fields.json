@@ -1,0 +1,83 @@
+{
+  "fixture_version": 1,
+  "description": "Sanitized Codex 0.144.2 app-server model/list shape: all current Official models are present, but no numeric context or compaction fields are supplied.",
+  "data": [
+    {
+      "id": "gpt-5.6-sol",
+      "model": "gpt-5.6-sol",
+      "displayName": "GPT-5.6-Sol",
+      "hidden": false,
+      "defaultReasoningEffort": "low",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "model": "gpt-5.6-terra",
+      "displayName": "GPT-5.6-Terra",
+      "hidden": false,
+      "defaultReasoningEffort": "low",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "model": "gpt-5.6-luna",
+      "displayName": "GPT-5.6-Luna",
+      "hidden": false,
+      "defaultReasoningEffort": "low",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    },
+    {
+      "id": "gpt-5.5",
+      "model": "gpt-5.5",
+      "displayName": "GPT-5.5",
+      "hidden": false,
+      "defaultReasoningEffort": "medium",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    },
+    {
+      "id": "gpt-5.4",
+      "model": "gpt-5.4",
+      "displayName": "GPT-5.4",
+      "hidden": false,
+      "defaultReasoningEffort": "medium",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "model": "gpt-5.4-mini",
+      "displayName": "GPT-5.4-Mini",
+      "hidden": false,
+      "defaultReasoningEffort": "medium",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "model": "gpt-5.3-codex-spark",
+      "displayName": "GPT-5.3-Codex-Spark",
+      "hidden": false,
+      "defaultReasoningEffort": "high",
+      "supportedReasoningEfforts": [
+        { "reasoningEffort": "low", "description": "Low" },
+        { "reasoningEffort": "max", "description": "Max" }
+      ]
+    }
+  ]
+}

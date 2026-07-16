@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
+import catalog_sync
 import codex_proxy
 from subagent_state import build_subagent_state
 from codex_proxy import (
@@ -36,6 +37,16 @@ from codex_proxy import (
     upstream_timeout_seconds,
     upstream_headers,
 )
+
+
+def _load_glm_apply_patch_retry_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_retry_loop.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _load_glm_apply_patch_history_native_ids_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_history_native_ids.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
 class FakeWFile:
@@ -365,6 +376,24 @@ class RoutingTests(unittest.TestCase):
         }
         event_names = {call.args[0] for call in self.write_proxy_event.call_args_list if call.args}
         self.assertFalse(blocked & event_names, blocked & event_names)
+
+    def _write_official_publication_fence(
+        self,
+        catalog_path: Path,
+        budgets: dict[str, dict[str, int]],
+        *,
+        ready: bool = True,
+    ) -> None:
+        (catalog_path.parent / "official-refresh-state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "publication_ready": ready,
+                    "published_context_budgets": budgets,
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def test_gateway_auto_retry_settings_default_to_enabled_thirty_attempts(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -2331,7 +2360,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(len(client_ports), 1)
 
-    def test_official_then_third_party_does_not_leak_keepalive_transport(self):
+    def test_open_upstream_once_keeps_official_transport_isolated_from_third_party(self):
         official_request = codex_proxy.Request(
             "https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST"
         )
@@ -2345,19 +2374,15 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy._official_urlopen", return_value=official_success) as official_urlopen,
             patch("codex_proxy.urlopen", return_value=third_party_success) as mock_urlopen,
         ):
-            official_response = codex_proxy._open_upstream_response(
+            official_response = codex_proxy._open_upstream_once(
                 official_request,
                 upstream_name="official",
-                upstream_format="responses",
                 timeout=1,
-                event_context={"request_id": "req-official-transport"},
             )
-            third_party_response = codex_proxy._open_upstream_response(
+            third_party_response = codex_proxy._open_upstream_once(
                 third_party_request,
                 upstream_name="volcengine",
-                upstream_format="responses",
                 timeout=1,
-                event_context={"request_id": "req-non-official-transport"},
             )
 
         self.assertIs(official_response, official_success)
@@ -4529,7 +4554,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(disabled_by_slug["glm-5.2"]["input_modalities"], ["text"])
         self.assertNotIn("input_modalities", disabled_by_slug["text-model-without-modalities"])
 
-    def test_current_catalog_data_applies_context_guard_only_to_openai_models(self):
+    def test_current_catalog_data_applies_published_context_budget_only_to_official_models(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_proxy_dir = Path(tmpdir) / "proxy"
             runtime_proxy_dir.mkdir()
@@ -4546,11 +4571,35 @@ class RoutingTests(unittest.TestCase):
                                 "slug": "gpt-5.6-sol",
                                 "context_window": 353_000,
                                 "max_context_window": 353_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 272_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 258_400,
+                                        "model_auto_compact_token_limit": 240_000,
+                                    },
+                                },
                             },
                             {
                                 "slug": "gpt-5.3-codex-spark",
                                 "context_window": 128_000,
                                 "max_context_window": 128_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 128_000,
+                                        "effective_context_window_percent": 100,
+                                        "effective_context_window": 128_000,
+                                        "model_auto_compact_token_limit": 115_200,
+                                    },
+                                },
                             },
                             {
                                 "slug": "glm-5.2",
@@ -4561,6 +4610,23 @@ class RoutingTests(unittest.TestCase):
                     }
                 ),
                 encoding="utf-8",
+            )
+            self._write_official_publication_fence(
+                catalog_path,
+                {
+                    "gpt-5.6-sol": {
+                        "model_context_window": 272_000,
+                        "effective_context_window_percent": 95,
+                        "effective_context_window": 258_400,
+                        "model_auto_compact_token_limit": 240_000,
+                    },
+                    "gpt-5.3-codex-spark": {
+                        "model_context_window": 128_000,
+                        "effective_context_window_percent": 100,
+                        "effective_context_window": 128_000,
+                        "model_auto_compact_token_limit": 115_200,
+                    },
+                },
             )
 
             with (
@@ -4580,12 +4646,160 @@ class RoutingTests(unittest.TestCase):
                 unguarded_catalog = codex_proxy.current_catalog_data()
 
         guarded_by_slug = {model["slug"]: model for model in guarded_catalog["models"]}
-        unguarded_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
+        disabled_by_slug = {model["slug"]: model for model in unguarded_catalog["models"]}
         self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
         self.assertEqual(guarded_by_slug["gpt-5.6-sol"]["max_context_window"], 272_000)
         self.assertEqual(guarded_by_slug["gpt-5.3-codex-spark"]["context_window"], 128_000)
         self.assertEqual(guarded_by_slug["glm-5.2"]["context_window"], 1_000_000)
-        self.assertEqual(unguarded_by_slug["gpt-5.6-sol"]["context_window"], 353_000)
+        self.assertEqual(disabled_by_slug["gpt-5.6-sol"]["context_window"], 272_000)
+
+    def test_context_guard_consumes_the_published_official_budget_not_a_fixed_cap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_proxy_dir = Path(tmpdir) / "proxy"
+            runtime_proxy_dir.mkdir()
+            (runtime_proxy_dir / "settings.json").write_text(
+                json.dumps({"openai_context_guard_enabled": True}),
+                encoding="utf-8",
+            )
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-sol",
+                                "context_window": 400_000,
+                                "max_context_window": 400_000,
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 300_000,
+                                        "effective_context_window_percent": 80,
+                                        "effective_context_window": 240_000,
+                                        "model_auto_compact_token_limit": 210_000,
+                                    },
+                                },
+                            },
+                            {
+                                "slug": "volc/glm-5.2",
+                                "context_window": 1_000_000,
+                                "max_context_window": 1_000_000,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._write_official_publication_fence(
+                catalog_path,
+                {
+                    "gpt-5.6-sol": {
+                        "model_context_window": 300_000,
+                        "effective_context_window_percent": 80,
+                        "effective_context_window": 240_000,
+                        "model_auto_compact_token_limit": 210_000,
+                    },
+                },
+            )
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+            ):
+                catalog = codex_proxy.current_catalog_data()
+
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["gpt-5.6-sol"]["context_window"], 300_000)
+        self.assertEqual(by_slug["gpt-5.6-sol"]["max_context_window"], 300_000)
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_context_guard_hides_official_limits_while_publication_is_interrupted(self):
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 353_000,
+                    "max_context_window": 353_000,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "current_direct_official",
+                            "freshness": "fresh",
+                            "model_context_window": 272_000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258_400,
+                            "model_auto_compact_token_limit": 240_000,
+                        },
+                    },
+                },
+                {"slug": "volc/glm-5.2", "context_window": 1_000_000},
+            ]
+        }
+
+        guarded = codex_proxy.catalog_with_openai_context_guard(
+            catalog,
+            {},
+            require_published_snapshot=True,
+        )
+        by_slug = {model["slug"]: model for model in guarded["models"]}
+
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-sol"])
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_context_guard_hides_incomplete_or_untrusted_official_budget(self):
+        catalog = {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 400_000,
+                    "max_context_window": 400_000,
+                    "effective_context_window_percent": 100,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "current_direct_official",
+                            "freshness": "stale",
+                            "model_context_window": 400_000,
+                            "effective_context_window_percent": 100,
+                            "effective_context_window": 400_000,
+                            "model_auto_compact_token_limit": 360_000,
+                        },
+                    },
+                },
+                {
+                    "slug": "volc/glm-5.2",
+                    "context_window": 1_000_000,
+                    "max_context_window": 1_000_000,
+                },
+            ]
+        }
+
+        guarded = codex_proxy.catalog_with_openai_context_guard(catalog)
+        by_slug = {model["slug"]: model for model in guarded["models"]}
+
+        self.assertNotIn("context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("max_context_window", by_slug["gpt-5.6-sol"])
+        self.assertNotIn("effective_context_window_percent", by_slug["gpt-5.6-sol"])
+        self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1_000_000)
+
+    def test_catalog_request_consumes_the_published_snapshot_without_discovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_path = Path(tmpdir) / "catalog.json"
+            catalog_path.write_text(json.dumps({"models": []}), encoding="utf-8")
+
+            with (
+                patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
+                patch.object(catalog_sync, "sync_catalog") as sync_catalog,
+            ):
+                self.assertEqual(codex_proxy.current_catalog_data(), {"models": []})
+
+        sync_catalog.assert_not_called()
 
     def test_current_catalog_data_dedupes_official_aliases_without_touching_third_party_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4787,6 +5001,49 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["auth"], "api_key")
         self.assertEqual(upstream["base_url"], "https://ollama.example.test/v1")
         self.assertEqual(upstream["upstream_model"], "new-runtime-model")
+
+    def test_runtime_ollama_tool_surface_strategy_is_copied_for_qualified_and_unqualified_routes(self):
+        runtime_model = {
+            "alias": "ollama-cloud/glm-5.2",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-runtime-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "tool_protocol": "auto",
+            "tool_surface_strategy": "deferred_core",
+            "input_modalities": ("text",),
+        }
+
+        with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, runtime_model)):
+            unqualified = choose_upstream("glm-5.2")
+            qualified = choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
+
+    def test_runtime_ollama_native_responses_tool_codec_is_copied_for_qualified_and_unqualified_routes(self):
+        runtime_model = {
+            "alias": "ollama-cloud/glm-5.2",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-runtime-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "tool_protocol": "auto",
+            "tool_surface_strategy": "deferred_core",
+            "native_responses_tool_codec": "strict_apply_patch",
+            "input_modalities": ("text",),
+        }
+
+        with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, runtime_model)):
+            unqualified = choose_upstream("glm-5.2")
+            qualified = choose_upstream("ollama-cloud/glm-5.2")
+
+        self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
 
     def test_runtime_ollama_provider_rejects_disabled_model_despite_static_policy_allowlist(self):
         with patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, None)):
@@ -6255,7 +6512,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(done["item"]["arguments"], "{\"message\":\"hi\"}")
         self.assertEqual(completed["response"]["output"][0]["call_id"], "call_spawn")
 
-    def test_chat_tool_call_chunks_generate_call_id_when_upstream_omits_it(self):
+    def test_chat_tool_call_chunks_fail_closed_when_upstream_omits_id(self):
         chunks = [
             {
                 "choices": [
@@ -6290,16 +6547,12 @@ class RoutingTests(unittest.TestCase):
             "[DONE]",
         ]
 
-        events = _chat_stream_chunks_to_response_events(chunks)
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            _chat_stream_chunks_to_response_events(chunks)
 
-        done = next(event for event in events if event["type"] == "response.output_item.done")
-        completed = next(event for event in events if event["type"] == "response.completed")
-        self.assertTrue(done["item"]["call_id"].startswith("call_"))
-        self.assertEqual(done["item"]["name"], "multi_agent_v1__spawn_agent")
-        self.assertEqual(json.loads(done["item"]["arguments"])["message"], "hi")
-        self.assertEqual(completed["response"]["output"][0]["call_id"], done["item"]["call_id"])
+        self.assertEqual(raised.exception.cause.code, "unpaired_tool_call")
 
-    def test_chat_tool_call_chunks_drop_text_message_when_tool_call_present(self):
+    def test_chat_tool_call_chunks_preserve_text_message_when_tool_call_present(self):
         chunks = [
             {
                 "choices": [
@@ -6355,10 +6608,13 @@ class RoutingTests(unittest.TestCase):
         completed = next(event for event in events if event["type"] == "response.completed")
 
         self.assertTrue(any(event["type"] == "response.output_item.done" for event in events))
-        self.assertFalse(any(event["type"] == "response.output_text.delta" for event in events))
-        self.assertEqual(len(completed["response"]["output"]), 1)
-        self.assertEqual(completed["response"]["output"][0]["type"], "function_call")
-        self.assertEqual(completed["response"]["output"][0]["name"], "mcp__node_repl__js")
+        self.assertTrue(any(event["type"] == "response.output_text.delta" for event in events))
+        self.assertEqual(
+            [item["type"] for item in completed["response"]["output"]],
+            ["message", "function_call"],
+        )
+        self.assertEqual(completed["response"]["output"][0]["content"][0]["text"], "I'll read the plan first.")
+        self.assertEqual(completed["response"]["output"][1]["name"], "mcp__node_repl__js")
 
     def test_chat_stream_pipeline_preserves_node_repl_dot_alias_tool_call(self):
         chunks = [
@@ -6422,10 +6678,16 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(done["item"]["namespace"], "mcp__node_repl")
         self.assertEqual(done["item"]["name"], "js")
         self.assertEqual(json.loads(done["item"]["arguments"]), {"code": "readPlan()"})
-        self.assertEqual(completed["response"]["output"][0]["type"], "function_call")
-        self.assertEqual(completed["response"]["output"][0]["namespace"], "mcp__node_repl")
-        self.assertEqual(completed["response"]["output"][0]["name"], "js")
-        self.assertFalse(any(event.get("item", {}).get("type") == "message" for event in events if isinstance(event.get("item"), dict)))
+        completed_call = next(item for item in completed["response"]["output"] if item["type"] == "function_call")
+        self.assertEqual(completed_call["namespace"], "mcp__node_repl")
+        self.assertEqual(completed_call["name"], "js")
+        self.assertTrue(
+            any(
+                event.get("item", {}).get("type") == "message"
+                for event in events
+                if isinstance(event.get("item"), dict)
+            )
+        )
 
     def test_chat_stream_pipeline_preserves_multi_agent_dot_alias_tool_call(self):
         chunks = [
@@ -6588,6 +6850,638 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["output"][0]["type"], "function_call")
         self.assertEqual(payload["output"][0]["call_id"], "call_spawn")
         self.assertEqual(payload["output"][0]["name"], "spawn_agent")
+
+    def test_glm_apply_patch_retry_loop_body_adapts_to_custom_freeform_call(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        converted = codex_proxy._chat_completion_to_response_body(
+            json.dumps(fixture["body_response"], ensure_ascii=True).encode("utf-8")
+        )
+
+        transformed = compatible_response_body(
+            converted,
+            "volcengine",
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        call = json.loads(transformed)["output"][0]
+        self.assertEqual(call["type"], "custom_tool_call")
+        self.assertEqual(call["id"], "fc_call_patch_fixture")
+        self.assertEqual(call["call_id"], fixture["paired_custom_tool_output"]["call_id"])
+        self.assertEqual(call["name"], "apply_patch")
+        self.assertEqual(call["input"], fixture["patch"])
+        self.assertNotIn("arguments", call)
+
+        adapter_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+        )
+        self.assertEqual(adapter_event["surface"], "body")
+        self.assertEqual(adapter_event["outcome"], "adapted")
+        self.assertEqual(adapter_event["count"], 1)
+        self.assertNotIn("arguments", adapter_event)
+        self.assertNotIn("input", adapter_event)
+        self.assertNotIn("patch", adapter_event)
+
+    def test_glm_apply_patch_retry_loop_stream_adapts_to_custom_freeform_events(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in fixture["stream_chunks"]]
+            + [b"data: [DONE]\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="<sanitized-request-id>",
+            model="<third-party-glm>",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        event_types = [payload["type"] for payload in payloads]
+        added = next(payload for payload in payloads if payload["type"] == "response.output_item.added")
+        input_done = next(
+            payload for payload in payloads if payload["type"] == "response.custom_tool_call_input.done"
+        )
+        item_done = next(payload for payload in payloads if payload["type"] == "response.output_item.done")
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("response.function_call_arguments.delta", event_types)
+        self.assertNotIn("response.function_call_arguments.done", event_types)
+        self.assertEqual(added["item"]["type"], "custom_tool_call")
+        self.assertEqual(added["item"]["id"], "fc_call_patch_fixture")
+        self.assertEqual(added["item"]["call_id"], fixture["paired_custom_tool_output"]["call_id"])
+        self.assertEqual(added["item"]["input"], "")
+        self.assertEqual(input_done["item_id"], "fc_call_patch_fixture")
+        self.assertEqual(input_done["input"], fixture["patch"])
+        self.assertEqual(item_done["item"]["type"], "custom_tool_call")
+        self.assertEqual(item_done["item"]["input"], fixture["patch"])
+        self.assertEqual(completed["response"]["output"][0]["type"], "custom_tool_call")
+        self.assertEqual(completed["response"]["output"][0]["input"], fixture["patch"])
+
+    def test_third_party_responses_sse_adapts_apply_patch_without_leaking_json_arguments(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        arguments = json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":"))
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": arguments,
+        }
+        events = [
+            {"type": "response.created", "response": {"id": "<response-id>", "model": "<third-party-glm>"}},
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**function_item, "status": "in_progress", "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_call_patch_fixture",
+                "output_index": 0,
+                "delta": arguments[:20],
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_call_patch_fixture",
+                "output_index": 0,
+                "delta": arguments[20:],
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_call_patch_fixture",
+                "output_index": 0,
+                "arguments": arguments,
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": function_item},
+            {
+                "type": "response.completed",
+                "response": {"id": "<response-id>", "status": "completed", "output": [function_item]},
+            },
+        ]
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [f"data: {json.dumps(event, ensure_ascii=True)}\n\n".encode("utf-8") for event in events] + [b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="<sanitized-request-id>",
+            model="<third-party-glm>",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        event_types = [payload["type"] for payload in payloads]
+        item_done = next(payload for payload in payloads if payload["type"] == "response.output_item.done")
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("response.function_call_arguments.delta", event_types)
+        self.assertNotIn("response.function_call_arguments.done", event_types)
+        self.assertIn("response.custom_tool_call_input.done", event_types)
+        self.assertEqual(item_done["item"]["type"], "custom_tool_call")
+        self.assertEqual(item_done["item"]["input"], fixture["patch"])
+        self.assertEqual(completed["response"]["output"][0]["type"], "custom_tool_call")
+        self.assertEqual(completed["response"]["output"][0]["input"], fixture["patch"])
+
+    def test_apply_patch_adapter_rejects_malformed_arguments_without_telemetry_content(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        malformed_arguments = {
+            "missing": None,
+            "null": json.dumps({"patch": None}),
+            "non_string": json.dumps({"patch": ["not-a-patch"]}),
+            "empty": json.dumps({"patch": ""}),
+            "nested": json.dumps({"patch": {"text": fixture["patch"]}}),
+            "duplicate": '{"patch":"one","patch":"two"}',
+            "extra": json.dumps({"patch": fixture["patch"], "extra": "unexpected"}),
+        }
+        malformed_arguments.update(
+            {
+                f"observed_{shape}": json.dumps(arguments)
+                for shape, arguments in fixture["observed_incompatible_arguments"].items()
+            }
+        )
+
+        for shape, arguments in malformed_arguments.items():
+            with self.subTest(shape=shape):
+                self.write_proxy_event.reset_mock()
+                item = {
+                    "id": "fc_call_patch_fixture",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": fixture["paired_custom_tool_output"]["call_id"],
+                    "name": "apply_patch",
+                }
+                if arguments is not None:
+                    item["arguments"] = arguments
+
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    compatible_response_body(
+                        json.dumps({"output": [item]}, ensure_ascii=True).encode("utf-8"),
+                        "volcengine",
+                        event_context={"request_id": "<sanitized-request-id>"},
+                    )
+
+                self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+                adapter_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+                )
+                self.assertEqual(adapter_event["outcome"], "rejected")
+                self.assertNotIn("arguments", adapter_event)
+                self.assertNotIn("input", adapter_event)
+                self.assertNotIn("patch", adapter_event)
+
+    def test_apply_patch_adapter_rejection_is_nonretryable_json_without_replay(self):
+        private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
+        malformed_item = {
+            "id": "fc_apply_patch",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "arguments": json.dumps({"patch": private_patch, "unexpected": True}),
+        }
+        upstream_body = json.dumps({"id": "resp_apply_patch", "output": [malformed_item]}).encode("utf-8")
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Apply the patch."}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        client_attempts = 0
+        with patch(
+            "codex_proxy._open_upstream_response",
+            side_effect=[FakeContextResponse(upstream_body) for _ in range(6)],
+        ) as open_upstream:
+            for _ in range(6):
+                client_attempts += 1
+                handler, fake = post_handler("/v1/responses", request_body)
+                CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+                payload = json.loads(b"".join(fake.wfile.writes))
+                if fake.status not in codex_proxy.TRANSIENT_HTTP_RETRY_STATUSES:
+                    break
+
+        self.assertEqual(client_attempts, 1)
+        self.assertEqual(open_upstream.call_count, 1)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("upstream_retry", event_names)
+        self.assertNotIn("sse_retry_notice", event_names)
+        self.assertEqual(fake.status, 400)
+        self.assertEqual(payload["codexhub_error"]["code"], "provider.request")
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["error"],
+            "invalid_apply_patch_function_call",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["failure_class"],
+            codex_proxy.RETRY_FAILURE_PERMANENT,
+        )
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+        rendered_payload = json.dumps(payload)
+        self.assertNotIn("arguments_not_exact", rendered_payload)
+        self.assertNotIn(private_patch, rendered_payload)
+
+    def test_apply_patch_adapter_rejection_sse_terminal_is_codec_scoped_and_preserves_response_id(self):
+        private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
+        malformed_item = {
+            "id": "fc_apply_patch",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "arguments": json.dumps({"patch": private_patch, "unexpected": True}),
+        }
+        upstream_events = [
+            {"type": "response.created", "response": {"id": "resp_apply_patch", "output": []}},
+            {"type": "response.output_item.done", "output_index": 0, "item": malformed_item},
+        ]
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Apply the patch."}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        cases = (
+            ("unselected", "none", b"event: error\n"),
+            ("selected", "strict_apply_patch", b"event: response.failed\n"),
+        )
+        for case, codec, expected_prefix in cases:
+            with self.subTest(case=case):
+                self.write_proxy_event.reset_mock()
+                response = FakeSseResponse(
+                    [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in upstream_events]
+                    + [b""]
+                )
+                handler, fake = post_handler("/v1/responses", request_body)
+                with (
+                    patch.dict(
+                        self.external_model,
+                        {"native_responses_tool_codec": codec},
+                    ),
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        return_value=response,
+                    ) as open_upstream,
+                ):
+                    CodexProxyHandler._proxy_post_request(
+                        handler,
+                        inbound_format="responses",
+                    )
+
+                self.assertEqual(open_upstream.call_count, 1)
+                event_names = [
+                    call.args[0]
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args
+                ]
+                self.assertNotIn("upstream_retry", event_names)
+                self.assertNotIn("sse_retry_notice", event_names)
+                self.assertEqual(fake.status, 200)
+                frames = b"".join(fake.wfile.writes).split(b"\n\n")
+                terminal_frames = [
+                    frame for frame in frames if frame.startswith(expected_prefix)
+                ]
+                self.assertEqual(len(terminal_frames), 1)
+
+                if codec == "none":
+                    self.assertFalse(
+                        any(
+                            frame.startswith(b"event: response.failed\n")
+                            for frame in frames
+                        )
+                    )
+                    self.assertNotIn("third_party_apply_patch_terminal", event_names)
+                    continue
+
+                self.assertFalse(
+                    any(frame.startswith(b"event: error\n") for frame in frames)
+                )
+                failed_line = next(
+                    line
+                    for line in terminal_frames[0].splitlines()
+                    if line.startswith(b"data: ")
+                )
+                payload = json.loads(failed_line.removeprefix(b"data: "))
+                self.assertEqual(payload["type"], "response.failed")
+                self.assertEqual(payload["response"]["id"], "resp_apply_patch")
+                self.assertEqual(payload["response"]["status"], "failed")
+                self.assertEqual(
+                    payload["response"]["error"]["code"],
+                    "invalid_apply_patch_function_call",
+                )
+                self.assertEqual(
+                    payload["response"]["error"]["failure_class"],
+                    codex_proxy.RETRY_FAILURE_PERMANENT,
+                )
+                self.assertFalse(payload["response"]["error"]["retryable"])
+                self.assertNotIn("arguments_not_exact", json.dumps(payload))
+                self.assertNotIn(private_patch, json.dumps(payload))
+                terminal_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_terminal"
+                )
+                self.assertEqual(terminal_event["codec"], "strict_apply_patch")
+                self.assertEqual(terminal_event["disposition"], "response.failed")
+                self.assertEqual(
+                    terminal_event["failure_class"],
+                    codex_proxy.RETRY_FAILURE_PERMANENT,
+                )
+                self.assertEqual(terminal_event["retry_count"], 0)
+                for forbidden in (
+                    "arguments",
+                    "input",
+                    "patch",
+                    "path",
+                    "content",
+                    "pattern",
+                    "response_id",
+                ):
+                    self.assertNotIn(forbidden, terminal_event)
+
+    def test_unrelated_protocol_translation_error_is_nonretryable_json_client_error(self):
+        translation_error = codex_proxy.UpstreamProtocolTranslationError(
+            codex_proxy.UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Unsupported response semantics.",
+            )
+        )
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Return a response."}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", request_body)
+
+        with (
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b"{}"),
+            ) as open_upstream,
+            patch.object(
+                CodexProxyHandler,
+                "_relay_upstream_response",
+                side_effect=translation_error,
+            ) as relay_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(open_upstream.call_count, 1)
+        relay_upstream.assert_called_once()
+        self.assertEqual(fake.status, 400)
+        payload = json.loads(b"".join(fake.wfile.writes))
+        self.assertEqual(payload["codexhub_error"]["code"], "upstream.error")
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["error"],
+            "unsupported_protocol_semantics",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["type"],
+            "unsupported_protocol_semantics",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["failure_class"],
+            codex_proxy.RETRY_FAILURE_PERMANENT,
+        )
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+
+    def test_unrelated_protocol_translation_sse_keeps_stream_error_envelope(self):
+        translation_error = codex_proxy.UpstreamProtocolTranslationError(
+            codex_proxy.UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Unsupported response semantics.",
+            )
+        )
+        request_body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Return a response."}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", request_body)
+
+        def relay_after_sse_headers(*args, **kwargs):
+            CodexProxyHandler._send_sse_headers(handler, 200, "volcengine")
+            kwargs["mark_downstream_sse_started"]()
+            raise translation_error
+
+        with (
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b"{}"),
+            ) as open_upstream,
+            patch.object(
+                CodexProxyHandler,
+                "_relay_upstream_response",
+                side_effect=relay_after_sse_headers,
+            ) as relay_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
+
+        self.assertEqual(open_upstream.call_count, 1)
+        relay_upstream.assert_called_once()
+        self.assertEqual(fake.status, 200)
+        frames = b"".join(fake.wfile.writes).split(b"\n\n")
+        error_frame = next(frame for frame in frames if frame.startswith(b"event: error\n"))
+        error_line = next(line for line in error_frame.splitlines() if line.startswith(b"data: "))
+        payload = json.loads(error_line.removeprefix(b"data: "))
+        self.assertEqual(payload["type"], "upstream_stream_error")
+        self.assertEqual(payload["status"], 400)
+        self.assertEqual(payload["error"], "unsupported_protocol_semantics")
+        self.assertEqual(payload["retry_owner"], "client")
+        self.assertEqual(payload["failure_class"], codex_proxy.RETRY_FAILURE_PERMANENT)
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["codexhub_error"]["code"], "upstream.error")
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["type"],
+            "upstream_stream_error",
+        )
+
+    def test_apply_patch_adapter_rejects_conflicting_item_fields_and_custom_call_id_collisions(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        arguments = json.dumps({"patch": fixture["patch"]})
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": arguments,
+        }
+        conflicting_item = {**function_item, "input": "must-not-be-overwritten"}
+        existing_custom = {
+            "id": "ctc_existing",
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "input": fixture["patch"],
+        }
+
+        for shape, output in (
+            ("conflicting_item_field", [conflicting_item]),
+            ("custom_call_id_collision", [existing_custom, function_item]),
+        ):
+            with self.subTest(shape=shape), self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                compatible_response_body(
+                    json.dumps({"output": output}, ensure_ascii=True).encode("utf-8"),
+                    "volcengine",
+                    event_context={"request_id": "<sanitized-request-id>"},
+                )
+            self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+
+    def test_apply_patch_adapter_preserves_unrelated_and_existing_custom_calls(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        body = {
+            "output": [
+                {
+                    "id": "fc_lookup",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_lookup",
+                    "name": "lookup",
+                    "arguments": '{"q":"sanitized"}',
+                },
+                {
+                    "id": "fc_call_patch_fixture",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": fixture["paired_custom_tool_output"]["call_id"],
+                    "name": "apply_patch",
+                    "arguments": json.dumps({"patch": fixture["patch"]}),
+                },
+                {
+                    "id": "ctc_existing",
+                    "type": "custom_tool_call",
+                    "status": "completed",
+                    "call_id": "call_existing_custom",
+                    "name": "apply_patch",
+                    "input": fixture["patch"],
+                },
+            ]
+        }
+
+        transformed = compatible_response_body(
+            json.dumps(body, ensure_ascii=True).encode("utf-8"),
+            "volcengine",
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        output = json.loads(transformed)["output"]
+
+        self.assertEqual([item["id"] for item in output], ["fc_lookup", "fc_call_patch_fixture", "ctc_existing"])
+        self.assertEqual(output[0], body["output"][0])
+        self.assertEqual(output[1]["type"], "custom_tool_call")
+        self.assertEqual(output[1]["call_id"], fixture["paired_custom_tool_output"]["call_id"])
+        self.assertEqual(output[2], body["output"][2])
+
+        adapter_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+        ]
+        self.assertEqual({event["outcome"] for event in adapter_events}, {"adapted", "untouched"})
+
+    def test_apply_patch_stream_adapter_rejects_duplicate_and_post_terminal_semantics(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        events = codex_proxy._chat_stream_chunks_to_response_events(fixture["stream_chunks"])
+        added = next(event for event in events if event["type"] == "response.output_item.added")
+
+        duplicate_events = list(events)
+        duplicate_events.insert(duplicate_events.index(added) + 1, json.loads(json.dumps(added)))
+        post_terminal_events = list(events) + [json.loads(json.dumps(added))]
+
+        for shape, malformed_events in (("duplicate", duplicate_events), ("post_terminal", post_terminal_events)):
+            with self.subTest(shape=shape):
+                self.write_proxy_event.reset_mock()
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    codex_proxy._adapt_third_party_apply_patch_stream_events(
+                        malformed_events,
+                        event_context={"request_id": "<sanitized-request-id>"},
+                    )
+                self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+                adapter_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_freeform_adapter"
+                )
+                self.assertEqual(adapter_event["outcome"], "rejected")
+                self.assertNotIn("arguments", adapter_event)
+                self.assertNotIn("input", adapter_event)
+                self.assertNotIn("patch", adapter_event)
+
+    def test_apply_patch_stream_adapter_rejects_incomplete_fragments_and_terminal_only_calls(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        arguments = json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":"))
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": arguments,
+        }
+        incomplete_fragments = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**function_item, "status": "in_progress", "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": function_item["id"],
+                "output_index": 0,
+                "delta": arguments[:8],
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": function_item["id"],
+                "output_index": 0,
+                "arguments": arguments,
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": function_item},
+            {"type": "response.completed", "response": {"status": "completed", "output": [function_item]}},
+        ]
+        terminal_only = [
+            {"type": "response.completed", "response": {"status": "completed", "output": [function_item]}}
+        ]
+
+        for shape, events in (("incomplete_fragments", incomplete_fragments), ("terminal_only", terminal_only)):
+            with self.subTest(shape=shape), self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                codex_proxy._adapt_third_party_apply_patch_stream_events(
+                    events,
+                    event_context={"request_id": "<sanitized-request-id>"},
+                )
+            self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
 
     def test_chat_completions_non_sse_relay_converts_xmlish_tool_call_text(self):
         body = json.dumps(
@@ -8193,6 +9087,576 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("Read-only Codex function result transcript", payload["input"][3]["content"])
         self.assertIn("ok", payload["input"][3]["content"])
 
+    def test_responses_structured_provider_preserves_apply_patch_custom_history_as_paired_function_history(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        patch_result = "Success. Updated target.txt"
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use the requested tools in order."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_shell",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "Get-Content target.txt"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_shell",
+                        "output": "before",
+                    },
+                    {
+                        "type": "custom_tool_call",
+                        "status": "completed",
+                        "call_id": "call_apply_patch",
+                        "name": "apply_patch",
+                        "input": patch_text,
+                    },
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_apply_patch",
+                        "output": patch_result,
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell_command",
+                        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+                    },
+                    {"type": "custom", "name": "apply_patch", "description": "Apply a freeform patch."},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [item["type"] for item in payload["input"]],
+            ["message", "function_call", "function_call_output", "function_call", "function_call_output"],
+        )
+        self.assertEqual(payload["input"][1]["name"], "shell_command")
+        self.assertEqual(payload["input"][1]["call_id"], "call_shell")
+        self.assertEqual(payload["input"][2], {"type": "function_call_output", "call_id": "call_shell", "output": "before"})
+        self.assertEqual(
+            payload["input"][3],
+            {
+                "type": "function_call",
+                "call_id": "call_apply_patch",
+                "name": "apply_patch",
+                "arguments": json.dumps({"patch": patch_text}, ensure_ascii=True, separators=(",", ":")),
+            },
+        )
+        self.assertEqual(
+            payload["input"][4],
+            {"type": "function_call_output", "call_id": "call_apply_patch", "output": patch_result},
+        )
+
+    def test_responses_structured_provider_adapts_native_id_apply_patch_history_fixture(self):
+        fixture = _load_glm_apply_patch_history_native_ids_fixture()
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": fixture["model"],
+                    "input": fixture["input"],
+                    "tools": fixture["tools"],
+                },
+                ensure_ascii=True,
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0], fixture["input"][0])
+        self.assertEqual(payload["input"][1:3], fixture["expected_apply_patch_function_history"])
+        self.assertEqual(payload["input"][3], fixture["input"][3])
+        self.assertNotIn("id", payload["input"][1])
+        self.assertNotIn("id", payload["input"][2])
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("id", "call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
+    def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
+        fixture = _load_glm_apply_patch_history_native_ids_fixture()
+        apply_patch_tool = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply one patch using the caller grammar.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch update_file end_patch",
+            },
+        }
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "native_responses_tool_codec": "strict_apply_patch",
+        }
+        initial_request = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": [{"type": "message", "role": "user", "content": "Edit it."}],
+                        "tools": [apply_patch_tool],
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={"request_id": "request-initial"},
+                inject_codex_tools=False,
+            )
+        )
+        function_item = {
+            "id": "fc_sanitized_apply_patch",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_sanitized_apply_patch",
+            "name": "apply_patch",
+            "arguments": json.dumps(
+                {"patch": fixture["input"][1]["input"]},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        }
+        unrelated_item = {
+            "id": "fc_unrelated",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_unrelated",
+            "name": "shell_command",
+            "arguments": json.dumps({"command": "Get-Content target.txt"}),
+        }
+        caller_response = json.loads(
+            compatible_response_body(
+                json.dumps(
+                    {"id": "resp_sanitized", "output": [unrelated_item, function_item]}
+                ).encode("utf-8"),
+                "ollama_cloud",
+                event_context={"request_id": "request-initial"},
+            )
+        )
+        caller_apply_patch = caller_response["output"][1]
+        next_request = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": [
+                            caller_apply_patch,
+                            {
+                                "type": "custom_tool_call_output",
+                                "call_id": caller_apply_patch["call_id"],
+                                "output": "Success. Updated target.txt",
+                            },
+                            {"type": "message", "role": "user", "content": "Verify it."},
+                        ],
+                        "tools": [apply_patch_tool],
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={"request_id": "request-next"},
+                inject_codex_tools=False,
+            )
+        )
+
+        self.assertEqual(initial_request["tools"][0]["type"], "function")
+        self.assertEqual(
+            [item["id"] for item in caller_response["output"]],
+            ["fc_unrelated", "fc_sanitized_apply_patch"],
+        )
+        self.assertEqual(caller_apply_patch["type"], "custom_tool_call")
+        self.assertEqual(caller_apply_patch["id"], "fc_sanitized_apply_patch")
+        self.assertEqual(caller_apply_patch["call_id"], "call_sanitized_apply_patch")
+        self.assertEqual(caller_apply_patch["input"], fixture["input"][1]["input"])
+        self.assertEqual(
+            [item["type"] for item in next_request["input"]],
+            ["function_call", "function_call_output", "message"],
+        )
+        self.assertEqual(next_request["input"][0]["call_id"], "call_sanitized_apply_patch")
+        self.assertEqual(next_request["input"][1]["call_id"], "call_sanitized_apply_patch")
+        self.assertEqual(next_request["tools"][0]["type"], "function")
+
+    def test_responses_structured_provider_preserves_body_originated_apply_patch_continuation(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        function_item = {
+            "id": "fc_call_patch_fixture",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": fixture["paired_custom_tool_output"]["call_id"],
+            "name": "apply_patch",
+            "arguments": json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":")),
+        }
+        response_payload, changed = codex_proxy._adapt_third_party_apply_patch_response_body(
+            {"output": [function_item]},
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        self.assertTrue(changed)
+        custom_call = response_payload["output"][0]
+        request_call = {
+            key: custom_call[key]
+            for key in ("type", "status", "call_id", "name", "input")
+        }
+        self.write_proxy_event.reset_mock()
+
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [request_call, fixture["paired_custom_tool_output"]],
+                    "tools": [{"type": "custom", "name": "apply_patch"}],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "function_call")
+        self.assertEqual(payload["input"][0]["call_id"], function_item["call_id"])
+        self.assertEqual(payload["input"][0]["name"], "apply_patch")
+        self.assertEqual(payload["input"][0]["arguments"], function_item["arguments"])
+        self.assertEqual(
+            payload["input"][1],
+            {
+                "type": "function_call_output",
+                "call_id": function_item["call_id"],
+                "output": fixture["paired_custom_tool_output"]["output"],
+            },
+        )
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
+    def test_responses_structured_provider_preserves_stream_originated_apply_patch_continuation(self):
+        fixture = _load_glm_apply_patch_retry_fixture()
+        stream_events = codex_proxy._chat_stream_chunks_to_response_events(fixture["stream_chunks"])
+        rewritten_events, changed = codex_proxy._adapt_third_party_apply_patch_stream_events(
+            stream_events,
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        self.assertTrue(changed)
+        custom_call = next(
+            event["item"]
+            for event in rewritten_events
+            if event["type"] == "response.output_item.done"
+        )
+        request_call = {
+            key: custom_call[key]
+            for key in ("type", "status", "call_id", "name", "input")
+        }
+        self.write_proxy_event.reset_mock()
+
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [request_call, fixture["paired_custom_tool_output"]],
+                    "tools": [{"type": "custom", "name": "apply_patch"}],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "function_call")
+        self.assertEqual(payload["input"][0]["call_id"], custom_call["call_id"])
+        self.assertEqual(payload["input"][0]["name"], "apply_patch")
+        self.assertEqual(payload["input"][0]["arguments"], json.dumps({"patch": fixture["patch"]}, ensure_ascii=True, separators=(",", ":")))
+        self.assertEqual(
+            payload["input"][1],
+            {
+                "type": "function_call_output",
+                "call_id": custom_call["call_id"],
+                "output": fixture["paired_custom_tool_output"]["output"],
+            },
+        )
+
+    def test_responses_structured_provider_rejects_malformed_unpaired_and_duplicate_apply_patch_history(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        custom_call = {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "input": patch_text,
+        }
+        custom_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_apply_patch",
+            "output": "Success. Updated target.txt",
+        }
+        malformed_histories = (
+            ("unexpected_call_field", [{**custom_call, "unexpected": "field"}, custom_output]),
+            (
+                "native_call_id_with_unexpected_field",
+                [{**custom_call, "id": "ctc_sanitized_apply_patch", "unexpected": "field"}, custom_output],
+            ),
+            ("non_string_call_item_id", [{**custom_call, "id": 1}, custom_output]),
+            ("empty_output_item_id", [custom_call, {**custom_output, "id": ""}]),
+            (
+                "native_output_id_with_unexpected_field",
+                [custom_call, {**custom_output, "id": "ctco_sanitized_apply_patch", "unexpected": "field"}],
+            ),
+            ("missing_completed_status", [{key: value for key, value in custom_call.items() if key != "status"}, custom_output]),
+            ("empty_patch", [{**custom_call, "input": "  "}, custom_output]),
+            ("unexpected_output_field", [custom_call, {**custom_output, "status": "completed"}]),
+            ("unpaired_call", [custom_call]),
+            ("duplicate_call", [custom_call, dict(custom_call), custom_output]),
+            ("duplicate_output", [custom_call, custom_output, dict(custom_output)]),
+        )
+
+        for shape, input_items in malformed_histories:
+            with self.subTest(shape=shape):
+                self.write_proxy_event.reset_mock()
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    compatible_request_body(
+                        json.dumps(
+                            {
+                                "model": "glm-5.2",
+                                "input": input_items,
+                                "tools": [{"type": "custom", "name": "apply_patch"}],
+                            }
+                        ).encode("utf-8"),
+                        {
+                            "name": "ollama_cloud",
+                            "upstream_format": "responses",
+                            "tool_protocol": "responses_structured",
+                        },
+                        event_context={"request_id": "<sanitized-request-id>"},
+                        inject_codex_tools=False,
+                    )
+
+                self.assertEqual(raised.exception.cause.code, "invalid_apply_patch_function_call")
+                history_events = [
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+                ]
+                self.assertEqual(len(history_events), 1)
+                self.assertEqual(history_events[0]["outcome"], "rejected")
+                self.assertEqual(history_events[0]["count"], 1)
+                for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+                    self.assertNotIn(forbidden, history_events[0])
+
+    def test_responses_structured_provider_pairs_apply_patch_history_by_call_id_without_reordering(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "custom_tool_call",
+                        "status": "completed",
+                        "call_id": "call_apply_patch",
+                        "name": "apply_patch",
+                        "input": patch_text,
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_shell",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "Get-Content target.txt"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_shell",
+                        "output": "before",
+                    },
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_apply_patch",
+                        "output": "Success. Updated target.txt",
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "shell_command", "parameters": {"type": "object"}},
+                    {"type": "custom", "name": "apply_patch"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [item["type"] for item in payload["input"]],
+            ["function_call", "function_call", "function_call_output", "function_call_output"],
+        )
+        self.assertEqual(
+            [item["call_id"] for item in payload["input"]],
+            ["call_apply_patch", "call_shell", "call_shell", "call_apply_patch"],
+        )
+        self.assertEqual(payload["input"][0]["arguments"], json.dumps({"patch": patch_text}, ensure_ascii=True, separators=(",", ":")))
+        self.assertEqual(payload["input"][3]["output"], "Success. Updated target.txt")
+
+    def test_apply_patch_history_adapter_leaves_unrelated_custom_tools_untouched(self):
+        unrelated_call = {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_unrelated",
+            "name": "workspace_note",
+            "input": "keep this custom tool unchanged",
+        }
+        unrelated_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_unrelated",
+            "output": "unchanged result",
+        }
+        apply_call = {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": "call_apply_patch",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch",
+        }
+        apply_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_apply_patch",
+            "output": "Success. Updated target.txt",
+        }
+
+        rewritten, adapted_call_ids, changed = codex_proxy._adapt_apply_patch_custom_tool_history(
+            [unrelated_call, unrelated_output, apply_call, apply_output],
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(adapted_call_ids, {"call_apply_patch"})
+        self.assertEqual(rewritten[0], unrelated_call)
+        self.assertEqual(rewritten[1], unrelated_output)
+        self.assertEqual(rewritten[2]["type"], "function_call")
+        self.assertEqual(rewritten[3]["type"], "function_call_output")
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(
+            {(event["outcome"], event["count"]) for event in history_events},
+            {("adapted", 1), ("untouched", 1)},
+        )
+        for event in history_events:
+            for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+                self.assertNotIn(forbidden, event)
+
+    def test_apply_patch_history_adapter_keeps_official_and_text_compat_paths_unchanged(self):
+        custom_history = [
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_apply_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_apply_patch",
+                "output": "Success. Updated target.txt",
+            },
+        ]
+        body = json.dumps({"model": "gpt-5.5", "input": custom_history}).encode("utf-8")
+
+        official = compatible_request_body(
+            body,
+            {"name": "official", "upstream_model": "gpt-5.5"},
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        self.assertEqual(json.loads(official)["input"], custom_history)
+        official_history_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(official_history_events, [])
+
+        self.write_proxy_event.reset_mock()
+        text_compat = compatible_request_body(
+            json.dumps({"model": "compat-model", "input": custom_history}).encode("utf-8"),
+            {"name": "compat", "upstream_format": "responses", "tool_protocol": "text_compat"},
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        text_payload = json.loads(text_compat)
+        self.assertEqual([item["type"] for item in text_payload["input"]], ["message", "message"])
+        self.assertEqual(
+            [
+                call
+                for call in self.write_proxy_event.call_args_list
+                if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+            ],
+            [],
+        )
+
+        self.write_proxy_event.reset_mock()
+        implicit_text_compat = compatible_request_body(
+            json.dumps({"model": "compat-model", "input": custom_history}).encode("utf-8"),
+            {"name": "compat"},
+            event_context={"request_id": "<sanitized-request-id>"},
+            inject_codex_tools=False,
+        )
+        implicit_text_payload = json.loads(implicit_text_compat)
+        self.assertEqual([item["type"] for item in implicit_text_payload["input"]], ["message", "message"])
+        self.assertEqual(
+            [
+                call
+                for call in self.write_proxy_event.call_args_list
+                if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+            ],
+            [],
+        )
+
     def test_responses_structured_provider_preserves_multi_agent_tool_history(self):
         body = json.dumps(
             {
@@ -8481,6 +9945,25 @@ Do not modify any other files. Do not create any other files. Use a shell comman
         self.assertNotIn("tool_choice", payload)
         self.assertIn("worker_subagent_finalization_required", transcript)
         self.assertIn("ordinary assistant message content", transcript)
+
+        deferred_worker = json.loads(
+            compatible_request_body(
+                body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                    "tool_surface_strategy": "deferred_core",
+                },
+                event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
+            )
+        )
+        deferred_worker_names = {
+            tool["name"]
+            for tool in deferred_worker["tools"]
+            if tool.get("type") == "function"
+        }
+        self.assertNotIn("tool_search", deferred_worker_names)
 
     def test_responses_structured_exact_line_child_prompt_is_worker_context(self):
         worker_prompt = "Return exactly this line: SENTINEL:level1-single-glm52-responses"
@@ -10526,6 +12009,611 @@ Execution constraints:
         self.assertIn("ordinary assistant message content", transcript)
         self.assertIn("first visible output token", transcript)
         self.assertTrue(event_context["subagent_lifecycle_complete"])
+
+    def test_external_tool_surface_eager_preserves_legacy_additional_tools_carrier(self):
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "synthetic_tool",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "max_output_tokens": 131072,
+                "input": [{"type": "additional_tools", "tools": [namespace]}],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        legacy = compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_protocol": "responses_structured"},
+            inject_codex_tools=False,
+        )
+        eager = compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "eager",
+            },
+            inject_codex_tools=False,
+        )
+
+        self.assertEqual(legacy, body)
+        self.assertEqual(eager, body)
+
+    def test_external_tool_surface_ab_harness_defers_large_mcp_namespace(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "description": "Run a PowerShell command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        }
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a unified diff patch.",
+        }
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "description": "Synthetic App/MCP namespace for the deterministic tool-surface A/B.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": f"synthetic_tool_{index:03d}",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+                for index in range(200)
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use the visible core tools only.",
+                "tool_surface_strategy": "eager",
+                "tools": [shell_command, apply_patch, namespace],
+            }
+        ).encode("utf-8")
+
+        legacy_body = compatible_request_body(body, {"name": "ollama_cloud"})
+        eager_body = compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+        )
+        deferred = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        legacy = json.loads(legacy_body)
+        eager = json.loads(eager_body)
+        eager_names = {
+            tool["name"]
+            for tool in eager["tools"]
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+        deferred_names = {
+            tool["name"]
+            for tool in deferred["tools"]
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+
+        self.assertEqual(eager_body, legacy_body)
+        self.assertEqual(eager, legacy)
+        self.assertEqual(deferred["tools"][:2], [shell_command, apply_patch])
+        # deferred_core omits the 200 flattened namespace functions but keeps
+        # the bounded explicit tool_search entry point.
+        self.assertEqual(len(eager_names) - len(deferred_names), 199)
+        self.assertTrue(
+            all(f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" in eager_names for index in range(200))
+        )
+        self.assertTrue(
+            all(f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" not in deferred_names for index in range(200))
+        )
+        self.assertEqual(
+            [
+                tool["name"]
+                for tool in eager["tools"]
+                if isinstance(tool, dict)
+                and isinstance(tool.get("name"), str)
+                and tool["name"].startswith("mcp__synthetic_namespace__synthetic_tool_")
+            ],
+            [f"mcp__synthetic_namespace__synthetic_tool_{index:03d}" for index in range(200)],
+        )
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
+        self.assertNotIn("tool_search", eager_names)
+        self.assertIn("tool_search", deferred_names)
+        for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
+            self.assertIn(f"multi_agent_v1__{tool_name}", deferred_names)
+
+    def test_deferred_tool_surface_retains_bounded_caller_tool_search_without_changing_eager(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        caller_tool_search = dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [{"type": "function", "name": "deferred", "parameters": {"type": "object"}}],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use only the bounded visible tools.",
+                "tools": [shell_command, caller_tool_search, namespace],
+            }
+        ).encode("utf-8")
+
+        legacy_body = compatible_request_body(body, {"name": "ollama_cloud"})
+        eager_body = compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+        )
+        deferred = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        deferred_tools = [tool for tool in deferred["tools"] if isinstance(tool, dict)]
+
+        self.assertEqual(eager_body, legacy_body)
+        self.assertNotIn(
+            "tool_search",
+            {tool.get("name") for tool in json.loads(eager_body)["tools"] if isinstance(tool, dict)},
+        )
+        self.assertEqual(
+            [tool for tool in deferred_tools if tool.get("name") == "tool_search"],
+            [caller_tool_search],
+        )
+        injected_deferred = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": "Keep the bounded explicit tool surface.",
+                        "tools": [shell_command, namespace],
+                    }
+                ).encode("utf-8"),
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        self.assertEqual(
+            [tool for tool in injected_deferred["tools"] if tool.get("name") == "tool_search"],
+            [codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL],
+        )
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred_tools))
+        self.assertNotIn(
+            "mcp__synthetic_namespace__deferred",
+            {tool.get("name") for tool in deferred_tools},
+        )
+
+    def test_external_tool_surface_keeps_caller_order_and_deduplicates_flattened_names(self):
+        caller_alias = {
+            "type": "function",
+            "name": "mcp__synthetic_namespace__already_visible",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {"type": "function", "name": "already_visible", "parameters": {"type": "object"}},
+                {"type": "function", "name": "second", "parameters": {"type": "object"}},
+                {"type": "function", "name": "second", "parameters": {"type": "object"}},
+                {"type": "function", "name": "third", "parameters": {"type": "object"}},
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use the visible core tools only.",
+                "tools": [caller_alias, namespace],
+            }
+        ).encode("utf-8")
+
+        eager = json.loads(
+            compatible_request_body(body, {"name": "ollama_cloud", "tool_surface_strategy": "eager"})
+        )
+        deferred = json.loads(
+            compatible_request_body(body, {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"})
+        )
+        namespace_aliases = lambda payload: [
+            tool["name"]
+            for tool in payload["tools"]
+            if isinstance(tool, dict)
+            and isinstance(tool.get("name"), str)
+            and tool["name"].startswith("mcp__synthetic_namespace__")
+        ]
+
+        self.assertEqual(eager["tools"][0], caller_alias)
+        self.assertEqual(
+            namespace_aliases(eager),
+            [
+                "mcp__synthetic_namespace__already_visible",
+                "mcp__synthetic_namespace__second",
+                "mcp__synthetic_namespace__third",
+            ],
+        )
+        self.assertEqual(namespace_aliases(deferred), ["mcp__synthetic_namespace__already_visible"])
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in eager["tools"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
+
+    def test_external_tool_surface_preserves_opaque_namespaces_for_eager_compatibility(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        eligible_namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [{"type": "function", "name": "visible", "parameters": {"type": "object"}}],
+        }
+        opaque_namespace = {
+            "type": "namespace",
+            "name": "opaque_vendor",
+            "tools": [{"type": "function", "name": "opaque_tool", "parameters": {"type": "object"}}],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use the visible core tools only.",
+                "tools": [shell_command, eligible_namespace, opaque_namespace],
+            }
+        ).encode("utf-8")
+
+        legacy_body = compatible_request_body(body, {"name": "ollama_cloud"})
+        eager = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            )
+        )
+        deferred = json.loads(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            )
+        )
+        eager_names = {tool.get("name") for tool in eager["tools"] if isinstance(tool, dict)}
+        deferred_names = {tool.get("name") for tool in deferred["tools"] if isinstance(tool, dict)}
+
+        self.assertEqual(
+            compatible_request_body(
+                body,
+                {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            ),
+            legacy_body,
+        )
+        self.assertEqual(
+            [tool for tool in eager["tools"] if tool.get("type") == "namespace"],
+            [opaque_namespace],
+        )
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in deferred["tools"]))
+        self.assertIn("mcp__synthetic_namespace__visible", eager_names)
+        self.assertNotIn("mcp__synthetic_namespace__visible", deferred_names)
+
+    def test_external_tool_surface_hoists_cli_additional_tools_without_losing_freeform_apply_patch(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "description": "Run a PowerShell command.",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+        }
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a unified diff patch.",
+            "format": {"type": "grammar", "syntax": "lark", "definition": "start: patch"},
+        }
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {"type": "function", "name": "deferred", "parameters": {"type": "object"}},
+            ],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [shell_command, apply_patch, namespace],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Apply the one requested change."}],
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        payload = json.loads(
+            compatible_request_body(
+                body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_surface_strategy": "deferred_core",
+                },
+            )
+        )
+
+        self.assertFalse(any(item.get("type") == "additional_tools" for item in payload["input"]))
+        self.assertEqual(payload["tools"][:2], [shell_command, apply_patch])
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in payload["tools"]))
+        self.assertNotIn(
+            "mcp__synthetic_namespace__deferred",
+            {tool.get("name") for tool in payload["tools"] if isinstance(tool, dict)},
+        )
+
+    def test_native_responses_apply_patch_codec_is_opt_in_and_emits_one_strict_patch_field(self):
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch using the caller's grammar.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch update_file end_patch",
+            },
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "Make the requested edit."}],
+                "tools": [apply_patch],
+            }
+        ).encode("utf-8")
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+        }
+
+        unselected = json.loads(
+            compatible_request_body(body, upstream, inject_codex_tools=False)
+        )
+        selected = json.loads(
+            compatible_request_body(
+                body,
+                {**upstream, "native_responses_tool_codec": "strict_apply_patch"},
+                inject_codex_tools=False,
+            )
+        )
+
+        self.assertEqual(unselected["tools"], [apply_patch])
+        self.assertEqual(
+            selected["tools"][0],
+            {
+                "type": "function",
+                "name": "apply_patch",
+                "description": selected["tools"][0]["description"],
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"patch": {"type": "string", "minLength": 1}},
+                    "required": ["patch"],
+                    "additionalProperties": False,
+                },
+            },
+        )
+        description = selected["tools"][0]["description"]
+        self.assertIn(apply_patch["description"], description)
+        self.assertIn(apply_patch["format"]["definition"], description)
+        self.assertIn("*** Begin Patch", description)
+        self.assertIn("*** End Patch", description)
+
+    def test_native_responses_apply_patch_codec_rejects_ambiguous_or_lossy_custom_declarations(self):
+        apply_patch = {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch using the caller's grammar.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch update_file end_patch",
+            },
+        }
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "native_responses_tool_codec": "strict_apply_patch",
+        }
+        malformed_tools = {
+            "duplicate": [apply_patch, dict(apply_patch)],
+            "unknown_field": [{**apply_patch, "unexpected": True}],
+            "missing_grammar": [{key: value for key, value in apply_patch.items() if key != "format"}],
+        }
+
+        for shape, tools in malformed_tools.items():
+            with self.subTest(shape=shape):
+                with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                    compatible_request_body(
+                        json.dumps(
+                            {"model": "glm-5.2", "input": "Edit the file.", "tools": tools}
+                        ).encode("utf-8"),
+                        upstream,
+                        event_context={"request_id": "<sanitized-request-id>"},
+                        inject_codex_tools=False,
+                    )
+
+                self.assertEqual(
+                    raised.exception.cause.code,
+                    "invalid_native_responses_tool_contract",
+                )
+                rejected = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "native_responses_tool_codec"
+                )
+                self.assertEqual(rejected["codec"], "strict_apply_patch")
+                self.assertEqual(rejected["outcome"], "rejected")
+                for forbidden in (
+                    "description",
+                    "format",
+                    "grammar",
+                    "patch",
+                    "arguments",
+                    "input",
+                ):
+                    self.assertNotIn(forbidden, rejected)
+                self.write_proxy_event.reset_mock()
+
+    def test_external_tool_surface_preparation_telemetry_uses_sanitized_structural_counts(self):
+        shell_command = {
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        apply_patch = {"type": "custom", "name": "apply_patch", "description": "Apply a patch."}
+        namespace = {
+            "type": "namespace",
+            "name": "mcp__synthetic_namespace",
+            "tools": [
+                {"type": "function", "name": "first", "parameters": {"type": "object"}},
+                {"type": "function", "name": "second", "parameters": {"type": "object"}},
+            ],
+        }
+        opaque_namespace = {
+            "type": "namespace",
+            "name": "opaque_vendor",
+            "tools": [{"type": "function", "name": "opaque_tool", "parameters": {"type": "object"}}],
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": "Use tools.",
+                "tools": [shell_command, apply_patch, namespace, opaque_namespace],
+            }
+        ).encode("utf-8")
+
+        compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        compatible_request_body(
+            body,
+            {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+
+        events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "external_tool_surface_prepared"
+        ]
+        self.assertEqual(
+            events,
+            [
+                {
+                    "tool_surface_strategy": "eager",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 2,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 0,
+                },
+                {
+                    "tool_surface_strategy": "deferred_core",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 0,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 2,
+                },
+            ],
+        )
+
+    def test_external_tool_surface_rejects_invalid_internal_capability_before_any_upstream_io(self):
+        bodies = {
+            "object": json.dumps({"model": "glm-5.2", "input": "Use core tools."}).encode("utf-8"),
+            "non_object": b"[]",
+            "malformed": b"{not-json",
+        }
+
+        with patch("codex_proxy.urlopen") as mock_urlopen:
+            for shape, body in bodies.items():
+                with self.subTest(shape=shape):
+                    with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                        compatible_request_body(
+                            body,
+                            {"name": "ollama_cloud", "tool_surface_strategy": "not-a-strategy"},
+                            event_context={"request_id": "must-not-be-logged"},
+                        )
+
+                    self.assertEqual(raised.exception.cause.code, "invalid_external_tool_surface_strategy")
+
+        mock_urlopen.assert_not_called()
+        rejected = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "external_tool_surface_rejected"
+        ]
+        self.assertEqual(rejected, [{"reason": "invalid_tool_surface_strategy"}] * len(bodies))
+
+    def test_official_passthrough_keeps_malformed_and_non_object_bodies_byte_identical(self):
+        upstream = {
+            "name": "official",
+            "upstream_model": "gpt-5.5",
+            "tool_surface_strategy": "not-a-strategy",
+        }
+        bodies = {
+            "non_object": (b"[]", None),
+            "malformed": (b"{not-json", None),
+            "malformed_embedded_model": (b'{"model":"caller",oops', "caller"),
+        }
+        for shape, (body, model_id) in bodies.items():
+            with self.subTest(shape=shape):
+                self.assertEqual(
+                    compatible_request_body(
+                        body,
+                        upstream,
+                        model_id=model_id,
+                        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    ),
+                    body,
+                )
+
+    def test_official_passthrough_helper_keeps_unparsed_body_byte_identical(self):
+        upstream = {"name": "official", "upstream_model": "gpt-5.5"}
+        for shape, body in {
+            "non_object": b"[]",
+            "malformed_embedded_model": b'{"model":"caller",oops',
+        }.items():
+            with self.subTest(shape=shape):
+                self.assertEqual(
+                    codex_proxy.official_passthrough_request_body(
+                        body,
+                        None,
+                        upstream,
+                        model_id="caller",
+                    ),
+                    body,
+                )
 
     def test_external_request_flattens_mcp_node_repl_namespace_without_tool_search(self):
         body = json.dumps(

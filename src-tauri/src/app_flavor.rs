@@ -1,3 +1,4 @@
+use crate::build_info::{self, BuildFlavor, BuildInfo};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -10,6 +11,8 @@ pub enum RoutingOwner {
     UnknownExternal,
 }
 
+/// Legacy runtime-routing identities retained only to decode existing target ownership.
+/// New build flavors are defined by `build_info::BuildFlavor` and always use `Stable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeFlavor {
@@ -19,7 +22,7 @@ pub enum RuntimeFlavor {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppFlavorInfo {
-    pub flavor: RuntimeFlavor,
+    pub build: BuildInfo,
     pub routing_owner: RoutingOwner,
     pub product_name: &'static str,
     pub bridge_port: u16,
@@ -32,11 +35,29 @@ pub struct AppFlavorInfo {
 }
 
 pub fn current() -> RuntimeFlavor {
-    RuntimeFlavor::from_name(option_env!("CODEXHUB_BUILD_FLAVOR").unwrap_or("stable"))
+    runtime_flavor_for_build(build_info::current().flavor)
 }
 
 pub fn current_info() -> AppFlavorInfo {
-    current().info()
+    let build = build_info::current();
+    let runtime = runtime_flavor_for_build(build.flavor);
+    let codex_target_owner = crate::runtime_paths::codex_target_home_dir()
+        .ok()
+        .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok())
+        .as_deref()
+        .and_then(crate::config::codex_overlay_owner);
+    AppFlavorInfo {
+        build,
+        routing_owner: runtime.routing_owner(),
+        product_name: runtime.product_name(),
+        bridge_port: runtime.bridge_port(),
+        gateway_port: runtime.gateway_port(),
+        default_codex_home_suffix: runtime.default_codex_home_suffix(),
+        runtime_home_suffix: runtime.runtime_home_suffix(),
+        codex_target_home_suffix: runtime.codex_target_home_suffix(),
+        codex_target_owner,
+        codex_takeover_required: runtime.codex_takeover_required(codex_target_owner),
+    }
 }
 
 pub fn default_gateway_port() -> u16 {
@@ -47,34 +68,11 @@ pub fn bridge_addr() -> String {
     format!("127.0.0.1:{}", current().bridge_port())
 }
 
+fn runtime_flavor_for_build(_flavor: BuildFlavor) -> RuntimeFlavor {
+    RuntimeFlavor::Stable
+}
+
 impl RuntimeFlavor {
-    pub fn from_name(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "beta" => Self::Beta,
-            _ => Self::Stable,
-        }
-    }
-
-    pub fn info(self) -> AppFlavorInfo {
-        let codex_target_owner = crate::runtime_paths::codex_target_home_dir()
-            .ok()
-            .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok())
-            .as_deref()
-            .and_then(crate::config::codex_overlay_owner);
-        AppFlavorInfo {
-            flavor: self,
-            routing_owner: self.routing_owner(),
-            product_name: self.product_name(),
-            bridge_port: self.bridge_port(),
-            gateway_port: self.gateway_port(),
-            default_codex_home_suffix: self.default_codex_home_suffix(),
-            runtime_home_suffix: self.runtime_home_suffix(),
-            codex_target_home_suffix: self.codex_target_home_suffix(),
-            codex_target_owner,
-            codex_takeover_required: self.codex_takeover_required(codex_target_owner),
-        }
-    }
-
     pub fn routing_owner(self) -> RoutingOwner {
         match self {
             Self::Stable => RoutingOwner::Release,
@@ -161,17 +159,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_defaults_match_existing_ports_and_identity() {
-        let flavor = RuntimeFlavor::Stable;
-        assert_eq!(flavor.routing_owner(), RoutingOwner::Release);
-        assert_eq!(flavor.product_name(), "CodexHub");
-        assert_eq!(flavor.bridge_port(), 1421);
-        assert_eq!(flavor.gateway_port(), 9099);
-        assert_eq!(flavor.autostart_task_name(), "CodexHubProxy");
+    fn normal_and_debug_builds_share_the_existing_runtime_identity() {
+        for build_flavor in [BuildFlavor::Normal, BuildFlavor::Debug] {
+            let runtime = runtime_flavor_for_build(build_flavor);
+            assert_eq!(runtime, RuntimeFlavor::Stable);
+            assert_eq!(runtime.routing_owner(), RoutingOwner::Release);
+            assert_eq!(runtime.product_name(), "CodexHub");
+            assert_eq!(runtime.bridge_port(), 1421);
+            assert_eq!(runtime.gateway_port(), 9099);
+            assert_eq!(runtime.runtime_home_suffix(), ".codex");
+            assert_eq!(runtime.autostart_task_name(), "CodexHubProxy");
+        }
     }
 
     #[test]
-    fn beta_defaults_are_isolated_from_stable() {
+    fn legacy_beta_runtime_metadata_remains_decodable_for_existing_targets() {
         let flavor = RuntimeFlavor::Beta;
         assert_eq!(flavor.routing_owner(), RoutingOwner::Beta);
         assert_eq!(flavor.product_name(), "CodexHub Beta");
@@ -185,16 +187,19 @@ mod tests {
     }
 
     #[test]
-    fn beta_runtime_home_is_separate_but_codex_target_stays_real() {
+    fn legacy_beta_runtime_home_is_separate_but_codex_target_stays_real() {
         let flavor = RuntimeFlavor::Beta;
 
         assert_eq!(flavor.runtime_home_suffix(), ".codexhub-beta");
         assert_eq!(flavor.codex_target_home_suffix(), ".codex");
-        assert_ne!(flavor.runtime_home_suffix(), flavor.codex_target_home_suffix());
+        assert_ne!(
+            flavor.runtime_home_suffix(),
+            flavor.codex_target_home_suffix()
+        );
     }
 
     #[test]
-    fn beta_frontend_takeover_state_includes_unowned_and_official_targets() {
+    fn legacy_beta_frontend_takeover_state_includes_unowned_and_official_targets() {
         assert!(RuntimeFlavor::Beta.codex_takeover_required(None));
         assert!(RuntimeFlavor::Beta.codex_takeover_required(Some(RoutingOwner::Official)));
         assert!(!RuntimeFlavor::Beta.codex_takeover_required(Some(RoutingOwner::Beta)));

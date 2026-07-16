@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "openai/codex",
+    "revision": "b24aa20107f365a1d0f06de9e0b28df5c516c7dd",
+    "path": "codex-rs/models-manager/models.json"
+  },
+  "models": {
+    "gpt-5.6-sol": {
+      "prefer_websockets": true,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "use_responses_lite": true
+    },
+    "gpt-5.6-terra": {
+      "prefer_websockets": true,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "use_responses_lite": true
+    },
+    "gpt-5.6-luna": {
+      "prefer_websockets": true,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v1",
+      "use_responses_lite": true
+    },
+    "gpt-5.5": {
+      "prefer_websockets": true,
+      "tool_mode": null,
+      "multi_agent_version": null,
+      "use_responses_lite": false
+    },
+    "gpt-5.4": {
+      "prefer_websockets": true,
+      "tool_mode": null,
+      "multi_agent_version": null,
+      "use_responses_lite": false
+    },
+    "gpt-5.4-mini": {
+      "prefer_websockets": true,
+      "tool_mode": null,
+      "multi_agent_version": null,
+      "use_responses_lite": false
+    },
+    "gpt-5.3-codex-spark": {
+      "use_responses_lite": false
+    }
+  }
+}

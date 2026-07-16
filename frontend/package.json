@@ -1,13 +1,14 @@
 {
   "name": "codexhub-frontend",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "test:ui-contract": "node --test scripts/ui-contract.test.mjs",
+    "test:provider-comparison": "node --test scripts/provider-comparison.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

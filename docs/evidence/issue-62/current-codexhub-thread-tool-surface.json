@@ -1,0 +1,175 @@
+{
+  "schema_version": 4,
+  "captured_at": "2026-07-12T14:57:55+08:00",
+  "source": {
+    "capture_id": "sanitized-current-side-capture",
+    "originator": "Codex Desktop",
+    "cli_version": "0.144.0-alpha.4",
+    "configured_provider_id": "custom",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "xhigh",
+    "collaboration_mode": "default",
+    "multi_agent_version": "v2"
+  },
+  "gateway_route": {
+    "requested_model": "gpt-5.6-sol",
+    "canonical_model": "openai/gpt-5.6-sol",
+    "upstream": "official",
+    "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
+    "classification_basis": "concrete Gateway upstream route and catalog binding, not configured_provider_id",
+    "behavior_profile": "official_codex_app_http_passthrough",
+    "route_mode": "official",
+    "inbound_format": "responses",
+    "upstream_format": "responses",
+    "wire_format_adapter": "transparent",
+    "codex_semantic_adapter": "none",
+    "repair_policy": "none"
+  },
+  "gateway_observability": {
+    "request_prefix_equality_observed": true,
+    "request_prefix_bytes_observed": 65536,
+    "full_request_body_fingerprint": "not_captured",
+    "full_response_body_fingerprint": "not_captured",
+    "conclusion_limit": "prefix-level observation and replay-fixture consistency only; Gateway filtering is not ruled out beyond that evidence"
+  },
+  "registered_codex_app_tools": [
+    "automation_update",
+    "navigate_to_codex_page",
+    "read_thread_terminal",
+    "load_workspace_dependencies",
+    "fork_thread",
+    "handoff_thread",
+    "get_handoff_status",
+    "list_projects",
+    "create_thread",
+    "list_threads",
+    "read_thread",
+    "send_message_to_thread",
+    "set_thread_pinned",
+    "set_thread_archived",
+    "set_thread_title"
+  ],
+  "dynamic_tool_contributors": [
+    {
+      "contributor": "Codex Desktop",
+      "contributor_kind": "dynamic_tool_namespace",
+      "namespace": "codex_app",
+      "registered_tool_count": 15,
+      "tools": [
+        {"name": "automation_update", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "navigate_to_codex_page", "type": "function", "deferLoading": false, "deferLoading_source": "omitted_defaults_false", "planner_exposure": "Direct"},
+        {"name": "read_thread_terminal", "type": "function", "deferLoading": false, "deferLoading_source": "omitted_defaults_false", "planner_exposure": "Direct"},
+        {"name": "load_workspace_dependencies", "type": "function", "deferLoading": false, "deferLoading_source": "omitted_defaults_false", "planner_exposure": "Direct"},
+        {"name": "fork_thread", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "handoff_thread", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "get_handoff_status", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "list_projects", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "create_thread", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "list_threads", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "read_thread", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "send_message_to_thread", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "set_thread_pinned", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "set_thread_archived", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"},
+        {"name": "set_thread_title", "type": "function", "deferLoading": true, "planner_exposure": "Deferred"}
+      ]
+    }
+  ],
+  "dynamic_tool_exposure": {
+    "direct": ["navigate_to_codex_page", "read_thread_terminal", "load_workspace_dependencies"],
+    "deferred": ["automation_update", "fork_thread", "handoff_thread", "get_handoff_status", "list_projects", "create_thread", "list_threads", "read_thread", "send_message_to_thread", "set_thread_pinned", "set_thread_archived", "set_thread_title"]
+  },
+  "exposure_state_catalog": [
+    {"state": "Direct", "plane": "planner", "runtime_observed": true, "evidence": "three codex_app functions omit deferLoading"},
+    {"state": "DirectModelOnly", "plane": "planner", "runtime_observed": false, "evidence": "source-contract state; not used by the captured namespace"},
+    {"state": "Deferred", "plane": "planner", "runtime_observed": true, "evidence": "twelve codex_app functions set deferLoading=true"},
+    {"state": "Hidden", "plane": "planner", "runtime_observed": false, "evidence": "source-contract state; not used by the captured namespace"},
+    {"state": "hosted-only", "plane": "host-binding", "runtime_observed": false, "evidence": "tagged reconciliation sentinel only; not inferred as a ToolExposure enum variant"},
+    {"state": "host-unavailable", "plane": "host-binding", "runtime_observed": false, "evidence": "tagged reconciliation sentinel only; not inferred as a ToolExposure enum variant"}
+  ],
+  "planner_gates": {
+    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "predicate": "model_info.supports_search_tool && provider.capabilities.namespace_tools",
+    "catalog_source": {
+      "post_switch_catalog_basename": "codexhub-model-catalog.json",
+      "post_switch_model_supports_search_tool": true,
+      "read_only_snapshot_validation": {
+        "artifact_basename": "codexhub-model-catalog.json",
+        "sha256": "307a09f22b0c827ae77192a4beaf7059efcf8a698ec4f252aa4ba4787f8d1876",
+        "model_entry_id": "gpt-5.6-sol",
+        "model_entry_supports_search_tool": true
+      }
+    },
+    "config_source": {
+      "configured_provider_id": "custom",
+      "provider_namespace_tools": true,
+      "classification_rule": "configured_provider_id is not evidence of official versus third-party routing"
+    },
+    "caller_request": {
+      "source": "sanitized local transport record",
+      "additional_tools_contains_tool_search": true,
+      "tool_search_type": "tool_search",
+      "tool_search_execution": "client"
+    },
+    "model_visible_plan": {
+      "tool_search_available": true,
+      "codex_app_direct_tools": ["navigate_to_codex_page", "read_thread_terminal", "load_workspace_dependencies"],
+      "codex_app_deferred_tools_discoverable_through_tool_search": ["automation_update", "fork_thread", "handoff_thread", "get_handoff_status", "list_projects", "create_thread", "list_threads", "read_thread", "send_message_to_thread", "set_thread_pinned", "set_thread_archived", "set_thread_title"]
+    },
+    "runtime_gate_evaluation_for_this_trace": "not_independently_captured"
+  },
+  "independent_controls": [
+    {"name": "Desktop core exact-version app-server control", "result": "pass"},
+    {"name": "Code Mode exact-version app-server control", "result": "pass"}
+  ],
+  "control_boundaries": {
+    "in_process_provider_config_rewrite": {"status": "historical timeline observation", "causal_result": "does_not_prove_planner_state_drift"},
+    "clean_cold_start_for_current_codexhub_binding": {"status": "not_run", "reason": "kept separate from in-process rewrite; no shared-runtime experiment was expanded"}
+  },
+  "capture_coverage": {
+    "complete_model_visible_plan": {
+      "status": "partial",
+      "captured_contributors": ["codex_app"],
+      "gap": "other installed contributors and namespaces were not present in the retained sanitized capture"
+    },
+    "clean_cold_start_current_binding": {
+      "status": "not_run",
+      "gap": "requires a separately authorized shared-runtime control"
+    }
+  },
+  "process_and_catalog_timeline": {
+    "task_created_at": "2026-07-11T14:56:06.8960000Z",
+    "codexhub_app_started_at": "2026-07-12T05:05:13.8143112Z",
+    "codex_desktop_started_at": "2026-07-12T05:05:22.8667276Z",
+    "app_server_started_at": "2026-07-12T05:05:25.5581137Z",
+    "startup_catalog_basename": "openai-plus-ollama-cloud.json",
+    "startup_catalog_written_at": "2026-07-12T05:05:15.2166839Z",
+    "startup_catalog_sol_supports_search_tool_field_present": false,
+    "codexhub_gateway_started_at": "2026-07-12T05:32:25.2976813Z",
+    "provider_config_rewritten_at": "2026-07-12T05:40:06.8047490Z",
+    "post_switch_catalog_basename": "codexhub-model-catalog.json",
+    "post_switch_catalog_written_at": "2026-07-12T05:50:22.1550082Z",
+    "post_switch_catalog_sol_supports_search_tool": true,
+    "cold_start_for_initial_official_binding": true,
+    "cold_start_for_current_codexhub_binding": false,
+    "causal_interpretation": "timeline_only_not_runtime_manager_identity_proof"
+  },
+  "unknown_tagged_sentinels": [
+    {"tag": "unknown", "scope": "response_item_and_sse_replay", "preservation_rule": "retain tag and opaque payload rather than deleting or reclassifying"}
+  ],
+  "diagnosis": {
+    "status": "fact_hypothesis_split",
+    "facts": [
+      "The caller request contains client-executed tool_search in additional_tools.",
+      "The three Direct codex_app tools are direct; the twelve Deferred codex_app tools are discoverable through tool_search.",
+      "A 65,536-byte caller/upstream request-prefix match was observed; full request and response fingerprints were not captured."
+    ],
+    "observed_behavior": "The Desktop host/model did not select an available tool_search during this trace.",
+    "unproven_hypotheses": [
+      "The post-rewrite catalog timeline caused a stale StaticModelsManager snapshot.",
+      "A clean Desktop restart for the current CodexHub binding changes tool_search selection."
+    ],
+    "follow_up": "#63 owns reluctant-model and tool_search lifecycle investigation."
+  },
+  "observed_callable_codex_app_tools": ["load_workspace_dependencies", "navigate_to_codex_page", "read_thread_terminal"],
+  "required_thread_tools": ["fork_thread", "handoff_thread", "get_handoff_status", "list_projects", "create_thread", "list_threads", "read_thread", "send_message_to_thread", "set_thread_pinned", "set_thread_archived", "set_thread_title"]
+}

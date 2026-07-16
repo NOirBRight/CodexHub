@@ -19,6 +19,7 @@ import re
 import socket
 import sqlite3
 import ssl
+from functools import partial
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,7 +27,7 @@ import sys
 import threading
 import time
 import tomllib
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NoReturn
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
@@ -45,6 +46,31 @@ if not VENDORED_URLLIB3_WHEEL.is_file():
 sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
 import urllib3
+
+from protocol_translation import (
+    ChatToResponsesStreamConverter,
+    ResponsesToChatStreamConverter,
+    UnsupportedProtocolTranslationError,
+    UpstreamStreamIncompleteError,
+    chat_completion_body_to_stream_chunks,
+    chat_completion_error_body,
+    chat_completion_to_response_body,
+    chat_completions_request_to_responses_body,
+    chat_content_to_responses_content,
+    chat_messages_to_responses_input,
+    chat_stream_chunks_to_response_events,
+    chat_tool_choice_to_responses_tool_choice,
+    chat_tools_to_responses_tools,
+    events_to_responses_body,
+    response_body_to_chat_completion_body,
+    response_body_to_response_sse_events,
+    response_events_to_chat_stream_chunks,
+    responses_content_to_chat_content,
+    responses_input_to_chat_messages,
+    responses_request_to_chat_completion_body,
+    responses_tool_choice_to_chat_tool_choice,
+    responses_tools_to_chat_tools,
+)
 
 from codex_semantic_adapter import (
     coerce_number as _semantic_coerce_number,
@@ -70,7 +96,10 @@ from catalog_sync import (
     existing_generated_catalog_path,
     known_official_model_ids as catalog_known_official_model_ids,
     official_short_display_name,
-    sync_catalog,
+)
+from model_limits import (
+    CURRENT_DIRECT_OFFICIAL_SOURCE,
+    DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
 )
 from codex_auth import CodexAuthError, access_token as codex_access_token, account_id as codex_account_id
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
@@ -92,6 +121,8 @@ from websocket_transport import (
     write_frame,
 )
 import proxy_telemetry
+import bounded_event_writer
+import diagnostic_recorder
 
 try:
     import zstandard
@@ -110,6 +141,30 @@ OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
 OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
 OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
 OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
+_OFFICIAL_ATTEMPT_CONNECTION_STATE = threading.local()
+
+
+def _reset_official_attempt_connection_disposition() -> None:
+    """Clear the per-thread lease label before a new Official pool request."""
+
+    _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = "unobserved"
+
+
+def _set_official_attempt_connection_disposition(disposition: str) -> None:
+    if disposition in {"new", "reused"}:
+        _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = disposition
+
+
+def _official_attempt_connection_disposition() -> str:
+    disposition = getattr(_OFFICIAL_ATTEMPT_CONNECTION_STATE, "disposition", "unobserved")
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _clear_official_attempt_connection_disposition() -> None:
+    try:
+        del _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition
+    except AttributeError:
+        pass
 
 
 def _official_socket_options() -> list[tuple[int, int, int]]:
@@ -150,12 +205,24 @@ class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     def _get_conn(self, timeout: float | None = None) -> Any:
         connection = super()._get_conn(timeout)
         released_at = getattr(connection, "_codexhub_released_at", None)
+        try:
+            disposition = (
+                "reused" if isinstance(released_at, (int, float)) and getattr(connection, "sock", None) else "new"
+            )
+        except Exception:
+            disposition = "unobserved"
         idle_seconds = time.monotonic() - released_at if isinstance(released_at, (int, float)) else None
         max_idle_seconds = (
             OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS if self.proxy is not None else OFFICIAL_POOL_MAX_IDLE_SECONDS
         )
         if idle_seconds is not None and idle_seconds >= max_idle_seconds:
             connection.close()
+            disposition = "new"
+        try:
+            connection._codexhub_diagnostic_connection_disposition = disposition
+        except Exception:
+            pass
+        _set_official_attempt_connection_disposition(disposition)
         return connection
 
     def _put_conn(self, connection: Any) -> None:
@@ -172,6 +239,7 @@ class _OfficialPooledResponse:
         self.status = response.status
         self.reason = response.reason
         self.headers = response.headers
+        self.connection_disposition = _connection_disposition(getattr(response, "connection", None))
         self._terminal_drain_socket: Any = None
         self._terminal_drain_original_timeout: float | None = None
 
@@ -238,6 +306,14 @@ class _OfficialPooledResponse:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
         self.close()
         return False
+
+
+def _connection_disposition(connection: Any) -> str:
+    try:
+        disposition = getattr(connection, "_codexhub_diagnostic_connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
 
 
 def _official_proxy_url(url: str) -> str | None:
@@ -320,6 +396,7 @@ def _stdlib_transport_error(exc: BaseException) -> BaseException:
 def _official_urlopen(request: Request, *, timeout: float) -> Any:
     manager = _official_pool_manager(request.full_url)
     headers = {key: value for key, value in request.header_items() if key.lower() != "connection"}
+    _reset_official_attempt_connection_disposition()
     try:
         response = manager.request(
             request.get_method(),
@@ -335,7 +412,15 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
         )
     except urllib3.exceptions.HTTPError as exc:
         translated = _stdlib_transport_error(exc)
+        disposition = _official_attempt_connection_disposition()
+        if disposition != "unobserved":
+            try:
+                setattr(translated, "_codexhub_diagnostic_connection_disposition", disposition)
+            except Exception:
+                pass
         raise translated from exc
+    finally:
+        _clear_official_attempt_connection_disposition()
 
     pooled_response = _OfficialPooledResponse(response)
     if response.status >= 400:
@@ -528,6 +613,11 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
 ]
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
+TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
+TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
+NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
+NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE = "invalid_native_responses_tool_codec"
+NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -618,15 +708,48 @@ def _runtime_codex_dir() -> Path:
 
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
-PROXY_EVENT_LOG_LOCK = threading.Lock()
-PROXY_EVENT_QUEUE_MAXSIZE = _env_positive_int("CODEX_PROXY_EVENT_QUEUE_MAXSIZE", 4096)
-PROXY_EVENT_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=PROXY_EVENT_QUEUE_MAXSIZE)
-PROXY_EVENT_WRITER_LOCK = threading.Lock()
-PROXY_EVENT_WRITER_THREAD: threading.Thread | None = None
-PROXY_EVENT_DROPPED_COUNT = 0
-PROXY_EVENT_DROPPED_LOCK = threading.Lock()
+# Both limits apply to serialized Gateway telemetry still awaiting a sink write,
+# including an in-flight batch, so slow storage cannot grow request memory.
+GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
+GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
+GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _gateway_event_writer_recovery_record(
+    summary: bounded_event_writer.RecoverySummary,
+) -> Mapping[str, Any]:
+    return proxy_telemetry.prepare_event_payload(
+        "telemetry_writer_recovered",
+        {
+            "overflow_records": summary.overflow_records,
+            "overflow_bytes": summary.overflow_bytes,
+            "failed_records": summary.failed_records,
+            "failure_count": summary.failure_count,
+            "failure_categories": list(summary.failure_categories),
+        },
+        RUNTIME_CODEX_DIR,
+    )
+
+
+_previous_gateway_event_writer = globals().get("GATEWAY_EVENT_WRITER")
+if isinstance(_previous_gateway_event_writer, bounded_event_writer.BoundedEventWriter):
+    _previous_gateway_event_writer.shutdown(timeout=1.0)
+
+
+GATEWAY_EVENT_WRITER = bounded_event_writer.BoundedEventWriter(
+    bounded_event_writer.JsonlFileSink(PROXY_EVENT_LOG_PATH),
+    max_records=GATEWAY_EVENT_QUEUE_MAX_RECORDS,
+    max_bytes=GATEWAY_EVENT_QUEUE_MAX_BYTES,
+    recovery_record_factory=_gateway_event_writer_recovery_record,
+    thread_name="codex-gateway-event-writer",
+)
+# The compile-selected debug flavor will install a recorder in the later
+# Tauri/runtime slice. Normal builds intentionally have no recorder object,
+# settings toggle, or environment switch that could activate persistence.
+GATEWAY_DIAGNOSTIC_RECORDER: diagnostic_recorder.DiagnosticRecorderProtocol | None = None
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
@@ -634,7 +757,6 @@ DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEO
 DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
-OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW = 272_000
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
@@ -932,8 +1054,6 @@ class LifecycleFinalFormatResponseError(RuntimeError):
         super().__init__("Upstream returned a final response that did not start with the requested report format.")
 
 
-class UpstreamStreamIncompleteError(RuntimeError):
-    """Raised when an upstream stream ends without a terminal event."""
 
 
 class UpstreamStreamIdleTimeoutError(TimeoutError):
@@ -1302,14 +1422,6 @@ def gateway_image_proxy_model() -> str:
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
 
 
-def openai_context_guard_enabled() -> bool:
-    return _env_or_settings_flag(
-        "CODEX_PROXY_OPENAI_CONTEXT_GUARD_ENABLED",
-        "openai_context_guard_enabled",
-        False,
-    )
-
-
 def gateway_transparent_vision_proxy_enabled() -> bool:
     settings_value = _runtime_settings_value("gateway_transparent_vision_proxy_enabled")
     if isinstance(settings_value, bool):
@@ -1322,64 +1434,86 @@ def gateway_transparent_vision_proxy_enabled() -> bool:
     return gateway_image_proxy_enabled()
 
 
+def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
+    """Keep optional recorder failures out of Gateway request behavior."""
+
+    recorder = GATEWAY_DIAGNOSTIC_RECORDER
+    if recorder is None:
+        return
+    try:
+        observation = getattr(recorder, method, None)
+        if callable(observation):
+            observation(*args, **kwargs)
+    except Exception:
+        return
+
+
+def _diagnostic_context_value(event_context: Mapping[str, Any] | None, key: str) -> Any:
+    """Read optional diagnostic context without changing a request on failure."""
+
+    if event_context is None:
+        return None
+    try:
+        return event_context.get(key)
+    except Exception:
+        return None
+
+
+def _diagnostic_response_metadata(response: Any) -> tuple[Any, Any]:
+    """Snapshot only optional header summaries for the failure-contained hook."""
+
+    try:
+        status = getattr(response, "status", None)
+        if not status:
+            status = getattr(response, "code", None)
+    except Exception:
+        status = None
+    try:
+        headers = getattr(response, "headers", None)
+    except Exception:
+        headers = None
+    return status, headers
+
+
+def _diagnostic_connection_disposition(response: Any) -> str:
+    try:
+        disposition = getattr(response, "connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _diagnostic_error_connection_disposition(exc: BaseException) -> str:
+    """Read only the safe lease label attached to an Official transport error."""
+
+    try:
+        disposition = getattr(exc, "_codexhub_diagnostic_connection_disposition", "unobserved")
+    except Exception:
+        return "unobserved"
+    return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
+    return {
+        "dns": "upstream_dns",
+        "tcp_connect": "upstream_tcp",
+        "tls": "upstream_tls",
+        "request_write": "upstream_request_write",
+    }.get(failure_phase)
+
+
 def write_proxy_event(event: str, **fields: Any) -> None:
+    _observe_gateway_diagnostic("observe_proxy_event", event, fields)
     payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
-    _enqueue_proxy_event_payload(payload)
+    _enqueue_gateway_event_payload(payload)
 
 
-def _enqueue_proxy_event_payload(payload: dict[str, Any]) -> bool:
-    global PROXY_EVENT_DROPPED_COUNT
-    _ensure_proxy_event_writer_started()
-    try:
-        PROXY_EVENT_QUEUE.put_nowait(payload)
-        return True
-    except queue.Full:
-        with PROXY_EVENT_DROPPED_LOCK:
-            PROXY_EVENT_DROPPED_COUNT += 1
-        return False
-
-
-def _ensure_proxy_event_writer_started() -> None:
-    global PROXY_EVENT_WRITER_THREAD
-    with PROXY_EVENT_WRITER_LOCK:
-        if PROXY_EVENT_WRITER_THREAD is not None and PROXY_EVENT_WRITER_THREAD.is_alive():
-            return
-        PROXY_EVENT_WRITER_THREAD = threading.Thread(
-            target=_proxy_event_writer_loop,
-            name="codex-proxy-event-writer",
-            daemon=True,
-        )
-        PROXY_EVENT_WRITER_THREAD.start()
-
-
-def _proxy_event_writer_loop() -> None:
-    while True:
-        payload = PROXY_EVENT_QUEUE.get()
-        try:
-            _write_proxy_event_payload_to_log(payload)
-        finally:
-            PROXY_EVENT_QUEUE.task_done()
-
-
-def _write_proxy_event_payload_to_log(payload: Mapping[str, Any]) -> None:
-    line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    try:
-        with PROXY_EVENT_LOG_LOCK:
-            PROXY_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with PROXY_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-    except OSError as exc:
-        logger.warning("failed to write proxy event log: %s", type(exc).__name__)
+def _enqueue_gateway_event_payload(payload: Mapping[str, Any]) -> bool:
+    return GATEWAY_EVENT_WRITER.enqueue(payload)
 
 
 def flush_proxy_event_writer(timeout: float = 5.0) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout)
-    while PROXY_EVENT_QUEUE.unfinished_tasks:
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.01)
-    return True
+    return GATEWAY_EVENT_WRITER.flush(timeout).completed
 
 
 def _usage_int(value: Any) -> int | None:
@@ -1855,6 +1989,10 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
         "upstream_model": upstream_model,
         "upstream_format": runtime_model.get("upstream_format", "responses"),
         "tool_protocol": runtime_model.get("tool_protocol", "auto"),
+        "tool_surface_strategy": runtime_model.get("tool_surface_strategy", "eager"),
+        "native_responses_tool_codec": runtime_model.get(
+            "native_responses_tool_codec", "none"
+        ),
         "reports_cached_input_tokens": False,
         "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
     }
@@ -1955,6 +2093,10 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),
+            "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
+            "native_responses_tool_codec": external_model.get(
+                "native_responses_tool_codec", "none"
+            ),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
@@ -2955,172 +3097,22 @@ def _incomplete_stream_json_error_body(upstream_name: str) -> bytes:
     )
 
 
-def _responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
-    if isinstance(value, str):
-        return value
-    if not isinstance(value, list):
-        return ""
+class UpstreamProtocolTranslationError(ValueError):
+    """Marks an unsupported upstream wire shape for the downstream error mapper."""
 
-    parts: list[dict[str, Any]] = []
-    text_fragments: list[str] = []
-    has_image = False
-    for part in value:
-        if not isinstance(part, Mapping):
-            continue
-        part_type = part.get("type")
-        if part_type in {"input_text", "output_text", "text"} and isinstance(part.get("text"), str):
-            text = part["text"]
-            text_fragments.append(text)
-            parts.append({"type": "text", "text": text})
-            continue
-        if part_type == "input_image" and isinstance(part.get("image_url"), str):
-            has_image = True
-            parts.append({"type": "image_url", "image_url": {"url": part["image_url"]}})
-            continue
-        if part_type == "input_image" and isinstance(part.get("file_id"), str):
-            has_image = True
-            parts.append({"type": "text", "text": f"[Image file: {part['file_id']}]"})
-
-    if has_image:
-        return parts or [{"type": "text", "text": ""}]
-    return "\n".join(fragment for fragment in text_fragments if fragment)
+    def __init__(self, cause: UnsupportedProtocolTranslationError):
+        self.cause = cause
+        super().__init__(str(cause))
 
 
-def _responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, str):
-        return [{"role": "user", "content": value}]
-    if not isinstance(value, list):
-        return []
-
-    messages: list[dict[str, Any]] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "message" or (item_type is None and ("role" in item or "content" in item)):
-            role = item.get("role")
-            if role == "developer":
-                role = "system"
-            else:
-                role = role if role in {"system", "user", "assistant"} else "user"
-            content = _responses_content_to_chat_content(item.get("content"))
-            messages.append({"role": role, "content": content})
-            continue
-        if item_type == "function_call":
-            call_id = item.get("call_id")
-            name = item.get("name")
-            if not isinstance(call_id, str) or not isinstance(name, str):
-                continue
-            arguments = item.get("arguments")
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=True, separators=(",", ":"))
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": arguments},
-                        }
-                    ],
-                }
-            )
-            continue
-        if item_type == "function_call_output":
-            call_id = item.get("call_id")
-            if not isinstance(call_id, str):
-                continue
-            output = item.get("output")
-            content = output if isinstance(output, str) else json.dumps(output, ensure_ascii=True, separators=(",", ":"))
-            messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
-    return messages
-
-
-def _responses_tools_to_chat_tools(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    tools: list[dict[str, Any]] = []
-    for item in value:
-        if not isinstance(item, dict) or item.get("type") != "function":
-            continue
-        name = item.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        function: dict[str, Any] = {"name": name}
-        description = item.get("description")
-        if isinstance(description, str):
-            function["description"] = description
-        parameters = item.get("parameters")
-        if isinstance(parameters, dict):
-            function["parameters"] = parameters
-        tools.append({"type": "function", "function": function})
-    return tools
-
-
-def _responses_tool_choice_to_chat_tool_choice(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    if value.get("type") != "function":
-        return value
-    name = value.get("name")
-    if not isinstance(name, str) or not name:
-        return value
-    return {"type": "function", "function": {"name": name}}
+_responses_content_to_chat_content = responses_content_to_chat_content
+_responses_input_to_chat_messages = responses_input_to_chat_messages
+_responses_tools_to_chat_tools = responses_tools_to_chat_tools
+_responses_tool_choice_to_chat_tool_choice = responses_tool_choice_to_chat_tool_choice
 
 
 def _responses_request_to_chat_completion_body(body: bytes) -> bytes:
-    payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict):
-        return body
-
-    messages: list[dict[str, str]] = []
-    instructions = payload.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
-        messages.append({"role": "system", "content": instructions})
-    messages.extend(_responses_input_to_chat_messages(payload.get("input")))
-    if not messages:
-        messages.append({"role": "user", "content": ""})
-
-    chat_payload: dict[str, Any] = {
-        "model": payload.get("model"),
-        "messages": messages,
-    }
-    for key in ("stream", "temperature", "top_p", "presence_penalty", "frequency_penalty", "parallel_tool_calls"):
-        if key in payload:
-            chat_payload[key] = payload[key]
-    if payload.get("stream") is True:
-        stream_options = chat_payload.get("stream_options")
-        if not isinstance(stream_options, dict):
-            stream_options = {}
-        stream_options["include_usage"] = True
-        chat_payload["stream_options"] = stream_options
-    if "max_output_tokens" in payload:
-        chat_payload["max_tokens"] = payload["max_output_tokens"]
-
-    tools = _responses_tools_to_chat_tools(payload.get("tools"))
-    if tools:
-        chat_payload["tools"] = tools
-    tool_choice = _responses_tool_choice_to_chat_tool_choice(payload.get("tool_choice"))
-    if tool_choice is not None:
-        chat_payload["tool_choice"] = tool_choice
-
-    return json.dumps(chat_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-
-
-def _chat_completion_message_output(message: Mapping[str, Any], index: int) -> dict[str, Any] | None:
-    content = message.get("content")
-    text = content if isinstance(content, str) else _chat_content_text(content)
-    if not text:
-        return None
-    return {
-        "id": f"msg_{index}",
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": text, "annotations": []}],
-    }
+    return responses_request_to_chat_completion_body(body)
 
 
 XMLISH_TOOL_INVOKE_RE = re.compile(
@@ -3168,76 +3160,24 @@ def _xmlish_tool_call_outputs_from_text(text: str) -> list[dict[str, Any]]:
     return output
 
 
-def _chat_completion_tool_outputs(message: Mapping[str, Any]) -> list[dict[str, Any]]:
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        content = message.get("content")
-        text = content if isinstance(content, str) else _chat_content_text(content)
-        return _xmlish_tool_call_outputs_from_text(text) if text else []
-    output: list[dict[str, Any]] = []
-    for index, tool_call in enumerate(tool_calls):
-        if not isinstance(tool_call, dict):
-            continue
-        function = tool_call.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = function.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        call_id = tool_call.get("id")
-        if not isinstance(call_id, str) or not call_id:
-            call_id = f"call_{uuid.uuid4().hex[:12]}"
-        arguments = function.get("arguments")
-        output.append(
-            {
-                "id": f"fc_{call_id}",
-                "type": "function_call",
-                "status": "completed",
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments if isinstance(arguments, str) else "",
-            }
-        )
-    return output
+def _repair_chat_completion_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    _hide_reasoning_text(payload)
+    payload, _ = _normalize_third_party_tool_call(payload)
+    payload, _ = _downgrade_invalid_third_party_tool_calls(payload)
+    return payload
 
 
 def _chat_completion_to_response_body(body: bytes, *, repair: bool = True) -> bytes:
-    payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict):
-        return body
-
-    output: list[dict[str, Any]] = []
-    choices = payload.get("choices")
-    if isinstance(choices, list):
-        for index, choice in enumerate(choices):
-            if not isinstance(choice, dict):
-                continue
-            message = choice.get("message")
-            if not isinstance(message, dict):
-                continue
-            tool_outputs = _chat_completion_tool_outputs(message)
-            if tool_outputs:
-                output.extend(tool_outputs)
-                continue
-            message_output = _chat_completion_message_output(message, index)
-            if message_output is not None:
-                output.append(message_output)
-
-    response_payload: dict[str, Any] = {
-        "id": payload.get("id") if isinstance(payload.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}",
-        "object": "response",
-        "status": "completed",
-        "model": payload.get("model"),
-        "output": output,
-    }
-    if "usage" in payload:
-        response_payload["usage"] = payload["usage"]
-
-    if repair:
-        _hide_reasoning_text(response_payload)
-        response_payload, _ = _normalize_third_party_tool_call(response_payload)
-        response_payload, _ = _downgrade_invalid_third_party_tool_calls(response_payload)
-    return json.dumps(response_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    try:
+        return chat_completion_to_response_body(
+            body,
+            repair=repair,
+            chat_content_text=_chat_content_text,
+            xmlish_tool_outputs=_xmlish_tool_call_outputs_from_text,
+            repair_response=_repair_chat_completion_response_payload,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _normalize_chat_function_call_name(name: str) -> str:
@@ -3252,235 +3192,14 @@ def _normalize_chat_function_call_name(name: str) -> str:
 
 
 def _chat_stream_chunks_to_response_events(chunks: list[Mapping[str, Any] | str]) -> list[dict[str, Any]]:
-    """Translate Chat Completions tool-call chunks into Responses events.
-
-    OpenAI-compatible chat streams usually send tool_call.id only in the first
-    delta. Later chunks may omit it or send an empty value, so the first
-    non-empty id must win for Codex to pair tool calls with outputs.
-    """
-    states: dict[int, dict[str, Any]] = {}
-    events: list[dict[str, Any]] = []
-    text_parts: list[str] = []
-    finished = False
-    response_id = f"resp_{uuid.uuid4().hex[:12]}"
-    model: str | None = None
-
-    for chunk in chunks:
-        if not isinstance(chunk, Mapping):
-            continue
-        chunk_model = chunk.get("model")
-        if isinstance(chunk_model, str) and chunk_model:
-            model = chunk_model
-            break
-
-    created_response: dict[str, Any] = {
-        "id": response_id,
-        "object": "response",
-        "status": "in_progress",
-        "output": [],
-    }
-    if model:
-        created_response["model"] = model
-    events.append({"type": "response.created", "response": created_response})
-
-    def state_for(index: int) -> dict[str, Any]:
-        if index not in states:
-            output_index = len(states)
-            states[index] = {
-                "output_index": output_index,
-                "item_id": "",
-                "call_id": "",
-                "name": "",
-                "arguments": [],
-                "added": False,
-            }
-        return states[index]
-
-    def maybe_emit_added(state: dict[str, Any]) -> None:
-        if state["added"] or not state["call_id"] or not state["name"]:
-            return
-        state["item_id"] = f"fc_{state['call_id']}"
-        events.append(
-            {
-                "type": "response.output_item.added",
-                "output_index": state["output_index"],
-                "item": {
-                    "id": state["item_id"],
-                    "type": "function_call",
-                    "status": "in_progress",
-                    "call_id": state["call_id"],
-                    "name": state["name"],
-                    "arguments": "",
-                },
-            }
+    try:
+        return chat_stream_chunks_to_response_events(
+            chunks,
+            normalize_function_name=_normalize_chat_function_call_name,
+            xmlish_tool_outputs=_xmlish_tool_call_outputs_from_text,
         )
-        state["added"] = True
-
-    for chunk in chunks:
-        if chunk == "[DONE]":
-            finished = True
-            continue
-        if not isinstance(chunk, Mapping):
-            continue
-        choices = chunk.get("choices")
-        if not isinstance(choices, list):
-            continue
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            if choice.get("finish_reason") is not None:
-                finished = True
-            delta = choice.get("delta")
-            message = choice.get("message")
-            source = delta if isinstance(delta, dict) else message if isinstance(message, dict) else None
-            if not isinstance(source, dict):
-                continue
-            content = source.get("content")
-            if isinstance(content, str) and content:
-                text_parts.append(content)
-            tool_calls = source.get("tool_calls")
-            if not isinstance(tool_calls, list):
-                continue
-            for fallback_index, tool_call in enumerate(tool_calls):
-                if not isinstance(tool_call, dict):
-                    continue
-                raw_index = tool_call.get("index", fallback_index)
-                index = raw_index if isinstance(raw_index, int) else fallback_index
-                state = state_for(index)
-
-                call_id = tool_call.get("id")
-                if isinstance(call_id, str) and call_id and not state["call_id"]:
-                    state["call_id"] = call_id
-
-                function = tool_call.get("function")
-                if isinstance(function, dict):
-                    name = function.get("name")
-                    if isinstance(name, str) and name and not state["name"]:
-                        state["name"] = _normalize_chat_function_call_name(name)
-                    if state["name"] and not state["call_id"]:
-                        state["call_id"] = f"call_{uuid.uuid4().hex[:12]}"
-                    arguments = function.get("arguments")
-                    if isinstance(arguments, str) and arguments:
-                        state["arguments"].append(arguments)
-
-                maybe_emit_added(state)
-                if state["added"] and isinstance(function, dict):
-                    arguments = function.get("arguments")
-                    if isinstance(arguments, str) and arguments:
-                        events.append(
-                            {
-                                "type": "response.function_call_arguments.delta",
-                                "item_id": state["item_id"],
-                                "output_index": state["output_index"],
-                                "delta": arguments,
-                            }
-                        )
-
-    if finished:
-        output: list[dict[str, Any]] = []
-        text = "".join(text_parts)
-        xmlish_tool_outputs = _xmlish_tool_call_outputs_from_text(text) if text else []
-        for state in sorted(states.values(), key=lambda item: item["output_index"]):
-            maybe_emit_added(state)
-            if not state["added"]:
-                continue
-            arguments = "".join(state["arguments"])
-            item = {
-                "id": state["item_id"],
-                "type": "function_call",
-                "status": "completed",
-                "call_id": state["call_id"],
-                "name": state["name"],
-                "arguments": arguments,
-            }
-            events.append(
-                {
-                    "type": "response.function_call_arguments.done",
-                    "item_id": state["item_id"],
-                    "output_index": state["output_index"],
-                    "arguments": arguments,
-                }
-            )
-            events.append({"type": "response.output_item.done", "output_index": state["output_index"], "item": item})
-            output.append(item)
-        if xmlish_tool_outputs and not output:
-            for item in xmlish_tool_outputs:
-                output_index = len(output)
-                in_progress_item = dict(item)
-                in_progress_item["status"] = "in_progress"
-                in_progress_item["arguments"] = ""
-                events.append(
-                    {
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": in_progress_item,
-                    }
-                )
-                events.append(
-                    {
-                        "type": "response.function_call_arguments.done",
-                        "item_id": item["id"],
-                        "output_index": output_index,
-                        "arguments": item["arguments"],
-                    }
-                )
-                events.append({"type": "response.output_item.done", "output_index": output_index, "item": item})
-                output.append(item)
-        elif text and not output:
-            output_index = len(output)
-            item_id = f"msg_{uuid.uuid4().hex[:12]}"
-            item = {
-                "id": item_id,
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-            events.append(
-                {
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": {
-                        "id": item_id,
-                        "type": "message",
-                        "status": "in_progress",
-                        "role": "assistant",
-                        "content": [],
-                    },
-                }
-            )
-            for part in text_parts:
-                events.append(
-                    {
-                        "type": "response.output_text.delta",
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "delta": part,
-                    }
-                )
-            events.append(
-                {
-                    "type": "response.output_text.done",
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "content_index": 0,
-                    "text": text,
-                }
-            )
-            events.append({"type": "response.output_item.done", "output_index": output_index, "item": item})
-            output.append(item)
-        completed_response: dict[str, Any] = {
-            "id": response_id,
-            "object": "response",
-            "status": "completed",
-            "output": output,
-        }
-        if model:
-            completed_response["model"] = model
-        events.append({"type": "response.completed", "response": completed_response})
-
-    return events
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _response_events_shape_summary(events: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -3838,110 +3557,11 @@ def _lifecycle_final_issue_missing_reason(issue: str) -> str:
     return "lifecycle_final_format_response"
 
 
-def _chat_content_to_responses_content(value: Any) -> list[dict[str, Any]]:
-    """Translate a chat-completions message ``content`` into Responses content parts."""
-    if isinstance(value, str):
-        return [{"type": "input_text", "text": value}]
-    if not isinstance(value, list):
-        return []
-    parts: list[dict[str, Any]] = []
-    for fragment in value:
-        if not isinstance(fragment, dict):
-            continue
-        if fragment.get("type") == "text" and isinstance(fragment.get("text"), str):
-            parts.append({"type": "input_text", "text": fragment["text"]})
-        elif fragment.get("type") == "image_url" and isinstance(fragment.get("image_url"), dict):
-            url = fragment["image_url"].get("url")
-            if isinstance(url, str):
-                parts.append({"type": "input_image", "image_url": url})
-    return parts
-
-
-def _chat_messages_to_responses_input(messages: Any) -> tuple[str | None, list[dict[str, Any]]]:
-    """Convert chat-completions ``messages`` into Responses ``instructions`` + ``input``.
-
-    System messages are collected into ``instructions``; the rest become
-    ``message`` input items in order.  Assistant messages with ``tool_calls``
-    become ``function_call`` items so the upstream can reconstruct the transcript.
-    """
-    if not isinstance(messages, list):
-        return None, []
-
-    instructions_parts: list[str] = []
-    input_items: list[dict[str, Any]] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role")
-        if role == "system":
-            content = message.get("content")
-            text = content if isinstance(content, str) else _chat_content_text(content)
-            if text:
-                instructions_parts.append(text)
-            continue
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, list) and role == "assistant":
-            # Emit any textual content first, then function_call items.
-            content = message.get("content")
-            text = content if isinstance(content, str) else _chat_content_text(content)
-            if text:
-                input_items.append({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": text, "annotations": []}],
-                })
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict):
-                    continue
-                function = tool_call.get("function")
-                if not isinstance(function, dict):
-                    continue
-                name = function.get("name")
-                if not isinstance(name, str) or not name:
-                    continue
-                call_id = tool_call.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-                arguments = function.get("arguments")
-                input_items.append({
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": arguments if isinstance(arguments, str) else "",
-                })
-            continue
-        if role == "tool":
-            # tool result → function_call_output
-            call_id = message.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}"
-            content = message.get("content")
-            output = content if isinstance(content, str) else _chat_content_text(content)
-            input_items.append({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output or "",
-            })
-            continue
-        # user / assistant text
-        resp_role = role if role in {"user", "assistant"} else "user"
-        content_parts = _chat_content_to_responses_content(message.get("content"))
-        if not content_parts:
-            content_parts = [{"type": "input_text", "text": ""}]
-        content_field = "input_text" if resp_role == "user" else "output_text"
-        # For user messages use input_text parts; for assistant use output_text.
-        adjusted = []
-        for part in content_parts:
-            if part.get("type") == "input_text" and resp_role == "assistant":
-                adjusted.append({"type": "output_text", "text": part.get("text", ""), "annotations": []})
-            elif part.get("type") == "output_text" and resp_role == "user":
-                adjusted.append({"type": "input_text", "text": part.get("text", "")})
-            else:
-                adjusted.append(part)
-        input_items.append({
-            "type": "message",
-            "role": resp_role,
-            "content": adjusted or [{"type": "input_text", "text": ""}],
-        })
-
-    instructions = "\n\n".join(instructions_parts) if instructions_parts else None
-    return instructions, input_items
+_chat_content_to_responses_content = chat_content_to_responses_content
+_chat_messages_to_responses_input = partial(
+    chat_messages_to_responses_input,
+    chat_content_text=_chat_content_text,
+)
 
 
 def _normalize_responses_string_input(payload: dict[str, Any]) -> bool:
@@ -3984,84 +3604,15 @@ def _normalize_responses_message_input_items(payload: dict[str, Any]) -> bool:
     return changed
 
 
-def _chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
-    """Convert chat-completions ``tools`` into Responses ``tools``."""
-    if not isinstance(value, list):
-        return []
-    tools: list[dict[str, Any]] = []
-    for item in value:
-        if not isinstance(item, dict) or item.get("type") != "function":
-            continue
-        function = item.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = function.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        tool: dict[str, Any] = {"type": "function", "name": name}
-        description = function.get("description")
-        if isinstance(description, str):
-            tool["description"] = description
-        parameters = function.get("parameters")
-        if isinstance(parameters, dict):
-            tool["parameters"] = parameters
-        strict = function.get("strict")
-        if isinstance(strict, bool):
-            tool["strict"] = strict
-        tools.append(tool)
-    return tools
-
-
-def _chat_tool_choice_to_responses_tool_choice(value: Any) -> Any:
-    """Convert chat-completions ``tool_choice`` into Responses ``tool_choice``."""
-    if isinstance(value, str):
-        if value == "auto":
-            return "auto"
-        if value == "none":
-            return "none"
-        if value == "required":
-            return "required"
-        return value
-    if isinstance(value, dict) and value.get("type") == "function":
-        function = value.get("function")
-        if isinstance(function, dict) and isinstance(function.get("name"), str):
-            return {"type": "function", "name": function["name"]}
-    return value
+_chat_tools_to_responses_tools = chat_tools_to_responses_tools
+_chat_tool_choice_to_responses_tool_choice = chat_tool_choice_to_responses_tool_choice
 
 
 def _chat_completions_request_to_responses_body(body: bytes) -> bytes:
-    """Convert an inbound Chat Completions request into a Responses API request body."""
-    payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict):
-        return body
-
-    instructions, input_items = _chat_messages_to_responses_input(payload.get("messages"))
-    if not input_items:
-        input_items = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": ""}]}]
-
-    responses_payload: dict[str, Any] = {
-        "model": payload.get("model"),
-        "input": input_items,
-    }
-    if isinstance(instructions, str) and instructions.strip():
-        responses_payload["instructions"] = instructions
-
-    for key in ("stream", "temperature", "top_p", "presence_penalty", "frequency_penalty", "parallel_tool_calls"):
-        if key in payload:
-            responses_payload[key] = payload[key]
-    if "max_tokens" in payload:
-        responses_payload["max_output_tokens"] = payload["max_tokens"]
-    if "max_output_tokens" in payload:
-        responses_payload["max_output_tokens"] = payload["max_output_tokens"]
-
-    tools = _chat_tools_to_responses_tools(payload.get("tools"))
-    if tools:
-        responses_payload["tools"] = tools
-    tool_choice = _chat_tool_choice_to_responses_tool_choice(payload.get("tool_choice"))
-    if tool_choice is not None:
-        responses_payload["tool_choice"] = tool_choice
-
-    return json.dumps(responses_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return chat_completions_request_to_responses_body(
+        body,
+        chat_content_text=_chat_content_text,
+    )
 
 
 def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | None:
@@ -4084,188 +3635,25 @@ def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | Non
 
 
 def _response_body_to_chat_completion_body(body: bytes) -> bytes:
-    """Convert a Responses API response body into a Chat Completions response body."""
-    payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict):
-        return body
-    output = payload.get("output")
-    has_error_signal = (
-        payload.get("error") is not None
-        or isinstance(payload.get("detail"), str)
-        or payload.get("status") in {"failed", "incomplete"}
-    )
-    if has_error_signal and (not isinstance(output, list) or not output):
-        return _chat_completion_error_body(payload)
-
-    text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    if isinstance(output, list):
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "message":
-                content = item.get("content")
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") in ("output_text", "text"):
-                            text = part.get("text")
-                            if isinstance(text, str):
-                                text_parts.append(text)
-            elif item.get("type") == "function_call":
-                call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-                name = _chat_function_name_from_response_item(item)
-                arguments = item.get("arguments")
-                if isinstance(name, str) and name:
-                    tool_calls.append({
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments if isinstance(arguments, str) else "",
-                        },
-                    })
-
-    message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-        if not message["content"]:
-            message["content"] = None
-
-    choice: dict[str, Any] = {
-        "index": 0,
-        "message": message,
-        "finish_reason": "tool_calls" if tool_calls else "stop",
-    }
-
-    chat_payload: dict[str, Any] = {
-        "id": payload.get("id") if isinstance(payload.get("id"), str) else f"chatcmpl_{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": payload.get("model"),
-        "choices": [choice],
-    }
-    usage = payload.get("usage")
-    if isinstance(usage, dict):
-        chat_payload["usage"] = usage
-
-    return json.dumps(chat_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    try:
+        return response_body_to_chat_completion_body(
+            body,
+            function_name_from_response_item=_chat_function_name_from_response_item,
+            error_body=_chat_completion_error_body,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
-    payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict):
-        return []
-
-    response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"chatcmpl_{uuid.uuid4().hex[:12]}"
-    model = payload.get("model")
-    chunks: list[dict[str, Any]] = [
-        {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-        }
-    ]
-    choices = payload.get("choices")
-    if isinstance(choices, list):
-        for fallback_index, choice in enumerate(choices):
-            if not isinstance(choice, Mapping):
-                continue
-            index = choice.get("index")
-            index = index if isinstance(index, int) else fallback_index
-            message = choice.get("message")
-            if not isinstance(message, Mapping):
-                continue
-            content = message.get("content")
-            if isinstance(content, str) and content:
-                chunks.append(
-                    {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{"index": index, "delta": {"content": content}, "finish_reason": None}],
-                    }
-                )
-            tool_calls = message.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for fallback_tool_index, tool_call in enumerate(tool_calls):
-                    if not isinstance(tool_call, Mapping):
-                        continue
-                    function = tool_call.get("function")
-                    if not isinstance(function, Mapping):
-                        continue
-                    name = function.get("name")
-                    if not isinstance(name, str) or not name:
-                        continue
-                    tool_index = tool_call.get("index")
-                    tool_index = tool_index if isinstance(tool_index, int) else fallback_tool_index
-                    call_id = tool_call.get("id") if isinstance(tool_call.get("id"), str) else f"call_{uuid.uuid4().hex[:12]}"
-                    arguments = function.get("arguments") if isinstance(function.get("arguments"), str) else ""
-                    chunks.append(
-                        {
-                            "id": response_id,
-                            "object": "chat.completion.chunk",
-                            "created": int(time.time()),
-                            "model": model,
-                            "choices": [
-                                {
-                                    "index": index,
-                                    "delta": {
-                                        "tool_calls": [
-                                            {
-                                                "index": tool_index,
-                                                "id": call_id,
-                                                "type": "function",
-                                                "function": {"name": name, "arguments": arguments},
-                                            }
-                                        ]
-                                    },
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                    )
-            finish_reason = choice.get("finish_reason")
-            if not isinstance(finish_reason, str):
-                finish_reason = "tool_calls" if isinstance(tool_calls, list) and tool_calls else "stop"
-            chunks.append(
-                {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [{"index": index, "delta": {}, "finish_reason": finish_reason}],
-                }
-            )
-    return chunks
+    try:
+        return chat_completion_body_to_stream_chunks(body)
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _chat_completion_error_body(payload: Mapping[str, Any]) -> bytes:
-    error = payload.get("error")
-    if isinstance(error, Mapping):
-        normalized_error = dict(error)
-        if not isinstance(normalized_error.get("message"), str):
-            normalized_error["message"] = json.dumps(error, ensure_ascii=True, separators=(",", ":"))
-        normalized_error.setdefault("type", "upstream_error")
-        normalized_error.setdefault("code", payload.get("code"))
-    else:
-        error_type = payload.get("type") if isinstance(payload.get("type"), str) else "upstream_error"
-        detail = payload.get("detail")
-        message = error if isinstance(error, str) and error else detail or "Upstream request failed"
-        if error_type == "upstream_stream_error" and isinstance(detail, str) and detail:
-            message = detail
-        normalized_error = {
-            "message": message,
-            "type": error_type,
-            "code": payload.get("code") or (error if error_type == "upstream_stream_error" else None),
-        }
-    if isinstance(payload.get("status"), int):
-        normalized_error.setdefault("status", payload.get("status"))
-    if isinstance(payload.get("upstream"), str):
-        normalized_error.setdefault("upstream", payload.get("upstream"))
-    return json.dumps({"error": normalized_error}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return chat_completion_error_body(payload)
 
 
 class UpstreamStreamInterruptedError(RuntimeError):
@@ -4274,11 +3662,6 @@ class UpstreamStreamInterruptedError(RuntimeError):
     def __init__(self, cause: BaseException):
         self.cause = cause
         super().__init__(str(cause))
-
-
-class UpstreamStreamIncompleteError(RuntimeError):
-    """Raised when an upstream stream ends without a terminal event."""
-
 
 class UpstreamEmptyCompletedResponseError(UpstreamStreamIncompleteError):
     """Raised when a third-party Responses stream completes with no visible output."""
@@ -4310,13 +3693,6 @@ def _responses_events_have_terminal(events: list[Mapping[str, Any]]) -> bool:
     return False
 
 
-def _responses_events_have_completed(events: list[Mapping[str, Any]]) -> bool:
-    for event in events:
-        if isinstance(event, Mapping) and event.get("type") == "response.completed":
-            return True
-    return False
-
-
 def _chat_stream_chunk_has_finish(chunk: Mapping[str, Any]) -> bool:
     choices = chunk.get("choices")
     if not isinstance(choices, list):
@@ -4341,515 +3717,36 @@ def _response_events_to_chat_stream_chunks(
     *,
     require_completed: bool = False,
 ) -> list[dict[str, Any]]:
-    """Convert Responses API SSE events into Chat Completions stream chunks.
-
-    Mirrors :func:`_chat_stream_chunks_to_response_events`.  Text deltas become
-    ``delta.content`` fragments; function_call argument deltas become
-    ``delta.tool_calls`` fragments.  A final chunk with ``finish_reason`` is
-    emitted when the response completes.
-    """
-    if require_completed and not _responses_events_have_completed(events):
-        raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
-
-    chunks: list[dict[str, Any]] = []
-    tool_states: dict[str, dict[str, Any]] = {}
-    model: str | None = None
-    response_id: str | None = None
-    finish_reason: str | None = None
-
-    def tool_state(item_id: str) -> dict[str, Any]:
-        if item_id not in tool_states:
-            index = len(tool_states)
-            tool_states[item_id] = {
-                "index": index,
-                "id": "",
-                "name": "",
-                "arguments": "",
-                "emitted_header": False,
-            }
-        return tool_states[item_id]
-
-    for event in events:
-        if not isinstance(event, Mapping):
-            continue
-        event_type = event.get("type")
-        if event_type == "response.created":
-            response_obj = event.get("response")
-            if isinstance(response_obj, Mapping):
-                response_id = response_obj.get("id") or response_id
-                model = response_obj.get("model") or model
-            # Emit an initial role chunk — many OpenAI-compatible clients
-            # (including ZCode) expect the first delta to carry {"role":"assistant"}.
-            chunks.append({
-                "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            })
-            continue
-        if event_type == "response.output_text.delta":
-            delta_text = event.get("delta")
-            if isinstance(delta_text, str) and delta_text:
-                chunks.append({
-                    "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"content": delta_text}, "finish_reason": None}],
-                })
-            continue
-        if event_type == "response.output_item.added":
-            item = event.get("item")
-            if isinstance(item, Mapping) and item.get("type") == "function_call":
-                item_id = item.get("id") or item.get("call_id") or ""
-                state = tool_state(item_id)
-                state["id"] = item.get("call_id") or state["id"]
-                state["name"] = _chat_function_name_from_response_item(item) or state["name"]
-                if state["id"] and state["name"] and not state["emitted_header"]:
-                    chunks.append({
-                        "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [{
-                                    "index": state["index"],
-                                    "id": state["id"],
-                                    "type": "function",
-                                    "function": {"name": state["name"], "arguments": ""},
-                                }],
-                            },
-                            "finish_reason": None,
-                        }],
-                    })
-                    state["emitted_header"] = True
-            continue
-        if event_type == "response.function_call_arguments.delta":
-            item_id = event.get("item_id") or ""
-            state = tool_state(item_id)
-            delta_args = event.get("delta")
-            if isinstance(delta_args, str) and delta_args:
-                if not state["emitted_header"]:
-                    # Header not seen yet; emit it now with the delta.
-                    chunks.append({
-                        "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [{
-                                    "index": state["index"],
-                                    "id": state["id"] or f"call_{uuid.uuid4().hex[:12]}",
-                                    "type": "function",
-                                    "function": {"name": state["name"], "arguments": delta_args},
-                                }],
-                            },
-                            "finish_reason": None,
-                        }],
-                    })
-                    state["emitted_header"] = True
-                else:
-                    chunks.append({
-                        "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [{
-                                    "index": state["index"],
-                                    "function": {"arguments": delta_args},
-                                }],
-                            },
-                            "finish_reason": None,
-                        }],
-                    })
-            continue
-        if event_type == "response.completed":
-            response_obj = event.get("response")
-            if isinstance(response_obj, Mapping):
-                output = response_obj.get("output")
-                if isinstance(output, list):
-                    has_tool = any(
-                        isinstance(i, Mapping) and i.get("type") == "function_call"
-                        for i in output
-                    )
-                    finish_reason = "tool_calls" if has_tool else "stop"
-                else:
-                    finish_reason = "stop"
-            else:
-                finish_reason = "stop"
-            continue
-
-    if finish_reason is None:
-        finish_reason = "stop"
-    chunks.append({
-        "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-    })
-    return chunks
+    try:
+        return response_events_to_chat_stream_chunks(
+            events,
+            require_completed=require_completed,
+            function_name_from_response_item=_chat_function_name_from_response_item,
+        )
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
-class _ResponsesToChatStreamConverter:
-    def __init__(self) -> None:
-        self.tool_states: dict[str, dict[str, Any]] = {}
-        self.model: str | None = None
-        self.response_id: str | None = None
-        self.completed = False
-
-    def _tool_state(self, item_id: str) -> dict[str, Any]:
-        if item_id not in self.tool_states:
-            index = len(self.tool_states)
-            self.tool_states[item_id] = {
-                "index": index,
-                "id": "",
-                "name": "",
-                "arguments": "",
-                "emitted_header": False,
-            }
-        return self.tool_states[item_id]
-
-    def _chunk(self, delta: Mapping[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
-        return {
-            "id": self.response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": self.model,
-            "choices": [{"index": 0, "delta": dict(delta), "finish_reason": finish_reason}],
-        }
-
+class _ResponsesToChatStreamConverter(ResponsesToChatStreamConverter):
     def chunks_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
-        event_type = event.get("type")
-        if event_type == "response.created":
-            response_obj = event.get("response")
-            if isinstance(response_obj, Mapping):
-                self.response_id = response_obj.get("id") or self.response_id
-                self.model = response_obj.get("model") or self.model
-            return [self._chunk({"role": "assistant"})]
-        if event_type == "response.output_text.delta":
-            delta_text = event.get("delta")
-            if isinstance(delta_text, str) and delta_text:
-                return [self._chunk({"content": delta_text})]
-            return []
-        if event_type == "response.output_item.added":
-            item = event.get("item")
-            if not (isinstance(item, Mapping) and item.get("type") == "function_call"):
-                return []
-            item_id = item.get("id") or item.get("call_id") or ""
-            state = self._tool_state(str(item_id))
-            state["id"] = item.get("call_id") or state["id"]
-            state["name"] = item.get("name") or state["name"]
-            if not (state["id"] and state["name"] and not state["emitted_header"]):
-                return []
-            state["emitted_header"] = True
-            return [
-                self._chunk(
-                    {
-                        "tool_calls": [
-                            {
-                                "index": state["index"],
-                                "id": state["id"],
-                                "type": "function",
-                                "function": {"name": state["name"], "arguments": ""},
-                            }
-                        ]
-                    }
-                )
-            ]
-        if event_type == "response.function_call_arguments.delta":
-            item_id = str(event.get("item_id") or "")
-            state = self._tool_state(item_id)
-            delta_args = event.get("delta")
-            if not (isinstance(delta_args, str) and delta_args):
-                return []
-            if not state["emitted_header"]:
-                state["emitted_header"] = True
-                call_id = state["id"] or f"call_{uuid.uuid4().hex[:12]}"
-                return [
-                    self._chunk(
-                        {
-                            "tool_calls": [
-                                {
-                                    "index": state["index"],
-                                    "id": call_id,
-                                    "type": "function",
-                                    "function": {"name": state["name"], "arguments": delta_args},
-                                }
-                            ]
-                        }
-                    )
-                ]
-            return [
-                self._chunk(
-                    {
-                        "tool_calls": [
-                            {
-                                "index": state["index"],
-                                "function": {"arguments": delta_args},
-                            }
-                        ]
-                    }
-                )
-            ]
-        if event_type == "response.completed":
-            self.completed = True
-            finish_reason = "stop"
-            response_obj = event.get("response")
-            if isinstance(response_obj, Mapping):
-                output = response_obj.get("output")
-                if isinstance(output, list) and any(
-                    isinstance(item, Mapping) and item.get("type") == "function_call"
-                    for item in output
-                ):
-                    finish_reason = "tool_calls"
-            return [self._chunk({}, finish_reason=finish_reason)]
-        return []
+        try:
+            return super().chunks_for_event(event)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
 
 
-class _ChatToResponsesStreamConverter:
-    def __init__(self) -> None:
-        self.response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        self.model: str | None = None
-        self.item_id = f"msg_{uuid.uuid4().hex[:12]}"
-        self.text_parts: list[str] = []
-        self.message_output_index: int | None = None
-        self.next_output_index = 0
-        self.tool_states: dict[int, dict[str, Any]] = {}
-        self.created = False
-        self.message_started = False
-        self.completed = False
-
-    def _allocate_output_index(self) -> int:
-        output_index = self.next_output_index
-        self.next_output_index += 1
-        return output_index
-
-    def _created_events(self) -> list[dict[str, Any]]:
-        if self.created:
-            return []
-        self.created = True
-        response = {
-            "id": self.response_id,
-            "object": "response",
-            "status": "in_progress",
-            "model": self.model,
-            "output": [],
-        }
-        return [
-            {"type": "response.created", "response": response},
-            {"type": "response.in_progress", "response": response},
-        ]
-
-    def _message_start_events(self) -> list[dict[str, Any]]:
-        events = self._created_events()
-        if self.message_started:
-            return events
-        if self.message_output_index is None:
-            self.message_output_index = self._allocate_output_index()
-        self.message_started = True
-        events.extend(
-            [
-                {
-                    "type": "response.output_item.added",
-                    "output_index": self.message_output_index,
-                    "item": {
-                        "id": self.item_id,
-                        "type": "message",
-                        "status": "in_progress",
-                        "role": "assistant",
-                        "content": [],
-                    },
-                },
-                {
-                    "type": "response.content_part.added",
-                    "output_index": self.message_output_index,
-                    "item_id": self.item_id,
-                    "content_index": 0,
-                    "part": {"type": "output_text", "text": "", "annotations": []},
-                },
-            ]
-        )
-        return events
-
-    def _tool_state(self, index: int) -> dict[str, Any]:
-        if index not in self.tool_states:
-            self.tool_states[index] = {
-                "output_index": self._allocate_output_index(),
-                "item_id": "",
-                "call_id": "",
-                "name": "",
-                "arguments": [],
-                "added": False,
-                "done": False,
-            }
-        return self.tool_states[index]
-
-    def _tool_added_events(self, state: dict[str, Any]) -> list[dict[str, Any]]:
-        if state["added"] or not state["call_id"] or not state["name"]:
-            return []
-        events = self._created_events()
-        state["item_id"] = f"fc_{state['call_id']}"
-        events.append(
-            {
-                "type": "response.output_item.added",
-                "output_index": state["output_index"],
-                "item": {
-                    "id": state["item_id"],
-                    "type": "function_call",
-                    "status": "in_progress",
-                    "call_id": state["call_id"],
-                    "name": state["name"],
-                    "arguments": "",
-                },
-            }
-        )
-        state["added"] = True
-        return events
-
-    def _complete_events(self) -> list[dict[str, Any]]:
-        if self.completed:
-            return []
-        self.completed = True
-        events = self._created_events()
-        output_by_index: dict[int, dict[str, Any]] = {}
-        for state in sorted(self.tool_states.values(), key=lambda item: item["output_index"]):
-            events.extend(self._tool_added_events(state))
-            if not state["added"] or state["done"]:
-                continue
-            arguments = "".join(state["arguments"])
-            item = {
-                "id": state["item_id"],
-                "type": "function_call",
-                "status": "completed",
-                "call_id": state["call_id"],
-                "name": state["name"],
-                "arguments": arguments,
-            }
-            events.extend(
-                [
-                    {
-                        "type": "response.function_call_arguments.done",
-                        "item_id": state["item_id"],
-                        "output_index": state["output_index"],
-                        "arguments": arguments,
-                    },
-                    {"type": "response.output_item.done", "output_index": state["output_index"], "item": item},
-                ]
-            )
-            state["done"] = True
-            output_by_index[state["output_index"]] = item
-        if self.message_started:
-            text = "".join(self.text_parts)
-            output_index = self.message_output_index if self.message_output_index is not None else 0
-            item = {
-                "id": self.item_id,
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-            events.extend(
-                [
-                    {
-                        "type": "response.output_text.done",
-                        "item_id": self.item_id,
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "text": text,
-                    },
-                    {"type": "response.output_item.done", "output_index": output_index, "item": item},
-                ]
-            )
-            output_by_index[output_index] = item
-        output = [
-            item
-            for _, item in sorted(output_by_index.items(), key=lambda pair: pair[0])
-        ]
-        events.append(
-            {
-                "type": "response.completed",
-                "response": {
-                    "id": self.response_id,
-                    "object": "response",
-                    "status": "completed",
-                    "model": self.model,
-                    "output": output,
-                },
-            }
-        )
-        return events
+class _ChatToResponsesStreamConverter(ChatToResponsesStreamConverter):
+    def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
+        try:
+            return super().events_for_chunk(chunk)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
 
     def events_for_done(self) -> list[dict[str, Any]]:
-        return self._complete_events()
-
-    def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
-        if isinstance(chunk.get("model"), str):
-            self.model = chunk.get("model")
-        events: list[dict[str, Any]] = []
-        choices = chunk.get("choices")
-        if not isinstance(choices, list):
-            return events
-        for choice in choices:
-            if not isinstance(choice, Mapping):
-                continue
-            delta = choice.get("delta")
-            if isinstance(delta, Mapping):
-                content = delta.get("content")
-                if isinstance(content, str) and content:
-                    self.text_parts.append(content)
-                    events.extend(self._message_start_events())
-                    events.append(
-                        {
-                            "type": "response.output_text.delta",
-                            "item_id": self.item_id,
-                            "output_index": self.message_output_index if self.message_output_index is not None else 0,
-                            "content_index": 0,
-                            "delta": content,
-                        }
-                    )
-                tool_calls = delta.get("tool_calls")
-                if isinstance(tool_calls, list):
-                    for fallback_index, tool_call in enumerate(tool_calls):
-                        if not isinstance(tool_call, Mapping):
-                            continue
-                        raw_index = tool_call.get("index", fallback_index)
-                        index = raw_index if isinstance(raw_index, int) else fallback_index
-                        state = self._tool_state(index)
-                        call_id = tool_call.get("id")
-                        if isinstance(call_id, str) and call_id and not state["call_id"]:
-                            state["call_id"] = call_id
-                        function = tool_call.get("function")
-                        argument_delta: str | None = None
-                        if isinstance(function, Mapping):
-                            name = function.get("name")
-                            if isinstance(name, str) and name and not state["name"]:
-                                state["name"] = name
-                            arguments = function.get("arguments")
-                            if isinstance(arguments, str) and arguments:
-                                state["arguments"].append(arguments)
-                                argument_delta = arguments
-                        events.extend(self._tool_added_events(state))
-                        if state["added"] and argument_delta:
-                            events.append(
-                                {
-                                    "type": "response.function_call_arguments.delta",
-                                    "item_id": state["item_id"],
-                                    "output_index": state["output_index"],
-                                    "delta": argument_delta,
-                                }
-                            )
-            if choice.get("finish_reason") is not None:
-                events.extend(self._complete_events())
-        return events
+        try:
+            return super().events_for_done()
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def _is_reasoning_sse_payload(payload: Mapping[str, Any] | None) -> bool:
@@ -4867,213 +3764,18 @@ def _events_to_responses_body(
     *,
     require_completed: bool = False,
 ) -> bytes:
-    """Reconstruct a non-streaming Responses API body from SSE events.
-
-    Used when the upstream forces streaming (e.g. chatgpt.com) but the caller
-    requested a non-streaming response.  Collects output items and text from
-    the event stream into a single ``response`` object.
-    """
-    if require_completed and not _responses_events_have_completed(events):
-        raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
-
-    output: list[dict[str, Any]] = []
-    response_id = f"resp_{uuid.uuid4().hex[:12]}"
-    model: str | None = None
-    text_parts: list[str] = []
-    current_item: dict[str, Any] | None = None
-    usage: Mapping[str, Any] | None = None
-    response_payload: dict[str, Any] = {}
-
-    for event in events:
-        if not isinstance(event, Mapping):
-            continue
-        event_type = event.get("type")
-        if event_type == "response.created":
-            resp = event.get("response")
-            if isinstance(resp, Mapping):
-                response_payload.update(dict(resp))
-                response_id = resp.get("id") or response_id
-                model = resp.get("model") or model
-        elif event_type == "response.output_item.added":
-            item = event.get("item")
-            if isinstance(item, dict):
-                current_item = dict(item)
-        elif event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                text_parts.append(delta)
-        elif event_type == "response.output_item.done":
-            item = event.get("item")
-            if isinstance(item, dict):
-                output.append(dict(item))
-                current_item = None
-        elif event_type == "response.function_call_arguments.done":
-            # Ensure the function_call item is in output with final arguments.
-            args = event.get("arguments")
-            if current_item and isinstance(args, str):
-                current_item["arguments"] = args
-        elif event_type == "response.completed":
-            resp = event.get("response")
-            if isinstance(resp, Mapping):
-                response_payload.update(dict(resp))
-                response_id = resp.get("id") or response_id
-                model = resp.get("model") or model
-                usage = _usage_from_payload(resp) or usage
-                resp_output = resp.get("output")
-                if isinstance(resp_output, list) and not output:
-                    output = [dict(i) for i in resp_output if isinstance(i, dict)]
-
-    # If we collected text deltas but no output_item.done for the message,
-    # synthesize a message item.
-    if text_parts and not any(i.get("type") == "message" for i in output):
-        output.append({
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": "".join(text_parts), "annotations": []}],
-        })
-
-    payload: dict[str, Any] = dict(response_payload)
-    payload["id"] = response_id
-    payload.setdefault("object", "response")
-    payload.setdefault("status", "completed")
-    if model is not None or "model" not in payload:
-        payload["model"] = model
-    if output or not isinstance(payload.get("output"), list):
-        payload["output"] = output
-    if usage is not None:
-        payload["usage"] = dict(usage)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return events_to_responses_body(
+        events,
+        require_completed=require_completed,
+        usage_from_response=_usage_from_payload,
+    )
 
 
 def _response_body_to_response_sse_events(body: bytes) -> list[dict[str, Any]]:
-    payload = json.loads(body.decode("utf-8-sig"))
-    if not isinstance(payload, dict):
-        return []
-    if isinstance(payload.get("error"), (str, Mapping)):
-        return []
-
-    response = dict(payload)
-    response_id = response.get("id") if isinstance(response.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}"
-    response["id"] = response_id
-    response.setdefault("object", "response")
-    response.setdefault("status", "completed")
-    output = response.get("output")
-    output_items = output if isinstance(output, list) else []
-    model_value = response.get("model")
-
-    created_response = dict(response)
-    created_response["status"] = "in_progress"
-    created_response["output"] = []
-    events: list[dict[str, Any]] = [
-        {"type": "response.created", "response": created_response},
-        {"type": "response.in_progress", "response": created_response},
-    ]
-
-    for output_index, raw_item in enumerate(output_items):
-        if not isinstance(raw_item, Mapping):
-            continue
-        item = dict(raw_item)
-        item_type = item.get("type")
-        item_id = item.get("id") if isinstance(item.get("id"), str) else f"item_{output_index}"
-        item["id"] = item_id
-        if item_type == "message":
-            in_progress_item = dict(item)
-            in_progress_item["status"] = "in_progress"
-            events.append(
-                {
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": in_progress_item,
-                }
-            )
-            text = "".join(_collect_text_fragments(item.get("content")))
-            if text:
-                part = {"type": "output_text", "text": "", "annotations": []}
-                events.append(
-                    {
-                        "type": "response.content_part.added",
-                        "output_index": output_index,
-                        "item_id": item_id,
-                        "content_index": 0,
-                        "part": part,
-                    }
-                )
-                events.append(
-                    {
-                        "type": "response.output_text.delta",
-                        "output_index": output_index,
-                        "item_id": item_id,
-                        "content_index": 0,
-                        "delta": text,
-                    }
-                )
-                events.append(
-                    {
-                        "type": "response.output_text.done",
-                        "output_index": output_index,
-                        "item_id": item_id,
-                        "content_index": 0,
-                        "text": text,
-                    }
-                )
-                events.append(
-                    {
-                        "type": "response.content_part.done",
-                        "output_index": output_index,
-                        "item_id": item_id,
-                        "content_index": 0,
-                        "part": {"type": "output_text", "text": text, "annotations": []},
-                    }
-                )
-            events.append(
-                {
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": item,
-                }
-            )
-            continue
-        if item_type == "function_call":
-            in_progress_item = dict(item)
-            in_progress_item["status"] = "in_progress"
-            events.append(
-                {
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": in_progress_item,
-                }
-            )
-            arguments = item.get("arguments")
-            if isinstance(arguments, str) and arguments:
-                events.append(
-                    {
-                        "type": "response.function_call_arguments.delta",
-                        "output_index": output_index,
-                        "item_id": item_id,
-                        "delta": arguments,
-                    }
-                )
-            events.append(
-                {
-                    "type": "response.function_call_arguments.done",
-                    "output_index": output_index,
-                    "item_id": item_id,
-                    "arguments": arguments if isinstance(arguments, str) else "",
-                }
-            )
-            events.append(
-                {
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": item,
-                }
-            )
-
-    response["status"] = "completed"
-    if model_value is not None:
-        response["model"] = model_value
-    events.append({"type": "response.completed", "response": response})
-    return events
+    return response_body_to_response_sse_events(
+        body,
+        collect_text_fragments=_collect_text_fragments,
+    )
 
 
 def _count_sse_reasoning_event(
@@ -5481,6 +4183,10 @@ def _is_flattened_namespace_schema(value: Any) -> bool:
     )
 
 
+def _is_raw_namespace_schema(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("type") == "namespace"
+
+
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for namespace in tools:
@@ -5546,6 +4252,216 @@ def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
     return "text_compat"
 
 
+def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
+    configured = upstream.get("tool_surface_strategy", "eager")
+    if isinstance(configured, str) and configured in TOOL_SURFACE_STRATEGIES:
+        return configured
+    write_proxy_event("external_tool_surface_rejected", reason="invalid_tool_surface_strategy")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            TOOL_SURFACE_STRATEGY_ERROR_CODE,
+            "External tool surface strategy is invalid.",
+        )
+    )
+
+
+def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
+    configured = upstream.get("native_responses_tool_codec", "none")
+    if isinstance(configured, str) and configured in NATIVE_RESPONSES_TOOL_CODECS:
+        return configured
+    write_proxy_event("native_responses_tool_codec_rejected", reason="invalid_codec")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
+            "External native Responses tool codec is invalid.",
+        )
+    )
+
+
+STRICT_APPLY_PATCH_EXAMPLE = """*** Begin Patch
+*** Update File: example.txt
+@@
+-before
++after
+*** End Patch"""
+STRICT_APPLY_PATCH_CUSTOM_TOOL_FIELDS = frozenset(
+    {"type", "name", "description", "format"}
+)
+STRICT_APPLY_PATCH_FORMAT_FIELDS = frozenset(
+    {"type", "syntax", "definition"}
+)
+
+
+def _raise_native_responses_tool_contract_error(
+    event_context: Mapping[str, Any] | None,
+    *,
+    codec: str,
+    reason: str,
+    count: int = 1,
+) -> NoReturn:
+    _write_adapter_event(
+        event_context,
+        "native_responses_tool_codec",
+        codec=codec,
+        outcome="rejected",
+        count=count,
+        reason=reason,
+    )
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE,
+            "External native Responses apply_patch declaration is ambiguous or lossy.",
+        )
+    )
+
+
+def _validate_strict_apply_patch_custom_tool(
+    tool: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    codec: str,
+) -> None:
+    if set(tool) != STRICT_APPLY_PATCH_CUSTOM_TOOL_FIELDS:
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="custom_tool_fields_not_exact",
+        )
+    description = tool.get("description")
+    tool_format = tool.get("format")
+    if not isinstance(description, str) or not description.strip():
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="missing_description",
+        )
+    if not isinstance(tool_format, Mapping) or set(tool_format) != STRICT_APPLY_PATCH_FORMAT_FIELDS:
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="format_fields_not_exact",
+        )
+    if tool_format.get("type") != "grammar":
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="format_not_grammar",
+        )
+    if not isinstance(tool_format.get("syntax"), str) or not tool_format["syntax"].strip():
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="missing_grammar_syntax",
+        )
+    if not isinstance(tool_format.get("definition"), str) or not tool_format["definition"].strip():
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="missing_grammar_definition",
+        )
+
+
+def _strict_apply_patch_function_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    description_parts: list[str] = []
+    description = tool.get("description")
+    if isinstance(description, str) and description.strip():
+        description_parts.append(description.strip())
+    tool_format = tool.get("format")
+    if isinstance(tool_format, Mapping):
+        grammar = tool_format.get("definition")
+        if isinstance(grammar, str) and grammar.strip():
+            syntax = tool_format.get("syntax")
+            grammar_label = f"Original freeform grammar ({syntax}):" if isinstance(syntax, str) and syntax else "Original freeform grammar:"
+            description_parts.append(f"{grammar_label}\n{grammar.strip()}")
+    description_parts.append(
+        "Provide the complete patch in the required `patch` string. "
+        f"Example:\n{STRICT_APPLY_PATCH_EXAMPLE}"
+    )
+    return {
+        "type": "function",
+        "name": APPLY_PATCH_FUNCTION_NAME,
+        "description": "\n\n".join(description_parts),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"patch": {"type": "string", "minLength": 1}},
+            "required": ["patch"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _adapt_native_responses_tool_declarations(
+    payload: dict[str, Any],
+    upstream: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> bool:
+    codec = _external_native_responses_tool_codec(upstream)
+    if codec == "none":
+        return False
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+
+    apply_patch_tools = [
+        tool
+        for tool in tools
+        if isinstance(tool, Mapping) and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+    ]
+    if len(apply_patch_tools) > 1:
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="duplicate_declaration",
+            count=len(apply_patch_tools),
+        )
+    if not apply_patch_tools:
+        _write_adapter_event(
+            event_context,
+            "native_responses_tool_codec",
+            codec=codec,
+            outcome="untouched",
+            count=0,
+        )
+        return False
+    apply_patch_tool = apply_patch_tools[0]
+    if apply_patch_tool.get("type") != "custom":
+        _raise_native_responses_tool_contract_error(
+            event_context,
+            codec=codec,
+            reason="declaration_not_custom",
+        )
+    _validate_strict_apply_patch_custom_tool(
+        apply_patch_tool,
+        event_context,
+        codec=codec,
+    )
+
+    rewritten_tools: list[Any] = []
+    adapted = 0
+    for tool in tools:
+        if (
+            isinstance(tool, Mapping)
+            and tool.get("type") == "custom"
+            and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+        ):
+            rewritten_tools.append(_strict_apply_patch_function_tool(tool))
+            adapted += 1
+        else:
+            rewritten_tools.append(tool)
+    if not adapted:
+        return False
+    payload["tools"] = rewritten_tools
+    _write_adapter_event(
+        event_context,
+        "native_responses_tool_codec",
+        codec=codec,
+        outcome="adapted",
+        count=adapted,
+    )
+    return True
+
+
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if item.get("type") != "function_call":
         return None
@@ -5567,6 +4483,40 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
     return dict(item)
 
 
+def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
+    """Promote Codex's internal tool carrier to the standard Responses field."""
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    promoted_tools: list[Any] = []
+    rewritten_items: list[Any] = []
+    changed = False
+    for item in input_items:
+        if not isinstance(item, Mapping) or item.get("type") != "additional_tools":
+            rewritten_items.append(item)
+            continue
+        item_tools = item.get("tools")
+        if isinstance(item_tools, list):
+            promoted_tools.extend(item_tools)
+        changed = True
+
+    if not changed:
+        return False
+
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        tools.extend(promoted_tools)
+    elif tools is None:
+        payload["tools"] = promoted_tools
+    else:
+        # The caller's top-level tools are already malformed; remove the
+        # internal-only item so it cannot be forwarded to a third party.
+        payload["tools"] = promoted_tools
+    payload["input"] = rewritten_items
+    return True
+
+
 def _rewrite_structured_tool_input_items(
     payload: dict[str, Any],
     event_context: Mapping[str, Any] | None = None,
@@ -5576,9 +4526,14 @@ def _rewrite_structured_tool_input_items(
     if not isinstance(input_items, list):
         return False
 
-    changed = False
+    input_items, adapted_apply_patch_call_ids, changed = _adapt_apply_patch_custom_tool_history(
+        input_items,
+        event_context=event_context,
+    )
+    if changed:
+        payload["input"] = input_items
     rewritten_items: list[Any] = []
-    preserved_structured_call_ids: set[str] = set()
+    preserved_structured_call_ids: set[str] = set(adapted_apply_patch_call_ids)
     available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
@@ -5586,15 +4541,21 @@ def _rewrite_structured_tool_input_items(
             continue
         if item.get("type") == "function_call":
             function_name = item.get("name")
+            call_id = item.get("call_id")
+            preserve_apply_patch_history = (
+                function_name == APPLY_PATCH_FUNCTION_NAME
+                and isinstance(call_id, str)
+                and call_id in adapted_apply_patch_call_ids
+            )
             preserve_available_function = (
                 isinstance(function_name, str) and function_name in available_function_names
             )
             if (
                 preserve_available_function
+                or preserve_apply_patch_history
                 or _multi_agent_function_call_name(item) is not None
                 or _node_repl_function_call_name(item) is not None
             ):
-                call_id = item.get("call_id")
                 if isinstance(call_id, str):
                     preserved_structured_call_ids.add(call_id)
                 rewritten = _structured_tool_function_call_item(item)
@@ -5650,10 +4611,22 @@ def _inject_explicit_codex_tools(
     include_node_repl_tools: bool = True,
     include_local_tool_gateway_tools: bool = True,
     strip_namespace_tools: bool = True,
+    strip_all_namespace_tools: bool = False,
+    include_flattened_namespace_tools: bool = True,
+    tool_surface_counts: dict[str, int] | None = None,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
 ) -> bool:
+    if tool_surface_counts is not None:
+        tool_surface_counts.update(
+            {
+                "namespace_declaration_count": 0,
+                "eager_tool_count": 0,
+                "retained_core_count": 0,
+                "deferred_tool_count": 0,
+            }
+        )
     tools = payload.get("tools")
     if tools is None:
         tools = []
@@ -5662,9 +4635,21 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
+    caller_non_namespace_tools = tuple(
+        tool
+        for tool in tools
+        if not (isinstance(tool, Mapping) and tool.get("type") == "namespace")
+    )
+    namespace_declaration_count = sum(1 for tool in tools if _is_flattened_namespace_schema(tool))
     flattened_namespace_tools = _flatten_namespace_function_tools(tools)
     if strip_namespace_tools:
-        filtered_tools = [tool for tool in tools if not _is_flattened_namespace_schema(tool)]
+        # Eager preserves the #105 compatibility surface: only declarations the
+        # existing flattener understands are removed. deferred_core is the
+        # explicit normalized surface and drops every raw namespace declaration.
+        namespace_to_strip = (
+            _is_raw_namespace_schema if strip_all_namespace_tools else _is_flattened_namespace_schema
+        )
+        filtered_tools = [tool for tool in tools if not namespace_to_strip(tool)]
         if len(filtered_tools) != len(tools):
             tools[:] = filtered_tools
             changed = True
@@ -5721,11 +4706,11 @@ def _inject_explicit_codex_tools(
 
     existing_names = {_tool_schema_name(tool) for tool in tools}
     existing_names.discard(None)
-    additions = []
+    core_additions = []
     if include_tool_search:
-        additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
+        core_additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
     if include_multi_agent_tools:
-        additions.extend(
+        core_additions.extend(
             _multi_agent_explicit_function_tools(
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,
@@ -5737,15 +4722,29 @@ def _inject_explicit_codex_tools(
                 close_agent_ids=close_agent_ids,
             )
         )
-    additions.extend(flattened_namespace_tools)
     if not include_multi_agent_tools:
-        additions = [tool for tool in additions if not _is_multi_agent_tool_schema(tool)]
+        core_additions = [tool for tool in core_additions if not _is_multi_agent_tool_schema(tool)]
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_multi_agent_tool_schema(tool)
+        ]
     if not include_node_repl_tools:
-        additions = [tool for tool in additions if not _is_node_repl_tool_schema(tool)]
+        core_additions = [tool for tool in core_additions if not _is_node_repl_tool_schema(tool)]
+        flattened_namespace_tools = [
+            tool for tool in flattened_namespace_tools if not _is_node_repl_tool_schema(tool)
+        ]
     if excluded_tool_names:
-        additions = [
+        core_additions = [
             tool
-            for tool in additions
+            for tool in core_additions
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("type") == "function"
+                and tool.get("name") in excluded_tool_names
+            )
+        ]
+        flattened_namespace_tools = [
+            tool
+            for tool in flattened_namespace_tools
             if not (
                 isinstance(tool, Mapping)
                 and tool.get("type") == "function"
@@ -5753,6 +4752,24 @@ def _inject_explicit_codex_tools(
             )
         ]
 
+    potential_names = set(existing_names)
+    for tool in core_additions:
+        name = _tool_schema_name(tool)
+        if name:
+            potential_names.add(name)
+    deferred_tool_count = 0
+    for tool in flattened_namespace_tools:
+        name = _tool_schema_name(tool)
+        if name and name not in potential_names:
+            potential_names.add(name)
+            deferred_tool_count += 1
+
+    flattened_tool_ids = {id(tool) for tool in flattened_namespace_tools}
+    additions = list(core_additions)
+    if include_flattened_namespace_tools:
+        additions.extend(flattened_namespace_tools)
+
+    eager_tool_count = 0
     for tool in additions:
         name = _tool_schema_name(tool)
         if not name:
@@ -5771,7 +4788,21 @@ def _inject_explicit_codex_tools(
             continue
         tools.append(tool)
         existing_names.add(name)
+        if id(tool) in flattened_tool_ids:
+            eager_tool_count += 1
         changed = True
+    if tool_surface_counts is not None:
+        surviving_tool_ids = {id(tool) for tool in tools}
+        tool_surface_counts.update(
+            {
+                "namespace_declaration_count": namespace_declaration_count,
+                "eager_tool_count": eager_tool_count if include_flattened_namespace_tools else 0,
+                "retained_core_count": sum(
+                    1 for tool in caller_non_namespace_tools if id(tool) in surviving_tool_ids
+                ),
+                "deferred_tool_count": deferred_tool_count if not include_flattened_namespace_tools else 0,
+            }
+        )
     return changed
 
 
@@ -6035,7 +5066,14 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
         tool_name = _multi_agent_alias_tool_name(original_name)
         namespace_alias = None
         argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
-        if argument_key is not None and _json_argument_string_needs_repair(value.get(argument_key)):
+        if (
+            argument_key is not None
+            and not (
+                value.get("type") == "custom_tool_call"
+                and original_name == APPLY_PATCH_FUNCTION_NAME
+            )
+            and _json_argument_string_needs_repair(value.get(argument_key))
+        ):
             repaired_arguments = _json_object_from_arguments(value.get(argument_key))
             if repaired_arguments is not None:
                 rewritten[argument_key] = _dump_arguments_like(value.get(argument_key), repaired_arguments)
@@ -8259,9 +7297,7 @@ def official_passthrough_request_body(
     model_id: str | None = None,
 ) -> bytes:
     if not isinstance(payload, Mapping):
-        upstream_model = upstream.get("upstream_model")
-        if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
-            return _replace_embedded_model(body, model_id, upstream_model)
+        # Strict official passthrough has no parsed shape to safely rewrite.
         return body
 
     next_payload = dict(payload)
@@ -8370,9 +7406,22 @@ def compatible_request_body(
     inject_codex_tools: bool = True,
     behavior_profile: str = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
 ) -> bytes:
+    upstream_name = upstream.get("name")
+    official_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+    validated_tool_surface_strategy: str | None = None
+    if (
+        not official_passthrough
+        and upstream_name != "official"
+    ):
+        # Reject malformed configuration before an unparsable external body can
+        # bypass the third-party compatibility boundary. Official passthrough
+        # never consults the external capability.
+        validated_tool_surface_strategy = _external_tool_surface_strategy(upstream)
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
+        if official_passthrough:
+            return body
         upstream_model = upstream.get("upstream_model")
         if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
             return _replace_embedded_model(body, model_id, upstream_model)
@@ -8381,11 +7430,10 @@ def compatible_request_body(
     if not isinstance(payload, dict):
         return body
 
-    upstream_name = upstream.get("name")
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
     changed = False
-    if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+    if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
     changed = _normalize_responses_message_input_items(payload)
@@ -8428,6 +7476,11 @@ def compatible_request_body(
 
     raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = _external_tool_protocol(upstream)
+    tool_surface_strategy = (
+        validated_tool_surface_strategy
+        if validated_tool_surface_strategy is not None
+        else _external_tool_surface_strategy(upstream)
+    )
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
@@ -8435,6 +7488,11 @@ def compatible_request_body(
     if raw_provider_probe:
         pass
     else:
+        # ``additional_tools`` is a legacy Codex input carrier. Preserve it
+        # byte-for-byte for eager providers; deferred_core alone promotes it
+        # so the selected external surface policy can inspect namespaces.
+        if tool_surface_strategy == "deferred_core" and _hoist_additional_tools_input_items(payload):
+            changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
             if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
@@ -8451,11 +7509,17 @@ def compatible_request_body(
             if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
     input_items = payload.get("input")
-    include_tool_search = False
     subagent_worker_context = (
         not raw_provider_probe
         and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         and is_worker_subagent_request(input_items)
+    )
+    # deferred_core intentionally keeps Codex's bounded, explicit discovery
+    # entry point. It does not flatten namespace declarations or introduce a
+    # broader discovery service; eager remains the #105-compatible surface.
+    # Worker subagents retain their established restricted surface.
+    include_tool_search = (
+        tool_surface_strategy == "deferred_core" and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
@@ -8719,6 +7783,11 @@ def compatible_request_body(
         if not changed:
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if (
+        tool_protocol == "responses_structured"
+        and _adapt_native_responses_tool_declarations(payload, upstream, event_context)
+    ):
+        changed = True
     allow_codex_tools = tool_protocol != "none"
     if inject_codex_tools and allow_codex_tools and not raw_provider_probe:
         if lifecycle_complete:
@@ -8737,6 +7806,11 @@ def compatible_request_body(
                 subagent_state_active
                 and subagent_state is not None
                 and bool(getattr(subagent_state, "workflow_intent", False))
+            )
+            # Coordinator and worker restrictions deliberately remain narrower
+            # than the normal deferred-core surface.
+            effective_include_tool_search = (
+                include_tool_search and not restrict_to_subagent_coordinator_tools
             )
             include_node_repl_for_subagent_workflow = (
                 restrict_to_subagent_coordinator_tools
@@ -8766,9 +7840,10 @@ def compatible_request_body(
                 )
                 changed = True
             tool_names_before = _function_tool_names(payload.get("tools"))
-            if _inject_explicit_codex_tools(
+            tool_surface_counts: dict[str, int] = {}
+            explicit_tools_injected = _inject_explicit_codex_tools(
                 payload,
-                include_tool_search=include_tool_search,
+                include_tool_search=effective_include_tool_search,
                 include_multi_agent_tools=not subagent_worker_context,
                 include_spawn_agent=include_spawn_agent,
                 include_wait_agent=include_wait_agent,
@@ -8781,10 +7856,19 @@ def compatible_request_body(
                     else not node_repl_single_step_complete
                 ),
                 include_local_tool_gateway_tools=not subagent_worker_context,
+                strip_all_namespace_tools=tool_surface_strategy == "deferred_core",
+                include_flattened_namespace_tools=tool_surface_strategy == "eager",
+                tool_surface_counts=tool_surface_counts,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
-            ):
+            )
+            write_proxy_event(
+                "external_tool_surface_prepared",
+                tool_surface_strategy=tool_surface_strategy,
+                **tool_surface_counts,
+            )
+            if explicit_tools_injected:
                 added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
                 _write_adapter_event(
                     event_context,
@@ -8877,6 +7961,693 @@ def compatible_request_body(
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+APPLY_PATCH_FUNCTION_NAME = "apply_patch"
+APPLY_PATCH_ADAPTER_EVENT = "third_party_apply_patch_freeform_adapter"
+APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
+APPLY_PATCH_FUNCTION_CALL_FIELDS = frozenset(
+    {"id", "type", "status", "call_id", "name", "arguments"}
+)
+APPLY_PATCH_HISTORY_ADAPTER_EVENT = "third_party_apply_patch_freeform_history_adapter"
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS = frozenset(
+    {"type", "status", "call_id", "name", "input"}
+)
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS = frozenset(
+    {"type", "call_id", "output"}
+)
+APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS = frozenset({"id"})
+
+
+class _ApplyPatchAdapterFailure(ValueError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _apply_patch_adapter_enabled(event_context: Mapping[str, Any] | None) -> bool:
+    return not bool(event_context and event_context.get("_apply_patch_adapter_enabled") is False)
+
+
+def _write_apply_patch_adapter_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    outcome: str,
+    count: int = 1,
+    reason: str | None = None,
+) -> None:
+    fields: dict[str, Any] = {"surface": surface, "outcome": outcome, "count": count}
+    if reason is not None:
+        fields["reason"] = reason
+    _write_adapter_event(event_context, APPLY_PATCH_ADAPTER_EVENT, **fields)
+
+
+def _raise_apply_patch_adapter_failure(
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    reason: str,
+) -> None:
+    _write_apply_patch_adapter_event(
+        event_context,
+        surface=surface,
+        outcome="rejected",
+        reason=reason,
+    )
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            APPLY_PATCH_ADAPTER_ERROR_CODE,
+            "Third-party apply_patch function call is not an exact freeform patch invocation.",
+        )
+    )
+
+
+def _is_apply_patch_function_call(item: Any) -> bool:
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "function_call"
+        and item.get("name") == APPLY_PATCH_FUNCTION_NAME
+    )
+
+
+def _is_apply_patch_custom_tool_call(item: Any) -> bool:
+    return (
+        isinstance(item, Mapping)
+        and item.get("type") == "custom_tool_call"
+        and item.get("name") == APPLY_PATCH_FUNCTION_NAME
+    )
+
+
+def _require_exact_apply_patch_function_call_fields(item: Mapping[str, Any]) -> None:
+    if set(item) != APPLY_PATCH_FUNCTION_CALL_FIELDS:
+        raise _ApplyPatchAdapterFailure("function_call_fields_not_exact")
+
+
+def _apply_patch_arguments_text_and_input(arguments: Any) -> tuple[str, str]:
+    def unique_object(pairs: list[tuple[Any, Any]]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if not isinstance(key, str) or key in parsed:
+                raise _ApplyPatchAdapterFailure("duplicate_argument_key")
+            parsed[key] = value
+        return parsed
+
+    def reject_json_constant(_: str) -> None:
+        raise _ApplyPatchAdapterFailure("invalid_arguments")
+
+    if isinstance(arguments, Mapping):
+        parsed = dict(arguments)
+        arguments_text = json.dumps(parsed, ensure_ascii=True, separators=(",", ":"))
+    elif isinstance(arguments, str):
+        arguments_text = arguments
+        try:
+            parsed = json.loads(
+                arguments,
+                object_pairs_hook=unique_object,
+                parse_constant=reject_json_constant,
+            )
+        except _ApplyPatchAdapterFailure:
+            raise
+        except (TypeError, ValueError):
+            raise _ApplyPatchAdapterFailure("invalid_arguments") from None
+    else:
+        raise _ApplyPatchAdapterFailure("missing_arguments")
+
+    if not isinstance(parsed, dict) or set(parsed) != {"patch"}:
+        raise _ApplyPatchAdapterFailure("arguments_not_exact")
+    patch = parsed.get("patch")
+    if not isinstance(patch, str):
+        raise _ApplyPatchAdapterFailure("patch_not_string")
+    if not patch.strip():
+        raise _ApplyPatchAdapterFailure("patch_empty")
+    return arguments_text, patch
+
+
+def _apply_patch_item_identity(item: Mapping[str, Any]) -> tuple[str, str]:
+    item_id = item.get("id")
+    call_id = item.get("call_id")
+    if not isinstance(item_id, str) or not item_id:
+        raise _ApplyPatchAdapterFailure("missing_item_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise _ApplyPatchAdapterFailure("missing_call_id")
+    return item_id, call_id
+
+
+def _custom_apply_patch_item(item: Mapping[str, Any], patch: str) -> dict[str, Any]:
+    rewritten = dict(item)
+    rewritten["type"] = "custom_tool_call"
+    rewritten["input"] = patch
+    rewritten.pop("arguments", None)
+    return rewritten
+
+
+def _write_apply_patch_history_adapter_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    outcome: str,
+    count: int = 1,
+) -> None:
+    """Emit count-only telemetry for the request-history inverse adapter."""
+    _write_adapter_event(
+        event_context,
+        APPLY_PATCH_HISTORY_ADAPTER_EVENT,
+        outcome=outcome,
+        count=count,
+    )
+
+
+def _raise_apply_patch_history_adapter_failure(
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    _write_apply_patch_history_adapter_event(event_context, outcome="rejected")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            APPLY_PATCH_ADAPTER_ERROR_CODE,
+            "Third-party apply_patch custom-tool history is not an exact completed pair.",
+        )
+    )
+
+
+def _has_exact_apply_patch_custom_tool_history_fields(
+    item: Mapping[str, Any],
+    required_fields: frozenset[str],
+) -> bool:
+    fields = set(item)
+    if fields == required_fields:
+        return True
+    return (
+        fields == required_fields | APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS
+        and isinstance(item.get("id"), str)
+        and bool(item["id"])
+    )
+
+
+def _adapt_apply_patch_custom_tool_history(
+    input_items: list[Any],
+    *,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[list[Any], set[str], bool]:
+    """Reconstruct exact structured apply_patch history for third-party tools.
+
+    The downstream Codex client represents freeform ``apply_patch`` calls as a
+    custom-tool call/result pair.  Structured third-party Responses providers
+    need that one completed pair in function-call form to retain the call/result
+    relationship.  All other custom-tool history stays on the pre-existing
+    compatibility path.
+    """
+    if not _apply_patch_adapter_enabled(event_context):
+        return input_items, set(), False
+
+    rewritten_items: list[Any] = []
+    pending_call_ids: set[str] = set()
+    adapted_call_ids: set[str] = set()
+    foreign_call_ids: set[str] = set()
+    unmatched_custom_output_ids: set[str] = set()
+    adapted = 0
+    untouched = 0
+
+    for raw_item in input_items:
+        if not isinstance(raw_item, Mapping):
+            rewritten_items.append(raw_item)
+            continue
+
+        item_type = raw_item.get("type")
+        call_id = raw_item.get("call_id")
+        if _is_apply_patch_custom_tool_call(raw_item):
+            if (
+                not _has_exact_apply_patch_custom_tool_history_fields(
+                    raw_item,
+                    APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS,
+                )
+                or raw_item.get("status") != "completed"
+                or not isinstance(call_id, str)
+                or not call_id
+                or not isinstance(raw_item.get("input"), str)
+                or not raw_item["input"].strip()
+                or call_id in pending_call_ids
+                or call_id in adapted_call_ids
+                or call_id in foreign_call_ids
+                or call_id in unmatched_custom_output_ids
+            ):
+                _raise_apply_patch_history_adapter_failure(event_context)
+
+            patch = raw_item["input"]
+            pending_call_ids.add(call_id)
+            adapted_call_ids.add(call_id)
+            rewritten_items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": APPLY_PATCH_FUNCTION_NAME,
+                    "arguments": json.dumps(
+                        {"patch": patch},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+            adapted += 1
+            continue
+
+        if item_type == "custom_tool_call_output":
+            if isinstance(call_id, str) and call_id in pending_call_ids:
+                if not _has_exact_apply_patch_custom_tool_history_fields(
+                    raw_item,
+                    APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS,
+                ):
+                    _raise_apply_patch_history_adapter_failure(event_context)
+                pending_call_ids.remove(call_id)
+                rewritten_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": raw_item["output"],
+                    }
+                )
+                continue
+            if isinstance(call_id, str):
+                if call_id in adapted_call_ids:
+                    _raise_apply_patch_history_adapter_failure(event_context)
+                unmatched_custom_output_ids.add(call_id)
+            rewritten_items.append(raw_item)
+            continue
+
+        if isinstance(call_id, str) and call_id in adapted_call_ids:
+            _raise_apply_patch_history_adapter_failure(event_context)
+
+        if item_type in {"function_call", "function_call_output"}:
+            if isinstance(call_id, str) and call_id:
+                foreign_call_ids.add(call_id)
+        elif item_type == "custom_tool_call":
+            if isinstance(call_id, str) and call_id:
+                foreign_call_ids.add(call_id)
+            untouched += 1
+        rewritten_items.append(raw_item)
+
+    if pending_call_ids:
+        _raise_apply_patch_history_adapter_failure(event_context)
+
+    if adapted:
+        _write_apply_patch_history_adapter_event(
+            event_context,
+            outcome="adapted",
+            count=adapted,
+        )
+    if untouched:
+        _write_apply_patch_history_adapter_event(
+            event_context,
+            outcome="untouched",
+            count=untouched,
+        )
+    return rewritten_items, adapted_call_ids, bool(adapted)
+
+
+def _adapt_third_party_apply_patch_response_body(
+    payload: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if not _apply_patch_adapter_enabled(event_context) or not isinstance(payload, dict):
+        return payload, False
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return payload, False
+
+    adapted = 0
+    untouched = 0
+    seen_item_ids: set[str] = set()
+    seen_call_ids: set[str] = set()
+    seen_custom_item_ids: set[str] = set()
+    seen_custom_call_ids: set[str] = set()
+    seen_custom_keys: set[str] = set()
+    rewritten_output: list[Any] = []
+
+    for index, raw_item in enumerate(output):
+        if _is_apply_patch_function_call(raw_item):
+            assert isinstance(raw_item, Mapping)
+            try:
+                _require_exact_apply_patch_function_call_fields(raw_item)
+                item_id, call_id = _apply_patch_item_identity(raw_item)
+                _, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
+                if item_id in seen_item_ids or item_id in seen_custom_item_ids:
+                    raise _ApplyPatchAdapterFailure("duplicate_item_id")
+                if call_id in seen_call_ids or call_id in seen_custom_call_ids:
+                    raise _ApplyPatchAdapterFailure("duplicate_call_id")
+            except _ApplyPatchAdapterFailure as exc:
+                _raise_apply_patch_adapter_failure(event_context, surface="body", reason=exc.reason)
+            seen_item_ids.add(item_id)
+            seen_call_ids.add(call_id)
+            rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
+            adapted += 1
+            continue
+
+        if _is_apply_patch_custom_tool_call(raw_item):
+            assert isinstance(raw_item, Mapping)
+            raw_item_id = raw_item.get("id")
+            raw_call_id = raw_item.get("call_id")
+            if isinstance(raw_item_id, str) and raw_item_id:
+                if raw_item_id in seen_item_ids:
+                    _raise_apply_patch_adapter_failure(
+                        event_context,
+                        surface="body",
+                        reason="duplicate_item_id",
+                    )
+                seen_custom_item_ids.add(raw_item_id)
+            if isinstance(raw_call_id, str) and raw_call_id:
+                if raw_call_id in seen_call_ids:
+                    _raise_apply_patch_adapter_failure(
+                        event_context,
+                        surface="body",
+                        reason="duplicate_call_id",
+                    )
+                seen_custom_call_ids.add(raw_call_id)
+            key = (
+                f"item:{raw_item_id}"
+                if isinstance(raw_item_id, str) and raw_item_id
+                else f"call:{raw_call_id}"
+                if isinstance(raw_call_id, str) and raw_call_id
+                else f"index:{index}"
+            )
+            if key not in seen_custom_keys:
+                seen_custom_keys.add(key)
+                untouched += 1
+        rewritten_output.append(raw_item)
+
+    if adapted:
+        payload = dict(payload)
+        payload["output"] = rewritten_output
+        _write_apply_patch_adapter_event(
+            event_context,
+            surface="body",
+            outcome="adapted",
+            count=adapted,
+        )
+    if untouched:
+        _write_apply_patch_adapter_event(
+            event_context,
+            surface="body",
+            outcome="untouched",
+            count=untouched,
+        )
+    return payload, bool(adapted)
+
+
+@dataclass
+class _ApplyPatchStreamState:
+    item_id: str
+    call_id: str
+    output_index: int
+    initial_arguments: str | None
+    arguments: str | None = None
+    patch: str | None = None
+    delta_arguments: str = ""
+    arguments_done: bool = False
+    item_done: bool = False
+
+
+class _ThirdPartyApplyPatchStreamAdapter:
+    def __init__(self, event_context: Mapping[str, Any] | None, *, surface: str = "stream"):
+        self._event_context = event_context
+        self._surface = surface
+        self._states: dict[str, _ApplyPatchStreamState] = {}
+        self._item_id_by_call_id: dict[str, str] = {}
+        self._adapted_item_ids: set[str] = set()
+        self._custom_item_ids: set[str] = set()
+        self._custom_call_ids: set[str] = set()
+        self._untouched_keys: set[str] = set()
+        self._terminal_seen = False
+        self._finished = False
+
+    def _fail(self, reason: str) -> None:
+        _raise_apply_patch_adapter_failure(
+            self._event_context,
+            surface=self._surface,
+            reason=reason,
+        )
+
+    def _output_index(self, event: Mapping[str, Any]) -> int:
+        output_index = event.get("output_index")
+        if isinstance(output_index, bool) or not isinstance(output_index, int) or output_index < 0:
+            self._fail("missing_output_index")
+        return output_index
+
+    def _remember_untouched(self, item: Mapping[str, Any], fallback: str) -> None:
+        item_id = item.get("id")
+        call_id = item.get("call_id")
+        if isinstance(item_id, str) and item_id:
+            if item_id in self._states:
+                self._fail("duplicate_item_id")
+            self._custom_item_ids.add(item_id)
+        if isinstance(call_id, str) and call_id:
+            if call_id in self._item_id_by_call_id:
+                self._fail("duplicate_call_id")
+            self._custom_call_ids.add(call_id)
+        key = (
+            f"item:{item_id}"
+            if isinstance(item_id, str) and item_id
+            else f"call:{call_id}"
+            if isinstance(call_id, str) and call_id
+            else fallback
+        )
+        self._untouched_keys.add(key)
+
+    def _state_from_added_item(
+        self,
+        item: Mapping[str, Any],
+        output_index: int,
+    ) -> tuple[_ApplyPatchStreamState, str]:
+        try:
+            _require_exact_apply_patch_function_call_fields(item)
+            item_id, call_id = _apply_patch_item_identity(item)
+            arguments = item.get("arguments")
+            if isinstance(arguments, str) and not arguments:
+                initial_arguments = None
+            else:
+                initial_arguments, _ = _apply_patch_arguments_text_and_input(arguments)
+        except _ApplyPatchAdapterFailure as exc:
+            self._fail(exc.reason)
+        if item_id in self._states or item_id in self._custom_item_ids:
+            self._fail("duplicate_item_added")
+        if call_id in self._item_id_by_call_id or call_id in self._custom_call_ids:
+            self._fail("duplicate_call_id")
+        state = _ApplyPatchStreamState(
+            item_id=item_id,
+            call_id=call_id,
+            output_index=output_index,
+            initial_arguments=initial_arguments,
+        )
+        self._states[item_id] = state
+        self._item_id_by_call_id[call_id] = item_id
+        return state, ""
+
+    def _state_for_event(self, event: Mapping[str, Any]) -> _ApplyPatchStreamState:
+        item_id = event.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            self._fail("missing_item_id")
+        state = self._states.get(item_id)
+        if state is None:
+            self._fail("unpaired_stream_event")
+        output_index = self._output_index(event)
+        if output_index != state.output_index:
+            self._fail("conflicting_output_index")
+        return state
+
+    def _check_completed_item(
+        self,
+        item: Mapping[str, Any],
+        state: _ApplyPatchStreamState,
+    ) -> None:
+        try:
+            _require_exact_apply_patch_function_call_fields(item)
+            item_id, call_id = _apply_patch_item_identity(item)
+            arguments, patch = _apply_patch_arguments_text_and_input(item.get("arguments"))
+        except _ApplyPatchAdapterFailure as exc:
+            self._fail(exc.reason)
+        if item_id != state.item_id or call_id != state.call_id:
+            self._fail("conflicting_item_identity")
+        if not state.arguments_done or state.arguments is None or state.patch is None:
+            self._fail("missing_arguments_done")
+        if arguments != state.arguments or patch != state.patch:
+            self._fail("conflicting_arguments")
+
+    def _rewrite_terminal_response(self, event: Mapping[str, Any]) -> tuple[Mapping[str, Any], bool]:
+        response = event.get("response")
+        if not isinstance(response, Mapping):
+            return event, False
+        output = response.get("output")
+        if not isinstance(output, list):
+            return event, False
+        changed = False
+        seen_terminal_item_ids: set[str] = set()
+        rewritten_output: list[Any] = []
+        for index, raw_item in enumerate(output):
+            if _is_apply_patch_function_call(raw_item):
+                assert isinstance(raw_item, Mapping)
+                try:
+                    _require_exact_apply_patch_function_call_fields(raw_item)
+                    item_id, call_id = _apply_patch_item_identity(raw_item)
+                    arguments, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                if item_id in seen_terminal_item_ids:
+                    self._fail("duplicate_terminal_item")
+                seen_terminal_item_ids.add(item_id)
+                state = self._states.get(item_id)
+                if state is None:
+                    self._fail("unpaired_terminal_item")
+                if call_id != state.call_id or not state.item_done or state.arguments != arguments or state.patch != patch:
+                    self._fail("conflicting_terminal_item")
+                rewritten_output.append(_custom_apply_patch_item(raw_item, patch))
+                changed = True
+                continue
+            if _is_apply_patch_custom_tool_call(raw_item):
+                assert isinstance(raw_item, Mapping)
+                self._remember_untouched(raw_item, f"terminal:{index}")
+            rewritten_output.append(raw_item)
+        if not changed:
+            return event, False
+        rewritten_response = dict(response)
+        rewritten_response["output"] = rewritten_output
+        rewritten_event = dict(event)
+        rewritten_event["response"] = rewritten_response
+        return rewritten_event, True
+
+    def _ensure_terminal_lifecycle(self) -> None:
+        for state in self._states.values():
+            if not state.item_done:
+                self._fail("incomplete_tool_lifecycle")
+
+    def events_for_event(self, event: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], bool]:
+        event_type = event.get("type")
+        if self._terminal_seen and isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
+            self._fail("post_terminal_semantic_event")
+
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if _is_apply_patch_function_call(item):
+                assert isinstance(item, Mapping)
+                output_index = self._output_index(event)
+                self._state_from_added_item(item, output_index)
+                rewritten_event = dict(event)
+                rewritten_event["item"] = _custom_apply_patch_item(item, "")
+                return [rewritten_event], True
+            if _is_apply_patch_custom_tool_call(item):
+                assert isinstance(item, Mapping)
+                self._remember_untouched(item, "added")
+            return [event], False
+
+        if event_type == "response.function_call_arguments.delta":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in self._states:
+                state = self._state_for_event(event)
+                delta = event.get("delta")
+                if state.arguments_done or state.item_done or not isinstance(delta, str):
+                    self._fail("invalid_arguments_delta")
+                # Do not expose the third-party JSON wrapper as freeform input.
+                # The validated raw patch is emitted only by the matching done event.
+                state.delta_arguments += delta
+                return [], True
+            return [event], False
+
+        if event_type == "response.function_call_arguments.done":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in self._states:
+                state = self._state_for_event(event)
+                if state.arguments_done or state.item_done:
+                    self._fail("duplicate_arguments_done")
+                try:
+                    arguments, patch = _apply_patch_arguments_text_and_input(event.get("arguments"))
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                if state.initial_arguments is not None and arguments != state.initial_arguments:
+                    self._fail("conflicting_arguments")
+                if state.delta_arguments and arguments != state.delta_arguments:
+                    self._fail("conflicting_arguments")
+                state.arguments = arguments
+                state.patch = patch
+                state.arguments_done = True
+                self._adapted_item_ids.add(state.item_id)
+                rewritten_event = dict(event)
+                rewritten_event["type"] = "response.custom_tool_call_input.done"
+                rewritten_event["input"] = patch
+                rewritten_event.pop("arguments", None)
+                return [rewritten_event], True
+            return [event], False
+
+        if event_type == "response.output_item.done":
+            item = event.get("item")
+            if _is_apply_patch_function_call(item):
+                assert isinstance(item, Mapping)
+                try:
+                    _require_exact_apply_patch_function_call_fields(item)
+                    item_id, _ = _apply_patch_item_identity(item)
+                except _ApplyPatchAdapterFailure as exc:
+                    self._fail(exc.reason)
+                state = self._states.get(item_id)
+                if state is None:
+                    self._fail("unpaired_stream_item")
+                if state.item_done:
+                    self._fail("duplicate_item_done")
+                if self._output_index(event) != state.output_index:
+                    self._fail("conflicting_output_index")
+                self._check_completed_item(item, state)
+                state.item_done = True
+                rewritten_event = dict(event)
+                rewritten_event["item"] = _custom_apply_patch_item(item, state.patch or "")
+                return [rewritten_event], True
+            if _is_apply_patch_custom_tool_call(item):
+                assert isinstance(item, Mapping)
+                self._remember_untouched(item, "done")
+            return [event], False
+
+        if isinstance(event_type, str) and event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+            rewritten_event, changed = self._rewrite_terminal_response(event)
+            self._ensure_terminal_lifecycle()
+            self._terminal_seen = True
+            return [rewritten_event], changed
+
+        return [event], False
+
+    def finish(self, *, allow_missing_terminal: bool = False) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        if self._states and not self._terminal_seen:
+            if not allow_missing_terminal:
+                self._fail("missing_terminal_event")
+            self._ensure_terminal_lifecycle()
+        if self._adapted_item_ids:
+            _write_apply_patch_adapter_event(
+                self._event_context,
+                surface=self._surface,
+                outcome="adapted",
+                count=len(self._adapted_item_ids),
+            )
+        if self._untouched_keys:
+            _write_apply_patch_adapter_event(
+                self._event_context,
+                surface=self._surface,
+                outcome="untouched",
+                count=len(self._untouched_keys),
+            )
+
+
+def _adapt_third_party_apply_patch_stream_events(
+    events: list[Mapping[str, Any]],
+    *,
+    event_context: Mapping[str, Any] | None = None,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    if not _apply_patch_adapter_enabled(event_context):
+        return events, False
+    adapter = _ThirdPartyApplyPatchStreamAdapter(event_context)
+    changed = False
+    rewritten: list[Mapping[str, Any]] = []
+    for event in events:
+        event_replacements, event_changed = adapter.events_for_event(event)
+        rewritten.extend(event_replacements)
+        changed = changed or event_changed
+    adapter.finish()
+    return (rewritten if changed else events), changed
+
+
 def compatible_response_body(
     body: bytes,
     upstream_name: str,
@@ -8891,6 +8662,8 @@ def compatible_response_body(
         return body
 
     changed = _hide_reasoning_text(payload)
+    payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
+    changed = changed or apply_patch_changed
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -9481,49 +9254,142 @@ def upstream_headers(
     return outgoing
 
 
-def current_catalog_data(sync_first: bool = False) -> dict[str, Any]:
-    if sync_first:
-        try:
-            sync_catalog()
-        except Exception as exc:
-            logger.warning("catalog sync failed before /v1/models: %s", type(exc).__name__)
+def current_catalog_data() -> dict[str, Any]:
+    """Read the atomically published catalog without launching discovery.
 
+    Tauri owns Official acquisition and catalog refresh.  The Gateway only
+    consumes the published snapshot at request handling time.
+    """
     catalog_path = existing_generated_catalog_path()
     if not catalog_path.exists():
         return {"models": []}
+    published_budgets = published_official_context_budgets(catalog_path)
     return catalog_with_vision_proxy_capabilities(
         catalog_with_openai_context_guard(
-            catalog_with_official_fast_variants(
-                json.loads(catalog_path.read_text(encoding="utf-8-sig"))
-            )
+            catalog_with_official_fast_variants(json.loads(catalog_path.read_text(encoding="utf-8-sig"))),
+            published_budgets,
+            require_published_snapshot=True,
         )
     )
 
 
-def catalog_with_openai_context_guard(catalog: dict[str, Any]) -> dict[str, Any]:
-    if not openai_context_guard_enabled():
-        return catalog
+def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
+    """Read the Rust publication fence that commits an Official budget.
 
+    The catalog and Codex runtime overlay are separate atomic files.  The
+    refresh coordinator clears this fence before it begins an update, then
+    commits it only after both files agree.  A missing, interrupted, or
+    mismatched fence is therefore not a safe current Official snapshot.
+    """
+
+    state_path = catalog_path.parent / OFFICIAL_REFRESH_STATE_FILENAME
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, Mapping) or payload.get("publication_ready") is not True:
+        return {}
+    budgets = payload.get("published_context_budgets")
+    if not isinstance(budgets, Mapping):
+        return {}
+    return {
+        str(model_id): budget
+        for model_id, budget in budgets.items()
+        if isinstance(model_id, str) and isinstance(budget, Mapping)
+    }
+
+
+def catalog_with_openai_context_guard(
+    catalog: dict[str, Any],
+    published_budgets: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    require_published_snapshot: bool = False,
+) -> dict[str, Any]:
+    # The Direct Official budget is a safety invariant, not an optional
+    # presentation preference.  Gateway request handling only projects the
+    # atomically published resolver result and never refreshes it itself.
     models = catalog.get("models")
     if not isinstance(models, list):
         return catalog
 
+    def positive_int(value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
     def guarded_model(model: Any) -> Any:
+        def without_context_budget() -> dict[str, Any]:
+            updated = dict(model)
+            updated.pop("context_window", None)
+            updated.pop("max_context_window", None)
+            updated.pop("effective_context_window_percent", None)
+            return updated
+
         if not isinstance(model, Mapping):
             return model
-        slug = canonical_model_id(str(model.get("slug", "")))
-        if not slug.startswith("gpt-"):
+        metadata = model.get("codex_proxy_metadata")
+        if not isinstance(metadata, Mapping):
             return model
-        context_window = model.get("context_window")
-        guarded_window = (
-            min(context_window, OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW)
-            if isinstance(context_window, int) and context_window > 0
-            else OPENAI_CONTEXT_GUARD_CONTEXT_WINDOW
-        )
+        if metadata.get("provider") != "openai" or metadata.get("upstream_name") != "official":
+            return model
+        budget = metadata.get("official_context_budget")
+        if not isinstance(budget, Mapping):
+            return without_context_budget()
+        source = budget.get("source")
+        freshness = budget.get("freshness")
+        trusted_budget = (
+            source == CURRENT_DIRECT_OFFICIAL_SOURCE and freshness == "fresh"
+        ) or source == DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE
+        if not trusted_budget:
+            return without_context_budget()
+        guard_window = positive_int(budget.get("model_context_window"))
+        if guard_window is None:
+            guard_window = positive_int(budget.get("context_window"))
+        effective_percent = positive_int(budget.get("effective_context_window_percent"))
+        effective_window = positive_int(budget.get("effective_context_window"))
+        auto_compact_limit = positive_int(budget.get("model_auto_compact_token_limit"))
+        if (
+            guard_window is None
+            or effective_percent is None
+            or effective_percent > 100
+            or effective_window is None
+            or effective_window > guard_window
+            or auto_compact_limit is None
+            or auto_compact_limit > effective_window
+        ):
+            # An incomplete or interrupted resolved snapshot must not keep a
+            # larger stale catalog value visible to an Official caller.
+            return without_context_budget()
+        if require_published_snapshot:
+            if not isinstance(published_budgets, Mapping):
+                return without_context_budget()
+            model_id = str(model.get("slug", "")).removeprefix("openai/")
+            upstream_model = metadata.get("upstream_model")
+            expected = published_budgets.get(model_id)
+            if expected is None and isinstance(upstream_model, str):
+                expected = published_budgets.get(upstream_model.removeprefix("openai/"))
+            if not isinstance(expected, Mapping) or any(
+                expected.get(key) != budget.get(key)
+                for key in (
+                    "model_context_window",
+                    "effective_context_window_percent",
+                    "effective_context_window",
+                    "model_auto_compact_token_limit",
+                )
+            ):
+                return without_context_budget()
+        reported_windows = [
+            value
+            for value in (
+                positive_int(model.get("context_window")),
+                positive_int(model.get("max_context_window")),
+            )
+            if value is not None
+        ]
+        guarded_window = min(guard_window, *reported_windows) if reported_windows else guard_window
         return {
             **model,
             "context_window": guarded_window,
             "max_context_window": guarded_window,
+            "effective_context_window_percent": effective_percent,
         }
 
     updated = dict(catalog)
@@ -10769,6 +10635,7 @@ class DownstreamErrorSpec:
     error: str | None = None
     detail: str | None = None
     error_type: str = "upstream_error"
+    preserve_explicit_error: bool = False
 
 
 def _typed_error_code(
@@ -10864,11 +10731,12 @@ def _downstream_stream_error_payload(
     exc: BaseException | None = None,
     error: str | None = None,
     detail: str | None = None,
+    error_type: str = "upstream_stream_error",
 ) -> dict[str, Any]:
-    error_type = error or (type(exc).__name__ if exc is not None else "UpstreamStreamError")
+    error_code = error or (type(exc).__name__ if exc is not None else "UpstreamStreamError")
     error_detail = detail or (safe_upstream_error_detail(exc) if exc is not None else "")
     failure_class = _upstream_failure_class(exc) if exc is not None else None
-    if failure_class is None and error_type in {
+    if failure_class is None and error_code in {
         "upstream_stream_idle_timeout",
         "upstream_stream_incomplete",
         "UpstreamStreamError",
@@ -10876,10 +10744,10 @@ def _downstream_stream_error_payload(
     }:
         failure_class = RETRY_FAILURE_QUICK_TRANSIENT
     payload = {
-        "type": "upstream_stream_error",
+        "type": error_type,
         "status": status,
         "upstream": upstream_name,
-        "error": error_type,
+        "error": error_code,
         "detail": error_detail,
         "retry_owner": "client",
     }
@@ -10888,17 +10756,20 @@ def _downstream_stream_error_payload(
         payload["retryable"] = failure_class != RETRY_FAILURE_PERMANENT
     payload["codexhub_error"] = _codexhub_error_payload(
         source=upstream_name,
-        message=error_detail or error_type,
+        message=error_detail or error_code,
         status=status,
         exc=exc,
-        error=error_type,
-        error_type="upstream_stream_error",
+        error=error_code,
+        error_type=error_type,
         failure_class=failure_class,
     )
     return payload
 
 
 def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec) -> dict[str, Any]:
+    error_type = error.error_type
+    if error_type == "upstream_error":
+        error_type = "upstream_stream_error"
     if error.inbound_format == "chat_completions":
         return _chat_completion_error_payload(
             upstream_name=error.upstream_name,
@@ -10906,15 +10777,25 @@ def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec)
             exc=error.exc,
             error=error.error,
             detail=error.detail,
-            error_type="upstream_stream_error",
+            error_type=error_type,
         )
     if error.exc is not None:
-        return _downstream_stream_error_payload(upstream_name=error.upstream_name, exc=error.exc)
+        if not error.preserve_explicit_error:
+            return _downstream_stream_error_payload(upstream_name=error.upstream_name, exc=error.exc)
+        return _downstream_stream_error_payload(
+            upstream_name=error.upstream_name,
+            status=error.status,
+            exc=error.exc,
+            error=error.error,
+            detail=error.detail,
+            error_type=error_type,
+        )
     return _downstream_stream_error_payload(
         upstream_name=error.upstream_name,
         status=error.status,
         error=error.error or "UpstreamProtocolError",
         detail=error.detail or error.error or "upstream stream failed",
+        error_type=error_type,
     )
 
 
@@ -11156,6 +11037,17 @@ def _parse_gateway_request_input(
     )
 
 
+def _open_upstream_once(
+    request: Request,
+    *,
+    upstream_name: str,
+    timeout: int,
+) -> Any:
+    if upstream_name == "official":
+        return _official_urlopen(request, timeout=timeout)
+    return urlopen(request, timeout=timeout)
+
+
 def _open_upstream_response(
     request: Request,
     *,
@@ -11172,14 +11064,88 @@ def _open_upstream_response(
     explicit_max_attempts = max_attempts is not None
     base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
     retry_started_at = time.monotonic()
+    diagnostic_request_key = _diagnostic_context_value(event_context, "request_id")
+    diagnostic_model = _diagnostic_context_value(event_context, "model")
     attempt = 1
     while True:
+        attempt_started_at = time.monotonic()
         try:
-            if upstream_name == "official":
-                return _official_urlopen(request, timeout=timeout)
-            return urlopen(request, timeout=timeout)
+            response = _open_upstream_once(
+                request,
+                upstream_name=upstream_name,
+                timeout=timeout,
+            )
+            elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            connection_disposition = _diagnostic_connection_disposition(response)
+            # A returned response proves this Gateway attempt reached response
+            # completion after writing its request. It cannot prove DNS, TCP,
+            # or TLS occurred for this attempt (especially on a reused lease),
+            # so those success phases remain absent unless a lower-level seam
+            # later exposes them.
+            _observe_gateway_diagnostic(
+                "observe_upstream_phase",
+                diagnostic_request_key,
+                phase="upstream_request_write",
+                attempt=attempt,
+                retry_budget=base_retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="ok",
+                provider=upstream_name,
+                model=diagnostic_model,
+            )
+            _observe_gateway_diagnostic(
+                "observe_upstream_attempt",
+                diagnostic_request_key,
+                attempt=attempt,
+                retry_budget=base_retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="ok",
+                connection_disposition=connection_disposition,
+                provider=upstream_name,
+                model=diagnostic_model,
+            )
+            diagnostic_status, diagnostic_headers = _diagnostic_response_metadata(response)
+            _observe_gateway_diagnostic(
+                "observe_upstream_headers",
+                diagnostic_request_key,
+                status=diagnostic_status,
+                headers=diagnostic_headers,
+            )
+            return response
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
+            elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
+            connection_disposition = _diagnostic_error_connection_disposition(exc)
+            try:
+                failure_phase = transport_failure_phase(exc)
+            except Exception:
+                failure_phase = "unknown"
+            diagnostic_phase = _diagnostic_transport_phase(failure_phase)
+            if diagnostic_phase is not None:
+                _observe_gateway_diagnostic(
+                    "observe_upstream_phase",
+                    diagnostic_request_key,
+                    phase=diagnostic_phase,
+                    attempt=attempt,
+                    retry_budget=base_retry_attempts,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase=failure_phase,
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
             if isinstance(exc, HTTPError) and not retry_http_errors:
+                _observe_gateway_diagnostic(
+                    "observe_upstream_attempt",
+                    diagnostic_request_key,
+                    attempt=attempt,
+                    retry_budget=attempt,
+                    elapsed_ms=elapsed_ms,
+                    outcome="error",
+                    failure_phase=failure_phase,
+                    connection_disposition=connection_disposition,
+                    provider=upstream_name,
+                    model=diagnostic_model,
+                )
                 raise
             failure_class = _upstream_failure_class(exc)
             retry_attempts = _retry_attempts_for_failure_class(
@@ -11187,6 +11153,18 @@ def _open_upstream_response(
                 base_attempts=base_retry_attempts,
                 failure_class=failure_class,
                 explicit_max_attempts=explicit_max_attempts,
+            )
+            _observe_gateway_diagnostic(
+                "observe_upstream_attempt",
+                diagnostic_request_key,
+                attempt=attempt,
+                retry_budget=retry_attempts,
+                elapsed_ms=elapsed_ms,
+                outcome="error",
+                failure_phase=failure_phase,
+                connection_disposition=connection_disposition,
+                provider=upstream_name,
+                model=diagnostic_model,
             )
             if attempt >= retry_attempts or failure_class == RETRY_FAILURE_PERMANENT:
                 raise
@@ -11226,6 +11204,30 @@ def _open_upstream_response(
 
 class CodexProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def handle_one_request(self) -> None:
+        self._diagnostic_request_id: str | None = None
+        try:
+            super().handle_one_request()
+        finally:
+            self._diagnostic_request_id = None
+
+    def _observe_downstream_phase(self, event: str, *, status: int | None = None) -> None:
+        request_id = getattr(self, "_diagnostic_request_id", None)
+        if not isinstance(request_id, str) or not request_id:
+            return
+        fields: dict[str, Any] = {"request_id": request_id}
+        if isinstance(status, int):
+            fields["status"] = status
+        _observe_gateway_diagnostic("observe_proxy_event", event, fields)
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        super().send_response(code, message)
+        self._observe_downstream_phase("downstream_response_open", status=code)
+
+    def end_headers(self) -> None:
+        super().end_headers()
+        self._observe_downstream_phase("downstream_headers")
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -11296,6 +11298,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         Completions format before being returned to the caller.
         """
         request_id = uuid.uuid4().hex[:12]
+        self._diagnostic_request_id = request_id
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
@@ -11323,6 +11326,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             proxy_request_context["raw_provider_probe"] = True
         model = None
         model_requested = None
+        upstream: Mapping[str, Any] | None = None
         upstream_name = None
         upstream_format = "responses"
         reports_cached_input_tokens = False
@@ -11331,6 +11335,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         route_policy_event_fields: dict[str, Any] = {}
         vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
+        response_lifecycle_state: dict[str, str] = {}
         caller_body = b""
         caller_request_observability: dict[str, Any] = {}
         request_observability: dict[str, Any] = {}
@@ -11857,6 +11862,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     request_kind=request_kind,
                                     defer_stream_errors=relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
+                                    response_lifecycle_state=response_lifecycle_state,
                                     behavior_profile=behavior_profile,
                                 )
                             break
@@ -12131,6 +12137,85 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error="image_proxy_error",
                 detail=str(exc),
                 error_type="image_proxy_error",
+            )
+        except UpstreamProtocolTranslationError as exc:
+            detail = str(exc)
+            error_code = exc.cause.code
+            is_apply_patch_adapter_error = error_code == APPLY_PATCH_ADAPTER_ERROR_CODE
+            error_status = 400
+            json_error_type = "invalid_request_error" if is_apply_patch_adapter_error else error_code
+            sse_error_type = "invalid_request_error" if is_apply_patch_adapter_error else "upstream_error"
+            selected_native_responses_tool_codec = (
+                upstream.get("native_responses_tool_codec", "none")
+                if isinstance(upstream, Mapping)
+                else "none"
+            )
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                upstream=upstream_name,
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                status=error_status,
+                error=error_code,
+                detail=detail[:300],
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **proxy_request_context,
+            )
+            if downstream_sse_started:
+                if (
+                    is_apply_patch_adapter_error
+                    and inbound_format == "responses"
+                    and selected_native_responses_tool_codec == "strict_apply_patch"
+                ):
+                    self._write_sse_event(
+                        "response.failed",
+                        _responses_failed_event_for_stream_error(
+                            upstream_name=upstream_name or "upstream_error",
+                            model=canonical_model_id(model) if model else None,
+                            status=error_status,
+                            exc=exc,
+                            error=error_code,
+                            detail=detail,
+                            response_id=response_lifecycle_state.get("response_id"),
+                        ),
+                    )
+                    write_proxy_event(
+                        "third_party_apply_patch_terminal",
+                        request_id=request_id,
+                        model=canonical_model_id(model) if model else None,
+                        upstream=upstream_name,
+                        codec=selected_native_responses_tool_codec,
+                        disposition="response.failed",
+                        failure_class=RETRY_FAILURE_PERMANENT,
+                        retry_count=0,
+                    )
+                    self.close_connection = True
+                else:
+                    self._write_downstream_sse_error(
+                        inbound_format=inbound_format,
+                        upstream_name=upstream_name or "upstream_error",
+                        status=error_status,
+                        exc=exc,
+                        error=error_code,
+                        detail=detail,
+                        error_type=sse_error_type,
+                        preserve_explicit_error=True,
+                    )
+                return
+            self._safe_send_downstream_json_error(
+                error_status,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "upstream_error",
+                request_id=request_id,
+                exc=exc,
+                error=error_code,
+                detail=detail,
+                error_type=json_error_type,
             )
         except ValueError as exc:
             write_proxy_event(
@@ -12638,7 +12723,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         *,
         downstream_output_started: Callable[[], bool] | None = None,
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
+        on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
+        def observe_line(line: bytes) -> None:
+            if not line or on_line is None:
+                return
+            try:
+                on_line(line)
+            except Exception:
+                return
+
         keepalive_interval = sse_keepalive_seconds()
         transport_timeout_seconds = transport_sse_idle_timeout_seconds()
         model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
@@ -12647,6 +12741,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if keepalive_interval <= 0 and not transport_idle_guard_enabled and not model_event_idle_guard_enabled:
             while True:
                 line = response.readline()
+                observe_line(line)
                 yield line
                 if not line:
                     return
@@ -12727,6 +12822,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 last_transport_at = now
                 if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
                     last_model_event_at = now
+                observe_line(value)
             yield value
             if not value:
                 return
@@ -12734,7 +12830,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:
         self._write_sse_event(
             "error",
-            _downstream_stream_error_payload(upstream_name=upstream_name, exc=exc),
+            _downstream_sse_error_payload_for_inbound_format(
+                DownstreamErrorSpec(
+                    inbound_format="responses",
+                    upstream_name=upstream_name,
+                    exc=exc,
+                )
+            ),
         )
 
     def _write_downstream_sse_error(
@@ -12746,6 +12848,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         exc: BaseException | None = None,
         error: str | None = None,
         detail: str | None = None,
+        error_type: str = "upstream_error",
+        preserve_explicit_error: bool = False,
     ) -> None:
         error_spec = DownstreamErrorSpec(
             inbound_format=inbound_format,
@@ -12754,6 +12858,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             exc=exc,
             error=error,
             detail=detail,
+            error_type=error_type,
+            preserve_explicit_error=preserve_explicit_error,
         )
         if inbound_format == "chat_completions":
             self.wfile.write(
@@ -12766,10 +12872,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 + b"\n\n"
             )
             self.wfile.flush()
-            self.close_connection = True
-            return
-        if exc is not None:
-            self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
             self.close_connection = True
             return
         self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
@@ -12785,11 +12887,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     ) -> None:
         self._write_sse_event(
             "error",
-            _downstream_stream_error_payload(
-                upstream_name=upstream_name,
-                status=status,
-                error=error,
-                detail=detail,
+            _downstream_sse_error_payload_for_inbound_format(
+                DownstreamErrorSpec(
+                    inbound_format="responses",
+                    upstream_name=upstream_name,
+                    status=status,
+                    error=error,
+                    detail=detail,
+                )
             ),
         )
 
@@ -12882,6 +12987,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         failure_side = "upstream_read"
         sse_stats = PassthroughSseSemanticStats()
         terminal_drain_timeout_shortened = False
+        diagnostic_terminal_observed = False
         try:
             while True:
                 failure_side = "upstream_read"
@@ -12893,11 +12999,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 send_downstream_headers_once()
                 last_upstream_byte_at = time.monotonic()
                 failure_side = "downstream_write"
+                _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+                sse_stats.observe_line(line)
+                terminal_observed_now = sse_stats.terminal_event_seen and not diagnostic_terminal_observed
+                if terminal_observed_now:
+                    diagnostic_terminal_observed = True
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=False)
                 self.wfile.write(line)
                 self.wfile.flush()
                 lines_streamed += 1
                 bytes_streamed += len(line)
-                sse_stats.observe_line(line)
+                if terminal_observed_now:
+                    _observe_gateway_diagnostic("observe_terminal", request_id, forwarded=True)
                 _offer_official_passthrough_usage_line(usage_context, line)
                 if sse_stats.terminal_event_seen and not terminal_drain_timeout_shortened:
                     shorten_terminal_drain_timeout = getattr(response, "shorten_terminal_drain_timeout", None)
@@ -13072,6 +13185,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     return 502
                 if not line:
                     break
+                _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
                 if defer_stream_errors and not headers_sent:
                     pending_lines.append(line)
                     payload_bytes = _sse_payload_bytes(line)
@@ -13208,6 +13322,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
         defer_stream_errors: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
+        response_lifecycle_state: dict[str, str] | None = None,
         behavior_profile: str | None = None,
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
@@ -13215,6 +13330,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # When the caller spoke Chat Completions, the response must be converted
         # back to Chat Completions format regardless of the upstream wire format.
         want_chat_output = inbound_format == "chat_completions"
+        compatibility_event_context = dict(event_context or {})
+        compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
         # When the caller asked for a non-streaming response but the upstream
         # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
         # SSE into a single JSON response body.
@@ -13228,6 +13345,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format=upstream_format,
             inbound_format=inbound_format,
         )
+
+        def observe_diagnostic_sse_line(line: bytes) -> None:
+            _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+
+        def remember_response_id(payload: Mapping[str, Any]) -> None:
+            if response_lifecycle_state is None:
+                return
+            response_payload = payload.get("response")
+            if not isinstance(response_payload, Mapping):
+                return
+            response_id = response_payload.get("id")
+            if isinstance(response_id, str) and response_id:
+                response_lifecycle_state["response_id"] = response_id
+
         if (
             behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
             and upstream_format == inbound_format
@@ -13332,7 +13463,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         compatible_response_body(
                             _chat_completion_to_response_body(body),
                             upstream_name,
-                            event_context=event_context,
+                            event_context=compatibility_event_context,
                         )
                     )
                 else:
@@ -13341,7 +13472,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         body = _response_body_to_chat_completion_body(body)
                     else:
                         body = _response_body_to_chat_completion_body(
-                            compatible_response_body(body, upstream_name, event_context=event_context)
+                            compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
                         )
             elif upstream_format == "chat_completions":
                 converted_body = _chat_completion_to_response_body(
@@ -13354,10 +13485,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     body = compatible_response_body(
                         converted_body,
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
             else:
-                body = compatible_response_body(body, upstream_name, event_context=event_context)
+                body = compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
             if status >= 400:
                 body = _with_codexhub_http_error(
                     body,
@@ -13568,6 +13699,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13699,6 +13831,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13828,6 +13961,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -13898,7 +14032,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_body = compatible_response_body(
                         _events_to_responses_body(events, require_completed=True),
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
                 except UpstreamStreamIncompleteError:
                     if defer_stream_errors:
@@ -13948,6 +14082,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
@@ -14074,7 +14209,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_body = compatible_response_body(
                         _events_to_responses_body(_chat_stream_chunks_to_response_events(chunks)),
                         upstream_name,
-                        event_context=event_context,
+                        event_context=compatibility_event_context,
                     )
                     send_downstream_response_headers_once()
                     for chunk in _chat_completion_body_to_stream_chunks(
@@ -14094,6 +14229,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **_response_events_shape_summary(events),
                     )
                     events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    events, _ = _adapt_third_party_apply_patch_stream_events(
+                        events,
+                        event_context=compatibility_event_context,
+                    )
                     events, _ = _normalize_third_party_tool_call(events)
                     _write_adapter_event(
                         event_context,
@@ -14159,16 +14298,27 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 downstream_output_started = False
                 buffered_lines: list[tuple[bytes, bool]] = []
                 rewritten_events: list[Mapping[str, Any]] = []
+                apply_patch_stream_adapter = (
+                    _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
+                    if (
+                        upstream_name != "official"
+                        and not want_chat_output
+                        and _apply_patch_adapter_enabled(compatibility_event_context)
+                    )
+                    else None
+                )
                 try:
                     for line in self._iter_upstream_sse_lines(
                         response,
                         line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                        on_line=observe_diagnostic_sse_line,
                     ):
                         if not line:
                             break
                         original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                         usage_payload = _parse_sse_json_payload(line)
                         if isinstance(usage_payload, Mapping):
+                            remember_response_id(usage_payload)
                             event_type = usage_payload.get("type")
                             if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                                 saw_response_event = True
@@ -14177,7 +14327,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             if _responses_event_starts_downstream_output(usage_payload):
                                 downstream_output_started = True
                             _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
-                        rewritten_line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                        rewritten_line = line
+                        if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
+                            replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(
+                                usage_payload
+                            )
+                            if apply_patch_changed:
+                                rewritten_line = (
+                                    _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                                    if replacement_events
+                                    else b""
+                                )
+                        rewritten_line = compatible_sse_line(
+                            rewritten_line,
+                            upstream_name,
+                            event_context=compatibility_event_context,
+                        )
                         rewritten_payload = _parse_sse_json_payload(rewritten_line) if upstream_name != "official" else usage_payload
                         _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
                         if isinstance(rewritten_payload, Mapping):
@@ -14234,6 +14399,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
+                if apply_patch_stream_adapter is not None and saw_terminal_event:
+                    apply_patch_stream_adapter.finish()
                 if status < 400 and saw_response_event and not saw_terminal_event:
                     self.close_connection = True
                     write_proxy_event(
@@ -14317,6 +14484,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             created_response: dict[str, Any] | None = None
             completed_tool_output_items: list[dict[str, Any]] = []
             last_response_event_type: str | None = None
+            apply_patch_stream_adapter = (
+                _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
+                if (
+                    upstream_name != "official"
+                    and not want_chat_output
+                    and _apply_patch_adapter_enabled(compatibility_event_context)
+                )
+                else None
+            )
 
             def write_or_queue_downstream_line(out_line: bytes, *, buffer: bool = False, force: bool = False) -> None:
                 if not out_line:
@@ -14405,6 +14581,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 for line in self._iter_upstream_sse_lines(
                     response,
                     line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                    on_line=observe_diagnostic_sse_line,
                 ):
                     if not line:
                         break
@@ -14425,6 +14602,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     usage_payload = _parse_sse_json_payload(line)
                     buffer_current_line = False
                     if isinstance(usage_payload, Mapping):
+                        remember_response_id(usage_payload)
                         event_type = usage_payload.get("type")
                         if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                             last_response_event_type = event_type
@@ -14450,6 +14628,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             _capture_usage(usage_capture, None, missing_reason="stream_error_event")
                             return 502
                         if _responses_events_have_terminal([usage_payload]):
+                            if not saw_terminal_event:
+                                _observe_gateway_diagnostic(
+                                    "observe_terminal",
+                                    request_id,
+                                    forwarded=False,
+                                )
                             saw_terminal_event = True
                         if event_type == "response.completed":
                             saw_completed_event = True
@@ -14488,7 +14672,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         and not saw_terminal_event
                     ):
                         buffer_current_line = True
-                    line = compatible_sse_line(line, upstream_name, event_context=event_context)
+                    if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
+                        replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(usage_payload)
+                        if apply_patch_changed:
+                            if not replacement_events:
+                                line = b""
+                            else:
+                                line = _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                    line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)
                     rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
                     if isinstance(rewritten_payload, Mapping):
                         remember_completed_tool_event(rewritten_payload)
@@ -14520,6 +14711,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 buffer=not flush_terminal,
                                 force=flush_terminal,
                             )
+                            if flush_terminal:
+                                _observe_gateway_diagnostic(
+                                    "observe_terminal",
+                                    request_id,
+                                    forwarded=True,
+                                )
                     if saw_terminal_event:
                         break
             except UpstreamStreamIdleTimeoutError as exc:
@@ -14571,6 +14768,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 return 502
             if status < 400 and not saw_terminal_event:
                 if synthesize_completed_tool_response():
+                    if apply_patch_stream_adapter is not None:
+                        apply_patch_stream_adapter.finish(allow_missing_terminal=True)
                     self.close_connection = True
                     _capture_usage(usage_capture, None, missing_reason="synthetic_tool_terminal")
                     return status
@@ -14601,6 +14800,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
+            if apply_patch_stream_adapter is not None:
+                apply_patch_stream_adapter.finish()
             if (
                 status < 400
                 and upstream_name != "official"
@@ -14691,7 +14892,20 @@ def run_server(host: str, port: int) -> None:
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
     logger.info("serving Codex proxy on %s:%s", host, port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        writer_result = GATEWAY_EVENT_WRITER.shutdown(
+            timeout=GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        if not writer_result.completed:
+            logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
+        try:
+            diagnostic_shutdown = getattr(GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
+            if callable(diagnostic_shutdown) and not diagnostic_shutdown(GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS):
+                logger.warning("Gateway diagnostic recorder shutdown did not drain")
+        except Exception:
+            logger.warning("Gateway diagnostic recorder shutdown failed")
 
 
 def main(argv: list[str] | None = None) -> int:
