@@ -15052,17 +15052,7 @@ Execution constraints:
         )
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
-    def test_responses_caller_chat_upstream_sse_returns_carrier_and_replays(self):
-        event_context = {
-            "inbound_format": "responses",
-            "_spawn_selector_required": True,
-            "_worker_binding_required": True,
-            "_worker_requested_binding": {
-                "agent_type": "worker",
-                "model": "synthetic-original-model",
-                "reasoning": "high",
-            },
-        }
+    def _chat_spawn_sse_response(self, arguments, *, call_id="chat-worker-stream-call"):
         chunks = [
             {
                 "id": "chatcmpl_worker_stream",
@@ -15076,13 +15066,11 @@ Execution constraints:
                             "tool_calls": [
                                 {
                                     "index": 0,
-                                    "id": "chat-worker-stream-call",
+                                    "id": call_id,
                                     "type": "function",
                                     "function": {
                                         "name": "multi_agent_v1__spawn_agent",
-                                        "arguments": json.dumps(
-                                            {"agent_type": "worker", "message": "delegate"}
-                                        ),
+                                        "arguments": json.dumps(arguments),
                                     },
                                 }
                             ],
@@ -15100,19 +15088,46 @@ Execution constraints:
                 ],
             },
         ]
-        events = codex_proxy._chat_stream_chunks_to_response_events(chunks)
-        normalized_events = []
-        for event in events:
-            line = b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n"
-            normalized_line = compatible_sse_line(
-                line,
-                "synthetic-provider",
-                event_context=event_context,
-            )
-            normalized_events.append(json.loads(normalized_line.removeprefix(b"data: ").strip()))
+        return FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\n", b""]
+        )
+
+    def test_responses_caller_chat_upstream_sse_relay_returns_carrier_and_replays(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "synthetic-original-model",
+                "reasoning": "high",
+            },
+        }
+        handler = FakeHandler()
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            self._chat_spawn_sse_response({"agent_type": "worker", "message": "delegate"}),
+            "synthetic-provider",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=event_context,
+        )
+        normalized_events = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
         done = next(event for event in normalized_events if event.get("type") == "response.output_item.done")
+        completed = next(event for event in normalized_events if event.get("type") == "response.completed")
         call_item = done["item"]
+        self.assertEqual(status, 200)
         self.assertIn("_codexhub_worker_requested_binding", call_item)
+        self.assertEqual(
+            completed["response"]["output"][0]["_codexhub_worker_requested_binding"],
+            call_item["_codexhub_worker_requested_binding"],
+        )
 
         replay = compatible_request_body(
             self._worker_replay_body(
@@ -15131,6 +15146,53 @@ Execution constraints:
             json.loads(replay)["input"][0],
         )
         codex_proxy._responses_request_to_chat_completion_body(replay)
+
+    def test_responses_caller_chat_upstream_sse_relay_rejects_missing_selector_before_call(self):
+        handler = FakeHandler()
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                self._chat_spawn_sse_response({"message": "delegate"}, call_id="chat-missing-selector"),
+                "synthetic-provider",
+                upstream_format="chat_completions",
+                inbound_format="responses",
+                caller_stream=True,
+                event_context={"inbound_format": "responses", "_spawn_selector_required": True},
+            )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.assertEqual(handler.wfile.writes, [])
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="missing_selector",
+            surface="sse",
+        )
+
+    def test_responses_caller_chat_upstream_sse_relay_rejects_unsupported_selector_before_call(self):
+        handler = FakeHandler()
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                self._chat_spawn_sse_response(
+                    {"agent_type": "synthetic-unknown", "message": "delegate"},
+                    call_id="chat-unsupported-selector",
+                ),
+                "synthetic-provider",
+                upstream_format="chat_completions",
+                inbound_format="responses",
+                caller_stream=True,
+                event_context={"inbound_format": "responses", "_spawn_selector_required": True},
+            )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.assertEqual(handler.wfile.writes, [])
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="unsupported_selector",
+            surface="sse",
+        )
 
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(

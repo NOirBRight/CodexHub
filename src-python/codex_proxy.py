@@ -5411,11 +5411,21 @@ def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
     return payload.get("reasoning_effort")
 
 
+def _worker_requested_binding_signature_payload(binding: Mapping[str, Any], call_id: str) -> bytes:
+    signed_binding = {
+        "contract_version": binding.get("contract_version"),
+        "agent_type": binding.get("agent_type"),
+        "model": binding.get("model"),
+        "reasoning": binding.get("reasoning"),
+    }
+    canonical = json.dumps(signed_binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return call_id.encode("utf-8") + b"\0" + canonical
+
+
 def _requested_worker_binding_signature(binding: Mapping[str, Any], call_id: str) -> str:
-    canonical = json.dumps(binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return worker_binding_signing.sign(
         WORKER_BINDING_SIGNING_ROOT,
-        call_id.encode("utf-8") + b"\0" + canonical,
+        _worker_requested_binding_signature_payload(binding, call_id),
     )
 
 
@@ -5456,10 +5466,9 @@ def _verified_worker_requested_binding(
         "model": value.get("model"),
         "reasoning": value.get("reasoning"),
     }
-    canonical = json.dumps(binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if not worker_binding_signing.verify(
         WORKER_BINDING_SIGNING_ROOT,
-        call_id.encode("utf-8") + b"\0" + canonical,
+        _worker_requested_binding_signature_payload(binding, call_id),
         signature,
     ):
         return None, "unknown_requested_binding_sidecar"
@@ -5521,6 +5530,21 @@ def _attach_worker_requested_binding_sidecars(
         rewritten[WORKER_REQUESTED_BINDING_FIELD] = sidecar
         changed = True
     return (rewritten if changed else value), changed
+
+
+def _apply_external_worker_response_contract(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    validate_selectors: bool = True,
+    attach_sidecars: bool = True,
+) -> tuple[Any, bool]:
+    if validate_selectors:
+        _validate_external_worker_selectors(value, event_context, surface=surface)
+    if attach_sidecars:
+        return _attach_worker_requested_binding_sidecars(value, event_context)
+    return value, False
 
 
 def _validate_worker_binding_history(
@@ -9365,7 +9389,12 @@ def compatible_response_body(
     changed = _hide_reasoning_text(payload)
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
-    _validate_external_worker_selectors(payload, event_context, surface="body")
+    payload, _ = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="body",
+        attach_sidecars=False,
+    )
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -9396,7 +9425,12 @@ def compatible_response_body(
     changed = changed or required_tool_changed
     payload, required_call_changed = _repair_missing_required_subagent_call_payload(payload, event_context)
     changed = changed or required_call_changed
-    payload, requested_binding_changed = _attach_worker_requested_binding_sidecars(payload, event_context)
+    payload, requested_binding_changed = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="body",
+        validate_selectors=False,
+    )
     changed = changed or requested_binding_changed
     if not changed:
         return body
@@ -9425,7 +9459,12 @@ def compatible_sse_line(
         return b""
 
     changed = _hide_reasoning_text(payload)
-    _validate_external_worker_selectors(payload, event_context, surface="sse")
+    payload, _ = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="sse",
+        attach_sidecars=False,
+    )
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -9462,7 +9501,12 @@ def compatible_sse_line(
     changed = changed or exact_spawn_changed
     payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
     changed = changed or required_tool_changed
-    payload, requested_binding_changed = _attach_worker_requested_binding_sidecars(payload, event_context)
+    payload, requested_binding_changed = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="sse",
+        validate_selectors=False,
+    )
     changed = changed or requested_binding_changed
     repaired_line = _repair_missing_required_subagent_call_sse_line(payload, event_context, line_ending)
     if repaired_line is not None:
@@ -14984,6 +15028,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     events, _ = _coerce_required_subagent_tool_calls(events, event_context)
                     events, _ = _reconcile_function_call_argument_events(events)
                     events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    events, _ = _apply_external_worker_response_contract(
+                        events,
+                        compatibility_event_context,
+                        surface="sse",
+                    )
                     _write_adapter_event(
                         event_context,
                         "chat_to_responses_event_summary",
