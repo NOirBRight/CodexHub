@@ -91,6 +91,8 @@ open
 
 选择顺序是 P0 Gate blocker、依赖图中最早的未阻塞节点、地图顺序，以及同级情况下能最早缩小后续风险的独立任务。`ready-for-human` 不进入自动 frontier，但必须显示在 Gate 的 Fog/Decision 区。
 
+Frontier 发布必须把两类资格分开记录：一类是 label/assignee/native dependency 资格；另一类是所有权/hotset 资格。后者要求对每个候选执行 exact-title 与 `Issue N` 两次原生 Task 查询，任一 Host 不可用或任一匹配都 fail closed；同时从 Issue 正文解析规范化 `## Expected hotset`，枚举所有本地 worktree、本地 branch 和 open PR head 的 revision、clean/dirty 状态及相对 `dev` 的 changed-file 集，并计算逐候选交集。Branch 名称不能当作所有权证据；规划 worktree 只有在完整 changed-file 集与产品 hotset 无交集时才能标记为 migration-control，`dev` 也必须实际审计。脱敏输入、推导、查询 schema/timestamp/availability 和结果保存在 `docs/superpowers/reviews/` 的版本化 artifact 中，#147 checkpoint 记录其 repository-relative path 与 SHA-256；artifact 是审计证据，不是新的工作状态 authority。
+
 ## 4. 发布列车
 
 ### 4.1 0.1.6 — Codex 执行控制面可靠性
@@ -367,8 +369,9 @@ Out of scope
 2. 更新 #147；
 3. 更新 milestones、子 Issue 和依赖；
 4. 每次写入后 readback；
-5. 重新计算 frontier；
-6. 地图迁移期间不自动 assign 或启动 Worker。
+5. 重新计算 frontier，生成并读回 content-addressed 的脱敏 audit artifact；
+6. 首次 checkpoint 使用 exact-body/same-purpose create-only guard；既有 checkpoint 更新必须同时匹配 public comment ID 和规范化 prior-body SHA-256，只 PATCH 该 comment，并读回唯一 prefix/exact body；
+7. 地图迁移期间不自动 assign 或启动 Worker。
 
 ## 10. 设计决策摘要
 

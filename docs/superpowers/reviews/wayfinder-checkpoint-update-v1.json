@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-16T19:13:35.7585728Z",
+  "issue": 147,
+  "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
+  "historical_original": {
+    "source": "Task 8 execution report exact original published body",
+    "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Visible Worker gate and #159 is its ready local bounded-search child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+    "normalized_body_sha256": "0c09e6b7c4ba7abf432dc43b19860095094912a1b36b3d67c98e0c3870f40fb4"
+  },
+  "pre_update": {
+    "public_comment_id": 4994927680,
+    "normalized_body_sha256": "b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b",
+    "readback_at": "2026-07-16T19:13:35.7634320Z"
+  },
+  "desired": {
+    "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `388da2e2f68b3e5c3e8ce5cc99cdfb1ba801941b19e864e3bbb22331c5b6356b`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+    "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+    "frontier_artifact_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+    "frontier_artifact_sha256": "388da2e2f68b3e5c3e8ce5cc99cdfb1ba801941b19e864e3bbb22331c5b6356b"
+  },
+  "operation_decision": "patch",
+  "post_readback": {
+    "public_comment_id": 4994927680,
+    "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+    "prefix_multiplicity": 1,
+    "exact_body_multiplicity": 1,
+    "readback_at": "2026-07-16T19:13:35.7639048Z"
+  }
+}

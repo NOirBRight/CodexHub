@@ -1149,11 +1149,22 @@ Expected: `milestones-and-hierarchy-ok`.
 Run:
 
 ```powershell
+function Normalize-IssueCommentBody([string]$Body) {
+  return ($Body -replace "`r`n","`n").TrimEnd()
+}
+function Get-NormalizedBodySha256([string]$Body) {
+  $normalized = Normalize-IssueCommentBody $Body
+  $bytes = [Text.Encoding]::UTF8.GetBytes($normalized)
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+function Get-IssueComments([int]$Issue) {
+  return @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+}
 function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Body) {
-  $Body = ($Body -replace "`r`n","`n").TrimEnd()
+  $Body = Normalize-IssueCommentBody $Body
   $comments = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
-  $exact = @($comments | Where-Object body -CEQ $Body)
-  $purpose = @($comments | Where-Object { ([string]$_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  $exact = @($comments | Where-Object { (Normalize-IssueCommentBody $_.body) -ceq $Body })
+  $purpose = @($comments | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
   if ($exact.Count -gt 1) { throw "multiple exact comments on #$Issue" }
   if ($exact.Count -eq 1) {
     if ($purpose.Count -ne 1) { throw "conflicting same-purpose comment on #$Issue" }
@@ -1162,9 +1173,60 @@ function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Bod
     gh issue comment $Issue --body $Body | Out-Null
   }
   $readback = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
-  $matches = @($readback | Where-Object body -CEQ $Body)
-  if ($matches.Count -ne 1) { throw "exact comment readback failed on #$Issue" }
-  $matches[0].html_url
+  $purposeReadback = @($readback | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  $matches = @($readback | Where-Object { (Normalize-IssueCommentBody $_.body) -ceq $Body })
+  if ($purposeReadback.Count -ne 1 -or $matches.Count -ne 1) { throw "exact create/no-op readback failed on #$Issue" }
+  return [ordered]@{
+    operation_decision = if ($exact.Count -eq 1) { 'exact-no-op' } else { 'create' }
+    public_comment_id = [long]$matches[0].id
+    normalized_body_sha256 = Get-NormalizedBodySha256 $Body
+    prefix_multiplicity = $purposeReadback.Count
+    exact_body_multiplicity = $matches.Count
+    url = $matches[0].html_url
+  }
+}
+function Set-ExactIssueComment(
+  [int]$Issue,
+  [string]$PurposePrefix,
+  [string]$DesiredBody,
+  [long]$ExpectedPriorPublicCommentId,
+  [string]$ExpectedPriorNormalizedBodySha256
+) {
+  $DesiredBody = Normalize-IssueCommentBody $DesiredBody
+  $comments = @(Get-IssueComments $Issue)
+  $purpose = @($comments | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  if ($purpose.Count -ne 1) { throw "expected exactly one same-purpose comment on #$Issue" }
+  $exact = @($comments | Where-Object { (Normalize-IssueCommentBody $_.body) -ceq $DesiredBody })
+  if ($exact.Count -gt 1) { throw "multiple exact desired comments on #$Issue" }
+
+  $selected = $purpose[0]
+  $priorHash = Get-NormalizedBodySha256 ([string]$selected.body)
+  if ($exact.Count -eq 1) {
+    $operation = 'exact-no-op'
+  } else {
+    if ([long]$selected.id -ne $ExpectedPriorPublicCommentId) { throw "prior public comment ID mismatch on #$Issue" }
+    if ($priorHash -cne $ExpectedPriorNormalizedBodySha256.ToLowerInvariant()) { throw "prior normalized-body SHA-256 mismatch on #$Issue" }
+    @{body=$DesiredBody} | ConvertTo-Json -Compress |
+      gh api --method PATCH "repos/NOirBRight/CodexHub/issues/comments/$ExpectedPriorPublicCommentId" --input - | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "checkpoint PATCH failed on #$Issue" }
+    $operation = 'patch'
+  }
+
+  $readback = @(Get-IssueComments $Issue)
+  $purposeReadback = @($readback | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  $exactReadback = @($readback | Where-Object { (Normalize-IssueCommentBody $_.body) -ceq $DesiredBody })
+  if ($purposeReadback.Count -ne 1 -or $exactReadback.Count -ne 1) { throw "exact checkpoint update readback failed on #$Issue" }
+  if ([long]$exactReadback[0].id -ne [long]$selected.id) { throw "checkpoint identity changed on #$Issue" }
+  return [ordered]@{
+    operation_decision = $operation
+    prior_public_comment_id = [long]$selected.id
+    prior_normalized_body_sha256 = $priorHash
+    desired_normalized_body_sha256 = Get-NormalizedBodySha256 $DesiredBody
+    post_public_comment_id = [long]$exactReadback[0].id
+    post_prefix_multiplicity = $purposeReadback.Count
+    post_exact_body_multiplicity = $exactReadback.Count
+    url = $exactReadback[0].html_url
+  }
 }
 
 git merge-base --is-ancestor 400d19bb dev
@@ -1512,10 +1574,11 @@ Expected: #147 URL and no exception.
 **Files:**
 - GitHub milestones and #147 comments only.
 - Temporary: `$env:TEMP\codexhub-wayfinder-migration\final-issues-api.json`.
+- Durable audit inputs/outputs: `scripts/generate_wayfinder_final_audit.py`, `docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json`, `docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json`, and `docs/superpowers/reviews/wayfinder-final-audit-v1.json`.
 
 **Interfaces:**
 - Consumes: all prior tasks.
-- Produces: closed legacy milestone, exact lifecycle/milestone/hierarchy/dependency validation, and one durable #147 migration checkpoint with the unclaimed frontier.
+- Produces: closed legacy milestone, exact lifecycle/milestone/hierarchy/dependency validation, a self-contained content-addressed audit package, and one durable #147 migration checkpoint with the unclaimed frontier plus the repository-relative frontier artifact path/SHA-256.
 
 - [ ] **Step 1: Close the superseded legacy milestone only after reassignments**
 
@@ -1635,7 +1698,7 @@ Expected: `hierarchy-dependencies-ok`.
 
 - [ ] **Step 5: Prove hotset ownership eligibility and compute the unclaimed 0.1.6 ready frontier**
 
-First build the label/dependency candidate set with the following PowerShell. Then, for every candidate it prints, call native `codex_app__list_threads` twice: once with the exact Issue title and once with `Issue N`. Do not use SQLite. Save only `{issue,queries:[{query,threads,unavailableHosts}]}` to `$env:TEMP\codexhub-wayfinder-migration\frontier-task-evidence.json`; omit Task IDs and local paths. If the native Task tool is unavailable, any host is unavailable, or any matching Task exists, stop with `NEEDS_CONTEXT` rather than guessing.
+First build the label/dependency candidate set with the following PowerShell. Then, for every candidate it prints, call native `codex_app__list_threads` twice: once with the exact Issue title and once with `Issue N`. Do not use SQLite. Preserve the actual sanitized tool output in one JSON object with top-level `captured_at`, `tool`, `limit`, and `records`; every record must contain `issue`, `kind`, `query`, `schemaVersion`, `threads`, and `unavailableHosts`. Write it to `$env:TEMP\codexhub-wayfinder-migration\frontier-task-evidence.json` only when every `threads` and `unavailableHosts` array is empty, so no Task ID can enter the file. If the native Task tool is unavailable, any host is unavailable, any matching Task exists, or the capture timestamp/schema/query is incomplete, stop with `NEEDS_CONTEXT` rather than guessing.
 
 Run:
 
@@ -1661,53 +1724,36 @@ After the native queries are saved, run:
 ```powershell
 $taskEvidenceFile = Join-Path $env:TEMP 'codexhub-wayfinder-migration/frontier-task-evidence.json'
 if (-not (Test-Path $taskEvidenceFile)) { throw 'NEEDS_CONTEXT: native Task evidence is missing' }
-$taskEvidence = @(Get-Content -Raw $taskEvidenceFile | ConvertFrom-Json)
-foreach ($candidate in $labelCandidates) {
-  $record = @($taskEvidence | Where-Object issue -eq $candidate.number)
-  if ($record.Count -ne 1 -or $record[0].queries.Count -ne 2) { throw "NEEDS_CONTEXT: incomplete Task evidence #$($candidate.number)" }
-  $expectedQueries = @($candidate.title,"Issue $($candidate.number)" | Sort-Object)
-  $actualQueries = @($record[0].queries.query | Sort-Object)
-  if (($actualQueries -join '|') -cne ($expectedQueries -join '|')) { throw "NEEDS_CONTEXT: wrong Task queries #$($candidate.number)" }
-  foreach ($query in $record[0].queries) {
-    if ($query.unavailableHosts.Count -ne 0) { throw "NEEDS_CONTEXT: native Task host unavailable #$($candidate.number)" }
-    if ($query.threads.Count -ne 0) { throw "active native Task owns #$($candidate.number)" }
-  }
-}
+$artifactPath = 'docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json'
+python scripts/generate_wayfinder_final_audit.py capture `
+  --native-task-evidence $taskEvidenceFile `
+  --output $artifactPath `
+  --base-ref dev `
+  --planned-path scripts/generate_wayfinder_final_audit.py `
+  --planned-path docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md
+if ($LASTEXITCODE -ne 0) { throw 'frontier audit capture/self-validation failed closed' }
 
-$currentBranch = git branch --show-current
-$worktreeLines = @(git worktree list --porcelain)
-$worktreeBranches = @($worktreeLines | Where-Object { $_ -like 'branch refs/heads/*' } | ForEach-Object { $_.Substring(7) })
-$allowedWorktreeBranches = @('refs/heads/dev',"refs/heads/$currentBranch")
-$extraWorktrees = @($worktreeBranches | Where-Object { $_ -notin $allowedWorktreeBranches })
-if ($extraWorktrees.Count) { throw 'active product worktree requires hotset reconciliation' }
-
-$allBranches = @(git branch --all --format='%(refname:short)')
-$openPrs = @(gh pr list --state open --limit 100 --json number,title,headRefName,baseRefName,url | ConvertFrom-Json)
-foreach ($candidate in $labelCandidates) {
-  $branchPattern = "(?i)(issue[-_/]?$($candidate.number)(\D|$)|#$($candidate.number)(\D|$))"
-  if (@($allBranches | Where-Object { $_ -match $branchPattern }).Count) { throw "candidate branch owns #$($candidate.number)" }
-  if (@($openPrs | Where-Object { $_.headRefName -match $branchPattern -or $_.title -match "#$($candidate.number)(\D|$)" }).Count) { throw "open PR owns #$($candidate.number)" }
-  if ($candidate.assignees.Count -ne 0) { throw "assignee owns #$($candidate.number)" }
-  if (-not $candidate.body.Contains('## Expected hotset')) { throw "missing Expected hotset #$($candidate.number)" }
+$audit = Get-Content -Raw $artifactPath | ConvertFrom-Json
+if ($audit.schema_version -ne 1 -or $audit.artifact_kind -cne 'wayfinder-frontier-ownership-audit') {
+  throw 'frontier audit schema mismatch'
 }
-
-$ownershipEvidence = [ordered]@{
-  captured_at = (Get-Date).ToUniversalTime().ToString('o')
-  candidates = @($labelCandidates.number)
-  native_task_queries = @($taskEvidence | ForEach-Object { @{issue=$_.issue;queries=@($_.queries | ForEach-Object { @{query=$_.query;match_count=$_.threads.Count;unavailable_host_count=$_.unavailableHosts.Count} })} })
-  active_product_worktree_count = $extraWorktrees.Count
-  candidate_branch_count = 0
-  candidate_open_pr_count = 0
-  candidate_assignee_count = 0
-  hotset_preflight = 'Expected hotsets re-read; no native Task or active product worktree owns a candidate hotset.'
+if ($audit.native_task_capture.records.Count -ne (2 * $labelCandidates.Count)) {
+  throw 'frontier native Task record count mismatch'
 }
-$ownershipEvidence | ConvertTo-Json -Depth 8 |
-  Set-Content -Encoding utf8 (Join-Path $env:TEMP 'codexhub-wayfinder-migration/frontier-ownership-evidence.json')
-$frontier = @($labelCandidates)
+$frontier = @($audit.frontier | ForEach-Object {
+  $number = [int]$_
+  $match = @($labelCandidates | Where-Object number -eq $number)
+  if ($match.Count -ne 1) { throw "frontier readback mismatch #$number" }
+  $match[0]
+})
+$artifactSha256 = (Get-FileHash $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+python scripts/generate_wayfinder_final_audit.py validate --artifact $artifactPath
+if ($LASTEXITCODE -ne 0) { throw 'frontier artifact self-validation failed' }
 $frontier | Select-Object number,title,url | Format-Table -AutoSize
+"frontier-artifact=$artifactPath sha256=$artifactSha256"
 ```
 
-Expected: sanitized native Task/worktree/branch/PR/assignee/hotset evidence proves no active ownership conflict. If live state remains unchanged, frontier order is `$localSearchIssue`, `$selectorBindingIssue`, #139, #149, #150, #111. Do not assign or dispatch any candidate.
+Expected: the generator validates all twelve exact query records, parses/persists every candidate's normalized Expected hotset, enumerates revisions/cleanliness/file sets for every worktree/local branch/open PR head, computes per-candidate intersections without inferring ownership from branch names, and records label/dependency eligibility separately from ownership/hotset eligibility. The current planning worktree may be `migration-control` only with zero product-hotset intersections; `dev` must be audited clean rather than trusted. If live state remains unchanged, frontier order is `$localSearchIssue`, `$selectorBindingIssue`, #139, #149, #150, #111. Do not assign or dispatch any candidate.
 
 - [ ] **Step 6: Publish one migration checkpoint comment on #147**
 
@@ -1752,12 +1798,82 @@ Current unclaimed 0.1.6 ready frontier:
 
 Sanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.
 
+Durable frontier audit: $artifactPath (SHA-256: ``$artifactSha256``).
+
 Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
 "@
-Write-ExactIssueComment 147 '## Reliability-gated Wayfinder migration readback' $comment
+$purposePrefix = '## Reliability-gated Wayfinder migration readback'
+$existing = @(Get-IssueComments 147 | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($purposePrefix,[StringComparison]::Ordinal) })
+if ($existing.Count -eq 0) {
+  $guard = Write-ExactIssueComment 147 $purposePrefix $comment
+} else {
+  $guard = Set-ExactIssueComment 147 $purposePrefix $comment `
+    4994927680 'b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b'
+}
+
+$historicalOriginalBody = @'
+## Reliability-gated Wayfinder migration readback
+
+The approved roadmap migration is complete and read back:
+
+- five active reliability milestones exist with exact membership;
+- the legacy cross-version reliability milestone is closed as superseded;
+- #156 is the ready-for-human Visible Worker gate and #159 is its ready local bounded-search child;
+- #64 is blocked by #156 for the full post-fix collaboration matrix;
+- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;
+- every open Issue has exactly one canonical lifecycle label;
+- no ticket was assigned or dispatched by the migration.
+
+Current unclaimed 0.1.6 ready frontier:
+
+- #159 Bound repeated empty tool_search misses for external models
+- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes
+- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe
+- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts
+- #111 Make Windows app autostart registration verifiable and reliable
+
+Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
+'@
+$desiredBody = Normalize-IssueCommentBody $comment
+$transcript = [ordered]@{
+  schema_version = 1
+  captured_at = (Get-Date).ToUniversalTime().ToString('o')
+  issue = 147
+  purpose_prefix = $purposePrefix
+  historical_original = [ordered]@{
+    source = 'Task 8 execution report exact original published body'
+    normalized_body = Normalize-IssueCommentBody $historicalOriginalBody
+    normalized_body_sha256 = Get-NormalizedBodySha256 $historicalOriginalBody
+  }
+  pre_update = [ordered]@{
+    public_comment_id = [long]($guard.prior_public_comment_id ?? $guard.public_comment_id)
+    normalized_body_sha256 = [string]($guard.prior_normalized_body_sha256 ?? $guard.normalized_body_sha256)
+  }
+  desired = [ordered]@{
+    normalized_body = $desiredBody
+    normalized_body_sha256 = Get-NormalizedBodySha256 $desiredBody
+    frontier_artifact_path = $artifactPath
+    frontier_artifact_sha256 = $artifactSha256
+  }
+  operation_decision = [string]$guard.operation_decision
+  post_readback = [ordered]@{
+    public_comment_id = [long]($guard.post_public_comment_id ?? $guard.public_comment_id)
+    normalized_body_sha256 = Get-NormalizedBodySha256 $desiredBody
+    prefix_multiplicity = [int]($guard.post_prefix_multiplicity ?? $guard.prefix_multiplicity)
+    exact_body_multiplicity = [int]($guard.post_exact_body_multiplicity ?? $guard.exact_body_multiplicity)
+  }
+}
+$transcriptPath = 'docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json'
+$transcript | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $transcriptPath
+python scripts/generate_wayfinder_final_audit.py finalize `
+  --core $artifactPath `
+  --transcript $transcriptPath `
+  --output docs/superpowers/reviews/wayfinder-final-audit-v1.json
+if ($LASTEXITCODE -ne 0) { throw 'final Wayfinder audit package validation failed' }
+$guard.url
 ```
 
-Expected: one comment URL returned.
+Expected: initial publication remains create-only and guarded; an existing checkpoint is either an exact no-op or a PATCH of only public comment `4994927680` after both its public ID and normalized prior-body SHA-256 match. Readback leaves exactly one same-purpose prefix and one exact desired body. The durable transcript and final self-contained artifact validate before the comment URL is returned.
 
 - [ ] **Step 7: Perform the final no-claim readback**
 
@@ -1776,9 +1892,17 @@ $prs = @(gh pr list --state open --limit 100 `
 if (@($prs | Where-Object { $_.headRefName -match '(?i)wayfinder|issue[-_/]?(159|161|139|149|150|111)' }).Count) {
   throw 'migration/candidate PR exists'
 }
-if (-not (Test-Path (Join-Path $env:TEMP 'codexhub-wayfinder-migration/frontier-ownership-evidence.json'))) {
-  throw 'frontier ownership evidence missing'
+foreach ($path in @(
+  'docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json',
+  'docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json',
+  'docs/superpowers/reviews/wayfinder-final-audit-v1.json'
+)) {
+  if (-not (Test-Path $path)) { throw "durable audit artifact missing: $path" }
 }
+python scripts/generate_wayfinder_final_audit.py validate `
+  --artifact docs/superpowers/reviews/wayfinder-final-audit-v1.json `
+  --live
+if ($LASTEXITCODE -ne 0) { throw 'fresh live final audit failed' }
 git status --short --branch
 ```
 
@@ -1789,7 +1913,7 @@ Expected:
 - #159 and the selector/binding child are present in the exact frontier and ownership-evidence readback;
 - no migration-created product PR exists;
 - no product Issue was assigned by this plan;
-- repository working tree is clean.
+- repository working tree contains only the intended planning generator/docs/audit changes before their scoped commit, and is clean after commit.
 
 ---
 
@@ -1802,6 +1926,6 @@ Before execution handoff, verify this plan against the approved design:
 3. **Type consistency:** `$localSearchIssue`, `$selectorBindingIssue`, `$uninstallIssue`, milestone titles, parent relationships, and dependency direction are identical in every task.
 4. **Scope:** The plan changes only GitHub planning state. Every product Issue receives its own later spec/plan/implementation cycle.
 5. **No hidden claim:** No command assigns an Issue, creates a product branch/worktree, starts a Worker, opens a production PR, or edits product code.
-6. **Retry safety:** Every Task 6/8 comment write uses the exact-body/same-purpose-prefix guard, reads back exactly one match, and returns its URL; hierarchy/dependency writes are idempotent and final assertions compare exact sets.
-7. **Ownership proof:** Task 8 requires sanitized native Task/worktree/branch/PR/assignee/hotset evidence and stops with `NEEDS_CONTEXT` when native Task evidence is unavailable; labels alone never establish frontier eligibility.
+6. **Retry safety:** Every Task 6 comment and initial Task 8 publication uses the create/no-op exact-body/same-purpose-prefix guard. Every Task 8 checkpoint update uses `Set-ExactIssueComment`, optimistic concurrency on the expected public comment ID plus normalized prior-body SHA-256, a single-comment PATCH, and exact post-readback multiplicities.
+7. **Ownership proof:** Task 8's tracked read-only generator validates twelve timestamped/schema-versioned native queries, parses normalized Expected hotsets, enumerates every worktree/local branch/open PR head with revisions and changed-file sets versus `dev`, computes file-based intersections without branch-name inference, keeps label/dependency and ownership/hotset eligibility separate, and stops fail-closed on incomplete evidence or conflicts.
 8. **Review blockers resolved:** Task 1 safely fast-forwards only a clean stale planning branch with no unique commits, requires the design and plan in-tree, emits the full read-only write-set preview, and stops for explicit authorization; Tasks 2–8 use Inline Execution only.
