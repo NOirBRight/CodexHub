@@ -180,6 +180,7 @@ $preview = [ordered]@{
     )
     issues_if_absent = @(
       'Bound repeated empty tool_search misses for external models',
+      'Preserve Worker selector and effective binding validation for external delegation',
       'Remove CodexHub-owned Windows autostart registration during uninstall'
     )
   }
@@ -196,12 +197,17 @@ $preview = [ordered]@{
       83,85,86,87,88,89,90,91,92,93,94,104,109,111,112,113,114,115,
       126,138,139,141,143,148,149,150,151,152,153,154,155,156,157
     )
-    dependency_edges = @('#156 blocked by bounded-search child','#64 blocked by #156','uninstall child blocked by #111')
+    dependency_edges = @('#156 blocked by bounded-search child','#156 blocked by selector/binding child','#64 blocked by #156','uninstall child blocked by #111')
     dynamic_issue_mutations = @(
       'bounded-search child: bug + ready-for-agent + wayfinder:task, milestone 0.1.6, parent #156',
+      'selector/binding child: bug + ready-for-agent + wayfinder:task, milestone 0.1.6, parent #156',
       'uninstall child: bug + ready-for-agent + wayfinder:task, milestone 0.1.10, parent #147'
     )
-    bodies = @('#28 narrowed to discovery performance','#147 replaced with reliability-gated Wayfinder map')
+    bodies = @(
+      '#156 title/body rewritten as the Host/runtime-only visible-Worker gate',
+      '#28 narrowed to discovery performance',
+      '#147 replaced with reliability-gated Wayfinder map including both #156 children'
+    )
     comments = @('#8 baseline correction','#10 closure evidence','#12 closure evidence','#62 conditional ownership reconciliation','#147 final migration readback')
     assignee_changes = @('#62 removal only if native Task and PR readback prove ownership is stale')
     milestone_close = 'Third-party model agentic reliability, only after zero-open-Issue readback'
@@ -298,42 +304,173 @@ Expected: five unique open milestones with exact descriptions.
 
 ---
 
-### Task 3: Decompose #156 into the human Visible Worker gate and a local bounded-search fix
+### Task 3: Split #156 into one Host/runtime-only gate and two CodexHub adapter children
 
 **Files:**
 - Read: `docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md`
-- GitHub Issue: #156.
-- Create GitHub Issue with exact title: `Bound repeated empty tool_search misses for external models`.
+- GitHub Issue: #156, rewritten in place with exact title `Enable sidebar-visible third-party Worker callbacks and binding readback`.
+- Discover or create GitHub Issue with exact title: `Bound repeated empty tool_search misses for external models`.
+- Discover or create GitHub Issue with exact title: `Preserve Worker selector and effective binding validation for external delegation`.
 
 **Interfaces:**
-- Consumes: milestone `0.1.6 — Codex control-plane reliability`.
-- Produces: `$localSearchIssue`, a ready-for-agent CodexHub-owned child of #156; #156 remains the ready-for-human Visible Worker gate; #64 is blocked by #156.
+- Consumes: milestone `0.1.6 — Codex control-plane reliability` and Task 1's immutable pre-write Issue snapshot.
+- Produces: `$localSearchIssue` and `$selectorBindingIssue`, both unassigned ready-for-agent CodexHub children of #156; #156 remains the unassigned ready-for-human Host/runtime-only gate; #156 is blocked by both children; #64 retains blockers #62/#63/#156.
 
-- [ ] **Step 1: Re-read #156 immediately before writing**
+- [ ] **Step 1: Re-read #156, #159, and comments immediately before writing**
 
 Run:
 
 ```powershell
-gh issue view 156 --comments `
-  --json number,title,state,body,labels,assignees,milestone,comments,url
+foreach ($n in 156,159) {
+  gh issue view $n --comments `
+    --json number,title,state,body,labels,assignees,milestone,comments,url
+}
 ```
 
-Expected: open `bug` + `ready-for-human`; body contains the Host/runtime callback gap and the CodexHub repeated empty-search amplification; the reporter clarification comment ends with `issuecomment-4993730159`.
+Expected: #156 is open, unassigned, and `ready-for-human`; #159 is open, unassigned, and `ready-for-agent`; all existing comments and sanitized evidence are visible before any mutation.
 
-- [ ] **Step 2: Create the local bounded-search child Issue if absent**
+- [ ] **Step 2: Rewrite #156 as the exact Host/runtime-only gate with a fresh-body guard**
 
 Run:
 
-````powershell
-$title = 'Bound repeated empty tool_search misses for external models'
-$matches = @(gh issue list --state all --limit 100 `
-  --search 'in:title "Bound repeated empty tool_search misses for external models"' `
-  --json number,title,state,url `
-  --jq ".[] | select(.title == \"$title\") | .number")
-if ($matches.Count -gt 1) { throw 'duplicate bounded-search Issues' }
+`````powershell
+function Get-TextHash([string]$Text) {
+  $bytes = [Text.Encoding]::UTF8.GetBytes(($Text -replace "`r`n","`n").TrimEnd())
+  [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
 
-if ($matches.Count -eq 0) {
-  $body = @'
+$hostTitle = 'Enable sidebar-visible third-party Worker callbacks and binding readback'
+$hostBody = @'
+## Priority and external blocker
+
+**Priority: P0 — complete the Host/runtime gate before resuming dependent orchestration work.**
+
+This is a hard external blocker for [NOirBRight/github-work-orchestrator#16](https://github.com/NOirBRight/github-work-orchestrator/issues/16). Keep that Issue stopped and unclaimed until the native sidebar-visible Worker acceptance gate below passes.
+
+## Sanitized reproduction
+
+Environment: Codex Desktop 26.707.12708.0, Codex CLI 0.144.5, CodexHub route, Ollama Cloud native Responses, requested `glm-5.2 / max`.
+
+1. A native worktree Worker was created from the parent and appeared as a separate sidebar Task.
+2. Parent-to-child continuation worked, and the child had functioning shell/MCP tools.
+3. The child could not access a supported parent-result callback or equivalent result-delivery channel. Exact-name searches returned `tools=[]`.
+4. The child could not prove the effective agent type, model, and reasoning through supported readback.
+5. Without a terminal unsupported result, the failed capability search could repeat. A bounded parent continuation stopped the read-only incident; the child returned `BLOCKED` and its worktree stayed clean.
+
+Private rollout, Task, callback, local-path, call, and token identifiers remain excluded. Do not edit Codex SQLite or infer evidence from private IDs.
+
+## Problem
+
+The Codex Host/runtime does not yet provide a complete supported contract for third-party delegated implementation as a native **sidebar-visible Worker Task**. The required contract spans Worker materialization, bidirectional parent/Worker communication, result delivery with a confirmable receipt, effective binding readback, explicit unsupported terminalization, and a visible Active → Done lifecycle.
+
+A model-visible callback schema is not sufficient when the child has no registered native handler. Requested settings are not effective binding evidence.
+
+## Desired outcome
+
+Native Host/runtime delegation can create a sidebar-visible third-party Worker and prove, before implementation begins, that the supported execution surface and effective binding match the request. The parent and Worker can communicate in both directions, the parent receives a confirmable result receipt, unsupported capabilities stop terminally, and the Worker becomes visibly Active and then Done.
+
+## Scope — Host/runtime only
+
+- Materialize delegated implementation as a separate native sidebar-visible Worker Task with supported discovery/readback.
+- Register a supported parent-result callback in the Worker context, or provide an equivalent durable result-delivery channel whose receipt the parent can confirm.
+- Support parent-to-Worker continuation and Worker-to-parent result return in the same isolated lifecycle.
+- Expose supported effective readback for agent type, model, and reasoning effort before edits begin.
+- Return an explicit, machine-classifiable terminal unsupported result when the requested Worker surface, callback/result channel, or binding cannot be provided.
+- Expose supported lifecycle readback showing the Worker transition from Active to Done.
+- Preserve sanitized Host/runtime evidence for a bounded manual replay.
+
+## Non-goals
+
+- Do not implement CodexHub's repeated identical empty-`tool_search` bound; #159 owns that work.
+- Do not implement CodexHub Worker selector/codec preservation or effective-binding validation; #161 owns that work.
+- Do not inject a callback schema without a registered Host/runtime handler.
+- Do not substitute GPT, Hidden Subagent, Inline execution, Background process, `codex exec`, or a shell-launched model for the sidebar-visible Worker.
+- Do not edit Codex SQLite, publish private IDs or local paths, synthesize rollout state, or infer binding from requested settings.
+- Do not broaden into unrelated transport, routing, retry, apply-patch, or Task-activity rendering work.
+
+## Acceptance criteria
+
+- [ ] A native delegation materializes one separate sidebar-visible third-party Worker Task.
+- [ ] Supported readback proves the effective Worker agent type, requested third-party model, and requested reasoning effort before implementation begins.
+- [ ] Missing, unknown, contradictory, rejected, unsupported, or GPT-substituted binding evidence stops terminally before edits.
+- [ ] Parent-to-Worker continuation and Worker-to-parent result delivery both succeed in the same isolated Worker lifecycle.
+- [ ] The parent receives a supported confirmable receipt for the Worker's final result.
+- [ ] An unavailable Worker surface, callback/result channel, or selector returns an explicit terminal unsupported result rather than continuing or substituting another surface.
+- [ ] Supported Task APIs show the separate Worker as Active and then Done.
+- [ ] The real validation performs only a disposable read-only action until surface, binding, and callback/receipt preflight pass.
+- [ ] No GPT, Hidden Subagent, Inline, Background, `codex exec`, or shell-launched substitute appears in the evidence.
+
+## Host/runtime verification and evidence
+
+This Issue does not authorize or invent CodexHub product-code verification. Its acceptance is manual Host/runtime evidence from one isolated native Codex Desktop replay using a third-party model and requested reasoning:
+
+1. create one native sidebar-visible Worker Task;
+2. read back effective Worker agent type, model, and reasoning through supported APIs;
+3. send one parent continuation;
+4. return one Worker result and confirm the parent receipt;
+5. read back Active → Done terminal visibility;
+6. capture only sanitized outcome fields and failure classifications.
+
+## Relationships
+
+- External hard blocker: [NOirBRight/github-work-orchestrator#16](https://github.com/NOirBRight/github-work-orchestrator/issues/16)
+- Broad collaboration verification: #64
+- Deferred discovery classification: #63
+- Runtime plan evidence: #62
+- CodexHub repeated-search child: #159
+- CodexHub selector/binding child: #161
+
+## Expected hotset
+
+Host/runtime-owned, outside this repository:
+
+- native sidebar-visible Worker Task creation/materialization;
+- child Host tool registration or equivalent result-delivery channel and receipt;
+- supported effective agent/model/reasoning readback;
+- supported Worker lifecycle state and explicit unsupported terminalization.
+
+No CodexHub product-code hotset is owned by this Issue.
+
+## Execution contract
+
+Execution-Contract: v2
+Verification-Class: strict
+Verification-Commands: Host/runtime supported-API readback only; no CodexHub product-code command is claimed
+Manual-Evidence: one isolated native third-party sidebar-visible Worker replay proving effective binding, bidirectional communication, confirmed parent receipt, explicit unsupported behavior, and Active → Done visibility
+Architecture-Decision: resolved
+Review-Owner: orchestrator
+'@
+$hostBody = ($hostBody -replace "`r`n","`n").TrimEnd()
+$before = gh issue view 156 --comments `
+  --json number,title,state,body,labels,assignees,milestone,comments,url | ConvertFrom-Json
+$commentGuard = @($before.comments | ForEach-Object { "$($_.id):$(Get-TextHash $_.body)" })
+
+if ($before.title -cne $hostTitle -or (Get-TextHash $before.body) -cne (Get-TextHash $hostBody)) {
+  $snapshot = Get-Content -Raw (Join-Path $env:TEMP 'codexhub-wayfinder-migration/issues.json') | ConvertFrom-Json
+  $baseline = @($snapshot | Where-Object number -eq 156)
+  if ($baseline.Count -ne 1 -or $before.title -cne $baseline[0].title -or
+      (Get-TextHash $before.body) -cne (Get-TextHash $baseline[0].body)) {
+    throw '#156 changed since Task 1 snapshot; do not overwrite fresh evidence'
+  }
+  gh issue edit 156 --title $hostTitle --body $hostBody | Out-Null
+}
+
+$after = gh issue view 156 --comments `
+  --json title,state,body,labels,assignees,milestone,comments,url | ConvertFrom-Json
+$commentReadback = @($after.comments | ForEach-Object { "$($_.id):$(Get-TextHash $_.body)" })
+if ($after.title -cne $hostTitle -or (Get-TextHash $after.body) -cne (Get-TextHash $hostBody)) { throw '#156 exact body readback failed' }
+if (($commentReadback -join '|') -cne ($commentGuard -join '|')) { throw '#156 comments changed' }
+`````
+
+Expected: #156 has the exact Host/runtime-only title/body, all prior comments remain byte-equivalent after line-ending normalization, and no CodexHub product verification is claimed by the parent gate.
+
+- [ ] **Step 3: Discover or create both exact CodexHub children idempotently**
+
+Run:
+
+`````powershell
+$searchTitle = 'Bound repeated empty tool_search misses for external models'
+$searchBody = @'
 Part of #156.
 
 ## Problem
@@ -404,72 +541,208 @@ Manual-Evidence: none
 Architecture-Decision: resolved
 Review-Owner: orchestrator
 '@
-  $url = gh issue create --title $title --body $body `
-    --label bug --label ready-for-agent --label wayfinder:task
-  $localSearchIssue = [int]($url.TrimEnd('/') -split '/')[-1]
-} else {
-  $localSearchIssue = [int]$matches[0]
+$selectorTitle = 'Preserve Worker selector and effective binding validation for external delegation'
+$selectorBody = @'
+Split from #156. This Issue owns only the CodexHub adapter contract for Worker selector preservation and supported effective-binding validation.
+
+## Problem
+
+`spawn_agent.agent_type=worker` is advertised at the adapter boundary but can be removed or weakened during normalization/history processing. The adapter also lacks a fail-closed contract for supported effective agent type, model, and reasoning readback, so requested settings can be mistaken for effective execution evidence.
+
+## Outcome
+
+CodexHub preserves the explicit Worker selector across every adapter stage, or rejects it before child execution, and consumes supported effective binding readback to prove the selected agent type, model, and reasoning. Missing, unknown, contradictory, rejected, or GPT-substituted results fail closed before edits.
+
+## Scope — CodexHub adapter only
+
+- Preserve `spawn_agent.agent_type=worker` across tool declaration, argument normalization, call execution, response normalization, and history replay.
+- Reject unsupported `agent_type` values before child execution; do not delete, coerce, or silently substitute them.
+- Consume the Host/runtime's supported effective agent type, model, and reasoning readback.
+- Require effective readback to agree with the requested Worker selector, third-party model, and reasoning before edits begin.
+- Fail closed for missing, unknown, contradictory, rejected, unsupported, or GPT-substituted readback/results.
+- Emit sanitized, machine-classifiable telemetry for selector preservation/rejection and effective-binding validation outcomes.
+- Add deterministic tests and a focused sanitized fixture derived only from shapes, enums, and synthetic values.
+
+## Non-goals
+
+- Do not register Host callbacks or implement parent-result delivery; #156 owns the Host/runtime surface.
+- Do not implement the repeated identical empty-`tool_search` bound; #159 owns it.
+- Do not use Codex SQLite, private Task/callback IDs, local paths, or rollout records as evidence.
+- Do not broaden into unrelated transport, protocol routing, retry, apply-patch, or Task-activity work.
+- Do not infer binding from requested settings and do not accept GPT substitution.
+
+## Acceptance criteria
+
+- [ ] `agent_type=worker` survives declaration, normalization, call execution, result normalization, and history replay unchanged.
+- [ ] An unsupported selector is rejected with a sanitized terminal classification before child execution.
+- [ ] Supported readback proves the effective agent type, model, and reasoning and matches the request before edits.
+- [ ] Missing, unknown, contradictory, rejected, unsupported, or GPT-substituted readback/result stops before edits.
+- [ ] Existing supported non-Worker collaboration behavior remains unchanged.
+- [ ] Telemetry contains no credentials, prompts, private Task/callback identifiers, rollout data, or local paths.
+
+## Minimal deterministic tests
+
+1. Worker selector survives declaration, normalization, execution, response normalization, and history replay.
+2. Missing and unsupported selector values reject before child execution.
+3. Effective readback matching the requested Worker/model/reasoning passes.
+4. Missing, unknown, contradictory, rejected, unsupported, and GPT-substituted readbacks each fail closed before edits.
+5. Sanitized telemetry records only stable classification fields and synthetic fixture values.
+
+## Verification
+
+```powershell
+python -m pytest -q tests/test_codex_semantic_adapter.py
+python -m pytest -q tests/test_routing.py -k "agent_type or binding"
+python -m pytest -q
+git diff --check
+python scripts/report_quality_gates.py
+```
+
+Run the full Python suite once at the candidate commit. `python scripts/report_quality_gates.py` is report-only.
+
+## Expected hotset
+
+- `src-python/codex_semantic_adapter.py`
+- `src-python/codex_proxy.py` only where the selector/effective-binding result crosses the adapter boundary
+- `tests/test_codex_semantic_adapter.py`
+- focused routing tests for `agent_type`/binding
+- one focused sanitized fixture under `tests/fixtures/` if required
+
+## Relationships
+
+- Parent Host/runtime gate: #156
+- Sibling repeated-search bound: #159
+
+## Execution contract
+
+Execution-Contract: v2
+Verification-Class: strict
+Verification-Commands: targeted `tests/test_codex_semantic_adapter.py`; targeted routing tests for `agent_type`/binding; full Python suite once; `git diff --check`; `python scripts/report_quality_gates.py` report-only
+Manual-Evidence: none; consume only supported effective readback supplied by the Host/runtime contract in #156
+Architecture-Decision: resolved
+Review-Owner: orchestrator
+'@
+$searchBody = ($searchBody -replace "`r`n","`n").TrimEnd()
+$selectorBody = ($selectorBody -replace "`r`n","`n").TrimEnd()
+
+$all = @(gh api --paginate 'repos/NOirBRight/CodexHub/issues?state=all&per_page=100' | ConvertFrom-Json | Where-Object { -not $_.pull_request })
+$potentialSelectorDuplicates = @($all | Where-Object {
+  $_.number -notin @(147,156,159) -and $_.title -cne $selectorTitle -and
+  (($_.title + "`n" + $_.body) -match '(?is)agent_type\s*=\s*worker') -and
+  (($_.title + "`n" + $_.body) -match '(?is)(effective.binding|binding.readback)') -and
+  (($_.title + "`n" + $_.body) -match '(?is)(preserv|normaliz|codec|history)')
+})
+if ($potentialSelectorDuplicates.Count) {
+  throw "possible selector/codec duplicate(s): $(@($potentialSelectorDuplicates.number) -join ',')"
 }
-"localSearchIssue=$localSearchIssue"
-````
 
-Expected: exactly one open Issue with the exact title; record its numeric value as `$localSearchIssue`.
+function Find-OrCreateExactIssue([string]$Title,[string]$Body) {
+  $matches = @($all | Where-Object title -CEQ $Title)
+  if ($matches.Count -gt 1) { throw "duplicate exact-title Issues: $Title" }
+  if ($matches.Count -eq 1) {
+    if ($matches[0].state -ne 'open' -or (Get-TextHash $matches[0].body) -cne (Get-TextHash $Body)) {
+      throw "existing exact-title Issue has conflicting state/body: $Title"
+    }
+    return [int]$matches[0].number
+  }
+  $bodyFile = Join-Path $env:TEMP ("wayfinder-" + [guid]::NewGuid().ToString('N') + '.md')
+  [IO.File]::WriteAllText($bodyFile,$Body,[Text.UTF8Encoding]::new($false))
+  try {
+    $url = gh issue create --title $Title --body-file $bodyFile `
+      --label bug --label ready-for-agent --label wayfinder:task `
+      --milestone '0.1.6 — Codex control-plane reliability'
+    return [int](($url | Select-Object -Last 1).TrimEnd('/') -split '/')[-1]
+  } finally { Remove-Item -LiteralPath $bodyFile -ErrorAction SilentlyContinue }
+}
 
-- [ ] **Step 3: Set milestone, parent, labels, and hard dependencies idempotently**
+$localSearchIssue = Find-OrCreateExactIssue $searchTitle $searchBody
+$selectorBindingIssue = Find-OrCreateExactIssue $selectorTitle $selectorBody
+"localSearchIssue=$localSearchIssue selectorBindingIssue=$selectorBindingIssue"
+`````
+
+Expected: exactly one open Issue exists for each exact title. A possible open or closed duplicate of the selector/codec outcome stops creation for review.
+
+- [ ] **Step 4: Set exact metadata, parents, and dependencies idempotently**
 
 Run:
 
 ```powershell
-gh issue edit $localSearchIssue `
-  --add-label bug --add-label ready-for-agent --add-label wayfinder:task `
-  --milestone '0.1.6 — Codex control-plane reliability'
-
-gh issue edit 156 --add-label wayfinder:grilling `
-  --milestone '0.1.6 — Codex control-plane reliability'
-
-function Ensure-SubIssue([int]$Parent, [int]$Child) {
-  $childIssue = gh api "repos/NOirBRight/CodexHub/issues/$Child" | ConvertFrom-Json
-  $expected = "https://api.github.com/repos/NOirBRight/CodexHub/issues/$Parent"
-  if ($childIssue.parent_issue_url -eq $expected) { return }
-  if ($childIssue.parent_issue_url) { throw "#$Child already has parent $($childIssue.parent_issue_url)" }
-  gh api --method POST "repos/NOirBRight/CodexHub/issues/$Parent/sub_issues" `
-    -F sub_issue_id=$childIssue.id | Out-Null
+$milestone = @(gh api 'repos/NOirBRight/CodexHub/milestones?state=open&per_page=100' |
+  ConvertFrom-Json | Where-Object title -CEQ '0.1.6 — Codex control-plane reliability')
+if ($milestone.Count -ne 1) { throw '0.1.6 milestone lookup failed' }
+foreach ($n in $localSearchIssue,$selectorBindingIssue) {
+  @{labels=@('bug','ready-for-agent','wayfinder:task');milestone=[int]$milestone[0].number} |
+    ConvertTo-Json -Compress | gh api --method PATCH "repos/NOirBRight/CodexHub/issues/$n" --input - | Out-Null
 }
+gh issue edit 156 --add-label wayfinder:grilling `
+  --milestone '0.1.6 — Codex control-plane reliability' | Out-Null
 
-function Ensure-BlockedBy([int]$Blocked, [int]$Blocker) {
-  $existing = @(gh api "repos/NOirBRight/CodexHub/issues/$Blocked/dependencies/blocked_by" `
-    --jq ".[] | select(.number == $Blocker) | .number")
+function Get-Parent([int]$Child) {
+  $json = gh api "repos/NOirBRight/CodexHub/issues/$Child/parent" 2>$null
+  if ($LASTEXITCODE -eq 0) { return ($json | ConvertFrom-Json) }
+  return $null
+}
+function Ensure-SubIssue([int]$Parent,[int]$Child) {
+  $current = Get-Parent $Child
+  if ($current -and $current.number -eq $Parent) { return }
+  if ($current) { throw "#$Child already has parent #$($current.number)" }
+  $childIssue = gh api "repos/NOirBRight/CodexHub/issues/$Child" | ConvertFrom-Json
+  gh api --method POST "repos/NOirBRight/CodexHub/issues/$Parent/sub_issues" `
+    -F "sub_issue_id=$($childIssue.id)" | Out-Null
+}
+function Ensure-BlockedBy([int]$Blocked,[int]$Blocker) {
+  $existing = @(gh api "repos/NOirBRight/CodexHub/issues/$Blocked/dependencies/blocked_by" |
+    ConvertFrom-Json | Where-Object number -eq $Blocker)
+  if ($existing.Count -gt 1) { throw "duplicate dependency #$Blocked <- #$Blocker" }
   if ($existing.Count -eq 0) {
-    $blockerId = gh api "repos/NOirBRight/CodexHub/issues/$Blocker" --jq .id
+    $blocker = gh api "repos/NOirBRight/CodexHub/issues/$Blocker" | ConvertFrom-Json
     gh api --method POST "repos/NOirBRight/CodexHub/issues/$Blocked/dependencies/blocked_by" `
-      -F issue_id=$blockerId | Out-Null
+      -F "issue_id=$($blocker.id)" | Out-Null
   }
 }
 
 Ensure-SubIssue 147 156
 Ensure-SubIssue 156 $localSearchIssue
+Ensure-SubIssue 156 $selectorBindingIssue
 Ensure-BlockedBy 156 $localSearchIssue
+Ensure-BlockedBy 156 $selectorBindingIssue
 Ensure-BlockedBy 64 156
 ```
 
-Expected: #156 is a child of #147; the local Issue is a child of #156; #156 is blocked by the local Issue; #64 is blocked by #156.
+Expected: #156 is a child of #147; both local Issues are children of #156; #156 is blocked by both local Issues; #64 retains #62/#63/#156.
 
-- [ ] **Step 4: Read back the complete decomposition**
+- [ ] **Step 5: Read back the complete split exactly**
 
 Run:
 
 ```powershell
-foreach ($n in 156,$localSearchIssue,64) {
-  gh api "repos/NOirBRight/CodexHub/issues/$n" `
-    --jq '{number,title,state,labels:[.labels[].name],assignees:[.assignees[].login],milestone:(.milestone.title // null),parent:.parent_issue_url,deps:.issue_dependencies_summary,url:.html_url}'
+foreach ($n in 156,$localSearchIssue,$selectorBindingIssue,64) {
+  gh issue view $n --json number,title,state,body,labels,assignees,milestone,url
 }
-gh api "repos/NOirBRight/CodexHub/issues/156/dependencies/blocked_by" `
-  --jq '.[] | {number,title,state}'
-gh api "repos/NOirBRight/CodexHub/issues/64/dependencies/blocked_by" `
-  --jq '.[] | {number,title,state}'
+$host = gh issue view 156 --json state,labels,assignees,milestone | ConvertFrom-Json
+$hostLabels = @($host.labels.name | Sort-Object)
+if ($host.state -ne 'OPEN' -or $host.assignees.Count -ne 0 -or
+    ($hostLabels -join ',') -cne 'bug,ready-for-human,wayfinder:grilling' -or
+    $host.milestone.title -cne '0.1.6 — Codex control-plane reliability') { throw '#156 metadata mismatch' }
+$children156 = @(gh api 'repos/NOirBRight/CodexHub/issues/156/sub_issues' | ConvertFrom-Json | ForEach-Object number | Sort-Object)
+$blocked156 = @(gh api 'repos/NOirBRight/CodexHub/issues/156/dependencies/blocked_by' | ConvertFrom-Json | ForEach-Object number | Sort-Object)
+$blocked64 = @(gh api 'repos/NOirBRight/CodexHub/issues/64/dependencies/blocked_by' | ConvertFrom-Json | ForEach-Object number | Sort-Object)
+$expectedChildren = @($localSearchIssue,$selectorBindingIssue | Sort-Object)
+if (($children156 -join ',') -cne ($expectedChildren -join ',')) { throw '#156 child set mismatch' }
+if (($blocked156 -join ',') -cne ($expectedChildren -join ',')) { throw '#156 blocker set mismatch' }
+if (($blocked64 -join ',') -cne '62,63,156') { throw '#64 blocker set mismatch' }
+foreach ($n in $localSearchIssue,$selectorBindingIssue) {
+  $issue = gh issue view $n --json state,labels,assignees,milestone | ConvertFrom-Json
+  $labels = @($issue.labels.name | Sort-Object)
+  if ($issue.state -ne 'OPEN' -or $issue.assignees.Count -ne 0 -or
+      ($labels -join ',') -cne 'bug,ready-for-agent,wayfinder:task' -or
+      $issue.milestone.title -cne '0.1.6 — Codex control-plane reliability') { throw "child metadata mismatch #$n" }
+  $parent = Get-Parent $n
+  if (-not $parent -or $parent.number -ne 156) { throw "child parent mismatch #$n" }
+}
 ```
 
-Expected: exact hierarchy and dependencies from Step 3; #156 remains unassigned and `ready-for-human`; the local child is unassigned and `ready-for-agent`.
+Expected: exact titles/bodies/metadata, hierarchy, and dependency sets; #156 is unassigned and `ready-for-human`; both children are unassigned and `ready-for-agent`; no Issue claim occurred.
 
 ---
 
@@ -668,12 +941,15 @@ gh issue edit $uninstallIssue `
   --milestone '0.1.10 — Existing product reliability'
 
 function Ensure-SubIssue([int]$Parent, [int]$Child) {
+  $parentJson = gh api "repos/NOirBRight/CodexHub/issues/$Child/parent" 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    $current = $parentJson | ConvertFrom-Json
+    if ($current.number -eq $Parent) { return }
+    throw "#$Child already has parent #$($current.number)"
+  }
   $childIssue = gh api "repos/NOirBRight/CodexHub/issues/$Child" | ConvertFrom-Json
-  $expected = "https://api.github.com/repos/NOirBRight/CodexHub/issues/$Parent"
-  if ($childIssue.parent_issue_url -eq $expected) { return }
-  if ($childIssue.parent_issue_url) { throw "#$Child already has parent $($childIssue.parent_issue_url)" }
   gh api --method POST "repos/NOirBRight/CodexHub/issues/$Parent/sub_issues" `
-    -F sub_issue_id=$childIssue.id | Out-Null
+    -F "sub_issue_id=$($childIssue.id)" | Out-Null
 }
 function Ensure-BlockedBy([int]$Blocked, [int]$Blocker) {
   $existing = @(gh api "repos/NOirBRight/CodexHub/issues/$Blocked/dependencies/blocked_by" `
@@ -698,8 +974,7 @@ Run:
 ```powershell
 gh issue view 28 --json number,title,state,body,labels,assignees,milestone,url
 gh issue view $uninstallIssue --json number,title,state,body,labels,assignees,milestone,url
-gh api "repos/NOirBRight/CodexHub/issues/$uninstallIssue" `
-  --jq '{parent:.parent_issue_url,deps:.issue_dependencies_summary}'
+gh api "repos/NOirBRight/CodexHub/issues/$uninstallIssue/parent" --jq '{number,title,state}'
 gh api "repos/NOirBRight/CodexHub/issues/$uninstallIssue/dependencies/blocked_by" `
   --jq '.[] | {number,title,state}'
 ```
@@ -714,10 +989,10 @@ Expected: both Issues have complete v2 contracts, exact milestones, one lifecycl
 - GitHub Issues and sub-issue relationships only.
 
 **Interfaces:**
-- Consumes: `$localSearchIssue` discoverable by exact title and `$uninstallIssue` discoverable by exact title.
+- Consumes: `$localSearchIssue`, `$selectorBindingIssue`, and `$uninstallIssue`, each discoverable by exact title.
 - Produces: every active release Issue assigned to exactly one 0.1.6–0.1.10 milestone; every new-feature parent visible under #147 without an active reliability milestone; nested workstreams retain one parent.
 
-- [ ] **Step 1: Rediscover the two newly created Issue numbers by exact title**
+- [ ] **Step 1: Rediscover the three newly created Issue numbers by exact title**
 
 Run:
 
@@ -730,10 +1005,11 @@ function Find-ExactIssue([string]$Title) {
   return [int]$matches[0]
 }
 $localSearchIssue = Find-ExactIssue 'Bound repeated empty tool_search misses for external models'
+$selectorBindingIssue = Find-ExactIssue 'Preserve Worker selector and effective binding validation for external delegation'
 $uninstallIssue = Find-ExactIssue 'Remove CodexHub-owned Windows autostart registration during uninstall'
 ```
 
-Expected: two unique numeric Issue IDs.
+Expected: three unique numeric Issue IDs.
 
 - [ ] **Step 2: Assign exact milestone membership**
 
@@ -741,7 +1017,7 @@ Run:
 
 ```powershell
 $membership = [ordered]@{
-  '0.1.6 — Codex control-plane reliability' = @(111,112,138,139,141,143,149,150,151,156,$localSearchIssue)
+  '0.1.6 — Codex control-plane reliability' = @(111,112,138,139,141,143,149,150,151,156,$localSearchIssue,$selectorBindingIssue)
   '0.1.7 — Official GPT reliability' = @(18,19,20,21,104,109,114,157)
   '0.1.8 — Third-party model certification' = @(17,22,57,58,59,61,62,63,64,65,66,67)
   '0.1.9 — Managed client reliability' = @(8,28,83,153,154,155)
@@ -761,7 +1037,7 @@ Expected: every listed open Issue reports the exact milestone; no Issue appears 
 Run:
 
 ```powershell
-$taskIssues = @(8,28,83,86,87,88,89,90,91,92,93,111,113,115,126,155,157,$localSearchIssue,$uninstallIssue)
+$taskIssues = @(8,28,83,86,87,88,89,90,91,92,93,111,113,115,126,155,157,$localSearchIssue,$selectorBindingIssue,$uninstallIssue)
 $researchIssues = @(68,104)
 $grillingIssues = @(71,94,109,156)
 
@@ -778,12 +1054,15 @@ Run:
 
 ```powershell
 function Ensure-SubIssue([int]$Parent, [int]$Child) {
+  $parentJson = gh api "repos/NOirBRight/CodexHub/issues/$Child/parent" 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    $current = $parentJson | ConvertFrom-Json
+    if ($current.number -eq $Parent) { return }
+    throw "#$Child already has parent #$($current.number)"
+  }
   $childIssue = gh api "repos/NOirBRight/CodexHub/issues/$Child" | ConvertFrom-Json
-  $expected = "https://api.github.com/repos/NOirBRight/CodexHub/issues/$Parent"
-  if ($childIssue.parent_issue_url -eq $expected) { return }
-  if ($childIssue.parent_issue_url) { throw "#$Child already has parent $($childIssue.parent_issue_url)" }
   gh api --method POST "repos/NOirBRight/CodexHub/issues/$Parent/sub_issues" `
-    -F sub_issue_id=$childIssue.id | Out-Null
+    -F "sub_issue_id=$($childIssue.id)" | Out-Null
 }
 
 $topLevel = @(
@@ -795,9 +1074,11 @@ $topLevel = @(
   68,71,73,85,148,152
 )
 foreach ($n in $topLevel) { Ensure-SubIssue 147 $n }
+Ensure-SubIssue 156 $localSearchIssue
+Ensure-SubIssue 156 $selectorBindingIssue
 ```
 
-Expected: every listed Issue has parent #147. Existing nested #57 and #73 children are not moved.
+Expected: every listed top-level Issue has parent #147; both local adapter children have parent #156. Existing nested #57 and #73 children are not moved.
 
 - [ ] **Step 5: Ensure the Provider-auth and Claude workstream nesting**
 
@@ -837,10 +1118,14 @@ foreach ($entry in $membership.GetEnumerator()) {
 }
 
 foreach ($n in $topLevel) {
-  $parent = gh api "repos/NOirBRight/CodexHub/issues/$n" --jq .parent_issue_url
-  if ($parent -ne 'https://api.github.com/repos/NOirBRight/CodexHub/issues/147') {
+  $parent = gh api "repos/NOirBRight/CodexHub/issues/$n/parent" --jq .number
+  if ([int]$parent -ne 147) {
     throw "map parent mismatch #$n"
   }
+}
+foreach ($n in $localSearchIssue,$selectorBindingIssue) {
+  $parent = gh api "repos/NOirBRight/CodexHub/issues/$n/parent" --jq .number
+  if ([int]$parent -ne 156) { throw "#156 child mismatch #$n" }
 }
 'milestones-and-hierarchy-ok'
 ```
@@ -864,6 +1149,24 @@ Expected: `milestones-and-hierarchy-ok`.
 Run:
 
 ```powershell
+function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Body) {
+  $Body = ($Body -replace "`r`n","`n").TrimEnd()
+  $comments = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $exact = @($comments | Where-Object body -CEQ $Body)
+  $purpose = @($comments | Where-Object { ([string]$_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  if ($exact.Count -gt 1) { throw "multiple exact comments on #$Issue" }
+  if ($exact.Count -eq 1) {
+    if ($purpose.Count -ne 1) { throw "conflicting same-purpose comment on #$Issue" }
+  } else {
+    if ($purpose.Count -gt 0) { throw "conflicting same-purpose comment on #$Issue" }
+    gh issue comment $Issue --body $Body | Out-Null
+  }
+  $readback = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $matches = @($readback | Where-Object body -CEQ $Body)
+  if ($matches.Count -ne 1) { throw "exact comment readback failed on #$Issue" }
+  $matches[0].html_url
+}
+
 git merge-base --is-ancestor 400d19bb dev
 $ancestor = ($LASTEXITCODE -eq 0)
 $moduleExists = Test-Path 'src-tauri/src/gateway/client_adapters.rs'
@@ -879,7 +1182,7 @@ The earlier local-completion comment does not describe the current `dev` baselin
 
 #8 therefore remains open and is scheduled under `0.1.9 — Managed client reliability`. This comment does not claim the orphaned implementation is reusable; a future Worker must compare it against current code before choosing reimplementation or recovery.
 '@
-gh issue comment 8 --body $body
+Write-ExactIssueComment 8 '### Wayfinder baseline correction' $body
 ```
 
 Expected: comment URL returned; Issue remains open, unassigned, and `ready-for-agent`.
@@ -889,6 +1192,24 @@ Expected: comment URL returned; Issue remains open, unassigned, and `ready-for-a
 Run:
 
 ```powershell
+function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Body) {
+  $Body = ($Body -replace "`r`n","`n").TrimEnd()
+  $comments = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $exact = @($comments | Where-Object body -CEQ $Body)
+  $purpose = @($comments | Where-Object { ([string]$_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  if ($exact.Count -gt 1) { throw "multiple exact comments on #$Issue" }
+  if ($exact.Count -eq 1) {
+    if ($purpose.Count -ne 1) { throw "conflicting same-purpose comment on #$Issue" }
+  } else {
+    if ($purpose.Count -gt 0) { throw "conflicting same-purpose comment on #$Issue" }
+    gh issue comment $Issue --body $Body | Out-Null
+  }
+  $readback = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $matches = @($readback | Where-Object body -CEQ $Body)
+  if ($matches.Count -ne 1) { throw "exact comment readback failed on #$Issue" }
+  $matches[0].html_url
+}
+
 $checks = [ordered]@{10='7de67c51';12='77014e9'}
 foreach ($entry in $checks.GetEnumerator()) {
   git merge-base --is-ancestor $entry.Value main
@@ -897,7 +1218,8 @@ foreach ($entry in $checks.GetEnumerator()) {
   if ($LASTEXITCODE -ne 0) { throw "#$($entry.Name) fix is not on dev" }
   $state = gh issue view $entry.Name --json state --jq .state
   if ($state -ne 'CLOSED') { throw "#$($entry.Name) unexpectedly open" }
-  gh issue comment $entry.Name --body "Wayfinder closure reconciliation: fix commit ``$($entry.Value)`` is an ancestor of both current ``main`` and ``dev``. The Issue remains closed; this records the final evidence missing after the earlier post-tag reopen comment."
+  $body = "Wayfinder closure reconciliation: fix commit ``$($entry.Value)`` is an ancestor of both current ``main`` and ``dev``. The Issue remains closed; this records the final evidence missing after the earlier post-tag reopen comment."
+  Write-ExactIssueComment $entry.Name 'Wayfinder closure reconciliation:' $body
 }
 ```
 
@@ -922,8 +1244,27 @@ Expected decision:
 - if no real #62 Task exists, no open PR exists, and no durable work owner exists, run:
 
 ```powershell
+function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Body) {
+  $Body = ($Body -replace "`r`n","`n").TrimEnd()
+  $comments = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $exact = @($comments | Where-Object body -CEQ $Body)
+  $purpose = @($comments | Where-Object { ([string]$_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  if ($exact.Count -gt 1) { throw "multiple exact comments on #$Issue" }
+  if ($exact.Count -eq 1) {
+    if ($purpose.Count -ne 1) { throw "conflicting same-purpose comment on #$Issue" }
+  } else {
+    if ($purpose.Count -gt 0) { throw "conflicting same-purpose comment on #$Issue" }
+    gh issue comment $Issue --body $Body | Out-Null
+  }
+  $readback = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $matches = @($readback | Where-Object body -CEQ $Body)
+  if ($matches.Count -ne 1) { throw "exact comment readback failed on #$Issue" }
+  $matches[0].html_url
+}
+
 gh issue edit 62 --remove-assignee NOirBRight
-gh issue comment 62 --body 'Wayfinder ownership reconciliation: no active sidebar Worker, open PR, or durable execution owner was found. The stale assignee is removed; #62 remains blocked by #61 and will return to the 0.1.8 frontier only after its native dependencies close.'
+$body = 'Wayfinder ownership reconciliation: no active sidebar Worker, open PR, or durable execution owner was found. The stale assignee is removed; #62 remains blocked by #61 and will return to the 0.1.8 frontier only after its native dependencies close.'
+Write-ExactIssueComment 62 'Wayfinder ownership reconciliation:' $body
 ```
 
 - if native Task state is unavailable or ambiguous, leave the assignee unchanged and stop this step with an explicit human reconciliation requirement.
@@ -970,6 +1311,7 @@ function Find-ExactIssue([string]$Title) {
   return [int]$matches[0]
 }
 $localSearchIssue = Find-ExactIssue 'Bound repeated empty tool_search misses for external models'
+$selectorBindingIssue = Find-ExactIssue 'Preserve Worker selector and effective binding validation for external delegation'
 $uninstallIssue = Find-ExactIssue 'Remove CodexHub-owned Windows autostart registration during uninstall'
 gh issue view 147 --comments `
   --json number,title,state,body,labels,assignees,milestone,comments,url
@@ -1009,8 +1351,9 @@ Lifecycle spine: #139 → #143 → #112.
 
 Parallel gates:
 
-- #156 — human Host/runtime gate for a sidebar-visible third-party Worker, effective binding readback, bidirectional communication, receipt, and terminal state;
+- #156 — Host/runtime-only gate for sidebar-visible third-party Worker materialization, effective binding readback, bidirectional communication, receipt, explicit unsupported terminalization, and Active → Done visibility;
 - #$localSearchIssue — CodexHub-owned bound for repeated empty `tool_search` misses;
+- #$selectorBindingIssue — CodexHub-owned Worker selector preservation and effective binding validation;
 - #141 — Desktop restart and Task disappearance first-failure evidence;
 - #138 — auditable Task command output, diffs, progress, and terminal state;
 - #150 — coalesced usage probes and app-server child cleanup;
@@ -1085,14 +1428,14 @@ These lanes do not refill until 0.1.6–0.1.10 gates complete:
 - Visible Worker, Hidden Subagent, and Inline are distinct execution surfaces and cannot substitute for one another.
 - Terra/Luna Visible Workers implement current work; third-party models join only after certification.
 - Provider/model support is granular and versioned; Responses endpoint naming is not compatibility evidence.
-- #156 is the P0 human Visible Worker gate; #$localSearchIssue is its local CodexHub child; #64 validates the full post-fix collaboration matrix.
+- #156 is the P0 Host/runtime-only Visible Worker gate; its local CodexHub children are #$localSearchIssue for bounded empty search and #$selectorBindingIssue for Worker selector/effective binding validation; #64 validates the full post-fix collaboration matrix.
 - #8 remains open because its orphaned commit is absent from current `dev`.
 - Every open Issue belongs to a gate, support/decision queue, or new-feature parking area.
 
 ## Current frontier
 
 - Human P0 gate: #156.
-- Ready CodexHub candidate: #$localSearchIssue.
+- Ready local CodexHub candidates: #$localSearchIssue and #$selectorBindingIssue.
 - Independent ready 0.1.6 foundations, subject to hotset ownership: #139, #149, #150, #111.
 - #143 waits for #139; #112 waits for #143.
 - Map publication does not claim any of these tickets.
@@ -1230,9 +1573,10 @@ function Find-ExactIssue([string]$Title) {
   return [int]$matches[0]
 }
 $localSearchIssue = Find-ExactIssue 'Bound repeated empty tool_search misses for external models'
+$selectorBindingIssue = Find-ExactIssue 'Preserve Worker selector and effective binding validation for external delegation'
 $uninstallIssue = Find-ExactIssue 'Remove CodexHub-owned Windows autostart registration during uninstall'
 $expected = [ordered]@{
-  '0.1.6 — Codex control-plane reliability' = @(111,112,138,139,141,143,149,150,151,156,$localSearchIssue)
+  '0.1.6 — Codex control-plane reliability' = @(111,112,138,139,141,143,149,150,151,156,$localSearchIssue,$selectorBindingIssue)
   '0.1.7 — Official GPT reliability' = @(18,19,20,21,104,109,114,157)
   '0.1.8 — Third-party model certification' = @(17,22,57,58,59,61,62,63,64,65,66,67)
   '0.1.9 — Managed client reliability' = @(8,28,83,153,154,155)
@@ -1257,9 +1601,8 @@ Run:
 
 ```powershell
 function Assert-Parent([int]$Child,[int]$Parent) {
-  $actual = gh api "repos/NOirBRight/CodexHub/issues/$Child" --jq .parent_issue_url
-  $expected = "https://api.github.com/repos/NOirBRight/CodexHub/issues/$Parent"
-  if ($actual -ne $expected) { throw "parent mismatch #$Child" }
+  $actual = gh api "repos/NOirBRight/CodexHub/issues/$Child/parent" --jq .number
+  if ([int]$actual -ne $Parent) { throw "parent mismatch #$Child" }
 }
 function Assert-BlockedBy([int]$Blocked,[int]$Blocker) {
   $matches = @(gh api "repos/NOirBRight/CodexHub/issues/$Blocked/dependencies/blocked_by" `
@@ -1268,49 +1611,127 @@ function Assert-BlockedBy([int]$Blocked,[int]$Blocker) {
 }
 Assert-Parent 156 147
 Assert-Parent $localSearchIssue 156
+Assert-Parent $selectorBindingIssue 156
 Assert-Parent 64 57
 Assert-Parent 71 147
 Assert-Parent 73 147
 foreach ($n in 89,90,91,92,93,94) { Assert-Parent $n 71 }
 foreach ($n in 74,75,76,77,78) { Assert-Parent $n 73 }
 Assert-BlockedBy 156 $localSearchIssue
+Assert-BlockedBy 156 $selectorBindingIssue
 Assert-BlockedBy 64 156
 Assert-BlockedBy $uninstallIssue 111
+$children156 = @(gh api 'repos/NOirBRight/CodexHub/issues/156/sub_issues' | ConvertFrom-Json | ForEach-Object number | Sort-Object)
+$blocked156 = @(gh api 'repos/NOirBRight/CodexHub/issues/156/dependencies/blocked_by' | ConvertFrom-Json | ForEach-Object number | Sort-Object)
+$blocked64 = @(gh api 'repos/NOirBRight/CodexHub/issues/64/dependencies/blocked_by' | ConvertFrom-Json | ForEach-Object number | Sort-Object)
+$expectedLocal = @($localSearchIssue,$selectorBindingIssue | Sort-Object)
+if (($children156 -join ',') -cne ($expectedLocal -join ',')) { throw '#156 child set mismatch' }
+if (($blocked156 -join ',') -cne ($expectedLocal -join ',')) { throw '#156 dependency set mismatch' }
+if (($blocked64 -join ',') -cne '62,63,156') { throw '#64 dependency set mismatch' }
 'hierarchy-dependencies-ok'
 ```
 
 Expected: `hierarchy-dependencies-ok`.
 
-- [ ] **Step 5: Compute the unclaimed 0.1.6 ready frontier**
+- [ ] **Step 5: Prove hotset ownership eligibility and compute the unclaimed 0.1.6 ready frontier**
+
+First build the label/dependency candidate set with the following PowerShell. Then, for every candidate it prints, call native `codex_app__list_threads` twice: once with the exact Issue title and once with `Issue N`. Do not use SQLite. Save only `{issue,queries:[{query,threads,unavailableHosts}]}` to `$env:TEMP\codexhub-wayfinder-migration\frontier-task-evidence.json`; omit Task IDs and local paths. If the native Task tool is unavailable, any host is unavailable, or any matching Task exists, stop with `NEEDS_CONTEXT` rather than guessing.
 
 Run:
 
 ```powershell
 $gate = gh issue list --state open --limit 1000 `
   --milestone '0.1.6 — Codex control-plane reliability' `
-  --json number,title,labels,assignees,url | ConvertFrom-Json
+  --json number,title,body,labels,assignees,url | ConvertFrom-Json
 $readyByNumber = @{}
 foreach ($issue in $gate) {
   $labels = @($issue.labels.name)
-  $api = gh api "repos/NOirBRight/CodexHub/issues/$($issue.number)" | ConvertFrom-Json
-  if ('ready-for-agent' -in $labels -and
-      $issue.assignees.Count -eq 0 -and
-      $api.issue_dependencies_summary.blocked_by -eq 0) {
-    $readyByNumber[$issue.number] = [pscustomobject]@{number=$issue.number;title=$issue.title;url=$issue.url}
+  $blockers = @(gh api "repos/NOirBRight/CodexHub/issues/$($issue.number)/dependencies/blocked_by" | ConvertFrom-Json)
+  if ('ready-for-agent' -in $labels -and $issue.assignees.Count -eq 0 -and $blockers.Count -eq 0) {
+    $readyByNumber[$issue.number] = $issue
   }
 }
-$priorityOrder = @($localSearchIssue,139,149,150,111,141,138,151,143,112,156)
-$frontier = @($priorityOrder | Where-Object { $readyByNumber.ContainsKey($_) } | ForEach-Object { $readyByNumber[$_] })
-$frontier | Format-Table -AutoSize
+$priorityOrder = @($localSearchIssue,$selectorBindingIssue,139,149,150,111,141,138,151,143,112,156)
+$labelCandidates = @($priorityOrder | Where-Object { $readyByNumber.ContainsKey($_) } | ForEach-Object { $readyByNumber[$_] })
+$labelCandidates | Select-Object number,title | Format-Table -AutoSize
 ```
 
-Expected: a non-empty list containing the local bounded-search Issue and other unblocked 0.1.6 candidates such as #139/#149/#150/#111 if their live state has not changed. Do not assign any candidate.
+After the native queries are saved, run:
+
+```powershell
+$taskEvidenceFile = Join-Path $env:TEMP 'codexhub-wayfinder-migration/frontier-task-evidence.json'
+if (-not (Test-Path $taskEvidenceFile)) { throw 'NEEDS_CONTEXT: native Task evidence is missing' }
+$taskEvidence = @(Get-Content -Raw $taskEvidenceFile | ConvertFrom-Json)
+foreach ($candidate in $labelCandidates) {
+  $record = @($taskEvidence | Where-Object issue -eq $candidate.number)
+  if ($record.Count -ne 1 -or $record[0].queries.Count -ne 2) { throw "NEEDS_CONTEXT: incomplete Task evidence #$($candidate.number)" }
+  $expectedQueries = @($candidate.title,"Issue $($candidate.number)" | Sort-Object)
+  $actualQueries = @($record[0].queries.query | Sort-Object)
+  if (($actualQueries -join '|') -cne ($expectedQueries -join '|')) { throw "NEEDS_CONTEXT: wrong Task queries #$($candidate.number)" }
+  foreach ($query in $record[0].queries) {
+    if ($query.unavailableHosts.Count -ne 0) { throw "NEEDS_CONTEXT: native Task host unavailable #$($candidate.number)" }
+    if ($query.threads.Count -ne 0) { throw "active native Task owns #$($candidate.number)" }
+  }
+}
+
+$currentBranch = git branch --show-current
+$worktreeLines = @(git worktree list --porcelain)
+$worktreeBranches = @($worktreeLines | Where-Object { $_ -like 'branch refs/heads/*' } | ForEach-Object { $_.Substring(7) })
+$allowedWorktreeBranches = @('refs/heads/dev',"refs/heads/$currentBranch")
+$extraWorktrees = @($worktreeBranches | Where-Object { $_ -notin $allowedWorktreeBranches })
+if ($extraWorktrees.Count) { throw 'active product worktree requires hotset reconciliation' }
+
+$allBranches = @(git branch --all --format='%(refname:short)')
+$openPrs = @(gh pr list --state open --limit 100 --json number,title,headRefName,baseRefName,url | ConvertFrom-Json)
+foreach ($candidate in $labelCandidates) {
+  $branchPattern = "(?i)(issue[-_/]?$($candidate.number)(\D|$)|#$($candidate.number)(\D|$))"
+  if (@($allBranches | Where-Object { $_ -match $branchPattern }).Count) { throw "candidate branch owns #$($candidate.number)" }
+  if (@($openPrs | Where-Object { $_.headRefName -match $branchPattern -or $_.title -match "#$($candidate.number)(\D|$)" }).Count) { throw "open PR owns #$($candidate.number)" }
+  if ($candidate.assignees.Count -ne 0) { throw "assignee owns #$($candidate.number)" }
+  if (-not $candidate.body.Contains('## Expected hotset')) { throw "missing Expected hotset #$($candidate.number)" }
+}
+
+$ownershipEvidence = [ordered]@{
+  captured_at = (Get-Date).ToUniversalTime().ToString('o')
+  candidates = @($labelCandidates.number)
+  native_task_queries = @($taskEvidence | ForEach-Object { @{issue=$_.issue;queries=@($_.queries | ForEach-Object { @{query=$_.query;match_count=$_.threads.Count;unavailable_host_count=$_.unavailableHosts.Count} })} })
+  active_product_worktree_count = $extraWorktrees.Count
+  candidate_branch_count = 0
+  candidate_open_pr_count = 0
+  candidate_assignee_count = 0
+  hotset_preflight = 'Expected hotsets re-read; no native Task or active product worktree owns a candidate hotset.'
+}
+$ownershipEvidence | ConvertTo-Json -Depth 8 |
+  Set-Content -Encoding utf8 (Join-Path $env:TEMP 'codexhub-wayfinder-migration/frontier-ownership-evidence.json')
+$frontier = @($labelCandidates)
+$frontier | Select-Object number,title,url | Format-Table -AutoSize
+```
+
+Expected: sanitized native Task/worktree/branch/PR/assignee/hotset evidence proves no active ownership conflict. If live state remains unchanged, frontier order is `$localSearchIssue`, `$selectorBindingIssue`, #139, #149, #150, #111. Do not assign or dispatch any candidate.
 
 - [ ] **Step 6: Publish one migration checkpoint comment on #147**
 
 Run:
 
 ```powershell
+function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Body) {
+  $Body = ($Body -replace "`r`n","`n").TrimEnd()
+  $comments = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $exact = @($comments | Where-Object body -CEQ $Body)
+  $purpose = @($comments | Where-Object { ([string]$_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  if ($exact.Count -gt 1) { throw "multiple exact comments on #$Issue" }
+  if ($exact.Count -eq 1) {
+    if ($purpose.Count -ne 1) { throw "conflicting same-purpose comment on #$Issue" }
+  } else {
+    if ($purpose.Count -gt 0) { throw "conflicting same-purpose comment on #$Issue" }
+    gh issue comment $Issue --body $Body | Out-Null
+  }
+  $readback = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+  $matches = @($readback | Where-Object body -CEQ $Body)
+  if ($matches.Count -ne 1) { throw "exact comment readback failed on #$Issue" }
+  $matches[0].html_url
+}
+
 $frontierText = (($frontier | ForEach-Object { "#$($_.number) $($_.title)" }) -join "`n- ")
 $comment = @"
 ## Reliability-gated Wayfinder migration readback
@@ -1319,7 +1740,7 @@ The approved roadmap migration is complete and read back:
 
 - five active reliability milestones exist with exact membership;
 - the legacy cross-version reliability milestone is closed as superseded;
-- #156 is the ready-for-human Visible Worker gate and #$localSearchIssue is its ready local bounded-search child;
+- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #$localSearchIssue is its ready bounded-search child, and #$selectorBindingIssue is its ready selector/effective-binding validation child;
 - #64 is blocked by #156 for the full post-fix collaboration matrix;
 - #28 is narrowed to client discovery performance and #$uninstallIssue owns uninstall cleanup behind #111;
 - every open Issue has exactly one canonical lifecycle label;
@@ -1329,9 +1750,11 @@ Current unclaimed 0.1.6 ready frontier:
 
 - $frontierText
 
+Sanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.
+
 Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
 "@
-gh issue comment 147 --body $comment
+Write-ExactIssueComment 147 '## Reliability-gated Wayfinder migration readback' $comment
 ```
 
 Expected: one comment URL returned.
@@ -1343,14 +1766,27 @@ Run:
 ```powershell
 gh issue view 147 --comments `
   --json number,title,state,labels,assignees,body,comments,url
-gh pr list --state open --limit 100 `
-  --json number,title,headRefName,baseRefName,url
+$comments = @(gh api --paginate 'repos/NOirBRight/CodexHub/issues/147/comments?per_page=100' | ConvertFrom-Json)
+$expectedComment = ($comment -replace "`r`n","`n").TrimEnd()
+$prefixMatches = @($comments | Where-Object { ([string]$_.body).StartsWith('## Reliability-gated Wayfinder migration readback',[StringComparison]::Ordinal) })
+$exactMatches = @($comments | Where-Object body -CEQ $expectedComment)
+if ($prefixMatches.Count -ne 1 -or $exactMatches.Count -ne 1) { throw 'checkpoint multiplicity/body mismatch' }
+$prs = @(gh pr list --state open --limit 100 `
+  --json number,title,headRefName,baseRefName,url | ConvertFrom-Json)
+if (@($prs | Where-Object { $_.headRefName -match '(?i)wayfinder|issue[-_/]?(159|161|139|149|150|111)' }).Count) {
+  throw 'migration/candidate PR exists'
+}
+if (-not (Test-Path (Join-Path $env:TEMP 'codexhub-wayfinder-migration/frontier-ownership-evidence.json'))) {
+  throw 'frontier ownership evidence missing'
+}
 git status --short --branch
 ```
 
 Expected:
 
 - #147 is open, unassigned, and contains the migration checkpoint;
+- exactly one checkpoint prefix and exact body remain;
+- #159 and the selector/binding child are present in the exact frontier and ownership-evidence readback;
 - no migration-created product PR exists;
 - no product Issue was assigned by this plan;
 - repository working tree is clean.
@@ -1361,9 +1797,11 @@ Expected:
 
 Before execution handoff, verify this plan against the approved design:
 
-1. **Spec coverage:** Tasks 2–8 cover milestones, #156 decomposition, #28 split, all open-Issue routing, stale state, #147 rewrite, dependencies, readback, and frontier recomputation.
-2. **No placeholders:** Dynamic new Issue numbers are discovered by exact titles and stored in variables; no guessed number is embedded.
-3. **Type consistency:** `$localSearchIssue`, `$uninstallIssue`, milestone titles, parent relationships, and dependency direction are identical in every task.
+1. **Spec coverage:** Tasks 2–8 cover milestones, the full Host-only #156 rewrite, both CodexHub children, #28 split, all open-Issue routing, stale state, #147 rewrite, dependencies, readback, and ownership-backed frontier recomputation.
+2. **No placeholders:** Dynamic new Issue numbers are discovered by exact titles and stored in variables; open and closed selector/codec duplicates are checked before creation; no guessed number is embedded.
+3. **Type consistency:** `$localSearchIssue`, `$selectorBindingIssue`, `$uninstallIssue`, milestone titles, parent relationships, and dependency direction are identical in every task.
 4. **Scope:** The plan changes only GitHub planning state. Every product Issue receives its own later spec/plan/implementation cycle.
 5. **No hidden claim:** No command assigns an Issue, creates a product branch/worktree, starts a Worker, opens a production PR, or edits product code.
-6. **Review blockers resolved:** Task 1 safely fast-forwards only a clean stale planning branch with no unique commits, requires the design and plan in-tree, emits a read-only write-set preview, and stops for explicit authorization; Tasks 2–8 use Inline Execution only.
+6. **Retry safety:** Every Task 6/8 comment write uses the exact-body/same-purpose-prefix guard, reads back exactly one match, and returns its URL; hierarchy/dependency writes are idempotent and final assertions compare exact sets.
+7. **Ownership proof:** Task 8 requires sanitized native Task/worktree/branch/PR/assignee/hotset evidence and stops with `NEEDS_CONTEXT` when native Task evidence is unavailable; labels alone never establish frontier eligibility.
+8. **Review blockers resolved:** Task 1 safely fast-forwards only a clean stale planning branch with no unique commits, requires the design and plan in-tree, emits the full read-only write-set preview, and stops for explicit authorization; Tasks 2–8 use Inline Execution only.

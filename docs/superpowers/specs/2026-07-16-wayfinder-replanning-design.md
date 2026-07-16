@@ -244,8 +244,8 @@ Hidden Subagent 是独立能力测试面。即使它成功，也不能替代 Vis
 
 #156 应拆分为：
 
-- 保留 ready-for-human 的父 Gate，拥有 Host/runtime 的 Sidebar-visible third-party Worker、绑定读回、双向通信和终态；
-- 创建一个 CodexHub 本地子 Issue，限制重复空 `tool_search`、产生结构化 unavailable 终态并防止请求/token 放大；
+- 保留 ready-for-human 的 Host/runtime-only 父 Gate，拥有 Sidebar-visible third-party Worker materialization、有效绑定读回、双向通信、结果回执、显式 unsupported 终态和 Active → Done 可见性；
+- 创建两个 CodexHub 本地子 Issue：#159 限制重复空 `tool_search`、产生结构化 unavailable 终态并防止请求/token 放大；#161 保留 Worker selector/codec，并用受支持的有效 agent/model/reasoning 读回 fail closed 地验证绑定；
 - #64 在 #156 之后验证完整 Hidden Subagent 与 Visible Worker 矩阵，不把两个表面合并。
 
 ### 6.3 当前实施 Worker
@@ -350,14 +350,14 @@ Out of scope
 
 ### 9.3 台账修正
 
-- #155–#157 和 #156 加入 #147；
+- #155–#157 和 #156 加入 #147；#159 与 #161 作为 #156 的两个本地子 Issue 保持嵌套；
 - #8 保持 open，移除已在当前 `dev` 实现的错误假设；
 - #28 拆成探测性能与卸载清理；
 - #62 在确认真实执行状态后清理过期 assignee/Worker 描述；
 - #10/#12 核对 main 的最终证据，状态错误则重开或补充正式关闭证据；
 - #109 保持 `needs-info`，不阻塞整个 0.1.7；
 - #74 保持 `needs-info` 并移入新功能停车区；
-- #64 增加对 #156 的 blocked-by；
+- #156 增加对 #159 和 #161 的 blocked-by；#64 保持对 #156 的 blocked-by；
 - 每个 Issue 保持一个 canonical lifecycle label；
 - 硬依赖使用 GitHub native blocked-by，其他关系只写 Related。
 
@@ -377,7 +377,7 @@ Out of scope
 - 当前实施使用 Terra/Luna Sidebar-visible Workers；
 - 第三方模型逐组合认证后进入合格 Worker 池；
 - Visible Worker、Hidden Subagent 和 Inline 是不同执行表面，不能互相冒充；
-- #156 是 0.1.6 的 P0 Host/runtime Gate，并拆出可由 Terra/Luna 实施的 CodexHub 本地防放大子问题；
+- #156 是 0.1.6 的 P0 Host/runtime-only Gate，并拆出两个可由 Terra/Luna 实施的 CodexHub 本地子问题：#159 防止重复空搜索放大，#161 保留 Worker selector/codec 并验证有效绑定；
 - #64 在 0.1.8 负责完整协作矩阵；
 - 所有 open Issues 必须进入 Gate、支撑队列、决策队列或停车场；
 - GitHub 是唯一持久工作状态，Wayfinder 更新本身不领取任务。
