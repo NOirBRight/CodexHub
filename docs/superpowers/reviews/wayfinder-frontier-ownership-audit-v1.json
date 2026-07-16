@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "artifact_kind": "wayfinder-frontier-ownership-audit",
-  "captured_at": "2026-07-16T19:10:29.752972Z",
+  "captured_at": "2026-07-16T19:44:53.590618Z",
   "repository": "NOirBRight/CodexHub",
   "generator": "scripts/generate_wayfinder_final_audit.py",
   "base_ref": "dev",
   "base_revision": "51a636c98ca90a9766836a7d603c2013211bbeeb",
   "planning_branch": "wayfinder-github-migration",
-  "planning_revision": "bd2b44034c92cf60a4e5ac598300ef6817a0e02d",
+  "planning_revision": "7d60eca9a903672948445bc079ed46316b281907",
   "native_task_capture": {
     "tool": "codex_app__list_threads",
     "source_capture_file_sha256": "8d8a637e13cae1e791b79525b431c6006cbaf015b4bb1ac88f797692939d9ed5",
@@ -599,6 +599,7 @@
             "normalized": "frontend/src/pages/SettingsPage.tsx and/or the settings drawer",
             "path_matchers": [
               "frontend/src/components/**/Settings*",
+              "frontend/src/components/SettingsDrawer.tsx",
               "frontend/src/pages/SettingsPage.tsx"
             ]
           },
@@ -627,6 +628,7 @@
           "frontend/scripts/**",
           "frontend/src/App.tsx",
           "frontend/src/components/**/Settings*",
+          "frontend/src/components/SettingsDrawer.tsx",
           "frontend/src/pages/SettingsPage.tsx",
           "scripts/**/autostart*",
           "scripts/*autostart*",
@@ -678,12 +680,12 @@
       {
         "logical_identity": "worktree:wayfinder-github-migration",
         "branch": "wayfinder-github-migration",
-        "revision": "bd2b44034c92cf60a4e5ac598300ef6817a0e02d",
+        "revision": "7d60eca9a903672948445bc079ed46316b281907",
         "clean": false,
         "dirty_files": [
           "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
-          "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
-          "scripts/generate_wayfinder_final_audit.py"
+          "scripts/generate_wayfinder_final_audit.py",
+          "scripts/tests/test_wayfinder_final_audit_generator.py"
         ],
         "changed_files_vs_dev": [
           "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
@@ -691,7 +693,8 @@
           "docs/superpowers/reviews/wayfinder-final-audit-v1.json",
           "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
           "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
-          "scripts/generate_wayfinder_final_audit.py"
+          "scripts/generate_wayfinder_final_audit.py",
+          "scripts/tests/test_wayfinder_final_audit_generator.py"
         ],
         "hotset_intersections": {
           "159": [],
@@ -760,10 +763,14 @@
       {
         "logical_identity": "local-branch:wayfinder-github-migration",
         "name": "wayfinder-github-migration",
-        "revision": "bd2b44034c92cf60a4e5ac598300ef6817a0e02d",
+        "revision": "7d60eca9a903672948445bc079ed46316b281907",
         "changed_files_vs_dev": [
           "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
-          "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md"
+          "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json",
+          "docs/superpowers/reviews/wayfinder-final-audit-v1.json",
+          "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+          "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
+          "scripts/generate_wayfinder_final_audit.py"
         ],
         "hotset_intersections": {
           "159": [],
@@ -1296,11 +1303,11 @@
       "147": {
         "public_comment_id": 4994927680,
         "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
-        "normalized_body_sha256": "b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b",
+        "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
         "prefix_multiplicity": 1,
         "exact_body_multiplicity": 1,
         "created_at": "2026-07-16T17:46:29Z",
-        "updated_at": "2026-07-16T18:17:28Z",
+        "updated_at": "2026-07-16T19:13:34Z",
         "url": "https://github.com/NOirBRight/CodexHub/issues/147#issuecomment-4994927680"
       }
     }

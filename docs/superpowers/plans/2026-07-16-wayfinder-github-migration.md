@@ -1760,22 +1760,127 @@ Expected: the generator validates all twelve exact query records, parses/persist
 Run:
 
 ```powershell
-function Write-ExactIssueComment([int]$Issue,[string]$PurposePrefix,[string]$Body) {
-  $Body = ($Body -replace "`r`n","`n").TrimEnd()
-  $comments = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
-  $exact = @($comments | Where-Object body -CEQ $Body)
-  $purpose = @($comments | Where-Object { ([string]$_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
-  if ($exact.Count -gt 1) { throw "multiple exact comments on #$Issue" }
-  if ($exact.Count -eq 1) {
-    if ($purpose.Count -ne 1) { throw "conflicting same-purpose comment on #$Issue" }
+function Normalize-IssueCommentBody([string]$Body) {
+  return ($Body -replace "`r`n","`n").TrimEnd()
+}
+function Get-NormalizedBodySha256([string]$Body) {
+  $bytes = [Text.Encoding]::UTF8.GetBytes((Normalize-IssueCommentBody $Body))
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+function Get-IssueComments([int]$Issue) {
+  return @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
+}
+function New-IssueComment([int]$Issue,[string]$Body) {
+  gh issue comment $Issue --body $Body | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "checkpoint create failed on #$Issue" }
+}
+function Update-IssueComment([long]$PublicCommentId,[string]$Body) {
+  @{body=$Body} | ConvertTo-Json -Compress |
+    gh api --method PATCH "repos/NOirBRight/CodexHub/issues/comments/$PublicCommentId" --input - | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "checkpoint PATCH failed for comment $PublicCommentId" }
+}
+function Set-OrCreateExactIssueComment(
+  [int]$Issue,
+  [string]$PurposePrefix,
+  [string]$DesiredBody,
+  [long]$ExpectedPriorPublicCommentId,
+  [string]$ExpectedPriorNormalizedBodySha256
+) {
+  $DesiredBody = Normalize-IssueCommentBody $DesiredBody
+  $comments = @(Get-IssueComments $Issue)
+  $priorReadbackAt = (Get-Date).ToUniversalTime().ToString('o')
+  $purpose = @($comments | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  $exact = @($comments | Where-Object { (Normalize-IssueCommentBody $_.body) -ceq $DesiredBody })
+  if ($purpose.Count -gt 1 -or $exact.Count -gt 1) { throw "multiple checkpoint comments on #$Issue" }
+
+  $priorId = $null
+  $priorHash = $null
+  if ($purpose.Count -eq 0) {
+    if ($exact.Count -ne 0) { throw "exact checkpoint lacks purpose prefix on #$Issue" }
+    New-IssueComment $Issue $DesiredBody
+    $operation = 'create'
+    $priorReadbackAt = $null
   } else {
-    if ($purpose.Count -gt 0) { throw "conflicting same-purpose comment on #$Issue" }
-    gh issue comment $Issue --body $Body | Out-Null
+    $selected = $purpose[0]
+    $priorId = [long]$selected.id
+    $priorHash = Get-NormalizedBodySha256 ([string]$selected.body)
+    if ($exact.Count -eq 1) {
+      if ([long]$exact[0].id -ne $priorId) { throw "checkpoint exact-body identity mismatch on #$Issue" }
+      $operation = 'exact-no-op'
+    } else {
+      if ($priorId -ne $ExpectedPriorPublicCommentId) { throw "prior public comment ID mismatch on #$Issue" }
+      if ($priorHash -cne $ExpectedPriorNormalizedBodySha256.ToLowerInvariant()) { throw "prior normalized-body SHA-256 mismatch on #$Issue" }
+      Update-IssueComment $priorId $DesiredBody
+      $operation = 'patch'
+    }
   }
-  $readback = @(gh api --paginate "repos/NOirBRight/CodexHub/issues/$Issue/comments?per_page=100" | ConvertFrom-Json)
-  $matches = @($readback | Where-Object body -CEQ $Body)
-  if ($matches.Count -ne 1) { throw "exact comment readback failed on #$Issue" }
-  $matches[0].html_url
+
+  $readback = @(Get-IssueComments $Issue)
+  $postReadbackAt = (Get-Date).ToUniversalTime().ToString('o')
+  $purposeReadback = @($readback | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($PurposePrefix,[StringComparison]::Ordinal) })
+  $exactReadback = @($readback | Where-Object { (Normalize-IssueCommentBody $_.body) -ceq $DesiredBody })
+  if ($purposeReadback.Count -ne 1 -or $exactReadback.Count -ne 1) { throw "exact checkpoint readback failed on #$Issue" }
+  $postId = [long]$exactReadback[0].id
+  if ($null -ne $priorId -and $postId -ne $priorId) { throw "checkpoint identity changed on #$Issue" }
+  return [ordered]@{
+    operation_decision = $operation
+    prior_public_comment_id = $priorId
+    prior_normalized_body_sha256 = $priorHash
+    prior_readback_at = $priorReadbackAt
+    desired_normalized_body_sha256 = Get-NormalizedBodySha256 $DesiredBody
+    post_public_comment_id = $postId
+    post_normalized_body_sha256 = Get-NormalizedBodySha256 ([string]$exactReadback[0].body)
+    post_prefix_multiplicity = $purposeReadback.Count
+    post_exact_body_multiplicity = $exactReadback.Count
+    post_readback_at = $postReadbackAt
+    url = $exactReadback[0].html_url
+  }
+}
+function New-CheckpointTranscript(
+  [System.Collections.IDictionary]$Guard,
+  [string]$HistoricalOriginalBody,
+  [string]$DesiredBody,
+  [string]$ArtifactPath,
+  [string]$ArtifactSha256
+) {
+  $DesiredBody = Normalize-IssueCommentBody $DesiredBody
+  if ($Guard.operation_decision -ceq 'create') {
+    $originalSource = 'Task 8 initial publication desired body'
+    $originalBody = $DesiredBody
+  } else {
+    $originalSource = 'Task 8 execution report exact original published body'
+    $originalBody = Normalize-IssueCommentBody $HistoricalOriginalBody
+  }
+  return [ordered]@{
+    schema_version = 1
+    captured_at = (Get-Date).ToUniversalTime().ToString('o')
+    issue = 147
+    purpose_prefix = '## Reliability-gated Wayfinder migration readback'
+    historical_original = [ordered]@{
+      source = $originalSource
+      normalized_body = $originalBody
+      normalized_body_sha256 = Get-NormalizedBodySha256 $originalBody
+    }
+    pre_update = [ordered]@{
+      public_comment_id = $Guard.prior_public_comment_id
+      normalized_body_sha256 = $Guard.prior_normalized_body_sha256
+      readback_at = $Guard.prior_readback_at
+    }
+    desired = [ordered]@{
+      normalized_body = $DesiredBody
+      normalized_body_sha256 = $Guard.desired_normalized_body_sha256
+      frontier_artifact_path = $ArtifactPath
+      frontier_artifact_sha256 = $ArtifactSha256
+    }
+    operation_decision = $Guard.operation_decision
+    post_readback = [ordered]@{
+      public_comment_id = $Guard.post_public_comment_id
+      normalized_body_sha256 = $Guard.post_normalized_body_sha256
+      prefix_multiplicity = $Guard.post_prefix_multiplicity
+      exact_body_multiplicity = $Guard.post_exact_body_multiplicity
+      readback_at = $Guard.post_readback_at
+    }
+  }
 }
 
 $frontierText = (($frontier | ForEach-Object { "#$($_.number) $($_.title)" }) -join "`n- ")
@@ -1803,13 +1908,8 @@ Durable frontier audit: $artifactPath (SHA-256: ``$artifactSha256``).
 Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
 "@
 $purposePrefix = '## Reliability-gated Wayfinder migration readback'
-$existing = @(Get-IssueComments 147 | Where-Object { (Normalize-IssueCommentBody $_.body).StartsWith($purposePrefix,[StringComparison]::Ordinal) })
-if ($existing.Count -eq 0) {
-  $guard = Write-ExactIssueComment 147 $purposePrefix $comment
-} else {
-  $guard = Set-ExactIssueComment 147 $purposePrefix $comment `
-    4994927680 'b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b'
-}
+$guard = Set-OrCreateExactIssueComment 147 $purposePrefix $comment `
+  4994927680 'b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b'
 
 $historicalOriginalBody = @'
 ## Reliability-gated Wayfinder migration readback
@@ -1834,35 +1934,7 @@ Current unclaimed 0.1.6 ready frontier:
 
 Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
 '@
-$desiredBody = Normalize-IssueCommentBody $comment
-$transcript = [ordered]@{
-  schema_version = 1
-  captured_at = (Get-Date).ToUniversalTime().ToString('o')
-  issue = 147
-  purpose_prefix = $purposePrefix
-  historical_original = [ordered]@{
-    source = 'Task 8 execution report exact original published body'
-    normalized_body = Normalize-IssueCommentBody $historicalOriginalBody
-    normalized_body_sha256 = Get-NormalizedBodySha256 $historicalOriginalBody
-  }
-  pre_update = [ordered]@{
-    public_comment_id = [long]($guard.prior_public_comment_id ?? $guard.public_comment_id)
-    normalized_body_sha256 = [string]($guard.prior_normalized_body_sha256 ?? $guard.normalized_body_sha256)
-  }
-  desired = [ordered]@{
-    normalized_body = $desiredBody
-    normalized_body_sha256 = Get-NormalizedBodySha256 $desiredBody
-    frontier_artifact_path = $artifactPath
-    frontier_artifact_sha256 = $artifactSha256
-  }
-  operation_decision = [string]$guard.operation_decision
-  post_readback = [ordered]@{
-    public_comment_id = [long]($guard.post_public_comment_id ?? $guard.public_comment_id)
-    normalized_body_sha256 = Get-NormalizedBodySha256 $desiredBody
-    prefix_multiplicity = [int]($guard.post_prefix_multiplicity ?? $guard.prefix_multiplicity)
-    exact_body_multiplicity = [int]($guard.post_exact_body_multiplicity ?? $guard.exact_body_multiplicity)
-  }
-}
+$transcript = New-CheckpointTranscript $guard $historicalOriginalBody $comment $artifactPath $artifactSha256
 $transcriptPath = 'docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json'
 $transcript | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $transcriptPath
 python scripts/generate_wayfinder_final_audit.py finalize `

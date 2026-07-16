@@ -294,6 +294,7 @@ def _path_matchers(entry: str, number: int) -> list[str]:
         matchers.extend(
             [
                 "frontend/src/pages/SettingsPage.tsx",
+                "frontend/src/components/SettingsDrawer.tsx",
                 "frontend/src/components/**/Settings*",
             ]
         )
@@ -577,6 +578,9 @@ def collect_comment_evidence() -> dict[str, Any]:
             for item in comments
             if normalize_body(item.get("body")).startswith(prefix)
         ]
+        if number == 147 and not purpose:
+            result[str(number)] = None
+            continue
         if len(purpose) != 1:
             raise ValueError(f"same-purpose comment multiplicity on #{number}: {len(purpose)}")
         match = purpose[0]
@@ -916,17 +920,9 @@ def validate_transcript(transcript: dict[str, Any], core_sha256: str) -> None:
         raise ValueError("checkpoint transcript issue mismatch")
     if transcript.get("purpose_prefix") != COMMENT_PREFIXES[147]:
         raise ValueError("checkpoint transcript purpose prefix mismatch")
-    historical = transcript.get("historical_original", {})
-    original_body = normalize_body(historical.get("normalized_body"))
-    if original_body != normalize_body(ORIGINAL_CHECKPOINT_BODY):
-        raise ValueError("checkpoint historical original body mismatch")
-    if historical.get("normalized_body_sha256") != sha256_text(original_body):
-        raise ValueError("checkpoint historical original hash mismatch")
-    pre = transcript.get("pre_update", {})
-    if pre.get("public_comment_id") != CHECKPOINT_COMMENT_ID:
-        raise ValueError("checkpoint prior public comment ID mismatch")
-    if not re.fullmatch(r"[0-9a-f]{64}", str(pre.get("normalized_body_sha256", ""))):
-        raise ValueError("checkpoint prior hash missing")
+    operation = transcript.get("operation_decision")
+    if operation not in {"create", "patch", "exact-no-op"}:
+        raise ValueError("checkpoint operation decision missing")
     desired = transcript.get("desired", {})
     desired_body = normalize_body(desired.get("normalized_body"))
     if desired.get("normalized_body_sha256") != sha256_text(desired_body):
@@ -934,11 +930,32 @@ def validate_transcript(transcript: dict[str, Any], core_sha256: str) -> None:
     required_reference = f"{CORE_ARTIFACT_PATH} (SHA-256: `{core_sha256}`)"
     if required_reference not in desired_body:
         raise ValueError("checkpoint desired body lacks durable artifact path/hash")
-    if transcript.get("operation_decision") not in {"patch", "exact-no-op"}:
-        raise ValueError("checkpoint operation decision missing")
+    historical = transcript.get("historical_original", {})
+    original_body = normalize_body(historical.get("normalized_body"))
+    expected_original = (
+        desired_body if operation == "create" else normalize_body(ORIGINAL_CHECKPOINT_BODY)
+    )
+    if original_body != expected_original:
+        raise ValueError("checkpoint historical original body mismatch")
+    if historical.get("normalized_body_sha256") != sha256_text(original_body):
+        raise ValueError("checkpoint historical original hash mismatch")
+    pre = transcript.get("pre_update", {})
+    if operation == "create":
+        if (
+            pre.get("public_comment_id") is not None
+            or pre.get("normalized_body_sha256") is not None
+        ):
+            raise ValueError("checkpoint create operation invents prior state")
+    else:
+        if not isinstance(pre.get("public_comment_id"), int) or pre["public_comment_id"] <= 0:
+            raise ValueError("checkpoint prior public comment ID missing")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(pre.get("normalized_body_sha256", ""))):
+            raise ValueError("checkpoint prior hash missing")
     post = transcript.get("post_readback", {})
-    if post.get("public_comment_id") != CHECKPOINT_COMMENT_ID:
-        raise ValueError("checkpoint post public comment ID mismatch")
+    if not isinstance(post.get("public_comment_id"), int) or post["public_comment_id"] <= 0:
+        raise ValueError("checkpoint post public comment ID missing")
+    if operation != "create" and post["public_comment_id"] != pre["public_comment_id"]:
+        raise ValueError("checkpoint public comment identity changed")
     if post.get("prefix_multiplicity") != 1 or post.get("exact_body_multiplicity") != 1:
         raise ValueError("checkpoint post-readback multiplicity mismatch")
     if post.get("normalized_body_sha256") != desired.get("normalized_body_sha256"):
@@ -1004,11 +1021,14 @@ def validate_final(final: dict[str, Any]) -> None:
     if not isinstance(transcript, dict):
         raise ValueError("final artifact checkpoint transcript missing")
     validate_transcript(transcript, core_sha)
-    recorded_prior = core["global_github_audit"]["comments"]["147"]
+    recorded_prior = core["global_github_audit"]["comments"].get("147")
     transcript_prior = transcript["pre_update"]
-    if (
-        recorded_prior["public_comment_id"]
-        != transcript_prior["public_comment_id"]
+    if transcript["operation_decision"] == "create":
+        if recorded_prior is not None:
+            raise ValueError("frontier capture unexpectedly contains a checkpoint prior to create")
+    elif (
+        not isinstance(recorded_prior, dict)
+        or recorded_prior["public_comment_id"] != transcript_prior["public_comment_id"]
         or recorded_prior["normalized_body_sha256"]
         != transcript_prior["normalized_body_sha256"]
         or recorded_prior["prefix_multiplicity"] != 1
@@ -1077,8 +1097,9 @@ def compare_live(final: dict[str, Any]) -> None:
                 raise ValueError(
                     f"fresh active surface/hotset intersection: {surface['logical_identity']}"
                 )
+    checkpoint_comment_id = transcript_post["public_comment_id"]
     current_comment = api_json(
-        f"repos/{REPOSITORY}/issues/comments/{CHECKPOINT_COMMENT_ID}"
+        f"repos/{REPOSITORY}/issues/comments/{checkpoint_comment_id}"
     )
     desired = final["checkpoint_update_transcript"]["desired"]
     if sha256_text(normalize_body(current_comment.get("body"))) != desired["normalized_body_sha256"]:
@@ -1089,7 +1110,7 @@ def compare_live(final: dict[str, Any]) -> None:
                 "status": "live-ok",
                 "open_issue_count": fresh_global["open_issue_count"],
                 "frontier": core["frontier"],
-                "checkpoint_comment_id": CHECKPOINT_COMMENT_ID,
+                "checkpoint_comment_id": checkpoint_comment_id,
                 "worktree_count": len(fresh_surfaces["worktrees"]),
                 "local_branch_count": len(fresh_surfaces["local_branches"]),
                 "open_pr_head_count": len(fresh_surfaces["open_pr_heads"]),

@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
   "artifact_kind": "wayfinder-final-migration-audit",
-  "captured_at": "2026-07-16T19:13:41.822373Z",
+  "captured_at": "2026-07-16T19:48:15.733215Z",
   "repository": "NOirBRight/CodexHub",
   "generator": "scripts/generate_wayfinder_final_audit.py",
   "frontier_artifact": {
     "repository_relative_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
-    "sha256": "388da2e2f68b3e5c3e8ce5cc99cdfb1ba801941b19e864e3bbb22331c5b6356b",
+    "sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd",
     "embedded": {
       "schema_version": 1,
       "artifact_kind": "wayfinder-frontier-ownership-audit",
-      "captured_at": "2026-07-16T19:10:29.752972Z",
+      "captured_at": "2026-07-16T19:44:53.590618Z",
       "repository": "NOirBRight/CodexHub",
       "generator": "scripts/generate_wayfinder_final_audit.py",
       "base_ref": "dev",
       "base_revision": "51a636c98ca90a9766836a7d603c2013211bbeeb",
       "planning_branch": "wayfinder-github-migration",
-      "planning_revision": "bd2b44034c92cf60a4e5ac598300ef6817a0e02d",
+      "planning_revision": "7d60eca9a903672948445bc079ed46316b281907",
       "native_task_capture": {
         "tool": "codex_app__list_threads",
         "source_capture_file_sha256": "8d8a637e13cae1e791b79525b431c6006cbaf015b4bb1ac88f797692939d9ed5",
@@ -608,6 +608,7 @@
                 "normalized": "frontend/src/pages/SettingsPage.tsx and/or the settings drawer",
                 "path_matchers": [
                   "frontend/src/components/**/Settings*",
+                  "frontend/src/components/SettingsDrawer.tsx",
                   "frontend/src/pages/SettingsPage.tsx"
                 ]
               },
@@ -636,6 +637,7 @@
               "frontend/scripts/**",
               "frontend/src/App.tsx",
               "frontend/src/components/**/Settings*",
+              "frontend/src/components/SettingsDrawer.tsx",
               "frontend/src/pages/SettingsPage.tsx",
               "scripts/**/autostart*",
               "scripts/*autostart*",
@@ -687,12 +689,12 @@
           {
             "logical_identity": "worktree:wayfinder-github-migration",
             "branch": "wayfinder-github-migration",
-            "revision": "bd2b44034c92cf60a4e5ac598300ef6817a0e02d",
+            "revision": "7d60eca9a903672948445bc079ed46316b281907",
             "clean": false,
             "dirty_files": [
               "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
-              "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
-              "scripts/generate_wayfinder_final_audit.py"
+              "scripts/generate_wayfinder_final_audit.py",
+              "scripts/tests/test_wayfinder_final_audit_generator.py"
             ],
             "changed_files_vs_dev": [
               "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
@@ -700,7 +702,8 @@
               "docs/superpowers/reviews/wayfinder-final-audit-v1.json",
               "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
               "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
-              "scripts/generate_wayfinder_final_audit.py"
+              "scripts/generate_wayfinder_final_audit.py",
+              "scripts/tests/test_wayfinder_final_audit_generator.py"
             ],
             "hotset_intersections": {
               "159": [],
@@ -769,10 +772,14 @@
           {
             "logical_identity": "local-branch:wayfinder-github-migration",
             "name": "wayfinder-github-migration",
-            "revision": "bd2b44034c92cf60a4e5ac598300ef6817a0e02d",
+            "revision": "7d60eca9a903672948445bc079ed46316b281907",
             "changed_files_vs_dev": [
               "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
-              "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md"
+              "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json",
+              "docs/superpowers/reviews/wayfinder-final-audit-v1.json",
+              "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+              "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
+              "scripts/generate_wayfinder_final_audit.py"
             ],
             "hotset_intersections": {
               "159": [],
@@ -1305,11 +1312,11 @@
           "147": {
             "public_comment_id": 4994927680,
             "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
-            "normalized_body_sha256": "b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b",
+            "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
             "prefix_multiplicity": 1,
             "exact_body_multiplicity": 1,
             "created_at": "2026-07-16T17:46:29Z",
-            "updated_at": "2026-07-16T18:17:28Z",
+            "updated_at": "2026-07-16T19:13:34Z",
             "url": "https://github.com/NOirBRight/CodexHub/issues/147#issuecomment-4994927680"
           }
         }
@@ -1334,7 +1341,7 @@
   },
   "checkpoint_update_transcript": {
     "schema_version": 1,
-    "captured_at": "2026-07-16T19:13:35.7585728Z",
+    "captured_at": "2026-07-16T19:46:23.9035374Z",
     "issue": 147,
     "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
     "historical_original": {
@@ -1344,22 +1351,22 @@
     },
     "pre_update": {
       "public_comment_id": 4994927680,
-      "normalized_body_sha256": "b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b",
-      "readback_at": "2026-07-16T19:13:35.7634320Z"
+      "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+      "readback_at": "2026-07-16T19:46:23.9088831Z"
     },
     "desired": {
-      "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `388da2e2f68b3e5c3e8ce5cc99cdfb1ba801941b19e864e3bbb22331c5b6356b`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
-      "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+      "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+      "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
       "frontier_artifact_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
-      "frontier_artifact_sha256": "388da2e2f68b3e5c3e8ce5cc99cdfb1ba801941b19e864e3bbb22331c5b6356b"
+      "frontier_artifact_sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd"
     },
     "operation_decision": "patch",
     "post_readback": {
       "public_comment_id": 4994927680,
-      "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+      "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
       "prefix_multiplicity": 1,
       "exact_body_multiplicity": 1,
-      "readback_at": "2026-07-16T19:13:35.7639048Z"
+      "readback_at": "2026-07-16T19:46:23.9091773Z"
     }
   },
   "derivation": {
@@ -1481,8 +1488,8 @@
     "checkpoint_post_readback_exact": true
   },
   "artifact_hashes": {
-    "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json": "388da2e2f68b3e5c3e8ce5cc99cdfb1ba801941b19e864e3bbb22331c5b6356b",
-    "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json": "9668c99374b12526ed183291c2c883ab8b80b93dcd3258017b841be22541d646"
+    "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd",
+    "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json": "8274541276784904beee892b298122b3361528abad78e25a375cbb66b4886540"
   },
   "sanitization": {
     "native_task_ids_persisted": false,
