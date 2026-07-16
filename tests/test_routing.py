@@ -12206,6 +12206,193 @@ Execution constraints:
             {tool.get("name") for tool in deferred_tools},
         )
 
+    def test_deferred_tool_search_bounds_second_identical_empty_miss_with_sanitized_terminal_result(self):
+        query = "mcp__synthetic__missing_tool"
+        caller_tools = [
+            dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL),
+            {
+                "type": "function",
+                "name": "known_tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        ]
+        first_miss = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_search_first",
+                "status": "completed",
+                "arguments": {"query": query},
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_search_first",
+                "status": "completed",
+                "tools": [],
+            },
+        ]
+        second_miss = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_search_second",
+                "status": "completed",
+                "arguments": {"query": query},
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_search_second",
+                "status": "completed",
+                "tools": [],
+            },
+        ]
+        upstream = {
+            "name": "ollama_cloud",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+        }
+
+        first_payload = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": [{"type": "message", "role": "user", "content": "Use the named tool."}, *first_miss],
+                        "tools": caller_tools,
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={},
+            )
+        )
+        first_tool_names = {tool.get("name") for tool in first_payload["tools"]}
+        first_transcript = json.dumps(first_payload, ensure_ascii=True)
+        first_result = first_payload["input"][-1]["content"]
+
+        self.assertIn("tool_search", first_tool_names)
+        self.assertIn("call_search_first", first_transcript)
+        self.assertIn("tools:\n[]", first_result)
+        self.assertNotIn("identical_exact_query", first_transcript)
+
+        self.write_proxy_event.reset_mock()
+        bounded_payload = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": [
+                            {"type": "message", "role": "user", "content": "Use the named tool."},
+                            *first_miss,
+                            *second_miss,
+                        ],
+                        "tools": caller_tools,
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={},
+            )
+        )
+        bounded_tool_names = {tool.get("name") for tool in bounded_payload["tools"]}
+        bounded_transcript = json.dumps(bounded_payload, ensure_ascii=True)
+        terminal_results = [
+            item["content"]
+            for item in bounded_payload["input"]
+            if isinstance(item, dict)
+            and isinstance(item.get("content"), str)
+            and "query_classification: identical_exact_query" in item["content"]
+        ]
+
+        self.assertNotIn("tool_search", bounded_tool_names)
+        self.assertIn("known_tool", bounded_tool_names)
+        self.assertEqual(len(terminal_results), 1)
+        self.assertIn("call_id: call_search_second", terminal_results[0])
+        self.assertIn("status: unavailable", terminal_results[0])
+        self.assertIn("empty_miss_count: 2", terminal_results[0])
+        self.assertIn("terminal: true", terminal_results[0])
+        self.assertEqual(bounded_transcript.count("status: unavailable"), 1)
+        self.assertEqual(bounded_transcript.count("call_search_first"), 2)
+        self.assertEqual(bounded_transcript.count("call_search_second"), 2)
+        bound_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "tool_search_empty_miss_bound"
+        ]
+        self.assertEqual(len(bound_events), 1)
+        self.assertEqual(
+            bound_events[0].kwargs,
+            {
+                "query_classification": "identical_exact_query",
+                "count": 2,
+                "status": "unavailable",
+            },
+        )
+
+    def test_deferred_tool_search_preserves_distinct_empty_queries_and_non_empty_discovery(self):
+        history = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_distinct_first",
+                "arguments": {"query": "mcp__synthetic__first_missing"},
+            },
+            {"type": "tool_search_output", "call_id": "call_distinct_first", "tools": []},
+            {
+                "type": "tool_search_call",
+                "call_id": "call_distinct_second",
+                "arguments": {"query": "mcp__synthetic__second_missing"},
+            },
+            {"type": "tool_search_output", "call_id": "call_distinct_second", "tools": []},
+            {
+                "type": "tool_search_call",
+                "call_id": "call_found",
+                "arguments": {"query": "known_tool"},
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_found",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "known_tool",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+            },
+        ]
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": history,
+                    "tools": [
+                        dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL),
+                        {
+                            "type": "function",
+                            "name": "known_tool",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    ],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "deferred_core",
+            },
+            event_context={},
+        )
+        payload = json.loads(transformed)
+        tool_names = {tool.get("name") for tool in payload["tools"]}
+        transcript = json.dumps(payload, ensure_ascii=True)
+
+        self.assertIn("tool_search", tool_names)
+        self.assertIn("known_tool", tool_names)
+        self.assertIn('"name": "known_tool"', transcript)
+        self.assertNotIn("identical_exact_query", transcript)
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "tool_search_empty_miss_bound"
+                for call in self.write_proxy_event.call_args_list
+            )
+        )
+
     def test_external_tool_surface_keeps_caller_order_and_deduplicates_flattened_names(self):
         caller_alias = {
             "type": "function",

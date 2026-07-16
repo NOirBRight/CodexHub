@@ -632,6 +632,9 @@ TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
         "additionalProperties": False,
     },
 }
+TOOL_SEARCH_EMPTY_MISS_BOUND = 2
+TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION = "identical_exact_query"
+TOOL_SEARCH_UNAVAILABLE_STATUS = "unavailable"
 BROWSER_CONTEXT_MARKERS = (
     "# in app browser",
     "# browser comments",
@@ -5004,6 +5007,75 @@ def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
     return _semantic_normalize_tool_search_arguments(value)
 
 
+def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, int]:
+    if not isinstance(value, list):
+        return {}
+
+    queries_by_call_id: dict[str, str] = {}
+    empty_call_ids_by_query: dict[str, list[str]] = {}
+    successful_queries: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        if item.get("type") == "tool_search_call":
+            arguments = _normalize_tool_search_arguments(item.get("arguments"))
+            if arguments is None or _is_multi_agent_discovery_arguments(arguments):
+                continue
+            queries_by_call_id[call_id] = arguments["query"]
+            continue
+        if item.get("type") != "tool_search_output":
+            continue
+        query = queries_by_call_id.pop(call_id, None)
+        tools = item.get("tools")
+        if query is None or not isinstance(tools, list):
+            continue
+        if tools:
+            successful_queries.add(query)
+            continue
+        empty_call_ids_by_query.setdefault(query, []).append(call_id)
+
+    terminal_calls: dict[str, int] = {}
+    for query, call_ids in empty_call_ids_by_query.items():
+        if query in successful_queries or len(call_ids) < TOOL_SEARCH_EMPTY_MISS_BOUND:
+            continue
+        terminal_calls[call_ids[TOOL_SEARCH_EMPTY_MISS_BOUND - 1]] = TOOL_SEARCH_EMPTY_MISS_BOUND
+    return terminal_calls
+
+
+def _terminalize_bounded_empty_tool_search_misses(
+    payload: dict[str, Any],
+    terminal_calls: Mapping[str, int],
+) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list) or not terminal_calls:
+        return False
+
+    rewritten_items: list[Any] = []
+    changed = False
+    for item in input_items:
+        if (
+            isinstance(item, Mapping)
+            and item.get("type") == "tool_search_output"
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"] in terminal_calls
+        ):
+            rewritten = dict(item)
+            rewritten["status"] = TOOL_SEARCH_UNAVAILABLE_STATUS
+            rewritten["query_classification"] = TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION
+            rewritten["empty_miss_count"] = terminal_calls[item["call_id"]]
+            rewritten["terminal"] = True
+            rewritten_items.append(rewritten)
+            changed = True
+            continue
+        rewritten_items.append(item)
+    if changed:
+        payload["input"] = rewritten_items
+    return changed
+
+
 def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
     if not arguments:
         return False
@@ -5857,6 +5929,13 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
             )
             lines.append(
                 "next_action: call multi_agent_v1__spawn_agent to create the child agent; do not call tool_search again for the same multi-agent query."
+            )
+        if item.get("query_classification") == TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION:
+            lines.append(f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}")
+            lines.append(f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}")
+            lines.append("terminal: true")
+            lines.append(
+                "required_next_action: continue without the unavailable tool; do not call tool_search again for this exact query."
             )
         _append_internal_field(lines, "tools", item.get("tools"))
     else:
@@ -7485,6 +7564,20 @@ def compatible_request_body(
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
+    bounded_tool_search_terminal_calls = (
+        {}
+        if raw_provider_probe
+        else _bounded_empty_tool_search_terminal_calls(payload.get("input"))
+    )
+    if _terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
+        for count in bounded_tool_search_terminal_calls.values():
+            write_proxy_event(
+                "tool_search_empty_miss_bound",
+                query_classification=TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
+                count=count,
+                status=TOOL_SEARCH_UNAVAILABLE_STATUS,
+            )
+        changed = True
     if raw_provider_probe:
         pass
     else:
@@ -7519,7 +7612,9 @@ def compatible_request_body(
     # broader discovery service; eager remains the #105-compatible surface.
     # Worker subagents retain their established restricted surface.
     include_tool_search = (
-        tool_surface_strategy == "deferred_core" and not subagent_worker_context
+        tool_surface_strategy == "deferred_core"
+        and not subagent_worker_context
+        and not bounded_tool_search_terminal_calls
     )
     subagent_state = (
         build_subagent_state(input_items)
