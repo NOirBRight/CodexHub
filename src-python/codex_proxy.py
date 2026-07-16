@@ -7572,6 +7572,8 @@ def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[st
 def _coerce_required_subagent_tool_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
+    *,
+    surface: str = "coerce",
 ) -> tuple[Any, bool]:
     if not subagent_semantic_repair_enabled(event_context):
         return value, False
@@ -7590,7 +7592,14 @@ def _coerce_required_subagent_tool_calls(
         event_context["_required_subagent_coerced_item_ids"] = coerced_item_ids
     else:
         coerced_item_ids = set()
-    rewritten, changed = _coerce_required_subagent_tool_calls_inner(value, spec, coerced_item_ids)
+    rewritten, changed = _coerce_required_subagent_tool_calls_inner(
+        value,
+        spec,
+        coerced_item_ids,
+        event_context,
+        surface,
+        set(),
+    )
     if changed:
         _write_required_subagent_repair_event(event_context, spec, surface="coerce")
     return rewritten, changed
@@ -7722,12 +7731,22 @@ def _coerce_required_subagent_tool_calls_inner(
     value: Any,
     spec: Mapping[str, Any],
     coerced_item_ids: set[str],
+    event_context: Mapping[str, Any] | None,
+    surface: str,
+    validated_generated_spawn_ids: set[str],
 ) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
         rewritten = []
         for item in value:
-            replacement, item_changed = _coerce_required_subagent_tool_calls_inner(item, spec, coerced_item_ids)
+            replacement, item_changed = _coerce_required_subagent_tool_calls_inner(
+                item,
+                spec,
+                coerced_item_ids,
+                event_context,
+                surface,
+                validated_generated_spawn_ids,
+            )
             rewritten.append(replacement)
             changed = changed or item_changed
         return (rewritten if changed else value), changed
@@ -7750,17 +7769,37 @@ def _coerce_required_subagent_tool_calls_inner(
             return rewritten, True
         return value, False
 
-    if _multi_agent_function_call_name(value) is not None:
+    original_tool_name = _multi_agent_function_call_name(value)
+    if original_tool_name is not None:
         replacement = _required_subagent_call_item_like(spec, value)
         item_id = replacement.get("id")
         if isinstance(item_id, str) and item_id:
             coerced_item_ids.add(item_id)
+        if original_tool_name != "spawn_agent" and _multi_agent_function_call_name(replacement) == "spawn_agent":
+            raw_arguments = replacement.get("arguments")
+            arguments = _json_object_from_arguments(raw_arguments)
+            call_identity = replacement.get("call_id") or item_id
+            if (
+                arguments is not None
+                and raw_arguments not in (None, "")
+                and (not isinstance(call_identity, str) or call_identity not in validated_generated_spawn_ids)
+            ):
+                _validate_external_worker_selectors(replacement, event_context, surface=surface)
+                if isinstance(call_identity, str) and call_identity:
+                    validated_generated_spawn_ids.add(call_identity)
         return (replacement, True) if replacement != value else (value, False)
 
     changed = False
     rewritten = dict(value)
     for key, item in value.items():
-        replacement, item_changed = _coerce_required_subagent_tool_calls_inner(item, spec, coerced_item_ids)
+        replacement, item_changed = _coerce_required_subagent_tool_calls_inner(
+            item,
+            spec,
+            coerced_item_ids,
+            event_context,
+            surface,
+            validated_generated_spawn_ids,
+        )
         if item_changed:
             rewritten[key] = replacement
             changed = True
@@ -9425,7 +9464,11 @@ def compatible_response_body(
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
-    payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
+    payload, required_tool_changed = _coerce_required_subagent_tool_calls(
+        payload,
+        event_context,
+        surface="body",
+    )
     changed = changed or required_tool_changed
     payload, required_call_changed = _repair_missing_required_subagent_call_payload(payload, event_context)
     changed = changed or required_call_changed
@@ -9503,7 +9546,11 @@ def compatible_sse_line(
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
-    payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
+    payload, required_tool_changed = _coerce_required_subagent_tool_calls(
+        payload,
+        event_context,
+        surface="sse",
+    )
     changed = changed or required_tool_changed
     payload, requested_binding_changed = _apply_external_worker_response_contract(
         payload,
@@ -15035,7 +15082,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         attach_sidecars=False,
                     )
                     events, _ = _coerce_exact_spawn_prompt_tool_calls(events, event_context)
-                    events, _ = _coerce_required_subagent_tool_calls(events, event_context)
+                    events, _ = _coerce_required_subagent_tool_calls(
+                        events,
+                        event_context,
+                        surface="sse",
+                    )
                     events, _ = _reconcile_function_call_argument_events(events)
                     events, _ = _repair_missing_required_subagent_call_events(events, event_context)
                     events, _ = _apply_external_worker_response_contract(

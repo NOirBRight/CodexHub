@@ -15052,7 +15052,13 @@ Execution constraints:
         )
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
-    def _chat_spawn_sse_response(self, arguments, *, call_id="chat-worker-stream-call"):
+    def _chat_spawn_sse_response(
+        self,
+        arguments,
+        *,
+        call_id="chat-worker-stream-call",
+        tool_name="multi_agent_v1__spawn_agent",
+    ):
         chunks = [
             {
                 "id": "chatcmpl_worker_stream",
@@ -15069,7 +15075,7 @@ Execution constraints:
                                     "id": call_id,
                                     "type": "function",
                                     "function": {
-                                        "name": "multi_agent_v1__spawn_agent",
+                                        "name": tool_name,
                                         "arguments": json.dumps(arguments),
                                     },
                                 }
@@ -15254,6 +15260,44 @@ Execution constraints:
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(call_item["arguments"])["agent_type"], "general")
         self.assertNotIn("_codexhub_worker_requested_binding", call_item)
+
+    def test_responses_caller_chat_upstream_sse_relay_rejects_selectorless_required_spawn_replacement(self):
+        handler = FakeHandler()
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+            "tool_protocol": "chat_tools",
+            "subagent_legal_actions": [
+                {
+                    "tool_name": "spawn_agent",
+                    "arguments": {"message": "required replacement", "fork_context": False},
+                }
+            ],
+        }
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            CodexProxyHandler._relay_upstream_response(
+                handler,
+                self._chat_spawn_sse_response(
+                    {"targets": ["synthetic-child"], "timeout_ms": 1000},
+                    call_id="chat-required-spawn-replacement",
+                    tool_name="multi_agent_v1__wait_agent",
+                ),
+                "synthetic-provider",
+                upstream_format="chat_completions",
+                inbound_format="responses",
+                caller_stream=True,
+                event_context=event_context,
+            )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.assertEqual(handler.wfile.writes, [])
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="missing_selector",
+            surface="sse",
+        )
 
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(
