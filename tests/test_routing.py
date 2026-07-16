@@ -12300,7 +12300,6 @@ Execution constraints:
             and "query_classification: identical_exact_query" in item["content"]
         ]
 
-        self.assertNotIn("tool_search", bounded_tool_names)
         self.assertIn("known_tool", bounded_tool_names)
         self.assertEqual(len(terminal_results), 1)
         self.assertIn("call_id: call_search_second", terminal_results[0])
@@ -12325,50 +12324,29 @@ Execution constraints:
             },
         )
 
-    def test_deferred_tool_search_preserves_distinct_empty_queries_and_non_empty_discovery(self):
+    def test_deferred_tool_search_bound_rejects_third_identical_query_and_allows_distinct_query(self):
+        bounded_query = "mcp__synthetic__bounded_missing"
+        distinct_query = "mcp__synthetic__distinct_missing"
         history = [
             {
                 "type": "tool_search_call",
-                "call_id": "call_distinct_first",
-                "arguments": {"query": "mcp__synthetic__first_missing"},
+                "call_id": "call_bounded_first",
+                "arguments": {"query": bounded_query},
             },
-            {"type": "tool_search_output", "call_id": "call_distinct_first", "tools": []},
+            {"type": "tool_search_output", "call_id": "call_bounded_first", "tools": []},
             {
                 "type": "tool_search_call",
-                "call_id": "call_distinct_second",
-                "arguments": {"query": "mcp__synthetic__second_missing"},
+                "call_id": "call_bounded_second",
+                "arguments": {"query": bounded_query},
             },
-            {"type": "tool_search_output", "call_id": "call_distinct_second", "tools": []},
-            {
-                "type": "tool_search_call",
-                "call_id": "call_found",
-                "arguments": {"query": "known_tool"},
-            },
-            {
-                "type": "tool_search_output",
-                "call_id": "call_found",
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "known_tool",
-                        "parameters": {"type": "object", "properties": {}},
-                    }
-                ],
-            },
+            {"type": "tool_search_output", "call_id": "call_bounded_second", "tools": []},
         ]
         transformed = compatible_request_body(
             json.dumps(
                 {
                     "model": "glm-5.2",
                     "input": history,
-                    "tools": [
-                        dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL),
-                        {
-                            "type": "function",
-                            "name": "known_tool",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    ],
+                    "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)],
                 }
             ).encode("utf-8"),
             {
@@ -12379,13 +12357,98 @@ Execution constraints:
             event_context={},
         )
         payload = json.loads(transformed)
-        tool_names = {tool.get("name") for tool in payload["tools"]}
-        transcript = json.dumps(payload, ensure_ascii=True)
+        search_tools = [tool for tool in payload["tools"] if tool.get("name") == "tool_search"]
 
-        self.assertIn("tool_search", tool_names)
-        self.assertIn("known_tool", tool_names)
-        self.assertIn('"name": "known_tool"', transcript)
-        self.assertNotIn("identical_exact_query", transcript)
+        self.assertEqual(len(search_tools), 1)
+        query_schema = search_tools[0]["parameters"]["properties"]["query"]
+        self.assertEqual(query_schema["not"], {"enum": [bounded_query]})
+        self.assertIn(bounded_query, query_schema["not"]["enum"])
+        self.assertNotIn(distinct_query, query_schema["not"]["enum"])
+        self.assertEqual(json.dumps(payload).count("query_classification: identical_exact_query"), 1)
+
+    def test_deferred_tool_search_preserves_exact_non_empty_result_and_follow_up_callable_contract(self):
+        discovered_tool = {
+            "type": "function",
+            "name": "synthetic_weather_lookup",
+            "description": "Return a synthetic weather label.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "units": {"type": "string", "enum": ["metric", "imperial"]},
+                },
+                "required": ["city"],
+                "additionalProperties": False,
+            },
+        }
+        history = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_found",
+                "status": "completed",
+                "arguments": {"query": "synthetic_weather_lookup", "limit": 1},
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_found",
+                "status": "completed",
+                "execution": "client",
+                "tools": [discovered_tool],
+            },
+        ]
+        upstream = {
+            "name": "ollama_cloud",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+        }
+
+        discovery_payload = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": history,
+                        "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)],
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={},
+            )
+        )
+        discovery_names = {tool.get("name") for tool in discovery_payload["tools"]}
+        call_transcript = discovery_payload["input"][0]["content"]
+        result_transcript = discovery_payload["input"][1]["content"]
+        replayed_tools = json.loads(result_transcript.split("tools:\n", 1)[1])
+
+        self.assertNotIn(discovered_tool["name"], discovery_names)
+        self.assertIn("call_id: call_found", call_transcript)
+        self.assertIn('"limit":1', call_transcript)
+        self.assertIn("call_id: call_found", result_transcript)
+        self.assertIn("status: completed", result_transcript)
+        self.assertIn("execution:\nclient", result_transcript)
+        self.assertEqual(replayed_tools, [discovered_tool])
+
+        follow_up_payload = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": history,
+                        "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL), discovered_tool],
+                    }
+                ).encode("utf-8"),
+                upstream,
+                event_context={},
+            )
+        )
+        callable_tools = [
+            tool for tool in follow_up_payload["tools"] if tool.get("name") == discovered_tool["name"]
+        ]
+
+        self.assertEqual(callable_tools, [discovered_tool])
+        self.assertEqual(callable_tools[0]["parameters"], discovered_tool["parameters"])
+        self.assertEqual(follow_up_payload["input"][0]["content"], call_transcript)
+        self.assertEqual(follow_up_payload["input"][1]["content"], result_transcript)
         self.assertFalse(
             any(
                 call.args and call.args[0] == "tool_search_empty_miss_bound"

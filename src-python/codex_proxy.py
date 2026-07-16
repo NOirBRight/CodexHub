@@ -5007,7 +5007,7 @@ def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
     return _semantic_normalize_tool_search_arguments(value)
 
 
-def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, int]:
+def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, tuple[str, int]]:
     if not isinstance(value, list):
         return {}
 
@@ -5037,17 +5037,20 @@ def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, int]:
             continue
         empty_call_ids_by_query.setdefault(query, []).append(call_id)
 
-    terminal_calls: dict[str, int] = {}
+    terminal_calls: dict[str, tuple[str, int]] = {}
     for query, call_ids in empty_call_ids_by_query.items():
         if query in successful_queries or len(call_ids) < TOOL_SEARCH_EMPTY_MISS_BOUND:
             continue
-        terminal_calls[call_ids[TOOL_SEARCH_EMPTY_MISS_BOUND - 1]] = TOOL_SEARCH_EMPTY_MISS_BOUND
+        terminal_calls[call_ids[TOOL_SEARCH_EMPTY_MISS_BOUND - 1]] = (
+            query,
+            TOOL_SEARCH_EMPTY_MISS_BOUND,
+        )
     return terminal_calls
 
 
 def _terminalize_bounded_empty_tool_search_misses(
     payload: dict[str, Any],
-    terminal_calls: Mapping[str, int],
+    terminal_calls: Mapping[str, tuple[str, int]],
 ) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list) or not terminal_calls:
@@ -5065,7 +5068,8 @@ def _terminalize_bounded_empty_tool_search_misses(
             rewritten = dict(item)
             rewritten["status"] = TOOL_SEARCH_UNAVAILABLE_STATUS
             rewritten["query_classification"] = TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION
-            rewritten["empty_miss_count"] = terminal_calls[item["call_id"]]
+            _, count = terminal_calls[item["call_id"]]
+            rewritten["empty_miss_count"] = count
             rewritten["terminal"] = True
             rewritten_items.append(rewritten)
             changed = True
@@ -5073,6 +5077,42 @@ def _terminalize_bounded_empty_tool_search_misses(
         rewritten_items.append(item)
     if changed:
         payload["input"] = rewritten_items
+    return changed
+
+
+def _restrict_bounded_tool_search_queries(payload: dict[str, Any], bounded_queries: set[str]) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not bounded_queries:
+        return False
+
+    restriction = {"enum": sorted(bounded_queries)}
+    changed = False
+    rewritten_tools: list[Any] = []
+    for tool in tools:
+        if not (
+            isinstance(tool, Mapping)
+            and tool.get("type") == "function"
+            and tool.get("name") == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+        ):
+            rewritten_tools.append(tool)
+            continue
+        rewritten_tool = dict(tool)
+        parameters = dict(_tool_parameters_schema(tool))
+        properties_value = parameters.get("properties")
+        properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
+        query_value = properties.get("query")
+        query_schema = dict(query_value) if isinstance(query_value, Mapping) else {"type": "string"}
+        if "not" in query_schema:
+            query_schema = {"allOf": [query_schema, {"not": restriction}]}
+        else:
+            query_schema["not"] = restriction
+        properties["query"] = query_schema
+        parameters["properties"] = properties
+        rewritten_tool["parameters"] = parameters
+        rewritten_tools.append(rewritten_tool)
+        changed = True
+    if changed:
+        payload["tools"] = rewritten_tools
     return changed
 
 
@@ -7569,8 +7609,11 @@ def compatible_request_body(
         if raw_provider_probe
         else _bounded_empty_tool_search_terminal_calls(payload.get("input"))
     )
+    bounded_tool_search_queries = {
+        query for query, _count in bounded_tool_search_terminal_calls.values()
+    }
     if _terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
-        for count in bounded_tool_search_terminal_calls.values():
+        for _query, count in bounded_tool_search_terminal_calls.values():
             write_proxy_event(
                 "tool_search_empty_miss_bound",
                 query_classification=TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
@@ -7614,7 +7657,6 @@ def compatible_request_body(
     include_tool_search = (
         tool_surface_strategy == "deferred_core"
         and not subagent_worker_context
-        and not bounded_tool_search_terminal_calls
     )
     subagent_state = (
         build_subagent_state(input_items)
@@ -7958,6 +8000,8 @@ def compatible_request_body(
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
             )
+            if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
+                changed = True
             write_proxy_event(
                 "external_tool_surface_prepared",
                 tool_surface_strategy=tool_surface_strategy,
