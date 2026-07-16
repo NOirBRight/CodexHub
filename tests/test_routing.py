@@ -12531,6 +12531,323 @@ Execution constraints:
         self.assertNotIn(bounded_query, repr(event_context))
         self.assertNotIn(distinct_query, repr(event_context))
 
+    def test_deferred_tool_search_standard_sse_lifecycle_suppresses_bounded_arguments_and_preserves_distinct(self):
+        bounded_query = "mcp__synthetic__stream_bounded"
+        distinct_query = "mcp__synthetic__stream_distinct"
+        event_context = {}
+        history = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_stream_first",
+                "arguments": {"query": bounded_query},
+            },
+            {"type": "tool_search_output", "call_id": "call_stream_first", "tools": []},
+            {
+                "type": "tool_search_call",
+                "call_id": "call_stream_second",
+                "arguments": {"query": bounded_query},
+            },
+            {"type": "tool_search_output", "call_id": "call_stream_second", "tools": []},
+        ]
+        compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": history,
+                    "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "deferred_core",
+            },
+            event_context=event_context,
+        )
+
+        def sse_line(payload):
+            return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
+
+        def lifecycle(item_id, call_id, query):
+            arguments = json.dumps({"query": query})
+            return [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": item_id,
+                        "type": "function_call",
+                        "status": "in_progress",
+                        "call_id": call_id,
+                        "name": "tool_search",
+                        "arguments": "",
+                    },
+                },
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "delta": arguments,
+                },
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "arguments": arguments,
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": item_id,
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": "tool_search",
+                        "arguments": arguments,
+                    },
+                },
+            ]
+
+        bounded_lines = [
+            compatible_sse_line(sse_line(event), "ollama_cloud", event_context=event_context)
+            for event in lifecycle("fc_stream_bounded", "call_stream_third", bounded_query)
+        ]
+        distinct_lines = [
+            compatible_sse_line(sse_line(event), "ollama_cloud", event_context=event_context)
+            for event in lifecycle("fc_stream_distinct", "call_stream_distinct", distinct_query)
+        ]
+        bounded_payloads = [
+            json.loads(line.removeprefix(b"data: ")) for line in bounded_lines if line
+        ]
+        distinct_payloads = [
+            json.loads(line.removeprefix(b"data: ")) for line in distinct_lines if line
+        ]
+        bounded_done = next(
+            payload for payload in bounded_payloads if payload["type"] == "response.output_item.done"
+        )
+        distinct_arguments_done = next(
+            payload
+            for payload in distinct_payloads
+            if payload["type"] == "response.function_call_arguments.done"
+        )
+        distinct_done = next(
+            payload for payload in distinct_payloads if payload["type"] == "response.output_item.done"
+        )
+
+        self.assertEqual(bounded_lines[2], b"")
+        self.assertEqual(
+            sum("terminal: true" in line.decode("utf-8") for line in bounded_lines),
+            1,
+        )
+        self.assertNotIn(bounded_query, bounded_done["item"]["content"][0]["text"])
+        self.assertEqual(bounded_done["item"]["type"], "message")
+        self.assertFalse(
+            any(
+                payload.get("item", {}).get("type") == "tool_search_call"
+                for payload in bounded_payloads
+            )
+        )
+        self.assertEqual(distinct_arguments_done["arguments"], json.dumps({"query": distinct_query}))
+        self.assertEqual(distinct_done["item"]["type"], "tool_search_call")
+        self.assertEqual(distinct_done["item"]["call_id"], "call_stream_distinct")
+        self.assertEqual(distinct_done["item"]["arguments"], {"query": distinct_query})
+        telemetry_text = repr(self.write_proxy_event.call_args_list)
+        self.assertNotIn(bounded_query, telemetry_text)
+        self.assertNotIn(distinct_query, telemetry_text)
+        self.assertNotIn("_bounded_tool_search_query_digests", telemetry_text)
+        self.assertNotIn("_tool_search_stream_candidate_item_ids", telemetry_text)
+        self.assertNotIn("_bounded_tool_search_suppressed_item_ids", telemetry_text)
+        self.assertNotIn("fc_stream_bounded", telemetry_text)
+        self.assertNotIn("fc_stream_distinct", telemetry_text)
+
+    def test_bounded_tool_search_private_state_is_removed_from_handler_diagnostics(self):
+        bounded_query = "mcp__synthetic__diagnostic_bounded"
+        distinct_query = "mcp__synthetic__diagnostic_distinct"
+
+        def guarded_context():
+            context = {}
+            history = [
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_diagnostic_first",
+                    "arguments": {"query": bounded_query},
+                },
+                {"type": "tool_search_output", "call_id": "call_diagnostic_first", "tools": []},
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_diagnostic_second",
+                    "arguments": {"query": bounded_query},
+                },
+                {"type": "tool_search_output", "call_id": "call_diagnostic_second", "tools": []},
+            ]
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "input": history,
+                        "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)],
+                    }
+                ).encode("utf-8"),
+                {
+                    "name": "ollama_cloud",
+                    "tool_protocol": "responses_structured",
+                    "tool_surface_strategy": "deferred_core",
+                },
+                event_context=context,
+            )
+            added = {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_diagnostic_bounded",
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": "call_diagnostic_third",
+                    "name": "tool_search",
+                    "arguments": "",
+                },
+            }
+            arguments_done = {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_diagnostic_bounded",
+                "output_index": 0,
+                "arguments": json.dumps({"query": bounded_query}),
+            }
+            compatible_sse_line(
+                b"data: " + json.dumps(added).encode("utf-8") + b"\n\n",
+                "ollama_cloud",
+                event_context=context,
+            )
+            self.assertEqual(
+                compatible_sse_line(
+                    b"data: " + json.dumps(arguments_done).encode("utf-8") + b"\n\n",
+                    "ollama_cloud",
+                    event_context=context,
+                ),
+                b"",
+            )
+            self.assertIn("_bounded_tool_search_query_digests", context)
+            self.assertIn("_tool_search_stream_candidate_item_ids", context)
+            self.assertIn("_bounded_tool_search_suppressed_item_ids", context)
+            return context
+
+        self.write_proxy_event.reset_mock()
+
+        empty_context = guarded_context()
+        bound_event = next(
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "tool_search_empty_miss_bound"
+        )
+        self.assertEqual(
+            bound_event.kwargs,
+            {"query_classification": "identical_exact_query", "count": 2, "status": "unavailable"},
+        )
+        handler = FakeHandler()
+        empty_response = FakeResponse(
+            json.dumps(
+                {
+                    "id": "resp_diagnostic_empty",
+                    "object": "response",
+                    "status": "completed",
+                    "model": "glm-5.2",
+                    "output": [],
+                }
+            ).encode("utf-8")
+        )
+        CodexProxyHandler._relay_upstream_response(
+            handler,
+            empty_response,
+            "ollama_cloud",
+            request_id="req_diagnostic_empty",
+            model="glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=False,
+            event_context=empty_context,
+        )
+
+        compact_context = guarded_context()
+        compact_handler = FakeHandler()
+        CodexProxyHandler._relay_upstream_response(
+            compact_handler,
+            FakeResponse(empty_response.body),
+            "ollama_cloud",
+            request_id="req_diagnostic_compact",
+            model="glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=False,
+            event_context=compact_context,
+            headers_already_sent=True,
+            request_kind=RETRY_REQUEST_COMPACT,
+        )
+
+        close_context = guarded_context()
+        close_handler = FakeHandler()
+        close_handler.wfile = FakeWFile(fail_on_write=lambda data, _index: data == b"data: [DONE]\n\n")
+        close_chunks = [
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
+        ]
+        close_response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in close_chunks]
+            + [b"data: [DONE]\n", b""]
+        )
+        CodexProxyHandler._relay_upstream_response(
+            close_handler,
+            close_response,
+            "ollama_cloud",
+            request_id="req_diagnostic_close",
+            model="glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=close_context,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        diagnostic_names = {
+            "empty_assistant_response",
+            "compact_empty_response",
+            "downstream_stream_closed",
+        }
+        diagnostic_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] in diagnostic_names
+        ]
+        self.assertEqual({call.args[0] for call in diagnostic_events}, diagnostic_names)
+        private_keys = {
+            key
+            for context in (empty_context, compact_context, close_context)
+            for key in context
+            if key.startswith("_")
+        }
+        private_values = {
+            repr(value)
+            for context in (empty_context, compact_context, close_context)
+            for key, value in context.items()
+            if key.startswith("_")
+        }
+        digest_values = {
+            digest.hex()
+            for context in (empty_context, compact_context, close_context)
+            for digest in context["_bounded_tool_search_query_digests"]
+        }
+        for event in diagnostic_events:
+            serialized = json.dumps(event.kwargs, ensure_ascii=True, sort_keys=True)
+            self.assertTrue(private_keys.isdisjoint(event.kwargs))
+            self.assertNotIn(bounded_query, serialized)
+            self.assertNotIn(distinct_query, serialized)
+            self.assertNotIn("fc_diagnostic_bounded", serialized)
+            self.assertNotIn("call_diagnostic_third", serialized)
+            for digest_value in digest_values:
+                self.assertNotIn(digest_value, serialized)
+            for private_value in private_values:
+                self.assertNotIn(private_value, serialized)
+
     def test_deferred_tool_search_preserves_exact_non_empty_result_and_follow_up_callable_contract(self):
         discovered_tool = {
             "type": "function",

@@ -1506,8 +1506,9 @@ def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
-    _observe_gateway_diagnostic("observe_proxy_event", event, fields)
-    payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
+    public_fields = _public_event_context(fields)
+    _observe_gateway_diagnostic("observe_proxy_event", event, public_fields)
+    payload = proxy_telemetry.prepare_event_payload(event, public_fields, RUNTIME_CODEX_DIR)
     _enqueue_gateway_event_payload(payload)
 
 
@@ -1616,6 +1617,14 @@ def _capture_usage(
     usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
 
 
+def _public_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in (context or {}).items()
+        if not str(key).startswith("_")
+    }
+
+
 def _usage_observed_context(
     event_context: Mapping[str, Any] | None,
     *,
@@ -1625,11 +1634,7 @@ def _usage_observed_context(
     upstream_format: str,
     inbound_format: str,
 ) -> dict[str, Any]:
-    context = {
-        key: value
-        for key, value in (event_context or {}).items()
-        if not str(key).startswith("_")
-    }
+    context = _public_event_context(event_context)
     context.update(
         {
             "request_id": request_id,
@@ -1708,7 +1713,7 @@ def _offer_official_passthrough_usage_line(context: Mapping[str, Any], line: byt
         return
     _start_official_passthrough_usage_worker()
     try:
-        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((dict(context), line))
+        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((_public_event_context(context), line))
     except queue.Full:
         return
 
@@ -1754,7 +1759,7 @@ def _offer_usage_observed_body(context: Mapping[str, Any], body: bytes) -> None:
         return
     _start_usage_observed_worker()
     try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("body", dict(context), body, None))
+        USAGE_OBSERVED_QUEUE.put_nowait(("body", _public_event_context(context), body, None))
     except queue.Full:
         return
 
@@ -1769,7 +1774,7 @@ def _offer_usage_observed_sse_line(
         return
     _start_usage_observed_worker()
     try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("sse", dict(context), line, upstream_format))
+        USAGE_OBSERVED_QUEUE.put_nowait(("sse", _public_event_context(context), line, upstream_format))
     except queue.Full:
         return
 
@@ -1804,13 +1809,13 @@ def _usage_observed_worker() -> None:
 def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
     if event_context is None:
         return
-    payload = {key: value for key, value in event_context.items() if not str(key).startswith("_")}
+    payload = _public_event_context(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
 
 
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
-    payload = dict(context)
+    payload = _public_event_context(context)
     existing = payload.get("request_kind")
     if isinstance(existing, str) and existing and existing != request_kind:
         payload.setdefault("client_request_kind", existing)
@@ -13524,7 +13529,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             write_transparent_line(pending_line)
                     except OSError as exc:
                         self.close_connection = True
-                        event_fields = dict(event_context or {})
+                        event_fields = _public_event_context(event_context)
                         for key in (
                             "request_id",
                             "model",
@@ -13556,7 +13561,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     write_transparent_line(line)
                 except OSError as exc:
                     self.close_connection = True
-                    event_fields = dict(event_context or {})
+                    event_fields = _public_event_context(event_context)
                     for key in (
                         "request_id",
                         "model",
@@ -13866,7 +13871,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
-                event_fields = dict(event_context or {})
+                event_fields = _public_event_context(event_context)
                 event_fields.pop("request_id", None)
                 event_fields.pop("model", None)
                 event_fields.pop("upstream", None)
@@ -13889,7 +13894,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     else _responses_body_is_empty(body)
                 )
                 if status < 400 and request_kind != RETRY_REQUEST_COMPACT and empty_non_compact:
-                    event_fields = dict(event_context) if event_context else {}
+                    event_fields = _public_event_context(event_context)
                     event_fields.pop("request_id", None)
                     event_fields.pop("model", None)
                     event_fields.pop("upstream", None)
@@ -13979,7 +13984,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if is_event_stream:
             def finish_downstream_stream_closed(exc: OSError) -> int:
                 self.close_connection = True
-                event_fields = dict(event_context or {})
+                event_fields = _public_event_context(event_context)
                 for key in ("request_id", "model", "upstream", "status", "error", "detail"):
                     event_fields.pop(key, None)
                 write_proxy_event(
