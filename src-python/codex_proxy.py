@@ -128,6 +128,7 @@ from websocket_transport import (
 import proxy_telemetry
 import bounded_event_writer
 import diagnostic_recorder
+import worker_binding_signing
 
 try:
     import zstandard
@@ -728,6 +729,7 @@ def _runtime_codex_dir() -> Path:
 
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+WORKER_BINDING_SIGNING_ROOT = RUNTIME_PROXY_DIR
 OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
@@ -4032,6 +4034,7 @@ def _multi_agent_explicit_function_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
+    worker_selector_values: tuple[str, ...] = ("worker", "general"),
 ) -> list[dict[str, Any]]:
     namespace = MULTI_AGENT_DISCOVERY_TOOLS[0]
     tools = namespace.get("tools") if isinstance(namespace, Mapping) else None
@@ -4060,6 +4063,9 @@ def _multi_agent_explicit_function_tools(
         parameters = json.loads(json.dumps(_tool_parameters_schema(tool)))
         properties = parameters.setdefault("properties", {})
         if name == "spawn_agent" and isinstance(properties, dict):
+            agent_type = properties.get("agent_type")
+            if isinstance(agent_type, dict):
+                agent_type["enum"] = list(worker_selector_values)
             message = properties.get("message")
             if isinstance(message, dict):
                 message.setdefault(
@@ -4490,9 +4496,12 @@ def _adapt_native_responses_tool_declarations(
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if item.get("type") != "function_call":
         return None
+    request_shape = dict(item)
+    for response_only_field in ("id", "status", WORKER_REQUESTED_BINDING_FIELD):
+        request_shape.pop(response_only_field, None)
     tool_name = _multi_agent_function_call_name(item)
     if tool_name is not None:
-        rewritten = dict(item)
+        rewritten = request_shape
         rewritten.pop("namespace", None)
         rewritten["name"] = f"multi_agent_v1__{tool_name}"
         normalized, _, args_changed = _normalize_multi_agent_arguments(rewritten.get("arguments"), tool_name)
@@ -4501,11 +4510,11 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
         return rewritten
     node_name = _node_repl_function_call_name(item)
     if node_name is not None:
-        rewritten = dict(item)
+        rewritten = request_shape
         rewritten.pop("namespace", None)
         rewritten["name"] = f"{NODE_REPL_NAMESPACE}__{node_name}"
         return rewritten
-    return dict(item)
+    return request_shape
 
 
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
@@ -4642,6 +4651,7 @@ def _inject_explicit_codex_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
+    worker_selector_values: tuple[str, ...] = ("worker", "general"),
 ) -> bool:
     if tool_surface_counts is not None:
         tool_surface_counts.update(
@@ -4745,6 +4755,7 @@ def _inject_explicit_codex_tools(
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
+                worker_selector_values=worker_selector_values,
             )
         )
     if not include_multi_agent_tools:
@@ -5359,13 +5370,20 @@ def _validate_external_worker_selectors(
             if agent_type == "general":
                 pass
             elif agent_type == "worker":
+                if not _worker_caller_carrier_supported(event_context):
+                    _raise_worker_contract_error(
+                        event="worker_selector_validated",
+                        error_code=WORKER_SELECTOR_ERROR_CODE,
+                        classification="unsupported_caller_carrier",
+                        surface=surface,
+                    )
                 write_proxy_event(
                     "worker_selector_validated",
                     outcome="accepted",
                     classification="worker_preserved",
                     surface=surface,
                 )
-            elif agent_type is not None or bool((event_context or {}).get("_worker_binding_required")):
+            elif agent_type is not None or bool((event_context or {}).get("_spawn_selector_required")):
                 validation = _semantic_validate_worker_selector(arguments)
                 _raise_worker_contract_error(
                     event="worker_selector_validated",
@@ -5376,6 +5394,12 @@ def _validate_external_worker_selectors(
 
     for item in value.values():
         _validate_external_worker_selectors(item, event_context, surface=surface)
+
+
+def _worker_caller_carrier_supported(event_context: Mapping[str, Any] | None) -> bool:
+    context = event_context or {}
+    caller_format = context.get("_caller_wire_format", context.get("inbound_format", "responses"))
+    return caller_format != "chat_completions"
 
 
 def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
@@ -5389,9 +5413,8 @@ def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
 
 def _requested_worker_binding_signature(binding: Mapping[str, Any], call_id: str) -> str:
     canonical = json.dumps(binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return proxy_telemetry.telemetry_hmac(
-        RUNTIME_CODEX_DIR,
-        b"worker-requested-binding-v1",
+    return worker_binding_signing.sign(
+        WORKER_BINDING_SIGNING_ROOT,
         call_id.encode("utf-8") + b"\0" + canonical,
     )
 
@@ -5433,9 +5456,11 @@ def _verified_worker_requested_binding(
         "model": value.get("model"),
         "reasoning": value.get("reasoning"),
     }
-    if not isinstance(signature, str) or not hmac.compare_digest(
+    canonical = json.dumps(binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if not worker_binding_signing.verify(
+        WORKER_BINDING_SIGNING_ROOT,
+        call_id.encode("utf-8") + b"\0" + canonical,
         signature,
-        _requested_worker_binding_signature(binding, call_id),
     ):
         return None, "unknown_requested_binding_sidecar"
     requested = {
@@ -5530,6 +5555,12 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification="missing_call_identity",
                 )
+            if call_id in worker_calls:
+                _raise_worker_contract_error(
+                    event="worker_effective_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="duplicate_worker_call_identity",
+                )
             requested, sidecar_failure = _verified_worker_requested_binding(
                 item.get(WORKER_REQUESTED_BINDING_FIELD),
                 call_id,
@@ -5540,6 +5571,8 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification=sidecar_failure or "unknown_requested_binding_sidecar",
                 )
+            if isinstance(item, dict):
+                item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
             worker_calls[call_id] = requested
             continue
         if (
@@ -5548,6 +5581,12 @@ def _validate_worker_binding_history(
             or call_id not in worker_calls
         ):
             continue
+        if call_id in validated_call_ids:
+            _raise_worker_contract_error(
+                event="worker_effective_binding_validated",
+                error_code=WORKER_BINDING_ERROR_CODE,
+                classification="duplicate_worker_effective_output",
+            )
 
         output = item.get("output")
         readback = _semantic_strict_json_object(output)
@@ -7767,7 +7806,7 @@ def _reject_missing_worker_selector_for_generated_call(
     *,
     surface: str,
 ) -> None:
-    if spec.get("tool_name") == "spawn_agent" and bool((event_context or {}).get("_worker_binding_required")):
+    if spec.get("tool_name") == "spawn_agent" and bool((event_context or {}).get("_spawn_selector_required")):
         _raise_worker_contract_error(
             event="worker_selector_validated",
             error_code=WORKER_SELECTOR_ERROR_CODE,
@@ -8480,8 +8519,13 @@ def compatible_request_body(
                 changed = True
             tool_names_before = _function_tool_names(payload.get("tools"))
             tool_surface_counts: dict[str, int] = {}
+            worker_caller_carrier_supported = _worker_caller_carrier_supported(event_context)
             if isinstance(event_context, dict):
                 if include_spawn_agent:
+                    event_context["_spawn_selector_required"] = True
+                else:
+                    event_context.pop("_spawn_selector_required", None)
+                if include_spawn_agent and worker_caller_carrier_supported:
                     event_context["_worker_binding_required"] = True
                     event_context["_worker_requested_binding"] = {
                         "agent_type": "worker",
@@ -8512,6 +8556,11 @@ def compatible_request_body(
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
+                worker_selector_values=(
+                    ("worker", "general")
+                    if worker_caller_carrier_supported
+                    else ("general",)
+                ),
             )
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
                 changed = True
@@ -12266,6 +12315,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "model": model_canonical,
                 "behavior_profile": behavior_profile,
                 **proxy_request_context,
+                "_caller_wire_format": inbound_format,
             }
 
             def emit_downstream_status(status_payload: Mapping[str, Any]) -> None:

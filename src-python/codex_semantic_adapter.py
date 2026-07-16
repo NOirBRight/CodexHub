@@ -120,16 +120,26 @@ def validate_effective_worker_binding(
     effective_agent_type = effective.get("agent_type")
     effective_model = effective.get("model")
     effective_reasoning = effective.get("reasoning")
-    if not all(isinstance(item, str) and item for item in (effective_agent_type, effective_model, effective_reasoning)):
-        return BindingValidation(BINDING_REJECTED, "missing_readback")
+    if effective_agent_type is None or effective_agent_type == "":
+        return BindingValidation(BINDING_REJECTED, "missing_effective_agent_type")
+    if not isinstance(effective_agent_type, str):
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_agent_type")
     if effective_agent_type not in SUPPORTED_AGENT_TYPES:
         return BindingValidation(BINDING_REJECTED, "unknown_effective_agent_type")
     if effective_agent_type != requested.get("agent_type"):
         return BindingValidation(BINDING_REJECTED, "contradictory_agent_type")
+    if effective_model is None or effective_model == "":
+        return BindingValidation(BINDING_REJECTED, "missing_effective_model")
+    if not isinstance(effective_model, str):
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_model")
     if effective_model.lower().startswith("gpt-"):
         return BindingValidation(BINDING_REJECTED, "gpt_substitution")
     if effective_model != requested_model:
         return BindingValidation(BINDING_REJECTED, "contradictory_model")
+    if effective_reasoning is None or effective_reasoning == "":
+        return BindingValidation(BINDING_REJECTED, "missing_effective_reasoning")
+    if not isinstance(effective_reasoning, str):
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_reasoning")
     if effective_reasoning not in SUPPORTED_REASONING_EFFORTS:
         return BindingValidation(BINDING_REJECTED, "unknown_effective_reasoning")
     if effective_reasoning != requested_reasoning:
@@ -297,9 +307,6 @@ def normalize_multi_agent_arguments(
                 arguments["nickname"] = name_value
                 changed = True
             arguments.pop("name", None)
-            changed = True
-        if arguments.get("agent_type") == "general":
-            arguments.pop("agent_type", None)
             changed = True
         if "fork_context" not in arguments:
             arguments["fork_context"] = False

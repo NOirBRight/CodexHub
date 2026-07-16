@@ -80,7 +80,7 @@ def test_normalize_multi_agent_spawn_retains_explicit_general_compatibility():
 
     assert changed is True
     assert tool_name == "spawn_agent"
-    assert "agent_type" not in json.loads(value)
+    assert json.loads(value)["agent_type"] == "general"
 
 
 @pytest.mark.parametrize(
@@ -138,6 +138,34 @@ def test_validate_effective_worker_binding_classifies_requested_binding_failures
 def test_validate_effective_worker_binding_classifies_effective_agent_type(effective_agent_type, classification):
     fixture = _worker_binding_fixture()
     fixture["readbacks"]["matching"]["effective_binding"]["agent_type"] = effective_agent_type
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        fixture["readbacks"]["matching"],
+    ) == codex_semantic_adapter.BindingValidation("rejected", classification)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "classification"),
+    [
+        ("agent_type", None, "missing_effective_agent_type"),
+        ("agent_type", "", "missing_effective_agent_type"),
+        ("agent_type", {"private": "agent"}, "unknown_effective_agent_type"),
+        ("model", None, "missing_effective_model"),
+        ("model", "", "missing_effective_model"),
+        ("model", {"private": "model"}, "unknown_effective_model"),
+        ("reasoning", None, "missing_effective_reasoning"),
+        ("reasoning", "", "missing_effective_reasoning"),
+        ("reasoning", {"private": "reasoning"}, "unknown_effective_reasoning"),
+    ],
+)
+def test_validate_effective_worker_binding_distinguishes_missing_from_wrong_types(
+    field,
+    value,
+    classification,
+):
+    fixture = _worker_binding_fixture()
+    fixture["readbacks"]["matching"]["effective_binding"][field] = value
 
     assert codex_semantic_adapter.validate_effective_worker_binding(
         fixture["requested"],

@@ -266,6 +266,12 @@ class RoutingTests(unittest.TestCase):
         self.runtime_proxy_patch = patch("codex_proxy.RUNTIME_PROXY_DIR", Path(self.runtime_proxy_dir.name))
         self.runtime_proxy_patch.start()
         self.addCleanup(self.runtime_proxy_patch.stop)
+        self.worker_binding_signing_root_patch = patch(
+            "codex_proxy.WORKER_BINDING_SIGNING_ROOT",
+            Path(self.runtime_proxy_dir.name) / "worker-binding-signing",
+        )
+        self.worker_binding_signing_root_patch.start()
+        self.addCleanup(self.worker_binding_signing_root_patch.stop)
         self.catalog_patch = patch(
             "codex_proxy.generated_catalog_slugs",
             return_value={
@@ -6798,7 +6804,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(done["item"]["arguments"])["message"], "Implement Task 1 exactly.")
         self.assertEqual(json.loads(done["item"]["arguments"])["nickname"], "implementer-task-1")
         self.assertEqual(done["item"]["arguments"], arguments_done["arguments"])
-        self.assertNotIn("agent_type", done["item"]["arguments"])
+        self.assertEqual(json.loads(done["item"]["arguments"])["agent_type"], "general")
 
 
     def test_non_sse_relay_bulk_writes_body(self):
@@ -7710,7 +7716,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(arguments["message"], "return sentinel A")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertNotIn("agent_type", arguments)
+        self.assertEqual(arguments["agent_type"], "general")
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
 
@@ -7993,7 +7999,7 @@ class RoutingTests(unittest.TestCase):
         arguments = json.loads(argument_text)
         self.assertEqual(arguments["message"], "return sentinel B")
         self.assertEqual(arguments["nickname"], "child-b")
-        self.assertNotIn("agent_type", arguments)
+        self.assertEqual(arguments["agent_type"], "general")
         self.assertNotIn("input", arguments)
         self.assertNotIn("name", arguments)
 
@@ -14691,9 +14697,92 @@ Execution constraints:
         self.assertEqual(arguments["message"], "return sentinel")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertNotIn("agent_type", arguments)
+        self.assertEqual(arguments["agent_type"], "general")
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
+
+        replay = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "synthetic-next-model",
+                    "input": [
+                        call,
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_spawn",
+                            "output": json.dumps({"agent_id": "synthetic-general-agent"}),
+                        },
+                    ],
+                    "tools": [],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={},
+        )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "general")
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
+
+    def test_external_general_spawn_sse_normalize_to_replay_preserves_selector_without_worker_sidecar(self):
+        line = b"data: " + json.dumps(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_general",
+                    "call_id": "call_general",
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps(
+                        {"agent_type": "general", "message": "legacy general task"}
+                    ),
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n\n"
+
+        normalized_line = compatible_sse_line(
+            line,
+            "synthetic-provider",
+            event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
+        )
+        event = json.loads(normalized_line.removeprefix(b"data: ").strip())
+        call = event["item"]
+        self.assertEqual(json.loads(call["arguments"])["agent_type"], "general")
+        self.assertNotIn("_codexhub_worker_requested_binding", call)
+
+        replay = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "synthetic-next-model",
+                    "input": [
+                        call,
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_general",
+                            "output": json.dumps({"agent_id": "synthetic-general-agent"}),
+                        },
+                    ],
+                    "tools": [],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={},
+        )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "general")
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
 
     def test_external_worker_agent_type_survives_declaration_response_and_history_replay(self):
         spawn_tool = next(
@@ -14751,7 +14840,6 @@ Execution constraints:
         request_body = json.dumps(
             {
                 "model": "synthetic-third-party-model",
-                "reasoning": {"effort": "high"},
                 "input": [
                     response_call,
                     {
@@ -14789,15 +14877,321 @@ Execution constraints:
 
         history_call = json.loads(normalized_request)["input"][0]
         self.assertEqual(json.loads(history_call["arguments"])["agent_type"], "worker")
-        self.assertEqual(
-            history_call["_codexhub_worker_requested_binding"],
-            response_call["_codexhub_worker_requested_binding"],
-        )
+        self.assertNotIn("_codexhub_worker_requested_binding", history_call)
         write_event.assert_any_call(
             "worker_effective_binding_validated",
             outcome="accepted",
             classification="matched",
         )
+
+        chat_upstream_body = codex_proxy._responses_request_to_chat_completion_body(normalized_request)
+        chat_messages = json.loads(chat_upstream_body)["messages"]
+        self.assertTrue(any(message.get("tool_calls") for message in chat_messages))
+
+    def test_chat_caller_does_not_advertise_worker_and_rejects_body_execution(self):
+        event_context = {"inbound_format": "chat_completions"}
+        request = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "synthetic-third-party-model",
+                    "reasoning": {"effort": "high"},
+                    "input": [{"type": "message", "role": "user", "content": "delegate"}],
+                    "tools": [],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-third-party-model",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+        spawn_tool = next(
+            tool
+            for tool in json.loads(request)["tools"]
+            if tool.get("name") == "multi_agent_v1__spawn_agent"
+        )
+        self.assertEqual(
+            spawn_tool["parameters"]["properties"]["agent_type"]["enum"],
+            ["general"],
+        )
+        self.assertNotIn("_worker_requested_binding", event_context)
+
+        response = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "chat-caller-worker",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps({"agent_type": "worker", "message": "delegate"}),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError):
+                compatible_response_body(response, "synthetic-provider", event_context=event_context)
+        write_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="unsupported_caller_carrier",
+            surface="body",
+        )
+
+    def test_chat_caller_rejects_worker_sse_execution_before_conversion(self):
+        event_context = {"inbound_format": "chat_completions"}
+        compatible_request_body(
+            json.dumps(
+                {
+                    "model": "synthetic-third-party-model",
+                    "input": [{"type": "message", "role": "user", "content": "delegate"}],
+                    "tools": [],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-third-party-model",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context=event_context,
+        )
+        line = b"data: " + json.dumps(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_chat_worker",
+                    "call_id": "chat-caller-worker",
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps({"agent_type": "worker", "message": "delegate"}),
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n\n"
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError):
+                compatible_sse_line(line, "synthetic-provider", event_context=event_context)
+        write_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="unsupported_caller_carrier",
+            surface="sse",
+        )
+
+    def test_responses_caller_chat_upstream_body_returns_carrier_and_strips_it_on_replay(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "synthetic-original-model",
+                "reasoning": "high",
+            },
+        }
+        chat_body = json.dumps(
+            {
+                "id": "chatcmpl_worker",
+                "object": "chat.completion",
+                "model": "synthetic-original-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "chat-worker-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "multi_agent_v1__spawn_agent",
+                                        "arguments": json.dumps(
+                                            {"agent_type": "worker", "message": "delegate"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        responses_body = codex_proxy._chat_completion_to_response_body(chat_body)
+        normalized = compatible_response_body(
+            responses_body,
+            "synthetic-provider",
+            event_context=event_context,
+        )
+        call_item = json.loads(normalized)["output"][0]
+        self.assertIn("_codexhub_worker_requested_binding", call_item)
+        self.assertNotIn("model", json.loads(call_item["arguments"]))
+        self.assertNotIn("reasoning", json.loads(call_item["arguments"]))
+
+        replay = compatible_request_body(
+            self._worker_replay_body(
+                [call_item, self._worker_effective_output("chat-worker-call")]
+            ),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context={"inbound_format": "responses"},
+        )
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replay)["input"][0],
+        )
+        codex_proxy._responses_request_to_chat_completion_body(replay)
+
+    def test_responses_caller_chat_upstream_sse_returns_carrier_and_replays(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "synthetic-original-model",
+                "reasoning": "high",
+            },
+        }
+        chunks = [
+            {
+                "id": "chatcmpl_worker_stream",
+                "object": "chat.completion.chunk",
+                "model": "synthetic-original-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "chat-worker-stream-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "multi_agent_v1__spawn_agent",
+                                        "arguments": json.dumps(
+                                            {"agent_type": "worker", "message": "delegate"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_worker_stream",
+                "object": "chat.completion.chunk",
+                "model": "synthetic-original-model",
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "tool_calls"}
+                ],
+            },
+        ]
+        events = codex_proxy._chat_stream_chunks_to_response_events(chunks)
+        normalized_events = []
+        for event in events:
+            line = b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n"
+            normalized_line = compatible_sse_line(
+                line,
+                "synthetic-provider",
+                event_context=event_context,
+            )
+            normalized_events.append(json.loads(normalized_line.removeprefix(b"data: ").strip()))
+        done = next(event for event in normalized_events if event.get("type") == "response.output_item.done")
+        call_item = done["item"]
+        self.assertIn("_codexhub_worker_requested_binding", call_item)
+
+        replay = compatible_request_body(
+            self._worker_replay_body(
+                [call_item, self._worker_effective_output("chat-worker-stream-call")]
+            ),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context={"inbound_format": "responses"},
+        )
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replay)["input"][0],
+        )
+        codex_proxy._responses_request_to_chat_completion_body(replay)
+
+    def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
+        replay = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "synthetic-next-model",
+                    "input": [
+                        {
+                            "id": "fc_lookup",
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": "lookup-call",
+                            "name": "lookup",
+                            "arguments": json.dumps({"query": "synthetic"}),
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "lookup-call",
+                            "output": json.dumps({"result": "synthetic-result"}),
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "lookup",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                                "required": ["query"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context={"inbound_format": "responses"},
+        )
+        request_call = json.loads(replay)["input"][0]
+        self.assertEqual(
+            request_call,
+            {
+                "type": "function_call",
+                "call_id": "lookup-call",
+                "name": "lookup",
+                "arguments": json.dumps({"query": "synthetic"}),
+            },
+        )
+        chat_body = codex_proxy._responses_request_to_chat_completion_body(replay)
+        tool_call = next(
+            tool_call
+            for message in json.loads(chat_body)["messages"]
+            for tool_call in message.get("tool_calls", [])
+        )
+        self.assertEqual(tool_call["function"]["name"], "lookup")
+        self.assertEqual(json.loads(tool_call["function"]["arguments"]), {"query": "synthetic"})
 
     def test_external_worker_agent_type_rejects_missing_or_unsupported_before_execution(self):
         cases = [
@@ -15000,6 +15394,149 @@ Execution constraints:
         )
         return json.loads(normalized)["output"][0]
 
+    def _worker_effective_output(self, call_id, *, model="synthetic-original-model", reasoning="high"):
+        return {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps(
+                {
+                    "effective_binding": {
+                        "contract_version": "codexhub.worker-binding.v1",
+                        "support": "supported",
+                        "status": "accepted",
+                        "agent_type": "worker",
+                        "model": model,
+                        "reasoning": reasoning,
+                    }
+                }
+            ),
+        }
+
+    def _worker_replay_body(self, input_items):
+        return json.dumps(
+            {
+                "model": "synthetic-next-model",
+                "input": input_items,
+                "tools": [],
+            }
+        ).encode("utf-8")
+
+    def _assert_worker_history_rejected(
+        self,
+        input_items,
+        classification,
+        *,
+        event="worker_effective_binding_validated",
+    ):
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError):
+                compatible_request_body(
+                    self._worker_replay_body(input_items),
+                    {
+                        "name": "synthetic-provider",
+                        "upstream_model": "synthetic-next-model",
+                        "upstream_format": "responses",
+                        "tool_protocol": "responses_structured",
+                    },
+                    event_context={},
+                )
+        write_event.assert_any_call(
+            event,
+            outcome="rejected",
+            classification=classification,
+        )
+
+    def test_external_worker_binding_rejects_duplicate_call_identity_before_output(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="duplicate-worker-call",
+        )
+        duplicate = json.loads(json.dumps(spawn_call))
+        self._assert_worker_history_rejected(
+            [spawn_call, duplicate, self._worker_effective_output("duplicate-worker-call")],
+            "duplicate_worker_call_identity",
+        )
+
+    def test_external_worker_binding_rejects_duplicate_effective_output(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="duplicate-worker-output",
+        )
+        output = self._worker_effective_output("duplicate-worker-output")
+        self._assert_worker_history_rejected(
+            [spawn_call, output, json.loads(json.dumps(output))],
+            "duplicate_worker_effective_output",
+        )
+
+    def test_external_worker_binding_rejects_valid_output_then_duplicate_call(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="replayed-worker-call",
+        )
+        duplicate = json.loads(json.dumps(spawn_call))
+        self._assert_worker_history_rejected(
+            [spawn_call, self._worker_effective_output("replayed-worker-call"), duplicate],
+            "duplicate_worker_call_identity",
+        )
+
+    def test_external_worker_binding_rejects_swapped_call_sidecars(self):
+        first = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="worker-call-a",
+        )
+        second = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="worker-call-b",
+        )
+        first["_codexhub_worker_requested_binding"], second["_codexhub_worker_requested_binding"] = (
+            second["_codexhub_worker_requested_binding"],
+            first["_codexhub_worker_requested_binding"],
+        )
+        self._assert_worker_history_rejected(
+            [
+                first,
+                self._worker_effective_output("worker-call-a"),
+                second,
+                self._worker_effective_output("worker-call-b"),
+            ],
+            "unknown_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
+    def test_external_worker_binding_rejects_tampered_sidecar_field(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="tampered-worker-call",
+        )
+        spawn_call["_codexhub_worker_requested_binding"]["reasoning"] = "low"
+        self._assert_worker_history_rejected(
+            [spawn_call, self._worker_effective_output("tampered-worker-call")],
+            "unknown_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
+    def test_external_worker_binding_secret_rotation_invalidates_existing_history(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="rotated-worker-call",
+        )
+        secret_path = codex_proxy.worker_binding_signing.signing_secret_path(
+            codex_proxy.WORKER_BINDING_SIGNING_ROOT
+        )
+        secret_path.unlink()
+        self._assert_worker_history_rejected(
+            [spawn_call, self._worker_effective_output("rotated-worker-call")],
+            "unknown_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
     def test_external_worker_binding_uses_original_call_sidecar_when_next_turn_changes(self):
         spawn_call = self._normalized_worker_spawn_call(
             model="synthetic-original-model",
@@ -15052,7 +15589,7 @@ Execution constraints:
             event_context={},
         )
         replayed_call = json.loads(normalized_replay)["input"][0]
-        self.assertEqual(replayed_call["_codexhub_worker_requested_binding"], sidecar)
+        self.assertNotIn("_codexhub_worker_requested_binding", replayed_call)
 
     def test_external_worker_binding_rejects_next_turn_values_that_only_match_effective_readback(self):
         spawn_call = self._normalized_worker_spawn_call(
@@ -15252,6 +15789,48 @@ Execution constraints:
             classification="contradictory_agent_type",
         )
 
+    def test_external_worker_binding_telemetry_distinguishes_missing_and_wrong_effective_types(self):
+        for field, value, classification in (
+            ("agent_type", None, "missing_effective_agent_type"),
+            ("agent_type", {"private": "agent"}, "unknown_effective_agent_type"),
+            ("model", None, "missing_effective_model"),
+            ("model", {"private": "model"}, "unknown_effective_model"),
+            ("reasoning", None, "missing_effective_reasoning"),
+            ("reasoning", {"private": "reasoning"}, "unknown_effective_reasoning"),
+        ):
+            with self.subTest(field=field, classification=classification):
+                call_id = f"wrong-effective-{field}-{classification}"
+                spawn_call = self._normalized_worker_spawn_call(
+                    model="synthetic-original-model",
+                    reasoning="high",
+                    call_id=call_id,
+                )
+                output = self._worker_effective_output(call_id)
+                readback = json.loads(output["output"])
+                readback["effective_binding"][field] = value
+                output["output"] = json.dumps(readback)
+                with patch.object(codex_proxy, "write_proxy_event") as write_event:
+                    with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError):
+                        compatible_request_body(
+                            self._worker_replay_body([spawn_call, output]),
+                            {
+                                "name": "synthetic-provider",
+                                "upstream_model": "synthetic-next-model",
+                                "upstream_format": "responses",
+                                "tool_protocol": "responses_structured",
+                            },
+                            event_context={},
+                        )
+                write_event.assert_called_once_with(
+                    "worker_effective_binding_validated",
+                    outcome="rejected",
+                    classification=classification,
+                )
+                telemetry_text = repr(write_event.call_args_list)
+                self.assertNotIn("private", telemetry_text)
+                self.assertNotIn("synthetic-original-model", telemetry_text)
+                self.assertNotIn(call_id, telemetry_text)
+
     def test_strict_mode_still_repairs_multi_agent_argument_shape(self):
         body = json.dumps(
             {
@@ -15281,7 +15860,7 @@ Execution constraints:
         self.assertEqual(call["name"], "spawn_agent")
         self.assertEqual(args["message"], "return ok")
         self.assertEqual(args["nickname"], "worker")
-        self.assertNotIn("agent_type", args)
+        self.assertEqual(args["agent_type"], "general")
 
     def test_external_response_normalizes_concatenated_multi_agent_alias(self):
         body = json.dumps(
@@ -15743,7 +16322,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 arguments = json.loads(call["arguments"])
                 self.assertEqual(arguments["message"], "return sentinel")
                 self.assertEqual(arguments["nickname"], "child-a")
-                self.assertNotIn("agent_type", arguments)
+                self.assertEqual(arguments["agent_type"], "general")
 
     def test_external_sse_normalizes_concatenated_multi_agent_alias_fragments(self):
         events = [
@@ -15824,7 +16403,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(arguments["message"], "return sentinel")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertNotIn("agent_type", arguments)
+        self.assertEqual(arguments["agent_type"], "general")
         self.assertNotIn("input", arguments)
         self.assertNotIn("name", arguments)
 
