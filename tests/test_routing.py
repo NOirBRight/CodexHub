@@ -12366,6 +12366,171 @@ Execution constraints:
         self.assertNotIn(distinct_query, query_schema["not"]["enum"])
         self.assertEqual(json.dumps(payload).count("query_classification: identical_exact_query"), 1)
 
+    def test_deferred_tool_search_response_body_suppresses_third_bounded_query_and_keeps_distinct_callable(self):
+        bounded_query = "mcp__synthetic__body_bounded"
+        distinct_query = "mcp__synthetic__body_distinct"
+        event_context = {}
+        history = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_body_first",
+                "arguments": {"query": bounded_query},
+            },
+            {"type": "tool_search_output", "call_id": "call_body_first", "tools": []},
+            {
+                "type": "tool_search_call",
+                "call_id": "call_body_second",
+                "arguments": {"query": bounded_query},
+            },
+            {"type": "tool_search_output", "call_id": "call_body_second", "tools": []},
+        ]
+        compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": history,
+                    "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "deferred_core",
+            },
+            event_context=event_context,
+        )
+        response = {
+            "id": "resp_tool_search_bound",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "fc_body_bounded",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_body_third",
+                    "name": "tool_search",
+                    "arguments": json.dumps({"query": bounded_query}),
+                },
+                {
+                    "id": "fc_body_distinct",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_body_distinct",
+                    "name": "tool_search",
+                    "arguments": json.dumps({"query": distinct_query}),
+                },
+            ],
+        }
+
+        transformed = compatible_response_body(
+            json.dumps(response).encode("utf-8"),
+            "ollama_cloud",
+            event_context=event_context,
+        )
+        output = json.loads(transformed)["output"]
+        terminal_text = output[0]["content"][0]["text"]
+
+        self.assertEqual(output[0]["type"], "message")
+        self.assertEqual(output[0]["role"], "assistant")
+        self.assertIn("tool_search_unavailable", terminal_text)
+        self.assertIn("query_classification: identical_exact_query", terminal_text)
+        self.assertIn("status: unavailable", terminal_text)
+        self.assertIn("terminal: true", terminal_text)
+        self.assertNotIn(bounded_query, terminal_text)
+        self.assertNotIn("tool_search_call", json.dumps(output[0]))
+        self.assertEqual(output[1]["type"], "tool_search_call")
+        self.assertEqual(output[1]["call_id"], "call_body_distinct")
+        self.assertEqual(output[1]["arguments"], {"query": distinct_query})
+        self.assertEqual(output[1]["execution"], "client")
+        self.assertEqual(output[1]["status"], "completed")
+        self.assertNotIn(bounded_query, repr(event_context))
+        self.assertNotIn(distinct_query, repr(event_context))
+        telemetry_text = repr(self.write_proxy_event.call_args_list)
+        self.assertNotIn(bounded_query, telemetry_text)
+        self.assertNotIn(distinct_query, telemetry_text)
+        self.assertNotIn("_bounded_tool_search_query_digests", telemetry_text)
+
+    def test_deferred_tool_search_sse_suppresses_third_bounded_query_and_keeps_distinct_callable(self):
+        bounded_query = "mcp__synthetic__sse_bounded"
+        distinct_query = "mcp__synthetic__sse_distinct"
+        event_context = {}
+        history = [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_sse_first",
+                "arguments": {"query": bounded_query},
+            },
+            {"type": "tool_search_output", "call_id": "call_sse_first", "tools": []},
+            {
+                "type": "tool_search_call",
+                "call_id": "call_sse_second",
+                "arguments": {"query": bounded_query},
+            },
+            {"type": "tool_search_output", "call_id": "call_sse_second", "tools": []},
+        ]
+        compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": history,
+                    "tools": [dict(codex_proxy.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "deferred_core",
+            },
+            event_context=event_context,
+        )
+
+        def done_line(item_id, call_id, query):
+            return b"data: " + json.dumps(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": item_id,
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": "tool_search",
+                        "arguments": json.dumps({"query": query}),
+                    },
+                }
+            ).encode("utf-8") + b"\n\n"
+
+        bounded_line = compatible_sse_line(
+            done_line("fc_sse_bounded", "call_sse_third", bounded_query),
+            "ollama_cloud",
+            event_context=event_context,
+        )
+        distinct_line = compatible_sse_line(
+            done_line("fc_sse_distinct", "call_sse_distinct", distinct_query),
+            "ollama_cloud",
+            event_context=event_context,
+        )
+        bounded_item = json.loads(bounded_line.removeprefix(b"data: "))["item"]
+        distinct_item = json.loads(distinct_line.removeprefix(b"data: "))["item"]
+        terminal_text = bounded_item["content"][0]["text"]
+
+        self.assertEqual(bounded_item["type"], "message")
+        self.assertEqual(bounded_item["role"], "assistant")
+        self.assertIn("tool_search_unavailable", terminal_text)
+        self.assertIn("query_classification: identical_exact_query", terminal_text)
+        self.assertIn("status: unavailable", terminal_text)
+        self.assertIn("terminal: true", terminal_text)
+        self.assertNotIn(bounded_query, terminal_text)
+        self.assertNotIn("tool_search_call", json.dumps(bounded_item))
+        self.assertEqual(distinct_item["type"], "tool_search_call")
+        self.assertEqual(distinct_item["call_id"], "call_sse_distinct")
+        self.assertEqual(distinct_item["arguments"], {"query": distinct_query})
+        self.assertEqual(distinct_item["execution"], "client")
+        self.assertEqual(distinct_item["status"], "completed")
+        self.assertNotIn(bounded_query, repr(event_context))
+        self.assertNotIn(distinct_query, repr(event_context))
+
     def test_deferred_tool_search_preserves_exact_non_empty_result_and_follow_up_callable_contract(self):
         discovered_tool = {
             "type": "function",
