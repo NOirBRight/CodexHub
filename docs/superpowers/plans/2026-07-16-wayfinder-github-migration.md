@@ -1,10 +1,10 @@
 # Wayfinder GitHub Migration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans and explicit Inline Execution to implement this plan task-by-task. Do not dispatch Hidden Subagents or delegated Workers for this migration. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Migrate GitHub Wayfinder #147 from the obsolete feature-first roadmap to the approved reliability-gated release train without claiming or starting product implementation work.
 
-**Architecture:** GitHub remains the only durable work-state authority. The migration is idempotent and readback-driven: snapshot current state, create the five release milestones, decompose mixed-ownership Issues, normalize hierarchy/labels/dependencies, rewrite #147, and recompute the ready frontier. Product code and per-Issue implementation plans remain outside this plan.
+**Architecture:** GitHub remains the only durable work-state authority. The migration is a two-phase, idempotent, readback-driven operation: first synchronize an isolated worktree and produce a read-only snapshot plus exact write-set preview; then stop for explicit human authorization before creating milestones, decomposing mixed-ownership Issues, normalizing hierarchy/labels/dependencies, rewriting #147, and recomputing the ready frontier. Product code and per-Issue implementation plans remain outside this plan.
 
 **Tech Stack:** PowerShell 7, GitHub CLI (`gh`), GitHub REST API, Git, Markdown.
 
@@ -12,9 +12,12 @@
 
 - Repository: `NOirBRight/CodexHub`; integration branch: `dev`.
 - Approved design: `docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md` at or after commit `59477301`.
+- Approved plan baseline: `docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md` at or after commit `51a636c9`.
+- Execute only from a clean linked worktree on a non-protected planning branch. Never execute from `dev`, `main`, `master`, or `develop`.
 - Use `gh` for every GitHub Issue, milestone, label, dependency, and sub-issue operation.
 - Do not assign an Issue, create a product branch/worktree, start a Worker, edit product code, or open a production PR during this migration.
-- The mandated process-skill name “subagent-driven-development” does not authorize hidden `spawn_agent` execution. Any delegated execution must materialize as a sidebar-visible GPT-5.6 Terra/max or Luna/max Worker with runtime-verified binding and bidirectional receipt; otherwise use explicit Inline Execution.
+- Execution mode for this GitHub planning-state migration is fixed to explicit Inline Execution. Do not use `task`-tool dispatch, Hidden Subagents, `spawn_agent`, or delegated Workers. Sidebar-visible Terra/max or Luna/max Workers remain the preferred surface for later product-Issue implementation, not for this sequential migration.
+- Task 1 is mandatory and read-only with respect to GitHub. After Task 1, stop and obtain explicit human authorization for the displayed write set before running any command in Tasks 2–8. Prior generic approval, approval to write the plan, or approval to run the dry run does not authorize GitHub writes.
 - Preserve exactly one canonical lifecycle label on each Issue: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix`.
 - Preserve reporter evidence. Never publish credentials, Task IDs, callback addresses, private paths, prompts, or raw private traces.
 - Native `blocked_by` edges represent only hard dependencies. Related work remains text-only.
@@ -39,20 +42,51 @@
 - Temporary: `$env:TEMP\codexhub-wayfinder-migration\map.json`
 - Temporary: `$env:TEMP\codexhub-wayfinder-migration\map-children.json`
 - Temporary: `$env:TEMP\codexhub-wayfinder-migration\open-prs.json`
+- Temporary: `$env:TEMP\codexhub-wayfinder-migration\proposed-writes.json`
 
 **Interfaces:**
-- Consumes: approved design commit `59477301` and the current GitHub repository state.
-- Produces: a timestamped, read-only JSON snapshot and a zero-write preflight result used to detect concurrent changes before later tasks.
+- Consumes: approved design commit `59477301`, plan baseline commit `51a636c9`, and the current GitHub repository state.
+- Produces: a synchronized isolated planning worktree, a timestamped read-only JSON snapshot, an exact write-set preview, and a mandatory human authorization checkpoint.
 
-- [ ] **Step 1: Verify repository identity, branch, and clean working state**
+- [ ] **Step 1: Synchronize and verify the isolated planning worktree**
 
 Run:
 
 ```powershell
+$designBase = '59477301'
+$planBase = '51a636c9'
+$protected = @('dev','main','master','develop')
+$branch = git branch --show-current
+$status = @(git status --porcelain)
+if ($status.Count) { throw 'planning worktree is not clean' }
+if (-not $branch -or $branch -in $protected) { throw "unsafe execution branch: $branch" }
+
+$gitDir = [IO.Path]::GetFullPath((git rev-parse --git-dir))
+$gitCommon = [IO.Path]::GetFullPath((git rev-parse --git-common-dir))
+$superproject = git rev-parse --show-superproject-working-tree
+if ($superproject) { throw 'execution directory is a submodule, not the planning worktree' }
+if ($gitDir -eq $gitCommon) { throw 'execution must use a linked worktree' }
+
+git merge-base --is-ancestor $planBase HEAD
+if ($LASTEXITCODE -ne 0) {
+  $counts = @((git rev-list --left-right --count "HEAD...$planBase") -split '\s+')
+  if ([int]$counts[0] -ne 0) {
+    throw "stale branch has unique commits; do not reset or rebase automatically: $($counts -join '/')"
+  }
+  git merge --ff-only $planBase
+  if ($LASTEXITCODE -ne 0) { throw 'safe fast-forward to approved plan baseline failed' }
+}
+
+git merge-base --is-ancestor $designBase HEAD
+if ($LASTEXITCODE -ne 0) { throw 'approved design commit is not an ancestor of HEAD' }
+git merge-base --is-ancestor $planBase HEAD
+if ($LASTEXITCODE -ne 0) { throw 'approved plan baseline is not an ancestor of HEAD' }
+if (-not (Test-Path 'docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md')) { throw 'design file is not in this worktree' }
+if (-not (Test-Path 'docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md')) { throw 'plan file is not in this worktree' }
+
 git remote get-url origin
 git branch --show-current
 git status --short
-git merge-base --is-ancestor 59477301 HEAD
 gh repo view --json nameWithOwner,defaultBranchRef,url
 gh auth status
 ```
@@ -60,9 +94,9 @@ gh auth status
 Expected:
 
 - remote is `https://github.com/NOirBRight/CodexHub.git`;
-- branch is `dev` or an isolated planning branch whose merge-base contains `59477301`;
+- branch is a non-protected planning branch in a linked worktree;
 - `git status --short` is empty;
-- the ancestry command exits `0`;
+- both `59477301` and `51a636c9` are ancestors of `HEAD`, and both plan files are present in-tree;
 - GitHub repository is `NOirBRight/CodexHub` and authentication succeeds.
 
 - [ ] **Step 2: Capture Issues, REST metadata, milestones, map membership, and PRs**
@@ -94,7 +128,7 @@ gh pr list --state open --limit 100 `
   | Set-Content -Encoding utf8 (Join-Path $root 'open-prs.json')
 ```
 
-Expected: all seven files exist and parse as JSON; the Issue snapshot contains 93 Issues at the design baseline, with later additions allowed only after they are reported before any write.
+Expected: all six snapshot files exist and parse as JSON; the Issue snapshot contains 93 Issues at the design baseline, with later additions allowed only after they are reported before any write.
 
 - [ ] **Step 3: Validate the snapshot without changing GitHub**
 
@@ -128,6 +162,67 @@ Get-FileHash (Join-Path $root '*.json') -Algorithm SHA256 `
 
 Expected: one SHA-256 per snapshot file. Retain this terminal output for the migration review checkpoint.
 
+- [ ] **Step 5: Generate and display the exact GitHub write-set preview**
+
+Run:
+
+```powershell
+$root = Join-Path $env:TEMP 'codexhub-wayfinder-migration'
+$preview = [ordered]@{
+  repository = 'NOirBRight/CodexHub'
+  creates = [ordered]@{
+    milestones = @(
+      '0.1.6 — Codex control-plane reliability',
+      '0.1.7 — Official GPT reliability',
+      '0.1.8 — Third-party model certification',
+      '0.1.9 — Managed client reliability',
+      '0.1.10 — Existing product reliability'
+    )
+    issues_if_absent = @(
+      'Bound repeated empty tool_search misses for external models',
+      'Remove CodexHub-owned Windows autostart registration during uninstall'
+    )
+  }
+  mutations = [ordered]@{
+    milestone_membership_issue_numbers = @(
+      8,17,18,19,20,21,22,28,57,58,59,61,62,63,64,65,66,67,83,
+      86,87,88,104,109,111,112,113,114,115,126,138,139,141,143,
+      149,150,151,153,154,155,156,157
+    )
+    deferred_issue_numbers_remove_milestone = @(68,71,73,74,75,76,77,78,85,89,90,91,92,93,94,148,152)
+    wayfinder_label_issue_numbers = @(8,28,68,71,83,86,87,88,89,90,91,92,93,94,104,109,111,113,115,126,155,156,157)
+    hierarchy_issue_numbers = @(
+      8,17,18,19,20,21,22,28,57,58,59,61,68,71,73,74,75,76,77,78,
+      83,85,86,87,88,89,90,91,92,93,94,104,109,111,112,113,114,115,
+      126,138,139,141,143,148,149,150,151,152,153,154,155,156,157
+    )
+    dependency_edges = @('#156 blocked by bounded-search child','#64 blocked by #156','uninstall child blocked by #111')
+    dynamic_issue_mutations = @(
+      'bounded-search child: bug + ready-for-agent + wayfinder:task, milestone 0.1.6, parent #156',
+      'uninstall child: bug + ready-for-agent + wayfinder:task, milestone 0.1.10, parent #147'
+    )
+    bodies = @('#28 narrowed to discovery performance','#147 replaced with reliability-gated Wayfinder map')
+    comments = @('#8 baseline correction','#10 closure evidence','#12 closure evidence','#62 conditional ownership reconciliation','#147 final migration readback')
+    assignee_changes = @('#62 removal only if native Task and PR readback prove ownership is stale')
+    milestone_close = 'Third-party model agentic reliability, only after zero-open-Issue readback'
+  }
+  prohibited = @('Issue assignment other than conditional stale #62 removal','product branch/worktree','Worker dispatch','product code edit','production PR')
+}
+$preview | ConvertTo-Json -Depth 8 |
+  Set-Content -Encoding utf8 (Join-Path $root 'proposed-writes.json')
+Get-Content -Raw (Join-Path $root 'proposed-writes.json')
+```
+
+Expected: the seventh temporary JSON file exists and displays every class of durable write in Tasks 2–8. If the live snapshot changes any target or creates a title collision, revise the plan and regenerate this preview before requesting authorization.
+
+- [ ] **Step 6: Stop for explicit human authorization**
+
+Present the snapshot counts, SHA-256 hashes, and full `proposed-writes.json`, then ask exactly:
+
+> Authorize Tasks 2–8 to perform the displayed durable GitHub writes on `NOirBRight/CodexHub`?
+
+Expected: stop execution here. Continue to Task 2 only after an explicit affirmative response scoped to Tasks 2–8 and this displayed write set. A response authorizing only the dry run, plan revision, or worktree synchronization is not sufficient.
+
 ---
 
 ### Task 2: Create the five reliability milestones idempotently
@@ -137,7 +232,7 @@ Expected: one SHA-256 per snapshot file. Retain this terminal output for the mig
 - GitHub objects: repository milestones only.
 
 **Interfaces:**
-- Consumes: Task 1 read-only snapshot.
+- Consumes: Task 1 read-only snapshot and the explicit human authorization captured by Task 1 Step 6.
 - Produces: five open milestones discoverable by their exact titles; later tasks use titles rather than unstable milestone numbers.
 
 - [ ] **Step 1: Define the exact milestone contracts**
@@ -229,7 +324,7 @@ Expected: open `bug` + `ready-for-human`; body contains the Host/runtime callbac
 
 Run:
 
-```powershell
+````powershell
 $title = 'Bound repeated empty tool_search misses for external models'
 $matches = @(gh issue list --state all --limit 100 `
   --search 'in:title "Bound repeated empty tool_search misses for external models"' `
@@ -316,7 +411,7 @@ Review-Owner: orchestrator
   $localSearchIssue = [int]$matches[0]
 }
 "localSearchIssue=$localSearchIssue"
-```
+````
 
 Expected: exactly one open Issue with the exact title; record its numeric value as `$localSearchIssue`.
 
@@ -403,7 +498,7 @@ Expected: open enhancement with two mixed concerns: installer uninstall cleanup 
 
 Run:
 
-```powershell
+````powershell
 $title = 'Remove CodexHub-owned Windows autostart registration during uninstall'
 $matches = @(gh issue list --state all --limit 100 `
   --search 'in:title "Remove CodexHub-owned Windows autostart registration during uninstall"' `
@@ -484,7 +579,7 @@ Review-Owner: orchestrator
   $uninstallIssue = [int]$matches[0]
 }
 "uninstallIssue=$uninstallIssue"
-```
+````
 
 Expected: exactly one open uninstall Issue; record its number as `$uninstallIssue`.
 
@@ -886,7 +981,7 @@ Expected: #147 remains open, unassigned, and labeled `wayfinder:map` + `ready-fo
 
 Run:
 
-```powershell
+````powershell
 $mapBody = @"
 ## Destination
 
@@ -1022,7 +1117,7 @@ These lanes do not refill until 0.1.6–0.1.10 gates complete:
 $mapFile = Join-Path $env:TEMP 'codexhub-wayfinder-map-body.md'
 Set-Content -Encoding utf8 $mapFile $mapBody
 Get-Content -Raw $mapFile
-```
+````
 
 Expected: complete body with real numeric dynamic Issue references, no placeholder text, no old GLM global binding, and no obsolete main→dev precondition.
 
@@ -1271,3 +1366,4 @@ Before execution handoff, verify this plan against the approved design:
 3. **Type consistency:** `$localSearchIssue`, `$uninstallIssue`, milestone titles, parent relationships, and dependency direction are identical in every task.
 4. **Scope:** The plan changes only GitHub planning state. Every product Issue receives its own later spec/plan/implementation cycle.
 5. **No hidden claim:** No command assigns an Issue, creates a product branch/worktree, starts a Worker, opens a production PR, or edits product code.
+6. **Review blockers resolved:** Task 1 safely fast-forwards only a clean stale planning branch with no unique commits, requires the design and plan in-tree, emits a read-only write-set preview, and stops for explicit authorization; Tasks 2–8 use Inline Execution only.
