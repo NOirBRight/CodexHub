@@ -632,6 +632,9 @@ TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
         "additionalProperties": False,
     },
 }
+TOOL_SEARCH_EMPTY_MISS_BOUND = 2
+TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION = "identical_exact_query"
+TOOL_SEARCH_UNAVAILABLE_STATUS = "unavailable"
 BROWSER_CONTEXT_MARKERS = (
     "# in app browser",
     "# browser comments",
@@ -1503,8 +1506,9 @@ def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
-    _observe_gateway_diagnostic("observe_proxy_event", event, fields)
-    payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
+    public_fields = _public_event_context(fields)
+    _observe_gateway_diagnostic("observe_proxy_event", event, public_fields)
+    payload = proxy_telemetry.prepare_event_payload(event, public_fields, RUNTIME_CODEX_DIR)
     _enqueue_gateway_event_payload(payload)
 
 
@@ -1613,6 +1617,14 @@ def _capture_usage(
     usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
 
 
+def _public_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in (context or {}).items()
+        if not str(key).startswith("_")
+    }
+
+
 def _usage_observed_context(
     event_context: Mapping[str, Any] | None,
     *,
@@ -1622,11 +1634,7 @@ def _usage_observed_context(
     upstream_format: str,
     inbound_format: str,
 ) -> dict[str, Any]:
-    context = {
-        key: value
-        for key, value in (event_context or {}).items()
-        if not str(key).startswith("_")
-    }
+    context = _public_event_context(event_context)
     context.update(
         {
             "request_id": request_id,
@@ -1705,7 +1713,7 @@ def _offer_official_passthrough_usage_line(context: Mapping[str, Any], line: byt
         return
     _start_official_passthrough_usage_worker()
     try:
-        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((dict(context), line))
+        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((_public_event_context(context), line))
     except queue.Full:
         return
 
@@ -1751,7 +1759,7 @@ def _offer_usage_observed_body(context: Mapping[str, Any], body: bytes) -> None:
         return
     _start_usage_observed_worker()
     try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("body", dict(context), body, None))
+        USAGE_OBSERVED_QUEUE.put_nowait(("body", _public_event_context(context), body, None))
     except queue.Full:
         return
 
@@ -1766,7 +1774,7 @@ def _offer_usage_observed_sse_line(
         return
     _start_usage_observed_worker()
     try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("sse", dict(context), line, upstream_format))
+        USAGE_OBSERVED_QUEUE.put_nowait(("sse", _public_event_context(context), line, upstream_format))
     except queue.Full:
         return
 
@@ -1801,13 +1809,13 @@ def _usage_observed_worker() -> None:
 def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
     if event_context is None:
         return
-    payload = {key: value for key, value in event_context.items() if not str(key).startswith("_")}
+    payload = _public_event_context(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
 
 
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
-    payload = dict(context)
+    payload = _public_event_context(context)
     existing = payload.get("request_kind")
     if isinstance(existing, str) and existing and existing != request_kind:
         payload.setdefault("client_request_kind", existing)
@@ -5004,6 +5012,272 @@ def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
     return _semantic_normalize_tool_search_arguments(value)
 
 
+def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, tuple[str, int]]:
+    if not isinstance(value, list):
+        return {}
+
+    queries_by_call_id: dict[str, str] = {}
+    empty_call_ids_by_query: dict[str, list[str]] = {}
+    successful_queries: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        if item.get("type") == "tool_search_call":
+            arguments = _normalize_tool_search_arguments(item.get("arguments"))
+            if arguments is None or _is_multi_agent_discovery_arguments(arguments):
+                continue
+            queries_by_call_id[call_id] = arguments["query"]
+            continue
+        if item.get("type") != "tool_search_output":
+            continue
+        query = queries_by_call_id.pop(call_id, None)
+        tools = item.get("tools")
+        if query is None or not isinstance(tools, list):
+            continue
+        if tools:
+            successful_queries.add(query)
+            continue
+        empty_call_ids_by_query.setdefault(query, []).append(call_id)
+
+    terminal_calls: dict[str, tuple[str, int]] = {}
+    for query, call_ids in empty_call_ids_by_query.items():
+        if query in successful_queries or len(call_ids) < TOOL_SEARCH_EMPTY_MISS_BOUND:
+            continue
+        terminal_calls[call_ids[TOOL_SEARCH_EMPTY_MISS_BOUND - 1]] = (
+            query,
+            TOOL_SEARCH_EMPTY_MISS_BOUND,
+        )
+    return terminal_calls
+
+
+def _terminalize_bounded_empty_tool_search_misses(
+    payload: dict[str, Any],
+    terminal_calls: Mapping[str, tuple[str, int]],
+) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list) or not terminal_calls:
+        return False
+
+    rewritten_items: list[Any] = []
+    changed = False
+    for item in input_items:
+        if (
+            isinstance(item, Mapping)
+            and item.get("type") == "tool_search_output"
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"] in terminal_calls
+        ):
+            rewritten = dict(item)
+            rewritten["status"] = TOOL_SEARCH_UNAVAILABLE_STATUS
+            rewritten["query_classification"] = TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION
+            _, count = terminal_calls[item["call_id"]]
+            rewritten["empty_miss_count"] = count
+            rewritten["terminal"] = True
+            rewritten_items.append(rewritten)
+            changed = True
+            continue
+        rewritten_items.append(item)
+    if changed:
+        payload["input"] = rewritten_items
+    return changed
+
+
+def _restrict_bounded_tool_search_queries(payload: dict[str, Any], bounded_queries: set[str]) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not bounded_queries:
+        return False
+
+    restriction = {"enum": sorted(bounded_queries)}
+    changed = False
+    rewritten_tools: list[Any] = []
+    for tool in tools:
+        if not (
+            isinstance(tool, Mapping)
+            and tool.get("type") == "function"
+            and tool.get("name") == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+        ):
+            rewritten_tools.append(tool)
+            continue
+        rewritten_tool = dict(tool)
+        parameters = dict(_tool_parameters_schema(tool))
+        properties_value = parameters.get("properties")
+        properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
+        query_value = properties.get("query")
+        query_schema = dict(query_value) if isinstance(query_value, Mapping) else {"type": "string"}
+        if "not" in query_schema:
+            query_schema = {"allOf": [query_schema, {"not": restriction}]}
+        else:
+            query_schema["not"] = restriction
+        properties["query"] = query_schema
+        parameters["properties"] = properties
+        rewritten_tool["parameters"] = parameters
+        rewritten_tools.append(rewritten_tool)
+        changed = True
+    if changed:
+        payload["tools"] = rewritten_tools
+    return changed
+
+
+def _tool_search_query_digest(query: str) -> bytes:
+    return hashlib.sha256(query.encode("utf-8")).digest()
+
+
+def _bounded_tool_search_query_digests(event_context: Mapping[str, Any] | None) -> set[bytes]:
+    value = (event_context or {}).get("_bounded_tool_search_query_digests")
+    if not isinstance(value, (set, frozenset)):
+        return set()
+    return {digest for digest in value if isinstance(digest, bytes)}
+
+
+def _tool_search_call_arguments(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    if value.get("type") == "tool_search_call":
+        return _normalize_tool_search_arguments(value.get("arguments"))
+    if value.get("type") == "function_call" and value.get("name") == "tool_search":
+        return _normalize_tool_search_arguments(value.get("arguments"))
+    return None
+
+
+def _bounded_tool_search_unavailable_message(item: Mapping[str, Any]) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {
+                "type": "output_text",
+                "text": (
+                    "tool_search_unavailable\n"
+                    f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}\n"
+                    f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}\n"
+                    f"status: {TOOL_SEARCH_UNAVAILABLE_STATUS}\n"
+                    "terminal: true\n"
+                    "execution: suppressed"
+                ),
+            }
+        ],
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        message["id"] = item_id
+    return message
+
+
+def _suppress_bounded_tool_search_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    bounded_digests = _bounded_tool_search_query_digests(event_context)
+    if not bounded_digests:
+        return value, False
+
+    if isinstance(event_context, dict):
+        candidates_value = event_context.setdefault("_tool_search_stream_candidate_item_ids", set())
+        candidate_item_ids = candidates_value if isinstance(candidates_value, set) else set()
+        event_context["_tool_search_stream_candidate_item_ids"] = candidate_item_ids
+        suppressed_value = event_context.setdefault("_bounded_tool_search_suppressed_item_ids", set())
+        suppressed_item_ids = suppressed_value if isinstance(suppressed_value, set) else set()
+        event_context["_bounded_tool_search_suppressed_item_ids"] = suppressed_item_ids
+    else:
+        candidate_item_ids = set()
+        suppressed_item_ids = set()
+
+    return _suppress_bounded_tool_search_calls_inner(
+        value,
+        bounded_digests,
+        candidate_item_ids,
+        suppressed_item_ids,
+    )
+
+
+def _suppress_bounded_tool_search_calls_inner(
+    value: Any,
+    bounded_digests: set[bytes],
+    candidate_item_ids: set[str],
+    suppressed_item_ids: set[str],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten_items: list[Any] = []
+        for item in value:
+            replacement, item_changed = _suppress_bounded_tool_search_calls_inner(
+                item,
+                bounded_digests,
+                candidate_item_ids,
+                suppressed_item_ids,
+            )
+            if replacement is None:
+                changed = True
+                continue
+            rewritten_items.append(replacement)
+            changed = changed or item_changed
+        return (rewritten_items if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    event_type = value.get("type")
+    if event_type == "response.output_item.added":
+        item = value.get("item")
+        if isinstance(item, Mapping):
+            item_id = item.get("id")
+            if (
+                isinstance(item_id, str)
+                and item_id
+                and (
+                    item.get("type") == "tool_search_call"
+                    or (item.get("type") == "function_call" and item.get("name") == "tool_search")
+                )
+            ):
+                candidate_item_ids.add(item_id)
+    elif event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id in suppressed_item_ids:
+            return None, True
+        if (
+            event_type == "response.function_call_arguments.done"
+            and isinstance(item_id, str)
+            and item_id in candidate_item_ids
+        ):
+            arguments = _normalize_tool_search_arguments(value.get("arguments"))
+            if (
+                arguments is not None
+                and _tool_search_query_digest(arguments["query"]) in bounded_digests
+            ):
+                suppressed_item_ids.add(item_id)
+                return None, True
+
+    arguments = _tool_search_call_arguments(value)
+    if (
+        arguments is not None
+        and _tool_search_query_digest(arguments["query"]) in bounded_digests
+    ):
+        item_id = value.get("id")
+        if isinstance(item_id, str) and item_id:
+            suppressed_item_ids.add(item_id)
+        return _bounded_tool_search_unavailable_message(value), True
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _suppress_bounded_tool_search_calls_inner(
+            item,
+            bounded_digests,
+            candidate_item_ids,
+            suppressed_item_ids,
+        )
+        if replacement is None:
+            rewritten.pop(key, None)
+            changed = True
+            continue
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
 def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
     if not arguments:
         return False
@@ -5857,6 +6131,13 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
             )
             lines.append(
                 "next_action: call multi_agent_v1__spawn_agent to create the child agent; do not call tool_search again for the same multi-agent query."
+            )
+        if item.get("query_classification") == TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION:
+            lines.append(f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}")
+            lines.append(f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}")
+            lines.append("terminal: true")
+            lines.append(
+                "required_next_action: continue without the unavailable tool; do not call tool_search again for this exact query."
             )
         _append_internal_field(lines, "tools", item.get("tools"))
     else:
@@ -7485,6 +7766,30 @@ def compatible_request_body(
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
+    bounded_tool_search_terminal_calls = (
+        {}
+        if raw_provider_probe
+        else _bounded_empty_tool_search_terminal_calls(payload.get("input"))
+    )
+    bounded_tool_search_queries = {
+        query for query, _count in bounded_tool_search_terminal_calls.values()
+    }
+    if isinstance(event_context, dict):
+        if bounded_tool_search_queries:
+            event_context["_bounded_tool_search_query_digests"] = frozenset(
+                _tool_search_query_digest(query) for query in bounded_tool_search_queries
+            )
+        else:
+            event_context.pop("_bounded_tool_search_query_digests", None)
+    if _terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
+        for _query, count in bounded_tool_search_terminal_calls.values():
+            write_proxy_event(
+                "tool_search_empty_miss_bound",
+                query_classification=TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
+                count=count,
+                status=TOOL_SEARCH_UNAVAILABLE_STATUS,
+            )
+        changed = True
     if raw_provider_probe:
         pass
     else:
@@ -7519,7 +7824,8 @@ def compatible_request_body(
     # broader discovery service; eager remains the #105-compatible surface.
     # Worker subagents retain their established restricted surface.
     include_tool_search = (
-        tool_surface_strategy == "deferred_core" and not subagent_worker_context
+        tool_surface_strategy == "deferred_core"
+        and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
@@ -7863,6 +8169,8 @@ def compatible_request_body(
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
             )
+            if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
+                changed = True
             write_proxy_event(
                 "external_tool_surface_prepared",
                 tool_surface_strategy=tool_surface_strategy,
@@ -8673,6 +8981,8 @@ def compatible_response_body(
             surface="body",
         )
     changed = changed or alias_changed
+    payload, bounded_tool_search_changed = _suppress_bounded_tool_search_calls(payload, event_context)
+    changed = changed or bounded_tool_search_changed
     payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
         payload,
         event_context,
@@ -8728,6 +9038,10 @@ def compatible_sse_line(
             surface="sse",
         )
     changed = changed or alias_changed
+    payload, bounded_tool_search_changed = _suppress_bounded_tool_search_calls(payload, event_context)
+    if payload is None:
+        return b""
+    changed = changed or bounded_tool_search_changed
     payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
         payload,
         event_context,
@@ -13215,7 +13529,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             write_transparent_line(pending_line)
                     except OSError as exc:
                         self.close_connection = True
-                        event_fields = dict(event_context or {})
+                        event_fields = _public_event_context(event_context)
                         for key in (
                             "request_id",
                             "model",
@@ -13247,7 +13561,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     write_transparent_line(line)
                 except OSError as exc:
                     self.close_connection = True
-                    event_fields = dict(event_context or {})
+                    event_fields = _public_event_context(event_context)
                     for key in (
                         "request_id",
                         "model",
@@ -13557,7 +13871,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
-                event_fields = dict(event_context or {})
+                event_fields = _public_event_context(event_context)
                 event_fields.pop("request_id", None)
                 event_fields.pop("model", None)
                 event_fields.pop("upstream", None)
@@ -13580,7 +13894,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     else _responses_body_is_empty(body)
                 )
                 if status < 400 and request_kind != RETRY_REQUEST_COMPACT and empty_non_compact:
-                    event_fields = dict(event_context) if event_context else {}
+                    event_fields = _public_event_context(event_context)
                     event_fields.pop("request_id", None)
                     event_fields.pop("model", None)
                     event_fields.pop("upstream", None)
@@ -13611,6 +13925,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for event in response_events:
                         if behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
                             event, _ = _normalize_third_party_tool_call(event)
+                            event, _ = _suppress_bounded_tool_search_calls(
+                                event,
+                                compatibility_event_context,
+                            )
+                            if event is None:
+                                continue
                             event, _ = _downgrade_invalid_third_party_tool_calls(event)
                             event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
                         event_type = event.get("type")
@@ -13664,7 +13984,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if is_event_stream:
             def finish_downstream_stream_closed(exc: OSError) -> int:
                 self.close_connection = True
-                event_fields = dict(event_context or {})
+                event_fields = _public_event_context(event_context)
                 for key in ("request_id", "model", "upstream", "status", "error", "detail"):
                     event_fields.pop(key, None)
                 write_proxy_event(
@@ -14234,6 +14554,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         event_context=compatibility_event_context,
                     )
                     events, _ = _normalize_third_party_tool_call(events)
+                    events, _ = _suppress_bounded_tool_search_calls(
+                        events,
+                        compatibility_event_context,
+                    )
                     _write_adapter_event(
                         event_context,
                         "chat_to_responses_event_summary",
