@@ -73,12 +73,15 @@ from protocol_translation import (
 )
 
 from codex_semantic_adapter import (
+    BINDING_ACCEPTED as _BINDING_ACCEPTED,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
     multi_agent_discovery_arguments as _semantic_multi_agent_discovery_arguments,
     normalize_multi_agent_arguments as _semantic_normalize_multi_agent_arguments,
     normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
+    validate_effective_worker_binding as _semantic_validate_effective_worker_binding,
+    validate_worker_selector as _semantic_validate_worker_selector,
 )
 
 from catalog import (
@@ -537,6 +540,8 @@ THIRD_PARTY_TOOL_NAME_ALIASES.update(
     {f"mcp__multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
 )
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
+WORKER_SELECTOR_ERROR_CODE = "external_worker_selector_rejected"
+WORKER_BINDING_ERROR_CODE = "external_worker_binding_rejected"
 MULTI_AGENT_DISCOVERY_TOOLS = [
     {
         "type": "namespace",
@@ -5299,6 +5304,134 @@ def _normalize_multi_agent_arguments(
     return _semantic_normalize_multi_agent_arguments(value, tool_name)
 
 
+def _raise_worker_contract_error(
+    *,
+    event: str,
+    error_code: str,
+    classification: str,
+    surface: str | None = None,
+) -> None:
+    fields = {
+        "outcome": "rejected",
+        "classification": classification,
+    }
+    if surface is not None:
+        fields["surface"] = surface
+    write_proxy_event(event, **fields)
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            error_code,
+            "External Worker delegation contract validation failed.",
+        )
+    )
+
+
+def _validate_external_worker_selectors(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _validate_external_worker_selectors(item, event_context, surface=surface)
+        return
+    if not isinstance(value, Mapping):
+        return
+
+    if _multi_agent_function_call_name(value) == "spawn_agent":
+        raw_arguments = value.get("arguments")
+        arguments = _json_object_from_arguments(raw_arguments)
+        if arguments is not None and raw_arguments not in (None, ""):
+            agent_type = arguments.get("agent_type")
+            if agent_type == "general":
+                pass
+            elif agent_type == "worker":
+                write_proxy_event(
+                    "worker_selector_validated",
+                    outcome="accepted",
+                    classification="worker_preserved",
+                    surface=surface,
+                )
+            elif agent_type is not None or bool((event_context or {}).get("_worker_binding_required")):
+                validation = _semantic_validate_worker_selector(arguments)
+                _raise_worker_contract_error(
+                    event="worker_selector_validated",
+                    error_code=WORKER_SELECTOR_ERROR_CODE,
+                    classification=validation.classification,
+                    surface=surface,
+                )
+
+    for item in value.values():
+        _validate_external_worker_selectors(item, event_context, surface=surface)
+
+
+def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        return reasoning.get("effort")
+    if isinstance(reasoning, str):
+        return reasoning
+    return payload.get("reasoning_effort")
+
+
+def _validate_worker_binding_history(
+    payload: Mapping[str, Any],
+) -> None:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return
+
+    worker_calls: dict[str, Mapping[str, Any]] = {}
+    validated_call_ids: set[str] = set()
+    for item in input_items:
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if item.get("type") == "function_call" and isinstance(call_id, str):
+            if _multi_agent_function_call_name(item) != "spawn_agent":
+                continue
+            arguments = _json_object_from_arguments(item.get("arguments"))
+            if arguments is not None and arguments.get("agent_type") == "worker":
+                worker_calls[call_id] = arguments
+            continue
+        if (
+            item.get("type") != "function_call_output"
+            or not isinstance(call_id, str)
+            or call_id not in worker_calls
+        ):
+            continue
+
+        requested = {
+            "agent_type": worker_calls[call_id].get("agent_type"),
+            "model": payload.get("model"),
+            "reasoning": _requested_reasoning_effort(payload),
+        }
+        validation = _semantic_validate_effective_worker_binding(
+            requested,
+            _json_object_from_arguments(item.get("output")),
+        )
+        if validation.outcome != _BINDING_ACCEPTED:
+            _raise_worker_contract_error(
+                event="worker_effective_binding_validated",
+                error_code=WORKER_BINDING_ERROR_CODE,
+                classification=validation.classification,
+            )
+        write_proxy_event(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification=validation.classification,
+        )
+        validated_call_ids.add(call_id)
+
+    if set(worker_calls) - validated_call_ids:
+        _raise_worker_contract_error(
+            event="worker_effective_binding_validated",
+            error_code=WORKER_BINDING_ERROR_CODE,
+            classification="missing_readback",
+        )
+
+
 def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
@@ -7190,6 +7323,15 @@ def _required_subagent_call_item(spec: Mapping[str, Any], call_id: str | None = 
 
 
 def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
+    if spec.get("tool_name") == "spawn_agent":
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        if original_arguments is not None and original_arguments.get("agent_type") == "worker":
+            spec = dict(spec)
+            required_arguments = spec.get("arguments")
+            spec["arguments"] = {
+                **(dict(required_arguments) if isinstance(required_arguments, Mapping) else {}),
+                "agent_type": "worker",
+            }
     call_id = value.get("call_id")
     item = _required_subagent_call_item(spec, call_id=call_id if isinstance(call_id, str) and call_id else None)
     item_id = value.get("id")
@@ -7298,7 +7440,19 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
         if not isinstance(item_id, str) or not isinstance(arguments_by_item_id, dict):
             return value, False
         expected = arguments_by_item_id.get(item_id)
-        if not isinstance(expected, str) or value.get("arguments") == expected:
+        if not isinstance(expected, str):
+            return value, False
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        expected_arguments = _json_object_from_arguments(expected)
+        if (
+            original_arguments is not None
+            and original_arguments.get("agent_type") == "worker"
+            and expected_arguments is not None
+        ):
+            expected_arguments["agent_type"] = "worker"
+            expected = json.dumps(expected_arguments, ensure_ascii=True, separators=(",", ":"))
+            arguments_by_item_id[item_id] = expected
+        if value.get("arguments") == expected:
             return value, False
         rewritten = dict(value)
         rewritten["arguments"] = expected
@@ -7320,6 +7474,9 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
                 return value, False
             expected_arguments = specs[next_index]
             state["next_index"] = next_index + 1
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        if original_arguments is not None and original_arguments.get("agent_type") == "worker":
+            expected_arguments = {**dict(expected_arguments), "agent_type": "worker"}
         expected_json = json.dumps(dict(expected_arguments), ensure_ascii=True, separators=(",", ":"))
         if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
             arguments_by_item_id[item_id] = expected_json
@@ -7363,7 +7520,11 @@ def _coerce_required_subagent_tool_calls_inner(
         item_id = value.get("item_id")
         if not isinstance(item_id, str) or item_id not in coerced_item_ids:
             return value, False
-        arguments = spec.get("arguments") if isinstance(spec.get("arguments"), Mapping) else {}
+        arguments = dict(spec.get("arguments")) if isinstance(spec.get("arguments"), Mapping) else {}
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        if spec.get("tool_name") == "spawn_agent" and original_arguments is not None:
+            if original_arguments.get("agent_type") == "worker":
+                arguments["agent_type"] = "worker"
         expected = json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":"))
         if value.get("arguments") != expected:
             rewritten = dict(value)
@@ -7766,6 +7927,8 @@ def compatible_request_body(
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
+    if not raw_provider_probe:
+        _validate_worker_binding_history(payload)
     bounded_tool_search_terminal_calls = (
         {}
         if raw_provider_probe
@@ -8147,6 +8310,11 @@ def compatible_request_body(
                 changed = True
             tool_names_before = _function_tool_names(payload.get("tools"))
             tool_surface_counts: dict[str, int] = {}
+            if isinstance(event_context, dict):
+                if include_spawn_agent:
+                    event_context["_worker_binding_required"] = True
+                else:
+                    event_context.pop("_worker_binding_required", None)
             explicit_tools_injected = _inject_explicit_codex_tools(
                 payload,
                 include_tool_search=effective_include_tool_search,
@@ -8972,6 +9140,7 @@ def compatible_response_body(
     changed = _hide_reasoning_text(payload)
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
+    _validate_external_worker_selectors(payload, event_context, surface="body")
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -9029,6 +9198,7 @@ def compatible_sse_line(
         return b""
 
     changed = _hide_reasoning_text(payload)
+    _validate_external_worker_selectors(payload, event_context, surface="sse")
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(

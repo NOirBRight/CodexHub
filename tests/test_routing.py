@@ -10456,7 +10456,11 @@ Required sequence:
                         "namespace": "multi_agent_v1",
                         "name": "spawn_agent",
                         "arguments": json.dumps(
-                            {"message": "Return exactly this line: SENTINEL:A", "fork_context": False}
+                            {
+                                "agent_type": "worker",
+                                "message": "Return exactly this line: SENTINEL:A",
+                                "fork_context": False,
+                            }
                         ),
                     },
                     {
@@ -10467,7 +10471,11 @@ Required sequence:
                         "namespace": "multi_agent_v1",
                         "name": "spawn_agent",
                         "arguments": json.dumps(
-                            {"message": "Return exactly this line: SENTINEL:A", "fork_context": False}
+                            {
+                                "agent_type": "worker",
+                                "message": "Return exactly this line: SENTINEL:A",
+                                "fork_context": False,
+                            }
                         ),
                     },
                 ],
@@ -10483,6 +10491,7 @@ Required sequence:
             ["Return exactly this line: SENTINEL:A", "Return exactly this line: SENTINEL:B"],
         )
         self.assertTrue(all(args["fork_context"] is False for args in call_args))
+        self.assertTrue(all(args["agent_type"] == "worker" for args in call_args))
 
     def test_responses_sse_coerces_exact_child_spawn_prompts_across_lines(self):
         level_one_prompt = """
@@ -10530,6 +10539,20 @@ Required sequence:
                 },
             }
         )
+        first_arguments_done = convert(
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_a",
+                "output_index": 0,
+                "arguments": json.dumps(
+                    {
+                        "agent_type": "worker",
+                        "message": "Return exactly this line: SENTINEL:A",
+                        "fork_context": False,
+                    }
+                ),
+            }
+        )
         first_done = convert(
             {
                 "type": "response.output_item.done",
@@ -10541,7 +10564,13 @@ Required sequence:
                     "call_id": "call_a",
                     "namespace": "multi_agent_v1",
                     "name": "spawn_agent",
-                    "arguments": json.dumps({"message": "Return exactly this line: SENTINEL:A", "fork_context": False}),
+                    "arguments": json.dumps(
+                        {
+                            "agent_type": "worker",
+                            "message": "Return exactly this line: SENTINEL:A",
+                            "fork_context": False,
+                        }
+                    ),
                 },
             }
         )
@@ -10571,15 +10600,25 @@ Required sequence:
                     "call_id": "call_b",
                     "namespace": "multi_agent_v1",
                     "name": "spawn_agent",
-                    "arguments": json.dumps({"message": "Return exactly this line: SENTINEL:A", "fork_context": False}),
+                    "arguments": json.dumps(
+                        {
+                            "agent_type": "worker",
+                            "message": "Return exactly this line: SENTINEL:A",
+                            "fork_context": False,
+                        }
+                    ),
                 },
             }
         )
 
         first_args = json.loads(first_done["item"]["arguments"])
         second_args = json.loads(second_done["item"]["arguments"])
+        first_done_args = json.loads(first_arguments_done["arguments"])
         self.assertEqual(first_args["message"], "Return exactly this line: SENTINEL:A")
         self.assertEqual(second_args["message"], "Return exactly this line: SENTINEL:B")
+        self.assertEqual(first_args["agent_type"], "worker")
+        self.assertEqual(second_args["agent_type"], "worker")
+        self.assertEqual(first_done_args["agent_type"], "worker")
 
     def test_responses_structured_workflow_quality_reviewer_prompt_carries_baseline_status(self):
         workflow_prompt = r"""
@@ -10624,9 +10663,12 @@ Task 1: create the diagnostic artifact.
                         "type": "function_call",
                         "call_id": "call_impl_spawn",
                         "namespace": "multi_agent_v1",
-                        "name": "spawn_agent",
-                        "arguments": json.dumps(
-                            {"message": "Implement Task 1 exactly.", "nickname": "implementer-task-1"}
+                            "name": "spawn_agent",
+                            "arguments": json.dumps(
+                                {
+                                    "message": "Implement Task 1 exactly.",
+                                    "nickname": "implementer-task-1",
+                                }
                         ),
                     },
                     {"type": "function_call_output", "call_id": "call_impl_spawn", "output": json.dumps({"agent_id": "impl-1"})},
@@ -14639,6 +14681,208 @@ Execution constraints:
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
 
+    def test_external_worker_agent_type_survives_declaration_response_and_history_replay(self):
+        spawn_tool = next(
+            tool
+            for tool in codex_proxy._multi_agent_explicit_function_tools()
+            if tool["name"] == "multi_agent_v1__spawn_agent"
+        )
+        self.assertEqual(spawn_tool["parameters"]["properties"]["agent_type"], {"type": "string"})
+
+        response_body = json.dumps(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "synthetic-call",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps(
+                            {"agent_type": "worker", "message": "synthetic task", "fork_context": False}
+                        ),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        response_context = {}
+        normalized_response = compatible_response_body(
+            response_body,
+            "synthetic-provider",
+            event_context=response_context,
+        )
+        response_call = json.loads(normalized_response)["output"][0]
+        self.assertEqual(json.loads(response_call["arguments"])["agent_type"], "worker")
+
+        request_body = json.dumps(
+            {
+                "model": "synthetic-third-party-model",
+                "reasoning": {"effort": "high"},
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "synthetic-call",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {
+                            "agent_type": "worker",
+                            "message": "synthetic task",
+                            "fork_context": False,
+                        },
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "synthetic-call",
+                        "output": json.dumps(
+                            {
+                                "agent_id": "synthetic-agent",
+                                "effective_binding": {
+                                    "contract_version": "codexhub.worker-binding.v1",
+                                    "support": "supported",
+                                    "status": "accepted",
+                                    "agent_type": "worker",
+                                    "model": "synthetic-third-party-model",
+                                    "reasoning": "high",
+                                },
+                            }
+                        ),
+                    },
+                ],
+                "tools": [spawn_tool],
+            }
+        ).encode("utf-8")
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            normalized_request = compatible_request_body(
+                request_body,
+                {
+                    "name": "synthetic-provider",
+                    "upstream_model": "synthetic-third-party-model",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context={},
+            )
+
+        history_call = json.loads(normalized_request)["input"][0]
+        self.assertEqual(history_call["arguments"]["agent_type"], "worker")
+        write_event.assert_any_call(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification="matched",
+        )
+
+    def test_external_worker_agent_type_rejects_missing_or_unsupported_before_execution(self):
+        cases = [
+            ({"message": "synthetic task"}, "missing_selector"),
+            ({"agent_type": "synthetic-unknown", "message": "synthetic task"}, "unsupported_selector"),
+        ]
+        for arguments, classification in cases:
+            with self.subTest(classification=classification):
+                event_context = {}
+                compatible_request_body(
+                    json.dumps(
+                        {
+                            "model": "synthetic-third-party-model",
+                            "input": [{"type": "message", "role": "user", "content": "synthetic delegation"}],
+                            "tools": [],
+                        }
+                    ).encode("utf-8"),
+                    {
+                        "name": "synthetic-provider",
+                        "upstream_model": "synthetic-third-party-model",
+                        "upstream_format": "responses",
+                        "tool_protocol": "responses_structured",
+                    },
+                    event_context=event_context,
+                )
+                self.assertIs(event_context["_worker_binding_required"], True)
+                body = json.dumps(
+                    {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "call_id": "synthetic-call",
+                                "name": "multi_agent_v1__spawn_agent",
+                                "arguments": json.dumps(arguments),
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+                with patch.object(codex_proxy, "write_proxy_event") as write_event:
+                    with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                        compatible_response_body(
+                            body,
+                            "synthetic-provider",
+                            event_context=event_context,
+                        )
+
+                self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+                write_event.assert_called_once_with(
+                    "worker_selector_validated",
+                    outcome="rejected",
+                    classification=classification,
+                    surface="body",
+                )
+
+    def test_external_worker_binding_mismatch_rejects_before_edit_capable_request(self):
+        body = json.dumps(
+            {
+                "model": "synthetic-third-party-model",
+                "reasoning": {"effort": "high"},
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "synthetic-call",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"agent_type": "worker", "message": "synthetic task"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "synthetic-call",
+                        "output": json.dumps(
+                            {
+                                "effective_binding": {
+                                    "contract_version": "codexhub.worker-binding.v1",
+                                    "support": "supported",
+                                    "status": "accepted",
+                                    "agent_type": "worker",
+                                    "model": "synthetic-other-model",
+                                    "reasoning": "high",
+                                }
+                            }
+                        ),
+                    },
+                ],
+                "tools": [
+                    {"type": "function", "name": "apply_patch", "parameters": {"type": "object"}}
+                ],
+            }
+        ).encode("utf-8")
+
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+                compatible_request_body(
+                    body,
+                    {
+                        "name": "synthetic-provider",
+                        "upstream_model": "synthetic-third-party-model",
+                        "upstream_format": "responses",
+                        "tool_protocol": "responses_structured",
+                    },
+                    event_context={},
+                )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_binding_rejected")
+        write_event.assert_called_once_with(
+            "worker_effective_binding_validated",
+            outcome="rejected",
+            classification="contradictory_binding",
+        )
+        telemetry_text = repr(write_event.call_args_list)
+        self.assertNotIn("synthetic task", telemetry_text)
+        self.assertNotIn("synthetic-call", telemetry_text)
+        self.assertNotIn("synthetic-third-party-model", telemetry_text)
+        self.assertNotIn("synthetic-other-model", telemetry_text)
+
     def test_strict_mode_still_repairs_multi_agent_argument_shape(self):
         body = json.dumps(
             {
@@ -15374,7 +15618,11 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                         "call_id": "call_duplicate_impl",
                         "name": "multi_agent_v1__spawn_agent",
                         "arguments": json.dumps(
-                            {"message": "Implement Task 1 exactly.", "nickname": "implementer-task-1"}
+                            {
+                                "agent_type": "worker",
+                                "message": "Implement Task 1 exactly.",
+                                "nickname": "implementer-task-1",
+                            }
                         ),
                     }
                 ]
