@@ -27,6 +27,7 @@ WORKER_AGENT_TYPE = "worker"
 BINDING_ACCEPTED = "accepted"
 BINDING_REJECTED = "rejected"
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+SUPPORTED_AGENT_TYPES = {"worker", "general"}
 WORKER_BINDING_CONTRACT_VERSION = "codexhub.worker-binding.v1"
 WORKER_BINDING_FIELDS = {
     "contract_version",
@@ -44,6 +45,18 @@ class BindingValidation:
     classification: str
 
 
+def strict_json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return dict(parsed) if isinstance(parsed, Mapping) else None
+
+
 def validate_worker_selector(value: Any) -> BindingValidation:
     arguments = json_object_from_arguments(value)
     if arguments is None or "agent_type" not in arguments:
@@ -53,22 +66,34 @@ def validate_worker_selector(value: Any) -> BindingValidation:
     return BindingValidation(BINDING_ACCEPTED, "worker_preserved")
 
 
-def validate_effective_worker_binding(
-    requested: Mapping[str, Any],
-    readback: Any,
-) -> BindingValidation:
+def validate_requested_worker_binding(requested: Mapping[str, Any]) -> BindingValidation:
     selector_validation = validate_worker_selector(requested)
     if selector_validation.outcome != BINDING_ACCEPTED:
         return selector_validation
 
     requested_model = requested.get("model")
     requested_reasoning = requested.get("reasoning")
-    if not isinstance(requested_model, str) or not requested_model:
-        return BindingValidation(BINDING_REJECTED, "missing_requested_binding")
-    if requested_model.lower().startswith("gpt-"):
-        return BindingValidation(BINDING_REJECTED, "unsupported_requested_binding")
+    if requested_model is None or requested_model == "":
+        return BindingValidation(BINDING_REJECTED, "missing_requested_model")
+    if not isinstance(requested_model, str) or requested_model.lower().startswith("gpt-"):
+        return BindingValidation(BINDING_REJECTED, "unsupported_requested_model")
+    if requested_reasoning is None or requested_reasoning == "":
+        return BindingValidation(BINDING_REJECTED, "missing_requested_reasoning")
     if requested_reasoning not in SUPPORTED_REASONING_EFFORTS:
-        return BindingValidation(BINDING_REJECTED, "missing_requested_binding")
+        return BindingValidation(BINDING_REJECTED, "unsupported_requested_reasoning")
+    return BindingValidation(BINDING_ACCEPTED, "requested_binding_supported")
+
+
+def validate_effective_worker_binding(
+    requested: Mapping[str, Any],
+    readback: Any,
+) -> BindingValidation:
+    requested_validation = validate_requested_worker_binding(requested)
+    if requested_validation.outcome != BINDING_ACCEPTED:
+        return requested_validation
+
+    requested_model = requested["model"]
+    requested_reasoning = requested["reasoning"]
 
     if not isinstance(readback, Mapping):
         return BindingValidation(BINDING_REJECTED, "missing_readback")
@@ -97,16 +122,18 @@ def validate_effective_worker_binding(
     effective_reasoning = effective.get("reasoning")
     if not all(isinstance(item, str) and item for item in (effective_agent_type, effective_model, effective_reasoning)):
         return BindingValidation(BINDING_REJECTED, "missing_readback")
-    if effective_agent_type != WORKER_AGENT_TYPE or effective_reasoning not in SUPPORTED_REASONING_EFFORTS:
-        return BindingValidation(BINDING_REJECTED, "unknown_readback")
+    if effective_agent_type not in SUPPORTED_AGENT_TYPES:
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_agent_type")
+    if effective_agent_type != requested.get("agent_type"):
+        return BindingValidation(BINDING_REJECTED, "contradictory_agent_type")
     if effective_model.lower().startswith("gpt-"):
         return BindingValidation(BINDING_REJECTED, "gpt_substitution")
-    if (
-        effective_agent_type != requested.get("agent_type")
-        or effective_model != requested_model
-        or effective_reasoning != requested_reasoning
-    ):
-        return BindingValidation(BINDING_REJECTED, "contradictory_binding")
+    if effective_model != requested_model:
+        return BindingValidation(BINDING_REJECTED, "contradictory_model")
+    if effective_reasoning not in SUPPORTED_REASONING_EFFORTS:
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_reasoning")
+    if effective_reasoning != requested_reasoning:
+        return BindingValidation(BINDING_REJECTED, "contradictory_reasoning")
     return BindingValidation(BINDING_ACCEPTED, "matched")
 
 
@@ -271,7 +298,7 @@ def normalize_multi_agent_arguments(
                 changed = True
             arguments.pop("name", None)
             changed = True
-        if "agent_type" in arguments and arguments.get("agent_type") != WORKER_AGENT_TYPE:
+        if arguments.get("agent_type") == "general":
             arguments.pop("agent_type", None)
             changed = True
         if "fork_context" not in arguments:
