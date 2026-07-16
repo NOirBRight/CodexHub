@@ -88,9 +88,9 @@ CodexHub Desktop App
 ```powershell
 .\scripts\Test-BuildFlavorReplacement.ps1 -DryRun
 .\scripts\Test-BuildFlavorReplacement.ps1 `
-  -Version 0.1.4 `
-  -NormalInstaller .\CodexHub_0.1.4_x64-setup.exe `
-  -DebugInstaller .\CodexHub_0.1.4_debug_x64-setup.exe `
+  -Version 0.1.5 `
+  -NormalInstaller .\CodexHub_0.1.5_x64-setup.exe `
+  -DebugInstaller .\CodexHub_0.1.5_debug_x64-setup.exe `
   -SettingsPath "$env:USERPROFILE\.codex\proxy\settings.json" `
   -InstalledExe 'C:\path\to\CodexHub.exe' `
   -RunInstall -LaunchAfterInstall
