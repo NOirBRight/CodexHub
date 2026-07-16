@@ -1836,20 +1836,93 @@ function Set-OrCreateExactIssueComment(
     url = $exactReadback[0].html_url
   }
 }
+function Resolve-ProvenCheckpointHistoricalProvenance(
+  [System.Collections.IDictionary]$Guard,
+  [string]$DesiredBody,
+  [System.Collections.IDictionary]$PriorTranscript,
+  [string]$HistoricalOriginalBody
+) {
+  $DesiredBody = Normalize-IssueCommentBody $DesiredBody
+  $desiredHash = Get-NormalizedBodySha256 $DesiredBody
+  if ($null -ne $PriorTranscript) {
+    $priorHistorical = $PriorTranscript.historical_original
+    $priorHistoricalBody = Normalize-IssueCommentBody ([string]$priorHistorical.normalized_body)
+    if ([string]$priorHistorical.normalized_body_sha256 -cne (Get-NormalizedBodySha256 $priorHistoricalBody)) {
+      throw 'tracked checkpoint transcript historical origin hash mismatch'
+    }
+    if ([long]$PriorTranscript.post_readback.public_comment_id -ne [long]$Guard.prior_public_comment_id -or
+        [string]$PriorTranscript.post_readback.normalized_body_sha256 -cne [string]$Guard.prior_normalized_body_sha256) {
+      throw 'tracked checkpoint transcript does not prove the current prior readback'
+    }
+    return [ordered]@{
+      historical_original = [ordered]@{
+        source = [string]$priorHistorical.source
+        normalized_body = $priorHistoricalBody
+        normalized_body_sha256 = [string]$priorHistorical.normalized_body_sha256
+      }
+      proof_kind = 'tracked-transcript'
+      prior_transcript = $PriorTranscript
+    }
+  }
+
+  if ($Guard.operation_decision -ceq 'create') {
+    return [ordered]@{
+      historical_original = [ordered]@{
+        source = 'Task 8 initial publication desired body'
+        normalized_body = $DesiredBody
+        normalized_body_sha256 = $desiredHash
+      }
+      proof_kind = 'initial-create'
+      prior_transcript = $null
+    }
+  }
+  if ($Guard.operation_decision -ceq 'exact-no-op') {
+    if ([string]$Guard.prior_normalized_body_sha256 -cne $desiredHash -or
+        [string]$Guard.post_normalized_body_sha256 -cne $desiredHash) {
+      throw 'exact-no-op pre/desired/post normalized hashes differ'
+    }
+    return [ordered]@{
+      historical_original = [ordered]@{
+        source = 'Task 8 live exact desired body'
+        normalized_body = $DesiredBody
+        normalized_body_sha256 = $desiredHash
+      }
+      proof_kind = 'live-exact-desired'
+      prior_transcript = $null
+    }
+  }
+  if ($Guard.operation_decision -cne 'patch') { throw 'unsupported checkpoint operation decision' }
+  $historicalBody = Normalize-IssueCommentBody $HistoricalOriginalBody
+  return [ordered]@{
+    historical_original = [ordered]@{
+      source = 'Task 8 execution report exact original published body'
+      normalized_body = $historicalBody
+      normalized_body_sha256 = Get-NormalizedBodySha256 $historicalBody
+    }
+    proof_kind = 'task8-execution-report'
+    prior_transcript = $null
+  }
+}
 function New-CheckpointTranscript(
   [System.Collections.IDictionary]$Guard,
-  [string]$HistoricalOriginalBody,
+  [System.Collections.IDictionary]$ProvenHistoricalProvenance,
   [string]$DesiredBody,
   [string]$ArtifactPath,
   [string]$ArtifactSha256
 ) {
   $DesiredBody = Normalize-IssueCommentBody $DesiredBody
-  if ($Guard.operation_decision -ceq 'create') {
-    $originalSource = 'Task 8 initial publication desired body'
-    $originalBody = $DesiredBody
-  } else {
-    $originalSource = 'Task 8 execution report exact original published body'
-    $originalBody = Normalize-IssueCommentBody $HistoricalOriginalBody
+  $original = $ProvenHistoricalProvenance.historical_original
+  $originalBody = Normalize-IssueCommentBody ([string]$original.normalized_body)
+  if ([string]$original.normalized_body_sha256 -cne (Get-NormalizedBodySha256 $originalBody)) {
+    throw 'proven historical origin hash mismatch'
+  }
+  if ($Guard.operation_decision -ceq 'exact-no-op') {
+    $hashes = @(@(
+      [string]$Guard.prior_normalized_body_sha256,
+      [string]$Guard.desired_normalized_body_sha256,
+      [string]$Guard.post_normalized_body_sha256
+    ) | Select-Object -Unique)
+    if ($hashes.Count -ne 1) { throw 'exact-no-op pre/desired/post normalized hashes differ' }
   }
   return [ordered]@{
     schema_version = 1
@@ -1857,9 +1930,13 @@ function New-CheckpointTranscript(
     issue = 147
     purpose_prefix = '## Reliability-gated Wayfinder migration readback'
     historical_original = [ordered]@{
-      source = $originalSource
+      source = [string]$original.source
       normalized_body = $originalBody
-      normalized_body_sha256 = Get-NormalizedBodySha256 $originalBody
+      normalized_body_sha256 = [string]$original.normalized_body_sha256
+    }
+    historical_provenance = [ordered]@{
+      proof_kind = [string]$ProvenHistoricalProvenance.proof_kind
+      prior_transcript = $ProvenHistoricalProvenance.prior_transcript
     }
     pre_update = [ordered]@{
       public_comment_id = $Guard.prior_public_comment_id
@@ -1908,6 +1985,10 @@ Durable frontier audit: $artifactPath (SHA-256: ``$artifactSha256``).
 Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
 "@
 $purposePrefix = '## Reliability-gated Wayfinder migration readback'
+$transcriptPath = 'docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json'
+$priorTranscript = if (Test-Path $transcriptPath) {
+  Get-Content -Raw $transcriptPath | ConvertFrom-Json -AsHashtable
+} else { $null }
 $guard = Set-OrCreateExactIssueComment 147 $purposePrefix $comment `
   4994927680 'b6d4d1e9bc58fd013c4968eb2799990fb7afa579572ade93534ee657c35ad82b'
 
@@ -1934,8 +2015,8 @@ Current unclaimed 0.1.6 ready frontier:
 
 Frontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.
 '@
-$transcript = New-CheckpointTranscript $guard $historicalOriginalBody $comment $artifactPath $artifactSha256
-$transcriptPath = 'docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json'
+$provenance = Resolve-ProvenCheckpointHistoricalProvenance $guard $comment $priorTranscript $historicalOriginalBody
+$transcript = New-CheckpointTranscript $guard $provenance $comment $artifactPath $artifactSha256
 $transcript | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $transcriptPath
 python scripts/generate_wayfinder_final_audit.py finalize `
   --core $artifactPath `

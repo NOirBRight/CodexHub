@@ -912,7 +912,11 @@ def validate_core(core: dict[str, Any]) -> None:
     _assert_sanitized(core)
 
 
-def validate_transcript(transcript: dict[str, Any], core_sha256: str) -> None:
+def validate_transcript(
+    transcript: dict[str, Any], core_sha256: str, _provenance_depth: int = 0
+) -> None:
+    if _provenance_depth > 32:
+        raise ValueError("checkpoint historical provenance chain too deep")
     if transcript.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("checkpoint transcript schema mismatch")
     parse_timestamp(transcript.get("captured_at"), "checkpoint transcript")
@@ -932,11 +936,6 @@ def validate_transcript(transcript: dict[str, Any], core_sha256: str) -> None:
         raise ValueError("checkpoint desired body lacks durable artifact path/hash")
     historical = transcript.get("historical_original", {})
     original_body = normalize_body(historical.get("normalized_body"))
-    expected_original = (
-        desired_body if operation == "create" else normalize_body(ORIGINAL_CHECKPOINT_BODY)
-    )
-    if original_body != expected_original:
-        raise ValueError("checkpoint historical original body mismatch")
     if historical.get("normalized_body_sha256") != sha256_text(original_body):
         raise ValueError("checkpoint historical original hash mismatch")
     pre = transcript.get("pre_update", {})
@@ -960,7 +959,75 @@ def validate_transcript(transcript: dict[str, Any], core_sha256: str) -> None:
         raise ValueError("checkpoint post-readback multiplicity mismatch")
     if post.get("normalized_body_sha256") != desired.get("normalized_body_sha256"):
         raise ValueError("checkpoint post-readback body mismatch")
+    if operation == "exact-no-op" and len(
+        {
+            pre.get("normalized_body_sha256"),
+            desired.get("normalized_body_sha256"),
+            post.get("normalized_body_sha256"),
+        }
+    ) != 1:
+        raise ValueError("checkpoint exact-no-op pre/desired/post hashes differ")
+
+    provenance = transcript.get("historical_provenance", {})
+    proof_kind = provenance.get("proof_kind")
+    prior_transcript = provenance.get("prior_transcript")
+    if proof_kind == "initial-create":
+        if operation != "create" or prior_transcript is not None or original_body != desired_body:
+            raise ValueError("checkpoint initial-create provenance mismatch")
+    elif proof_kind == "live-exact-desired":
+        if (
+            operation != "exact-no-op"
+            or prior_transcript is not None
+            or original_body != desired_body
+        ):
+            raise ValueError("checkpoint live-exact provenance mismatch")
+    elif proof_kind == "task8-execution-report":
+        if (
+            operation != "patch"
+            or prior_transcript is not None
+            or original_body != normalize_body(ORIGINAL_CHECKPOINT_BODY)
+        ):
+            raise ValueError("checkpoint execution-report provenance mismatch")
+    elif proof_kind == "tracked-transcript":
+        if operation not in {"patch", "exact-no-op"} or not isinstance(prior_transcript, dict):
+            raise ValueError("checkpoint tracked-transcript provenance mismatch")
+        prior_core_sha = prior_transcript.get("desired", {}).get(
+            "frontier_artifact_sha256"
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", str(prior_core_sha or "")):
+            raise ValueError("checkpoint prior transcript frontier hash missing")
+        validate_transcript(
+            prior_transcript, str(prior_core_sha), _provenance_depth + 1
+        )
+        if historical != prior_transcript.get("historical_original"):
+            raise ValueError("checkpoint historical origin changed across retry")
+        prior_post = prior_transcript["post_readback"]
+        if (
+            prior_post.get("public_comment_id") != pre.get("public_comment_id")
+            or prior_post.get("normalized_body_sha256")
+            != pre.get("normalized_body_sha256")
+        ):
+            raise ValueError("checkpoint prior transcript does not prove current pre-state")
+    else:
+        raise ValueError("checkpoint historical provenance proof missing")
     _assert_sanitized(transcript)
+
+
+def _captured_checkpoint_prior(
+    transcript: dict[str, Any], core_sha256: str
+) -> dict[str, Any] | None:
+    """Return the checkpoint state captured in the core before a retry chain."""
+    if transcript["operation_decision"] == "create":
+        return None
+    provenance = transcript["historical_provenance"]
+    prior = provenance.get("prior_transcript")
+    if (
+        provenance.get("proof_kind") == "tracked-transcript"
+        and isinstance(prior, dict)
+        and prior.get("desired", {}).get("frontier_artifact_sha256") == core_sha256
+    ):
+        return _captured_checkpoint_prior(prior, core_sha256)
+    return transcript["pre_update"]
 
 
 def build_final(core: dict[str, Any], core_path: str, transcript: dict[str, Any]) -> dict[str, Any]:
@@ -1022,8 +1089,8 @@ def validate_final(final: dict[str, Any]) -> None:
         raise ValueError("final artifact checkpoint transcript missing")
     validate_transcript(transcript, core_sha)
     recorded_prior = core["global_github_audit"]["comments"].get("147")
-    transcript_prior = transcript["pre_update"]
-    if transcript["operation_decision"] == "create":
+    transcript_prior = _captured_checkpoint_prior(transcript, core_sha)
+    if transcript_prior is None:
         if recorded_prior is not None:
             raise ValueError("frontier capture unexpectedly contains a checkpoint prior to create")
     elif (

@@ -4,6 +4,7 @@ import json
 import pathlib
 import re
 import subprocess
+import tempfile
 import unittest
 
 
@@ -122,26 +123,31 @@ $cases = @()
 
 Reset-Comments $null
 $guard = Set-OrCreateExactIssueComment 147 {ps_literal(module.COMMENT_PREFIXES[147])} $desired 4994927680L $oldHash
-$cases += [ordered]@{{ guard = $guard; transcript = New-CheckpointTranscript $guard $historical $desired $artifactPath $artifactSha }}
+$proof = Resolve-ProvenCheckpointHistoricalProvenance $guard $desired $null $historical
+$cases += [ordered]@{{ guard = $guard; transcript = New-CheckpointTranscript $guard $proof $desired $artifactPath $artifactSha }}
 
 Reset-Comments $desired
 $guard = Set-OrCreateExactIssueComment 147 {ps_literal(module.COMMENT_PREFIXES[147])} $desired 4994927680L $oldHash
-$cases += [ordered]@{{ guard = $guard; transcript = New-CheckpointTranscript $guard $historical $desired $artifactPath $artifactSha }}
+$proof = Resolve-ProvenCheckpointHistoricalProvenance $guard $desired $null $historical
+$cases += [ordered]@{{ guard = $guard; transcript = New-CheckpointTranscript $guard $proof $desired $artifactPath $artifactSha }}
 
 Reset-Comments $old
 $guard = Set-OrCreateExactIssueComment 147 {ps_literal(module.COMMENT_PREFIXES[147])} $desired 4994927680L $oldHash
-$cases += [ordered]@{{ guard = $guard; transcript = New-CheckpointTranscript $guard $historical $desired $artifactPath $artifactSha }}
+$proof = Resolve-ProvenCheckpointHistoricalProvenance $guard $desired $null $historical
+$cases += [ordered]@{{ guard = $guard; transcript = New-CheckpointTranscript $guard $proof $desired $artifactPath $artifactSha }}
 
 $cases | ConvertTo-Json -Depth 10 -Compress
 '''
-        completed = subprocess.run(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", "-"],
-            input=harness,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            cwd=ROOT,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            harness_path = pathlib.Path(temp_dir) / "checkpoint-sequence.ps1"
+            harness_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness_path)],
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                cwd=ROOT,
+            )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.strip(), completed.stderr or "PowerShell harness produced no JSON")
         cases = json.loads(completed.stdout)
@@ -157,12 +163,30 @@ $cases | ConvertTo-Json -Depth 10 -Compress
         self.assertTrue(all(case["guard"]["post_exact_body_multiplicity"] == 1 for case in cases))
         for case in cases:
             with self.subTest(operation=case["guard"]["operation_decision"]):
-                if case["guard"]["operation_decision"] != "create":
+                if case["guard"]["operation_decision"] == "patch":
                     self.assertEqual(
                         module.normalize_body(case["transcript"]["historical_original"]["normalized_body"]),
                         module.normalize_body(module.ORIGINAL_CHECKPOINT_BODY),
                     )
+                elif case["guard"]["operation_decision"] == "exact-no-op":
+                    self.assertEqual(
+                        module.normalize_body(case["transcript"]["historical_original"]["normalized_body"]),
+                        desired,
+                    )
                 module.validate_transcript(case["transcript"], core_sha)
+        broken_noop = json.loads(json.dumps(cases[1]["transcript"]))
+        broken_noop["pre_update"]["normalized_body_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "exact-no-op pre/desired/post hashes differ"):
+            module.validate_transcript(broken_noop, core_sha)
+
+        broken_origin = json.loads(json.dumps(cases[1]["transcript"]))
+        broken_origin["historical_original"] = {
+            "source": "Task 8 execution report exact original published body",
+            "normalized_body": module.ORIGINAL_CHECKPOINT_BODY,
+            "normalized_body_sha256": module.sha256_text(module.ORIGINAL_CHECKPOINT_BODY),
+        }
+        with self.assertRaisesRegex(ValueError, "live-exact provenance mismatch"):
+            module.validate_transcript(broken_origin, core_sha)
 
     def test_initial_checkpoint_transcript_finalizes_without_prior_state(self):
         module = load_module()
@@ -188,6 +212,10 @@ $cases | ConvertTo-Json -Depth 10 -Compress
                 "normalized_body": desired_body,
                 "normalized_body_sha256": desired_hash,
             },
+            "historical_provenance": {
+                "proof_kind": "initial-create",
+                "prior_transcript": None,
+            },
             "pre_update": {
                 "public_comment_id": None,
                 "normalized_body_sha256": None,
@@ -210,6 +238,137 @@ $cases | ConvertTo-Json -Depth 10 -Compress
         }
         final = module.build_final(core, module.CORE_ARTIFACT_PATH, transcript)
         self.assertEqual(final["derivation"]["checkpoint_exact_body_guard"], "create")
+
+    def test_stateful_retries_preserve_proven_historical_origin(self):
+        module = load_module()
+        plan = (ROOT / "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md").read_text(
+            encoding="utf-8"
+        )
+        task8 = plan.split("### Task 8:", 1)[1]
+        step6 = task8.split("**Step 6:", 1)[1]
+        block = re.search(r"```powershell\n(?P<body>.*?)\n```", step6, re.DOTALL)
+        self.assertIsNotNone(block)
+        prelude = block.group("body").split("$frontierText", 1)[0]
+
+        tracked_core = json.loads((ROOT / module.CORE_ARTIFACT_PATH).read_text(encoding="utf-8"))
+        create_core = json.loads(json.dumps(tracked_core))
+        create_core["global_github_audit"]["comments"]["147"] = None
+        create_core_sha = module.serialized_json_sha256(create_core)
+        create_desired = (
+            module.COMMENT_PREFIXES[147]
+            + "\n\nDurable frontier audit: "
+            + module.CORE_ARTIFACT_PATH
+            + f" (SHA-256: `{create_core_sha}`)."
+        )
+
+        patch_core = json.loads(json.dumps(tracked_core))
+        patch_prior_body = module.COMMENT_PREFIXES[147] + "\n\nPrior checkpoint body."
+        patch_core["global_github_audit"]["comments"]["147"][
+            "normalized_body_sha256"
+        ] = module.sha256_text(patch_prior_body)
+        patch_core_sha = module.serialized_json_sha256(patch_core)
+        self.assertEqual(
+            module.sha256_text(patch_prior_body),
+            patch_core["global_github_audit"]["comments"]["147"]["normalized_body_sha256"],
+        )
+        patch_desired = (
+            module.COMMENT_PREFIXES[147]
+            + "\n\nDurable frontier audit: "
+            + module.CORE_ARTIFACT_PATH
+            + f" (SHA-256: `{patch_core_sha}`).\n\nStateful retry target."
+        )
+
+        def b64(value):
+            return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+        harness = "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n" + prelude + rf'''
+function Reset-Comments([string]$Body) {{
+  if ($null -eq $Body) {{ $script:comments = @() }} else {{
+    $script:comments = @([pscustomobject]@{{ id = 4994927680L; body = $Body; html_url = 'https://example.invalid/comment' }})
+  }}
+}}
+function Get-IssueComments([int]$Issue) {{ return @($script:comments) }}
+function New-IssueComment([int]$Issue,[string]$Body) {{
+  $script:comments = @([pscustomobject]@{{ id = 4994927680L; body = $Body; html_url = 'https://example.invalid/comment' }})
+}}
+function Update-IssueComment([long]$PublicCommentId,[string]$Body) {{
+  $script:comments = @([pscustomobject]@{{ id = $PublicCommentId; body = $Body; html_url = 'https://example.invalid/comment' }})
+}}
+$prefix = '{module.COMMENT_PREFIXES[147]}'
+$artifactPath = '{module.CORE_ARTIFACT_PATH}'
+$legacy = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64(module.ORIGINAL_CHECKPOINT_BODY)}'))
+$createDesired = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64(create_desired)}'))
+$patchPrior = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64(patch_prior_body)}'))
+$patchDesired = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64(patch_desired)}'))
+
+Reset-Comments $null
+$createGuard = Set-OrCreateExactIssueComment 147 $prefix $createDesired 4994927680L ('0' * 64)
+$createProof = Resolve-ProvenCheckpointHistoricalProvenance $createGuard $createDesired $null $legacy
+$createTranscript = New-CheckpointTranscript $createGuard $createProof $createDesired $artifactPath '{create_core_sha}'
+$createNoopGuard = Set-OrCreateExactIssueComment 147 $prefix $createDesired 4994927680L ('0' * 64)
+$createNoopProof = Resolve-ProvenCheckpointHistoricalProvenance $createNoopGuard $createDesired $createTranscript $legacy
+$createNoopTranscript = New-CheckpointTranscript $createNoopGuard $createNoopProof $createDesired $artifactPath '{create_core_sha}'
+
+Reset-Comments $patchPrior
+$patchPriorHash = Get-NormalizedBodySha256 $patchPrior
+$patchGuard = Set-OrCreateExactIssueComment 147 $prefix $patchDesired 4994927680L $patchPriorHash
+$patchProof = Resolve-ProvenCheckpointHistoricalProvenance $patchGuard $patchDesired $null $legacy
+$patchTranscript = New-CheckpointTranscript $patchGuard $patchProof $patchDesired $artifactPath '{patch_core_sha}'
+$patchNoopGuard = Set-OrCreateExactIssueComment 147 $prefix $patchDesired 4994927680L $patchPriorHash
+$patchNoopProof = Resolve-ProvenCheckpointHistoricalProvenance $patchNoopGuard $patchDesired $patchTranscript $legacy
+$patchNoopTranscript = New-CheckpointTranscript $patchNoopGuard $patchNoopProof $patchDesired $artifactPath '{patch_core_sha}'
+
+$result = [ordered]@{{
+  create = $createTranscript
+  create_noop = $createNoopTranscript
+  patch = $patchTranscript
+  patch_noop = $patchNoopTranscript
+}}
+$json = $result | ConvertTo-Json -Depth 30 -Compress
+if ([string]::IsNullOrWhiteSpace($json)) {{ throw 'PowerShell sequence JSON serialization returned empty output' }}
+Write-Output $json
+'''
+        with tempfile.TemporaryDirectory() as temp_dir:
+            harness_path = pathlib.Path(temp_dir) / "checkpoint-sequence.ps1"
+            harness_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(harness_path)],
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                cwd=ROOT,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.strip(), completed.stderr or "PowerShell sequence produced no JSON")
+        transcripts = json.loads(completed.stdout)
+
+        for first, retry, core in (
+            ("create", "create_noop", create_core),
+            ("patch", "patch_noop", patch_core),
+        ):
+            self.assertEqual(
+                transcripts[first]["historical_original"],
+                transcripts[retry]["historical_original"],
+            )
+            self.assertEqual(transcripts[retry]["operation_decision"], "exact-no-op")
+            hashes = {
+                transcripts[retry]["pre_update"]["normalized_body_sha256"],
+                transcripts[retry]["desired"]["normalized_body_sha256"],
+                transcripts[retry]["post_readback"]["normalized_body_sha256"],
+            }
+            self.assertEqual(len(hashes), 1)
+            module.build_final(core, module.CORE_ARTIFACT_PATH, transcripts[first])
+            module.build_final(core, module.CORE_ARTIFACT_PATH, transcripts[retry])
+
+        self.assertIsNone(transcripts["create"]["pre_update"]["normalized_body_sha256"])
+        self.assertEqual(
+            transcripts["create"]["historical_original"]["normalized_body"],
+            create_desired,
+        )
+        self.assertEqual(
+            transcripts["patch"]["pre_update"]["normalized_body_sha256"],
+            module.sha256_text(patch_prior_body),
+        )
 
 
 if __name__ == "__main__":
