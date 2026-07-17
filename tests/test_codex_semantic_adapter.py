@@ -1,4 +1,8 @@
 import json
+from pathlib import Path
+
+import pytest
+import codex_semantic_adapter
 
 from codex_semantic_adapter import (
     coerce_number,
@@ -8,6 +12,11 @@ from codex_semantic_adapter import (
     normalize_multi_agent_arguments,
     normalize_tool_search_arguments,
 )
+
+
+def _worker_binding_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "worker_effective_binding.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
 def test_normalize_tool_search_arguments_accepts_json_string_limit():
@@ -39,6 +48,169 @@ def test_normalize_multi_agent_spawn_arguments_from_prompt_alias():
     assert payload["timeout_ms"] == 1500
     assert "prompt" not in payload
     assert "name" not in payload
+
+
+def test_normalize_multi_agent_spawn_preserves_worker_selector():
+    value, tool_name, changed = normalize_multi_agent_arguments(
+        '{"message":"do work","agent_type":"worker"}',
+        "spawn_agent",
+    )
+
+    assert changed is True
+    assert tool_name == "spawn_agent"
+    assert json.loads(value)["agent_type"] == "worker"
+
+
+def test_normalize_multi_agent_spawn_preserves_unknown_selector_for_rejection():
+    value, tool_name, changed = normalize_multi_agent_arguments(
+        '{"message":"do work","agent_type":"synthetic-unknown"}',
+        "spawn_agent",
+    )
+
+    assert changed is True
+    assert tool_name == "spawn_agent"
+    assert json.loads(value)["agent_type"] == "synthetic-unknown"
+
+
+def test_normalize_multi_agent_spawn_retains_explicit_general_compatibility():
+    value, tool_name, changed = normalize_multi_agent_arguments(
+        '{"message":"do work","agent_type":"general"}',
+        "spawn_agent",
+    )
+
+    assert changed is True
+    assert tool_name == "spawn_agent"
+    assert json.loads(value)["agent_type"] == "general"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "classification"),
+    [
+        ({"message": "do work"}, "missing_selector"),
+        ({"message": "do work", "agent_type": "synthetic-unknown"}, "unsupported_selector"),
+    ],
+)
+def test_validate_worker_selector_fails_closed(arguments, classification):
+    assert codex_semantic_adapter.validate_worker_selector(arguments) == (
+        codex_semantic_adapter.BindingValidation("rejected", classification)
+    )
+
+
+def test_validate_effective_worker_binding_accepts_supported_exact_readback():
+    fixture = _worker_binding_fixture()
+    assert fixture["fixture_kind"] == "synthetic_codexhub_internal_normalized_adapter_contract"
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        fixture["readbacks"]["matching"],
+    ) == codex_semantic_adapter.BindingValidation(codex_semantic_adapter.BINDING_ACCEPTED, "matched")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "classification"),
+    [
+        ("model", None, "missing_requested_model"),
+        ("model", "gpt-synthetic-request", "unsupported_requested_model"),
+        ("reasoning", None, "missing_requested_reasoning"),
+        ("reasoning", "synthetic-unknown", "unsupported_requested_reasoning"),
+    ],
+)
+def test_validate_effective_worker_binding_classifies_requested_binding_failures(field, value, classification):
+    fixture = _worker_binding_fixture()
+    if value is None:
+        fixture["requested"].pop(field)
+    else:
+        fixture["requested"][field] = value
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        fixture["readbacks"]["matching"],
+    ) == codex_semantic_adapter.BindingValidation("rejected", classification)
+
+
+@pytest.mark.parametrize(
+    ("effective_agent_type", "classification"),
+    [
+        ("general", "contradictory_agent_type"),
+        ("synthetic-unknown", "unknown_effective_agent_type"),
+    ],
+)
+def test_validate_effective_worker_binding_classifies_effective_agent_type(effective_agent_type, classification):
+    fixture = _worker_binding_fixture()
+    fixture["readbacks"]["matching"]["effective_binding"]["agent_type"] = effective_agent_type
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        fixture["readbacks"]["matching"],
+    ) == codex_semantic_adapter.BindingValidation("rejected", classification)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "classification"),
+    [
+        ("agent_type", None, "missing_effective_agent_type"),
+        ("agent_type", "", "missing_effective_agent_type"),
+        ("agent_type", {"private": "agent"}, "unknown_effective_agent_type"),
+        ("model", None, "missing_effective_model"),
+        ("model", "", "missing_effective_model"),
+        ("model", {"private": "model"}, "unknown_effective_model"),
+        ("reasoning", None, "missing_effective_reasoning"),
+        ("reasoning", "", "missing_effective_reasoning"),
+        ("reasoning", {"private": "reasoning"}, "unknown_effective_reasoning"),
+    ],
+)
+def test_validate_effective_worker_binding_distinguishes_missing_from_wrong_types(
+    field,
+    value,
+    classification,
+):
+    fixture = _worker_binding_fixture()
+    fixture["readbacks"]["matching"]["effective_binding"][field] = value
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        fixture["readbacks"]["matching"],
+    ) == codex_semantic_adapter.BindingValidation("rejected", classification)
+
+
+def test_strict_json_object_rejects_noncanonical_readback_strings():
+    assert codex_semantic_adapter.strict_json_object({"synthetic": "shape"}) == {"synthetic": "shape"}
+    assert codex_semantic_adapter.strict_json_object('{"synthetic":"shape"}') == {"synthetic": "shape"}
+    assert codex_semantic_adapter.strict_json_object('{"synthetic":"shape"} trailing') is None
+    assert codex_semantic_adapter.strict_json_object('{"synthetic":"shape"}{"second":true}') is None
+    assert codex_semantic_adapter.strict_json_object('{"synthetic":') is None
+
+
+def test_validate_effective_worker_binding_rejects_unversioned_extensions():
+    fixture = _worker_binding_fixture()
+    readback = fixture["readbacks"]["matching"]
+    readback["effective_binding"]["synthetic_extension"] = "not-part-of-v1"
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        readback,
+    ) == codex_semantic_adapter.BindingValidation("rejected", "unknown_readback")
+
+
+@pytest.mark.parametrize(
+    ("readback_name", "classification"),
+    [
+        ("missing", "missing_readback"),
+        ("unknown", "unknown_readback"),
+        ("contradictory", "contradictory_model"),
+        ("rejected", "rejected_readback"),
+        ("unsupported", "unsupported_readback"),
+        ("gpt_substituted", "gpt_substitution"),
+        ("aliased", "unknown_readback"),
+    ],
+)
+def test_validate_effective_worker_binding_fails_closed(readback_name, classification):
+    fixture = _worker_binding_fixture()
+
+    assert codex_semantic_adapter.validate_effective_worker_binding(
+        fixture["requested"],
+        fixture["readbacks"][readback_name],
+    ) == codex_semantic_adapter.BindingValidation("rejected", classification)
 
 
 def test_normalize_multi_agent_wait_target_to_targets():
