@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "codexhub"
-version = "0.1.6-beta.1"
+version = "0.1.6"
 dependencies = [
  "dirs 5.0.1",
  "log",
