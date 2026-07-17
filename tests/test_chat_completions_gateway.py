@@ -1329,6 +1329,153 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         ]
         self.assertEqual(marker_events, [])
 
+    def _ollama_glm_external_model(self):
+        return {
+            "alias": "ollama-cloud/glm-5.2",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "display_prefix": "Ollama",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "supported_reasoning_levels": ("low", "high", "xhigh", "max"),
+            "default_reasoning_level": "max",
+            "priority_base": 200,
+            "context_window": 131072,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+
+    def _run_ollama_chat_request(self, payload_fields):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = self._ollama_glm_external_model()
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+                **payload_fields,
+            }
+        ).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/ollama-cloud/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_reasoning",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi"}],
+            }],
+        }).encode("utf-8")
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "ollama-cloud/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "ollama-cloud/glm-5.2": {
+                        "slug": "ollama-cloud/glm-5.2",
+                        "input_modalities": ["text"],
+                        "supported_reasoning_levels": ["low", "high", "xhigh", "max"],
+                    },
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("ollama-cloud/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        return handler, mock_urlopen
+
+    def test_chat_template_reasoning_effort_reaches_ollama_upstream_as_responses_reasoning(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "max"},
+            "stream_options": {"include_usage": True},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["reasoning"], {"effort": "max"})
+        self.assertNotIn("chat_template_kwargs", sent_payload)
+        self.assertNotIn("stream_options", sent_payload)
+
+    def test_chat_template_reasoning_effort_high_stays_distinct_for_ollama(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "high"},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["reasoning"], {"effort": "high"})
+
+    def test_chat_template_reasoning_effort_xhigh_aliases_to_max_for_ollama(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "xhigh"},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["reasoning"], {"effort": "max"})
+
+    def test_unmappable_chat_template_kwargs_fails_closed_400(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"enable_thinking": True},
+        })
+        self.assertEqual(handler._fake.status, 400)
+        mock_urlopen.assert_not_called()
+        self.assertIn(b"chat_template_kwargs", b"".join(handler.wfile.writes))
+
+    def test_stream_options_with_extra_keys_fails_closed_400(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "max"},
+            "stream_options": {"include_usage": True, "chunk_delimiter": "\n"},
+        })
+        self.assertEqual(handler._fake.status, 400)
+        mock_urlopen.assert_not_called()
+
+    def test_ultra_reasoning_effort_via_chat_template_kwargs_rejected_400(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "ultra"},
+        })
+        self.assertEqual(handler._fake.status, 400)
+        mock_urlopen.assert_not_called()
+        self.assertIn(b"ultra", b"".join(handler.wfile.writes))
+
+    def test_reasoning_policy_marks_provider_default_when_control_omitted(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({})
+        self.assertEqual(handler._fake.status, 200)
+        request_start = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["reasoning_policy"], "provider-default")
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertNotIn("reasoning", sent_payload)
+
+    def test_reasoning_policy_marks_explicit_when_control_present(self):
+        handler, _mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "max"},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        request_start = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["reasoning_policy"], "explicit")
+
     def test_explicit_third_party_standard_chat_route_is_transparent_metered(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
