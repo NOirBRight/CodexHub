@@ -2,6 +2,7 @@ use crate::gateway_lifecycle::{
     coordinator as gateway_lifecycle, GatewayIdentity, GatewayLifecycleBackend,
     GatewayLifecycleSnapshot, GatewayStartOutcome,
 };
+use crate::gateway_transaction::GatewayLifecyclePhase;
 use crate::AppStatus;
 use crate::Settings;
 use crate::{build_info, runtime_paths, safe_file};
@@ -121,6 +122,10 @@ impl ProxyPaths {
         self.proxy_dir().join("proxy.pid")
     }
 
+    fn lifecycle_gate_path(&self) -> PathBuf {
+        self.proxy_dir().join("lifecycle.lock")
+    }
+
     fn codex_config_path(&self) -> PathBuf {
         self.codex_target_dir.join("config.toml")
     }
@@ -136,17 +141,24 @@ impl ProxyPaths {
 
 struct ProxyLifecycleBackend {
     paths: ProxyPaths,
+    lifecycle_gate_path: PathBuf,
 }
 
 impl ProxyLifecycleBackend {
     fn runtime() -> Result<Self, String> {
+        let paths = ProxyPaths::runtime()?;
         Ok(Self {
-            paths: ProxyPaths::runtime()?,
+            lifecycle_gate_path: paths.lifecycle_gate_path(),
+            paths,
         })
     }
 }
 
 impl GatewayLifecycleBackend for ProxyLifecycleBackend {
+    fn lifecycle_gate_path(&self) -> &Path {
+        &self.lifecycle_gate_path
+    }
+
     fn snapshot(&self) -> Result<GatewayLifecycleSnapshot, String> {
         reconciled_snapshot_with_controls(
             &self.paths,
@@ -154,6 +166,29 @@ impl GatewayLifecycleBackend for ProxyLifecycleBackend {
             &SystemProcessInspector,
             &SystemListenerInspector,
         )
+    }
+
+    fn transitional_status(&self, phase: GatewayLifecyclePhase) -> Result<AppStatus, String> {
+        let settings = read_settings(&self.paths)?;
+        let mode = read_mode(&self.paths)?;
+        let (proxy_running, message) = match phase {
+            GatewayLifecyclePhase::Starting => (false, "Gateway is starting"),
+            GatewayLifecyclePhase::Stopping => (true, "Gateway is stopping"),
+            GatewayLifecyclePhase::Restarting => (true, "Gateway is restarting"),
+            GatewayLifecyclePhase::Running => (true, "Gateway is running"),
+            GatewayLifecyclePhase::Stopped => (false, "Gateway is stopped"),
+            GatewayLifecyclePhase::Failed => (false, "Gateway lifecycle needs reconciliation"),
+        };
+        Ok(AppStatus {
+            mode,
+            proxy_running,
+            proxy_port: settings.proxy_port,
+            proxy_build: None,
+            message: message.to_string(),
+            gateway_lifecycle: phase,
+            history_sync_status: None,
+            history_sync_message: None,
+        })
     }
 
     fn start(&self) -> Result<GatewayStartOutcome, String> {
@@ -314,6 +349,8 @@ struct ProxyPidMetadata {
     script_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     script_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_start_id: Option<String>,
     started_at_unix_ms: u64,
 }
 
@@ -325,6 +362,7 @@ impl ProxyPidMetadata {
             port,
             script_path: comparable_path(script),
             script_sha256: file_sha256(script),
+            process_start_id: None,
             started_at_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -409,6 +447,7 @@ fn reconciled_snapshot_with_controls(
                 proxy_port: settings.proxy_port,
                 proxy_build: None,
                 message: "Gateway is not running".to_string(),
+                gateway_lifecycle: GatewayLifecyclePhase::Stopped,
                 history_sync_status: None,
                 history_sync_message: None,
             },
@@ -452,16 +491,14 @@ fn reconciled_snapshot_with_controls(
 
     let listener_pid = listener_inspector.listening_pid(settings.proxy_port)?;
     let Some(listener_pid) = listener_pid else {
-        remove_pid(paths)?;
         return Err(format!(
-            "Gateway health responds on port {}, but no TCP listener owner could be reconciled; removed managed PID {pid} without stopping the process",
+            "Gateway health responds on port {}, but no TCP listener owner could be reconciled; preserved exact managed PID {pid} for ownership-safe recovery",
             settings.proxy_port
         ));
     };
     if listener_pid != pid {
-        remove_pid(paths)?;
         return Err(format!(
-            "Gateway health responds on port {}, but listener PID {listener_pid} differs from managed PID {pid}; removed stale PID identity without stopping either process",
+            "Gateway health responds on port {}, but listener PID {listener_pid} differs from exact managed PID {pid}; preserved the managed PID identity without stopping either process",
             settings.proxy_port
         ));
     }
@@ -484,6 +521,7 @@ fn reconciled_snapshot_with_controls(
             proxy_port: settings.proxy_port,
             proxy_build: response.build.clone(),
             message: format!("Gateway running with PID {pid}"),
+            gateway_lifecycle: GatewayLifecyclePhase::Running,
             history_sync_status: None,
             history_sync_message: None,
         },
@@ -491,6 +529,7 @@ fn reconciled_snapshot_with_controls(
     })
 }
 
+#[cfg(test)]
 fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     let settings = read_settings(paths)?;
     let mode = read_mode(paths)?;
@@ -516,6 +555,11 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
             "Proxy is healthy".to_string()
         } else {
             "Proxy is not running".to_string()
+        },
+        gateway_lifecycle: if proxy_running {
+            GatewayLifecyclePhase::Running
+        } else {
+            GatewayLifecyclePhase::Stopped
         },
         history_sync_status: None,
         history_sync_message: None,
@@ -664,6 +708,8 @@ where
     })?;
     let output_capture = capture_child_stdio(&mut child);
     let pid = child.id();
+    let mut record =
+        ProxyPidRecord::Managed(ProxyPidMetadata::new(pid, settings.proxy_port, &script));
 
     let startup = match wait_for_startup(
         &mut child,
@@ -680,14 +726,40 @@ where
                 &mut child,
                 output_capture,
                 error,
+                &record,
+                inspector,
             ))
         }
     };
 
     match startup {
         StartupOutcome::Healthy(response) if response.is_running() => {
-            let record =
-                ProxyPidRecord::Managed(ProxyPidMetadata::new(pid, settings.proxy_port, &script));
+            let process_start_id = match inspector.inspect(pid) {
+                Ok(InspectedProcess::Running(info)) => info.process_start_id,
+                Ok(InspectedProcess::Missing) => {
+                    return Err(clean_up_failed_start(
+                        paths,
+                        &mut child,
+                        output_capture,
+                        format!("spawned Gateway PID {pid} disappeared before ownership fencing"),
+                        &record,
+                        inspector,
+                    ))
+                }
+                Err(error) => {
+                    return Err(clean_up_failed_start(
+                        paths,
+                        &mut child,
+                        output_capture,
+                        format!("failed to fence spawned Gateway PID {pid}: {error}"),
+                        &record,
+                        inspector,
+                    ))
+                }
+            };
+            if let ProxyPidRecord::Managed(metadata) = &mut record {
+                metadata.process_start_id = process_start_id;
+            }
             let verification =
                 verify_proxy_process(&record, paths, settings.proxy_port, inspector)?;
             if verification != (VerifiedProxyProcess::Verified { pid }) {
@@ -698,6 +770,8 @@ where
                     format!(
                         "spawned Gateway PID {pid} ownership could not be reconciled: {verification:?}"
                     ),
+                    &record,
+                    inspector,
                 ));
             }
 
@@ -709,6 +783,8 @@ where
                         &mut child,
                         output_capture,
                         error,
+                        &record,
+                        inspector,
                     ))
                 }
             };
@@ -724,15 +800,19 @@ where
                         "spawned Gateway PID {pid} became healthy, but {detail} owns port {}",
                         settings.proxy_port
                     ),
+                    &record,
+                    inspector,
                 ));
             }
 
-            if let Err(error) = write_pid(paths, pid, settings.proxy_port, &script) {
+            if let Err(error) = write_pid_record(paths, &record) {
                 return Err(clean_up_failed_start(
                     paths,
                     &mut child,
                     output_capture,
                     error,
+                    &record,
+                    inspector,
                 ));
             }
             match reconciled_snapshot_with_controls(
@@ -750,6 +830,8 @@ where
                     &mut child,
                     output_capture,
                     error,
+                    &record,
+                    inspector,
                 )),
             }
         }
@@ -761,6 +843,8 @@ where
                 "proxy returned a non-running health response at http://127.0.0.1:{}/health",
                 settings.proxy_port
             ),
+            &record,
+            inspector,
         )),
         StartupOutcome::Exited(status) => {
             let _ = remove_pid(paths);
@@ -782,6 +866,8 @@ where
                 ),
                 &StartupOutputSnapshot::default(),
             ),
+            &record,
+            inspector,
         )),
     }
 }
@@ -791,32 +877,34 @@ fn clean_up_failed_start(
     child: &mut Child,
     output_capture: StartupOutputCapture,
     reason: String,
+    record: &ProxyPidRecord,
+    inspector: &dyn ProcessInspector,
 ) -> String {
-    let termination_error = terminate_child(child).err();
-    let pid_error = remove_pid(paths).err();
-    let output = output_capture.finish();
-    let mut message = format_startup_failure(reason, &output);
-    if let Some(error) = termination_error {
-        message.push_str(&format!(
-            "\nfailed to terminate spawned child safely: {error}"
-        ));
-    }
-    if let Some(error) = pid_error {
-        message.push_str(&format!(
-            "\nfailed to remove unpublished PID identity: {error}"
-        ));
-    }
-    message
+    clean_up_failed_start_with_controls(
+        paths,
+        child,
+        output_capture,
+        reason,
+        record,
+        inspector,
+        &SystemChildTerminator,
+    )
 }
 
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
-    stop_with_paths_and_controls(paths, &SystemProcessKiller, &SystemProcessInspector)
+    stop_with_paths_and_controls(
+        paths,
+        &SystemProcessKiller,
+        &SystemProcessInspector,
+        &SystemListenerInspector,
+    )
 }
 
 fn stop_with_paths_and_controls(
     paths: &ProxyPaths,
     killer: &dyn ProcessKiller,
     inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
 ) -> Result<AppStatus, String> {
     let settings = read_settings(paths)?;
     let mode = read_mode(paths)?;
@@ -834,46 +922,46 @@ fn stop_with_paths_and_controls(
             pid_record,
             killer,
             inspector,
+            listener_inspector,
         );
     }
 
     let Some(pid_record) = pid_record else {
-        return stop_running_proxy_without_pid(
-            paths,
-            mode,
-            settings.proxy_port,
-            &settings.gateway_client_key,
-        );
+        return Err(format!(
+            "Gateway health responds on port {}, but no managed PID identity exists; refusing to send shutdown to the external listener",
+            settings.proxy_port
+        ));
     };
 
-    match verify_proxy_process(&pid_record, paths, settings.proxy_port, inspector)? {
+    let pid = match verify_proxy_process(&pid_record, paths, settings.proxy_port, inspector)? {
         VerifiedProxyProcess::Verified { pid } => pid,
         VerifiedProxyProcess::Missing { pid } => {
             remove_pid(paths)?;
-            return stop_running_proxy_with_stale_pid(
-                paths,
-                mode,
-                settings.proxy_port,
-                pid,
-                &settings.gateway_client_key,
-                "PID no longer exists".to_string(),
-            );
+            return Err(format!(
+                "Gateway health responds on port {}, but managed PID {pid} no longer exists; removed stale identity and refused shutdown",
+                settings.proxy_port
+            ));
         }
         VerifiedProxyProcess::Mismatch { pid, reason } => {
             remove_pid(paths)?;
-            return stop_running_proxy_with_stale_pid(
-                paths,
-                mode,
-                settings.proxy_port,
-                pid,
-                &settings.gateway_client_key,
-                format!("ownership could not be verified: {reason}"),
-            );
+            return Err(format!(
+                "Gateway health responds on port {}, but managed PID {pid} ownership could not be verified ({reason}); removed stale identity and refused shutdown",
+                settings.proxy_port
+            ));
         }
     };
 
+    verify_listener_owner(pid, settings.proxy_port, listener_inspector, "before shutdown")?;
+
     let _ = request_shutdown(settings.proxy_port, &settings.gateway_client_key);
     if wait_for_stopped(settings.proxy_port, GRACEFUL_STOP_TIMEOUT)? {
+        confirm_managed_process_stopped(
+            &pid_record,
+            paths,
+            settings.proxy_port,
+            inspector,
+            GRACEFUL_STOP_TIMEOUT,
+        )?;
         remove_pid(paths)?;
         return Ok(AppStatus {
             mode,
@@ -881,44 +969,34 @@ fn stop_with_paths_and_controls(
             proxy_port: settings.proxy_port,
             proxy_build: None,
             message: "Proxy stopped gracefully".to_string(),
+            gateway_lifecycle: GatewayLifecyclePhase::Stopped,
             history_sync_status: None,
             history_sync_message: None,
         });
     }
 
-    let pid = match verify_proxy_process(&pid_record, paths, settings.proxy_port, inspector)? {
-        VerifiedProxyProcess::Verified { pid } => pid,
-        VerifiedProxyProcess::Missing { pid } => {
-            remove_pid(paths)?;
-            return stop_running_proxy_with_stale_pid(
-                paths,
-                mode,
-                settings.proxy_port,
-                pid,
-                &settings.gateway_client_key,
-                "PID disappeared before force kill".to_string(),
-            );
-        }
-        VerifiedProxyProcess::Mismatch { pid, reason } => {
-            remove_pid(paths)?;
-            return stop_running_proxy_with_stale_pid(
-                paths,
-                mode,
-                settings.proxy_port,
-                pid,
-                &settings.gateway_client_key,
-                format!("ownership could not be verified before force kill: {reason}"),
-            );
-        }
-    };
-
-    killer.kill(pid)?;
+    let pid = force_kill_after_graceful_timeout(
+        paths,
+        &pid_record,
+        settings.proxy_port,
+        killer,
+        inspector,
+        listener_inspector,
+    )?;
     if !wait_for_stopped(settings.proxy_port, KILL_STOP_TIMEOUT)? {
         return Err(format!(
             "sent kill signal to proxy PID {pid}, but health still responds on port {}",
             settings.proxy_port
         ));
     }
+
+    confirm_managed_process_stopped(
+        &pid_record,
+        paths,
+        settings.proxy_port,
+        inspector,
+        KILL_STOP_TIMEOUT,
+    )?;
 
     remove_pid(paths)?;
     Ok(AppStatus {
@@ -927,65 +1005,44 @@ fn stop_with_paths_and_controls(
         proxy_port: settings.proxy_port,
         proxy_build: None,
         message: format!("Proxy PID {pid} stopped"),
+        gateway_lifecycle: GatewayLifecyclePhase::Stopped,
         history_sync_status: None,
         history_sync_message: None,
     })
 }
 
-fn stop_running_proxy_with_stale_pid(
+fn force_kill_after_graceful_timeout(
     paths: &ProxyPaths,
-    mode: String,
+    record: &ProxyPidRecord,
     port: u16,
-    pid: u32,
-    gateway_client_key: &str,
-    reason: String,
-) -> Result<AppStatus, String> {
-    let _ = request_shutdown(port, gateway_client_key);
-    if wait_for_stopped(port, GRACEFUL_STOP_TIMEOUT)? {
-        return Ok(AppStatus {
-            mode,
-            proxy_running: false,
-            proxy_port: port,
-            proxy_build: None,
-            message: format!(
-                "Proxy stopped gracefully after removing stale proxy PID {pid}: {reason}"
-            ),
-            history_sync_status: None,
-            history_sync_message: None,
-        });
-    }
+    killer: &dyn ProcessKiller,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+) -> Result<u32, String> {
+    let pid = match verify_proxy_process(record, paths, port, inspector)? {
+        VerifiedProxyProcess::Verified { pid } => pid,
+        VerifiedProxyProcess::Missing { pid } => {
+            remove_pid(paths)?;
+            return Err(format!(
+                "managed Gateway PID {pid} disappeared before force kill; preserved truthful failure for reconciliation"
+            ));
+        }
+        VerifiedProxyProcess::Mismatch { pid, reason } => {
+            remove_pid(paths)?;
+            return Err(format!(
+                "managed Gateway PID {pid} ownership could not be verified before force kill: {reason}"
+            ));
+        }
+    };
 
-    let mut status = status_with_paths(paths)?;
-    status.message = format!(
-        "Proxy health responds on port {port}, but stale PID {pid} was removed because {reason}; shutdown endpoint did not stop it and no force kill was attempted"
-    );
-    Ok(status)
-}
-
-fn stop_running_proxy_without_pid(
-    paths: &ProxyPaths,
-    mode: String,
-    port: u16,
-    gateway_client_key: &str,
-) -> Result<AppStatus, String> {
-    let _ = request_shutdown(port, gateway_client_key);
-    if wait_for_stopped(port, GRACEFUL_STOP_TIMEOUT)? {
-        return Ok(AppStatus {
-            mode,
-            proxy_running: false,
-            proxy_port: port,
-            proxy_build: None,
-            message: "Proxy stopped gracefully without a proxy PID file".to_string(),
-            history_sync_status: None,
-            history_sync_message: None,
-        });
-    }
-
-    let mut status = status_with_paths(paths)?;
-    status.message = format!(
-        "Proxy health responds on port {port}, but no proxy PID file was found; shutdown endpoint did not stop it and no force kill was attempted"
-    );
-    Ok(status)
+    verify_listener_owner(
+        pid,
+        port,
+        listener_inspector,
+        "immediately before force kill",
+    )?;
+    killer.kill(pid)?;
+    Ok(pid)
 }
 
 fn stop_when_health_unavailable(
@@ -995,11 +1052,25 @@ fn stop_when_health_unavailable(
     pid_record: Option<ProxyPidRecord>,
     killer: &dyn ProcessKiller,
     inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
 ) -> Result<AppStatus, String> {
     let message = match pid_record {
         Some(record) => match verify_proxy_process(&record, paths, port, inspector)? {
             VerifiedProxyProcess::Verified { pid } => {
+                verify_listener_owner(
+                    pid,
+                    port,
+                    listener_inspector,
+                    "immediately before force kill while health is unavailable",
+                )?;
                 killer.kill(pid)?;
+                confirm_managed_process_stopped(
+                    &record,
+                    paths,
+                    port,
+                    inspector,
+                    KILL_STOP_TIMEOUT,
+                )?;
                 remove_pid(paths)?;
                 format!("Proxy PID {pid} stopped after health endpoint was unavailable")
             }
@@ -1023,9 +1094,57 @@ fn stop_when_health_unavailable(
         proxy_port: port,
         proxy_build: None,
         message,
+        gateway_lifecycle: GatewayLifecyclePhase::Stopped,
         history_sync_status: None,
         history_sync_message: None,
     })
+}
+
+fn verify_listener_owner(
+    pid: u32,
+    port: u16,
+    listener_inspector: &dyn ListenerInspector,
+    action: &str,
+) -> Result<(), String> {
+    let listener_pid = listener_inspector.listening_pid(port)?;
+    if listener_pid == Some(pid) {
+        return Ok(());
+    }
+    let owner = listener_pid
+        .map(|value| format!("PID {value}"))
+        .unwrap_or_else(|| "no process".to_string());
+    Err(format!(
+        "exact managed Gateway PID {pid} does not own the current listener on port {port} {action} ({owner}); refusing destructive action and preserving durable ownership"
+    ))
+}
+
+fn confirm_managed_process_stopped(
+    record: &ProxyPidRecord,
+    paths: &ProxyPaths,
+    port: u16,
+    inspector: &dyn ProcessInspector,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match verify_proxy_process(record, paths, port, inspector)? {
+            VerifiedProxyProcess::Missing { .. } => return Ok(()),
+            VerifiedProxyProcess::Verified { pid } => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "Gateway PID {pid} did not exit within {} ms; preserved durable ownership",
+                        timeout.as_millis()
+                    ));
+                }
+            }
+            VerifiedProxyProcess::Mismatch { pid, reason } => {
+                return Err(format!(
+                    "Gateway PID {pid} changed identity while confirming termination ({reason}); preserved PID metadata for reconciliation"
+                ));
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn build_start_command(
@@ -1242,12 +1361,107 @@ where
     }
 }
 
-fn terminate_child(child: &mut Child) -> Result<(), String> {
-    child
-        .kill()
-        .map_err(|error| format!("failed to kill proxy child process: {error}"))?;
-    let _ = child.wait();
-    Ok(())
+trait ChildTerminator {
+    /// Returns true only when child exit was confirmed within the bounded wait.
+    fn terminate(&self, child: &mut Child) -> Result<bool, String>;
+}
+
+struct SystemChildTerminator;
+
+impl ChildTerminator for SystemChildTerminator {
+    fn terminate(&self, child: &mut Child) -> Result<bool, String> {
+        if child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect proxy child process: {error}"))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if let Err(error) = child.kill() {
+            return match child.try_wait() {
+                Ok(Some(_)) => Ok(true),
+                Ok(None) => Err(format!("failed to kill proxy child process: {error}")),
+                Err(wait_error) => Err(format!(
+                    "failed to kill proxy child process: {error}; exit inspection also failed: {wait_error}"
+                )),
+            };
+        }
+
+        let deadline = Instant::now() + KILL_STOP_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) => return Ok(false),
+                Err(error) => {
+                    return Err(format!(
+                        "failed to confirm proxy child termination: {error}"
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn clean_up_failed_start_with_controls(
+    paths: &ProxyPaths,
+    child: &mut Child,
+    output_capture: StartupOutputCapture,
+    reason: String,
+    record: &ProxyPidRecord,
+    inspector: &dyn ProcessInspector,
+    terminator: &dyn ChildTerminator,
+) -> String {
+    let termination = terminator.terminate(child);
+    let confirmed = matches!(termination, Ok(true));
+    let output = if confirmed {
+        output_capture.finish()
+    } else {
+        output_capture.snapshot()
+    };
+    let mut message = format_startup_failure(reason, &output);
+
+    if confirmed {
+        if let Err(error) = remove_pid(paths) {
+            message.push_str(&format!("\nfailed to remove terminated child PID identity: {error}"));
+        }
+        return message;
+    }
+
+    match termination {
+        Ok(false) => message.push_str("\nspawned child termination could not be confirmed within the bounded cleanup window"),
+        Err(error) => message.push_str(&format!(
+            "\nspawned child termination could not be confirmed: {error}"
+        )),
+        Ok(true) => unreachable!(),
+    }
+
+    match verify_proxy_process(record, paths, record.expected_port(0), inspector) {
+        Ok(VerifiedProxyProcess::Verified { pid }) => {
+            match write_pid_record(paths, record) {
+                Ok(()) => message.push_str(&format!(
+                    "\npreserved durable ownership for verified live Gateway PID {pid}"
+                )),
+                Err(error) => message.push_str(&format!(
+                    "\nfailed to persist verified live Gateway ownership: {error}"
+                )),
+            }
+        }
+        Ok(VerifiedProxyProcess::Missing { .. }) => {
+            if let Err(error) = remove_pid(paths) {
+                message.push_str(&format!("\nfailed to remove exited child PID identity: {error}"));
+            }
+        }
+        Ok(VerifiedProxyProcess::Mismatch { pid, reason }) => message.push_str(&format!(
+            "\nPID {pid} could not be durably claimed after failed cleanup because ownership changed: {reason}"
+        )),
+        Err(error) => message.push_str(&format!(
+            "\nfailed to reconcile child ownership after bounded cleanup: {error}"
+        )),
+    }
+    message
 }
 
 fn format_startup_failure(message: String, output: &StartupOutputSnapshot) -> String {
@@ -1281,23 +1495,27 @@ enum InspectedProcess {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessInfo {
-    command_line: String,
     args: Vec<String>,
+    process_start_id: Option<String>,
 }
 
 impl ProcessInfo {
-    fn from_command_line(command_line: String) -> Self {
+    #[cfg(windows)]
+    fn from_command_line_with_start_id(
+        command_line: String,
+        process_start_id: Option<String>,
+    ) -> Self {
         Self {
             args: split_command_line(&command_line),
-            command_line,
+            process_start_id,
         }
     }
 
     #[cfg(any(test, not(windows)))]
     fn from_args(args: Vec<String>) -> Self {
         Self {
-            command_line: args.join(" "),
             args,
+            process_start_id: None,
         }
     }
 }
@@ -1373,6 +1591,17 @@ fn verify_proxy_command_line(
         ));
     }
 
+    if let ProxyPidRecord::Managed(metadata) = record {
+        if let Some(expected_start_id) = metadata.process_start_id.as_ref() {
+            if info.process_start_id.as_ref() != Some(expected_start_id) {
+                return Err(format!(
+                    "process start identity differs from managed PID metadata (expected {expected_start_id:?}, found {:?})",
+                    info.process_start_id
+                ));
+            }
+        }
+    }
+
     if !command_line_has_script_name(info, "codex_proxy.py") {
         return Err("command line does not include codex_proxy.py".to_string());
     }
@@ -1407,8 +1636,6 @@ fn command_line_has_script_name(info: &ProcessInfo, script_name: &str) -> bool {
     info.args
         .iter()
         .any(|arg| path_file_name_eq(arg, script_name))
-        || normalized_command_text(&info.command_line)
-            .contains(&normalized_command_text(script_name))
 }
 
 fn command_line_has_script_path(info: &ProcessInfo, expected_script: &str) -> bool {
@@ -1416,7 +1643,6 @@ fn command_line_has_script_path(info: &ProcessInfo, expected_script: &str) -> bo
     info.args
         .iter()
         .any(|arg| normalized_path_text(arg) == expected)
-        || normalized_path_text(&info.command_line).contains(&expected)
 }
 
 fn path_file_name_eq(arg: &str, expected_name: &str) -> bool {
@@ -1691,14 +1917,22 @@ fn read_pid_record(paths: &ProxyPaths) -> Result<Option<ProxyPidRecord>, String>
         .map_err(|error| format!("invalid proxy PID in {}: {error}", path.display()))
 }
 
+#[cfg(test)]
 fn write_pid(paths: &ProxyPaths, pid: u32, port: u16, script: &Path) -> Result<(), String> {
+    let metadata = ProxyPidMetadata::new(pid, port, script);
+    write_pid_record(paths, &ProxyPidRecord::Managed(metadata))
+}
+
+fn write_pid_record(paths: &ProxyPaths, record: &ProxyPidRecord) -> Result<(), String> {
     fs::create_dir_all(paths.proxy_dir()).map_err(|error| {
         format!(
             "failed to create proxy runtime directory {}: {error}",
             paths.proxy_dir().display()
         )
     })?;
-    let metadata = ProxyPidMetadata::new(pid, port, script);
+    let ProxyPidRecord::Managed(metadata) = record else {
+        return Err("refusing to publish legacy PID metadata for a new Gateway".to_string());
+    };
     let text = serde_json::to_string_pretty(&metadata)
         .map_err(|error| format!("failed to encode proxy PID metadata: {error}"))?;
     safe_file::write_text_atomic(&paths.pid_path(), &format!("{text}\n")).map_err(|error| {
@@ -1865,7 +2099,7 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
     let script = format!(
         "$p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction SilentlyContinue; \
          if ($null -eq $p) {{ exit 3 }}; \
-         [Console]::Out.Write([string]$p.CommandLine)"
+         [Console]::Out.Write((@{{ command_line = [string]$p.CommandLine; process_start_id = [string]$p.CreationDate }} | ConvertTo-Json -Compress))"
     );
     let mut command = Command::new("powershell");
     command.args(["-NoProfile", "-Command", &script]);
@@ -1885,10 +2119,21 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
         ));
     }
 
-    let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(InspectedProcess::Running(ProcessInfo::from_command_line(
-        command_line,
-    )))
+    #[derive(Deserialize)]
+    struct WindowsProcessInspection {
+        command_line: String,
+        process_start_id: String,
+    }
+    let inspection: WindowsProcessInspection =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            format!("failed to parse process identity for PID {pid}: {error}")
+        })?;
+    Ok(InspectedProcess::Running(
+        ProcessInfo::from_command_line_with_start_id(
+            inspection.command_line,
+            (!inspection.process_start_id.is_empty()).then_some(inspection.process_start_id),
+        ),
+    ))
 }
 
 #[cfg(not(windows))]
@@ -1918,7 +2163,19 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).to_string())
         .collect::<Vec<_>>();
-    Ok(InspectedProcess::Running(ProcessInfo::from_args(args)))
+    let process_start_id = fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| process_start_ticks(&stat))
+        .map(|ticks| format!("proc-start-ticks:{ticks}"));
+    let mut info = ProcessInfo::from_args(args);
+    info.process_start_id = process_start_id;
+    Ok(InspectedProcess::Running(info))
+}
+
+#[cfg(not(windows))]
+fn process_start_ticks(stat: &str) -> Option<&str> {
+    let after_command = stat.rsplit_once(')')?.1.trim();
+    after_command.split_whitespace().nth(19)
 }
 
 #[cfg(windows)]
@@ -1971,12 +2228,15 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 #[cfg(test)]
 mod tests {
     use super::{
-        build_start_command, comparable_path, configure_start_stdio, detect_mode, find_python,
-        kill_process, read_pid, read_pid_record, reconciled_snapshot_with_controls,
+        build_start_command, capture_child_stdio, clean_up_failed_start_with_controls,
+        comparable_path, configure_start_stdio, detect_mode, find_python,
+        force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
+        reconciled_snapshot_with_controls,
         start_with_paths, start_with_paths_and_controls, start_with_paths_and_waiter,
-        status_with_paths, stop_with_paths, stop_with_paths_and_controls, write_pid,
-        InspectedProcess, ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller,
-        ProxyPaths, ProxyPidMetadata, ProxyPidRecord, StartupOutcome, DEBUG_DIAGNOSTIC_BOOTSTRAP,
+        status_with_paths, stop_with_paths, stop_with_paths_and_controls, verify_proxy_command_line,
+        write_pid, ChildTerminator, InspectedProcess, ListenerInspector, ProcessInfo,
+        ProcessInspector, ProcessKiller, ProxyPaths, ProxyPidMetadata, ProxyPidRecord, StartupOutcome,
+        DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
     use crate::Settings;
     use std::cell::RefCell;
@@ -1985,6 +2245,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -2038,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciled_snapshot_rejects_listener_pid_mismatch_and_removes_stale_pid() {
+    fn reconciled_snapshot_preserves_exact_managed_pid_when_listener_differs() {
         let root = temp_root("reconciled-listener-mismatch");
         let paths = test_paths(&root);
         let port = free_port();
@@ -2058,7 +2319,7 @@ mod tests {
 
         assert!(error.contains("listener PID 54321"));
         assert!(error.contains("managed PID 12345"));
-        assert_eq!(read_pid(&paths).expect("read PID"), None);
+        assert_eq!(read_pid(&paths).expect("read PID"), Some(12_345));
     }
 
     #[test]
@@ -2301,7 +2562,7 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
     }
 
     #[test]
-    fn stop_kills_pid_when_health_is_unavailable_and_command_line_matches() {
+    fn stop_preserves_exact_non_listening_child_when_health_is_unavailable() {
         let root = temp_root("stale-pid");
         let paths = test_paths(&root);
         let port = free_port();
@@ -2310,11 +2571,17 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         let killer = RecordingKiller::default();
         let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
 
-        let status = stop_with_paths_and_controls(&paths, &killer, &inspector).expect("stop stale");
+        let error = stop_with_paths_and_controls(
+            &paths,
+            &killer,
+            &inspector,
+            &FixedListenerInspector::new(None),
+        )
+        .expect_err("non-listening child must remain durably tracked");
 
-        assert!(!status.proxy_running);
-        assert_eq!(read_pid(&paths).expect("pid removed"), None);
-        assert_eq!(killer.killed.borrow().as_slice(), &[12_345]);
+        assert!(error.contains("does not own the current listener"));
+        assert_eq!(read_pid(&paths).expect("pid preserved"), Some(12_345));
+        assert!(killer.killed.borrow().is_empty());
         assert_eq!(inspector.inspected.borrow().as_slice(), &[12_345]);
     }
 
@@ -2334,8 +2601,13 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
                 port.to_string(),
             ])));
 
-        let status =
-            stop_with_paths_and_controls(&paths, &killer, &inspector).expect("stop mismatch");
+        let status = stop_with_paths_and_controls(
+            &paths,
+            &killer,
+            &inspector,
+            &FixedListenerInspector::new(None),
+        )
+        .expect("stop mismatch");
 
         assert!(!status.proxy_running);
         assert!(status.message.contains("was not killed"));
@@ -2344,7 +2616,7 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
     }
 
     #[test]
-    fn stop_treats_mismatched_pid_as_stale_when_health_responds() {
+    fn stop_refuses_shutdown_when_health_owner_is_not_exact_managed_pid() {
         let root = temp_root("pid-mismatch-health-running");
         let paths = test_paths(&root);
         let port = free_port();
@@ -2360,34 +2632,39 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
                 port.to_string(),
             ])));
 
-        let status = stop_with_paths_and_controls(&paths, &killer, &inspector)
-            .expect("stop should not error on stale mismatched pid");
+        let error = stop_with_paths_and_controls(
+            &paths,
+            &killer,
+            &inspector,
+            &FixedListenerInspector::new(Some(54_321)),
+        )
+        .expect_err("external listener must never receive shutdown");
 
-        assert!(!status.proxy_running);
-        assert!(status.message.contains("Proxy stopped gracefully"));
-        assert!(status.message.contains("stale proxy PID 12345"));
+        assert!(error.contains("ownership could not be verified"));
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
         assert!(killer.killed.borrow().is_empty());
         health_server.join().expect("health server joins");
     }
 
     #[test]
-    fn stop_treats_missing_pid_file_as_external_running_proxy() {
+    fn stop_refuses_shutdown_for_external_running_proxy_without_pid() {
         let root = temp_root("pid-missing-health-running");
         let paths = test_paths(&root);
         let port = free_port();
         write_settings(&paths, port);
-        let health_server = spawn_health_then_shutdown_server(port);
+        let health_server = spawn_single_health_response(port);
         let killer = RecordingKiller::default();
         let inspector = RecordingInspector::new(InspectedProcess::Missing);
 
-        let status = stop_with_paths_and_controls(&paths, &killer, &inspector)
-            .expect("stop should not error when running proxy has no pid file");
+        let error = stop_with_paths_and_controls(
+            &paths,
+            &killer,
+            &inspector,
+            &FixedListenerInspector::new(Some(54_321)),
+        )
+        .expect_err("external listener must not receive shutdown");
 
-        assert!(!status.proxy_running);
-        assert!(status
-            .message
-            .contains("Proxy stopped gracefully without a proxy PID file"));
+        assert!(error.contains("no managed PID identity"));
         assert_eq!(read_pid(&paths).expect("pid remains missing"), None);
         assert!(killer.killed.borrow().is_empty());
         assert!(inspector.inspected.borrow().is_empty());
@@ -2404,13 +2681,55 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         let killer = RecordingKiller::default();
         let inspector = RecordingInspector::new(InspectedProcess::Missing);
 
-        let status =
-            stop_with_paths_and_controls(&paths, &killer, &inspector).expect("stop missing");
+        let status = stop_with_paths_and_controls(
+            &paths,
+            &killer,
+            &inspector,
+            &FixedListenerInspector::new(None),
+        )
+        .expect("stop missing");
 
         assert!(!status.proxy_running);
         assert!(status.message.contains("Removed stale proxy PID 12345"));
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
         assert!(killer.killed.borrow().is_empty());
+    }
+
+    #[test]
+    fn stop_rechecks_current_listener_immediately_before_force_kill() {
+        let root = temp_root("listener-changed-before-kill");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let killer = RecordingKiller::default();
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = SequenceListenerInspector::new([Some(54_321)]);
+        let record = read_pid_record(&paths)
+            .expect("read PID record")
+            .expect("managed PID record");
+
+        let error = force_kill_after_graceful_timeout(
+            &paths,
+            &record,
+            port,
+            &killer,
+            &inspector,
+            &listener,
+        )
+        .expect_err("changed listener must fence force kill");
+
+        assert!(
+            error.contains("immediately before force kill"),
+            "{error}; listener calls: {:?}; remaining: {:?}",
+            listener.calls.borrow(),
+            listener.pids.borrow()
+        );
+        assert!(error.contains("PID 54321"));
+        assert!(killer.killed.borrow().is_empty());
+        assert_eq!(read_pid(&paths).expect("pid preserved"), Some(pid));
+        assert_eq!(listener.calls.borrow().as_slice(), &[port]);
     }
 
     #[test]
@@ -2459,6 +2778,90 @@ time.sleep(10)
         assert!(error.contains("startup stderr"));
         assert!(error.contains("fake proxy stderr during startup"));
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
+    }
+
+    #[test]
+    fn failed_start_cleanup_is_bounded_and_persists_identity_when_kill_is_unconfirmed() {
+        let root = temp_root("bounded-failed-cleanup");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
+        let mut command = Command::new(find_python(&paths));
+        command.args(["-c", "import time; time.sleep(30)"]);
+        configure_start_stdio(&mut command);
+        let mut child = command.spawn().expect("spawn cleanup child");
+        let pid = child.id();
+        let capture = capture_child_stdio(&mut child);
+        let record = ProxyPidRecord::Managed(ProxyPidMetadata::new(
+            pid,
+            port,
+            &paths.proxy_script_path(),
+        ));
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let started = Instant::now();
+
+        let error = clean_up_failed_start_with_controls(
+            &paths,
+            &mut child,
+            capture,
+            "startup reconciliation failed".to_string(),
+            &record,
+            &inspector,
+            &UnconfirmedTerminator,
+        );
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(error.contains("termination could not be confirmed"));
+        assert_eq!(read_pid(&paths).expect("durable PID"), Some(pid));
+        kill_process(pid).expect("clean up live child");
+        let _ = child.wait();
+        let _ = super::remove_pid(&paths);
+    }
+
+    #[test]
+    fn exact_process_verification_rejects_raw_substring_only_script_matches() {
+        let root = temp_root("exact-command-args");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let record = ProxyPidRecord::Managed(ProxyPidMetadata::new(
+            12_345,
+            port,
+            &paths.proxy_script_path(),
+        ));
+        let misleading = ProcessInfo::from_args(vec![
+            "python".to_string(),
+            "wrapper.py".to_string(),
+            "--note".to_string(),
+            format!("{}.backup", comparable_path(&paths.proxy_script_path())),
+            "--port".to_string(),
+            port.to_string(),
+        ]);
+
+        let error = verify_proxy_command_line(&record, &paths, port, &misleading)
+            .expect_err("raw substring must not establish exact process ownership");
+
+        assert!(error.contains("codex_proxy.py"));
+    }
+
+    #[test]
+    fn exact_process_verification_fences_pid_reuse_with_process_start_identity() {
+        let root = temp_root("pid-reuse-fence");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let mut metadata = ProxyPidMetadata::new(12_345, port, &paths.proxy_script_path());
+        metadata.process_start_id = Some("original-start".to_string());
+        let record = ProxyPidRecord::Managed(metadata);
+        let mut reused = match fake_proxy_process(&paths, port) {
+            InspectedProcess::Running(info) => info,
+            InspectedProcess::Missing => unreachable!(),
+        };
+        reused.process_start_id = Some("reused-start".to_string());
+
+        let error = verify_proxy_command_line(&record, &paths, port, &reused)
+            .expect_err("same PID and args with a different start identity must be rejected");
+
+        assert!(error.contains("process start identity"));
     }
 
     #[test]
@@ -2826,34 +3229,6 @@ time.sleep(10)
         })
     }
 
-    fn spawn_health_then_shutdown_server(port: u16) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind health port");
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().expect("accept request");
-                let mut buffer = [0u8; 1024];
-                let count = std::io::Read::read(&mut stream, &mut buffer).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buffer[..count]);
-                if request.starts_with("POST /shutdown ") {
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        )
-                        .expect("write shutdown response");
-                    break;
-                }
-                let body = r#"{"ok":true,"build":"test","features":[]}"#;
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-                .expect("write health response");
-            }
-        })
-    }
-
     fn write_settings(paths: &ProxyPaths, port: u16) {
         fs::create_dir_all(paths.proxy_dir()).unwrap();
         let settings = Settings {
@@ -2883,6 +3258,30 @@ time.sleep(10)
 
     struct FixedListenerInspector {
         pid: Option<u32>,
+    }
+
+    struct SequenceListenerInspector {
+        pids: RefCell<VecDeque<Option<u32>>>,
+        calls: RefCell<Vec<u16>>,
+    }
+
+    impl SequenceListenerInspector {
+        fn new(pids: impl IntoIterator<Item = Option<u32>>) -> Self {
+            Self {
+                pids: RefCell::new(pids.into_iter().collect()),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ListenerInspector for SequenceListenerInspector {
+        fn listening_pid(&self, port: u16) -> Result<Option<u32>, String> {
+            self.calls.borrow_mut().push(port);
+            self.pids
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| "unexpected listener inspection".to_string())
+        }
     }
 
     impl FixedListenerInspector {
@@ -2990,6 +3389,14 @@ time.sleep(10)
     #[derive(Default)]
     struct RecordingKiller {
         killed: RefCell<Vec<u32>>,
+    }
+
+    struct UnconfirmedTerminator;
+
+    impl ChildTerminator for UnconfirmedTerminator {
+        fn terminate(&self, _child: &mut std::process::Child) -> Result<bool, String> {
+            Ok(false)
+        }
     }
 
     impl ProcessKiller for RecordingKiller {

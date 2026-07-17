@@ -141,6 +141,7 @@ function setCacheError(current: RuntimeSnapshot, key: RuntimeCacheKey, error: st
     ...current,
     [key]: {
       ...cache,
+      data: key === "status" ? null : cache.data,
       loading: false,
       error,
     },
@@ -940,6 +941,7 @@ export default function App() {
     } catch (err) {
       const message = messageFromError(err);
       setBanner(message);
+      await refreshRuntimeStatus({ force: true });
       if (toastId) {
         updateToast(toastId, {
           action: null,

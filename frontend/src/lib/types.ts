@@ -96,6 +96,7 @@ export interface AppStatus {
   proxy_port: number;
   proxy_build?: string | null;
   message: string;
+  gateway_lifecycle: "stopped" | "starting" | "running" | "stopping" | "restarting" | "failed";
   history_sync_status?: string | null;
   history_sync_message?: string | null;
 }

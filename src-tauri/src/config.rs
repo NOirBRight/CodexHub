@@ -930,6 +930,7 @@ fn switch_mode_with_paths_takeover_as_owner(
         proxy_port: settings.proxy_port,
         proxy_build: None,
         message: format!("Switched to {mode} mode; proxy lifecycle is handled separately"),
+        gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
         history_sync_status: None,
         history_sync_message: None,
     })

@@ -10,6 +10,7 @@ mod config;
 mod diagnostics;
 mod gateway;
 mod gateway_lifecycle;
+mod gateway_transaction;
 mod history;
 mod models;
 mod openai_usage;
@@ -188,6 +189,8 @@ pub struct AppStatus {
     pub proxy_port: u16,
     pub proxy_build: Option<String>,
     pub message: String,
+    #[serde(default)]
+    pub gateway_lifecycle: gateway_transaction::GatewayLifecyclePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_sync_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +205,7 @@ impl AppStatus {
             proxy_port: app_flavor::default_gateway_port(),
             proxy_build: None,
             message: message.into(),
+            gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
             history_sync_status: None,
             history_sync_message: None,
         }
@@ -984,13 +988,16 @@ fn run_gui() {
 }
 
 fn start_gateway_on_launch() {
-    tauri::async_runtime::spawn_blocking(|| {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut launch_ready = StartupLaunchReady::new(ready_tx);
         official_refresh::start_scheduled_refresh_loop();
         let Ok(settings) = config::get_settings() else {
             return;
         };
         let start = || {
             proxy::start_after(|| {
+                launch_ready.signal();
                 if let Err(error) = official_refresh::refresh_at_startup() {
                     log::warn!("startup Official model refresh failed: {error}");
                 }
@@ -1000,11 +1007,35 @@ fn start_gateway_on_launch() {
         if let Err(error) = start_gateway_after_startup(settings.auto_start_gateway, start) {
             eprintln!("failed to start CodexHub gateway on app launch: {error}");
         } else if !settings.auto_start_gateway {
+            launch_ready.signal();
             if let Err(error) = official_refresh::refresh_at_startup() {
                 log::warn!("startup Official model refresh failed: {error}");
             }
         }
     });
+    // Do not expose the initial window until automatic startup either owns the
+    // cross-process gate (and publishes Starting) or has already completed.
+    let _ = ready_rx.recv();
+}
+
+struct StartupLaunchReady(Option<std::sync::mpsc::SyncSender<()>>);
+
+impl StartupLaunchReady {
+    fn new(sender: std::sync::mpsc::SyncSender<()>) -> Self {
+        Self(Some(sender))
+    }
+
+    fn signal(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl Drop for StartupLaunchReady {
+    fn drop(&mut self) {
+        self.signal();
+    }
 }
 
 fn start_gateway_after_startup<StartGateway>(
@@ -1075,6 +1106,7 @@ mod tests {
             proxy_port: 9099,
             proxy_build: None,
             message: "Gateway state updated".to_string(),
+            gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
             history_sync_status: None,
             history_sync_message: None,
         }
