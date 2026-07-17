@@ -244,6 +244,7 @@ export interface GatewayModel {
   supports_responses: boolean;
   supports_chat_completions: boolean;
   context_window: number;
+  input_modalities?: string[] | null;
 }
 
 export interface GatewayUsageSummary {

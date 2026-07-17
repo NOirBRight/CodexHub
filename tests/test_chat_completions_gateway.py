@@ -1620,6 +1620,71 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
         self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
 
+    def test_provider_scoped_chat_text_only_image_request_fails_closed_502(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,e2NoYXJ0fQ=="}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "0"},
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen") as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        mock_urlopen.assert_not_called()
+        self.assertEqual(handler._fake.status, 502)
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"does not support image input", written)
+
     def test_provider_scoped_chat_text_only_image_guard_uses_global_image_proxy_switch(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
