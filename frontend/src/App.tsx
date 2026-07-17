@@ -47,8 +47,9 @@ type RuntimeSnapshot = {
 };
 
 type TrayToastPayload = {
+  id: string;
   text: string;
-  tone: "success" | "error";
+  tone: "loading" | "success" | "error";
 };
 
 type LoadRuntimeOptions = {
@@ -141,6 +142,7 @@ function setCacheError(current: RuntimeSnapshot, key: RuntimeCacheKey, error: st
     ...current,
     [key]: {
       ...cache,
+      data: key === "status" ? null : cache.data,
       loading: false,
       error,
     },
@@ -333,6 +335,7 @@ export default function App() {
   const startupUpdateCheckStarted = useRef(false);
   const updateAvailableToastId = useRef<string | null>(null);
   const updateInstallToastId = useRef<string | null>(null);
+  const trayToastIds = useRef<Map<string, string>>(new Map());
   runtimeRef.current = runtime;
   const settingsLoaded = Boolean(runtime.settings.data);
 
@@ -766,10 +769,22 @@ export default function App() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void listen<TrayToastPayload>("codexhub:toast", (event) => {
-      showToast({
-        text: event.payload.text,
-        tone: event.payload.tone,
-      });
+      const existingToastId = trayToastIds.current.get(event.payload.id);
+      if (existingToastId) {
+        updateToast(existingToastId, {
+          action: null,
+          text: event.payload.text,
+          tone: event.payload.tone,
+        });
+        if (event.payload.tone !== "loading") {
+          trayToastIds.current.delete(event.payload.id);
+        }
+        return;
+      }
+      const toastId = showToast({ text: event.payload.text, tone: event.payload.tone });
+      if (event.payload.tone === "loading") {
+        trayToastIds.current.set(event.payload.id, toastId);
+      }
     })
       .then((nextUnlisten) => {
         if (disposed) {
@@ -785,7 +800,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [showToast]);
+  }, [showToast, updateToast]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -940,6 +955,7 @@ export default function App() {
     } catch (err) {
       const message = messageFromError(err);
       setBanner(message);
+      await refreshRuntimeStatus({ force: true });
       if (toastId) {
         updateToast(toastId, {
           action: null,
@@ -980,6 +996,7 @@ export default function App() {
     } catch (err) {
       const message = messageFromError(err);
       setBanner(message);
+      await refreshRuntimeStatus({ force: true });
       throw err;
     } finally {
       setBusy(null);
