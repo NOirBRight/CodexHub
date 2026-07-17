@@ -10,14 +10,52 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read};
+#[cfg(windows)]
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE, ERROR_INSUFFICIENT_BUFFER, NO_ERROR,
+};
+#[cfg(windows)]
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    TCP_TABLE_OWNER_PID_LISTENER,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
+    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, OpenThread, ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION,
+    THREAD_SUSPEND_RESUME,
+};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(800);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(800);
@@ -27,6 +65,10 @@ const KILL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const PID_FILE_VERSION: u32 = 2;
 const LEGACY_PID_FILE_VERSION: u32 = 1;
 const START_OUTPUT_CAPTURE_LIMIT: usize = 8 * 1024;
+#[cfg(windows)]
+const WINDOWS_INSPECTION_OUTPUT_LIMIT: usize = 64 * 1024;
+#[cfg(windows)]
+const WINDOWS_INSPECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MANAGED_OVERLAY_MARKER_BEGIN: &str = "# BEGIN CODEX PROXY SESSION CONFIG";
 const MANAGED_OVERLAY_MARKER_END: &str = "# END CODEX PROXY SESSION CONFIG";
 // This is intentionally reached only from the compile-selected Rust debug
@@ -372,6 +414,15 @@ impl ProxyPidMetadata {
         Self::with_identity(pid, port, script, None, true)
     }
 
+    fn recovery_with_identity(
+        pid: u32,
+        port: u16,
+        script: &Path,
+        process_start_id: String,
+    ) -> Self {
+        Self::with_identity(pid, port, script, Some(process_start_id), true)
+    }
+
     fn with_identity(
         pid: u32,
         port: u16,
@@ -503,13 +554,70 @@ fn reconciled_snapshot_with_controls(
         });
     };
 
-    let Some(pid_record) = pid_record else {
+    let Some(mut pid_record) = pid_record else {
         return Err(format!(
             "Gateway health responds on port {}, but no managed PID identity exists; refusing to claim or replace the external listener",
             reconciliation_port
         ));
     };
     let pid = pid_record.pid();
+    let recovery_pending = matches!(
+        &pid_record,
+        ProxyPidRecord::Managed(metadata) if metadata.recovery
+    );
+    let recovery_requires_identity = matches!(
+        &pid_record,
+        ProxyPidRecord::Managed(metadata) if metadata.recovery && metadata.process_start_id.is_none()
+    );
+
+    if recovery_requires_identity {
+        let process = inspector.inspect(pid).map_err(|error| {
+            format!(
+                "Gateway health responds on port {reconciliation_port}, but managed PID {pid} inspection is unavailable (process command line inspection failed: {error}); preserved durable ownership"
+            )
+        })?;
+        let InspectedProcess::Running(info) = process else {
+            remove_pid(paths)?;
+            return Err(format!(
+                "Gateway health responds on port {}, but managed PID {pid} no longer exists; removed stale PID identity without stopping the listener",
+                reconciliation_port
+            ));
+        };
+        if let Err(reason) = verify_proxy_command_shape(
+            &pid_record,
+            paths,
+            reconciliation_port,
+            &info,
+        ) {
+            remove_pid(paths)?;
+            return Err(format!(
+                "Gateway health responds on port {}, but managed PID {pid} ownership could not be verified ({reason}); removed stale PID identity without stopping either process",
+                reconciliation_port
+            ));
+        }
+        let listener_pid = listener_inspector.listening_pid(reconciliation_port)?;
+        if listener_pid != Some(pid) {
+            let detail = listener_pid
+                .map(|value| format!("listener PID {value}"))
+                .unwrap_or_else(|| "no TCP listener owner".to_string());
+            return Err(format!(
+                "Gateway health responds on port {reconciliation_port}, but {detail} differs from exact managed PID {pid}; preserved the managed PID identity without stopping either process"
+            ));
+        }
+        let Some(process_start_id) = info.process_start_id else {
+            return Err(format!(
+                "Gateway health responds on port {reconciliation_port}, but managed PID {pid} inspection has no process creation identity; preserved durable ownership"
+            ));
+        };
+        if let ProxyPidRecord::Managed(metadata) = &mut pid_record {
+            metadata.process_start_id = Some(process_start_id);
+            metadata.recovery = false;
+        }
+    } else if recovery_pending {
+        if let ProxyPidRecord::Managed(metadata) = &mut pid_record {
+            metadata.recovery = false;
+        }
+    }
 
     match verify_proxy_process(&pid_record, paths, reconciliation_port, inspector)? {
         VerifiedProxyProcess::Verified { .. } => {}
@@ -546,6 +654,10 @@ fn reconciled_snapshot_with_controls(
             "Gateway health responds on port {}, but listener PID {listener_pid} differs from exact managed PID {pid}; preserved the managed PID identity without stopping either process",
             reconciliation_port
         ));
+    }
+
+    if recovery_pending {
+        write_pid_record(paths, &pid_record)?;
     }
 
     let identity = match &pid_record {
@@ -757,8 +869,29 @@ where
     })?;
     let output_capture = capture_child_stdio(&mut child);
     let pid = child.id();
-    let mut record =
-        ProxyPidRecord::Managed(ProxyPidMetadata::recovery(pid, settings.proxy_port, &script));
+    let process_start_id = match inspector.spawned_process_start_id(&child) {
+        Ok(process_start_id) => process_start_id,
+        Err(error) => {
+            return Err(clean_up_failed_start(
+                paths,
+                &mut child,
+                output_capture,
+                error,
+                &ProxyPidRecord::Managed(ProxyPidMetadata::recovery(
+                    pid,
+                    settings.proxy_port,
+                    &script,
+                )),
+                inspector,
+            ))
+        }
+    };
+    let mut record = ProxyPidRecord::Managed(ProxyPidMetadata::recovery_with_identity(
+        pid,
+        settings.proxy_port,
+        &script,
+        process_start_id,
+    ));
 
     let startup = match wait_for_startup(
         &mut child,
@@ -783,8 +916,21 @@ where
 
     match startup {
         StartupOutcome::Healthy(response) if response.is_running() => {
-            let process_start_id = match inspector.inspect(pid) {
-                Ok(InspectedProcess::Running(info)) => info.process_start_id,
+            match inspector.inspect(pid) {
+                Ok(InspectedProcess::Running(info)) => {
+                    if info.process_start_id.as_ref() != record.process_start_id() {
+                        return Err(clean_up_failed_start(
+                            paths,
+                            &mut child,
+                            output_capture,
+                            format!(
+                                "spawned Gateway PID {pid} process creation identity changed during startup fencing"
+                            ),
+                            &record,
+                            inspector,
+                        ));
+                    }
+                }
                 Ok(InspectedProcess::Missing) => {
                     return Err(clean_up_failed_start(
                         paths,
@@ -805,23 +951,13 @@ where
                         inspector,
                     ))
                 }
-            };
-            if let ProxyPidRecord::Managed(metadata) = &mut record {
-                let Some(process_start_id) = process_start_id else {
-                    return Err(clean_up_failed_start(
-                        paths,
-                        &mut child,
-                        output_capture,
-                        format!("spawned Gateway PID {pid} has no process creation identity"),
-                        &record,
-                        inspector,
-                    ));
-                };
-                metadata.process_start_id = Some(process_start_id);
+            }
+            let mut verified_record = record.clone();
+            if let ProxyPidRecord::Managed(metadata) = &mut verified_record {
                 metadata.recovery = false;
             }
             let verification =
-                verify_proxy_process(&record, paths, settings.proxy_port, inspector)?;
+                verify_proxy_process(&verified_record, paths, settings.proxy_port, inspector)?;
             if verification != (VerifiedProxyProcess::Verified { pid }) {
                 return Err(clean_up_failed_start(
                     paths,
@@ -865,6 +1001,7 @@ where
                 ));
             }
 
+            record = verified_record;
             if let Err(error) = write_pid_record(paths, &record) {
                 return Err(clean_up_failed_start(
                     paths,
@@ -1347,16 +1484,35 @@ struct StartupOutputCapture {
     stdout: Arc<Mutex<BoundedOutput>>,
     stderr: Arc<Mutex<BoundedOutput>>,
     handles: Mutex<Vec<thread::JoinHandle<()>>>,
+    #[cfg(windows)]
+    stop: Arc<AtomicBool>,
 }
 
 impl StartupOutputCapture {
+    #[cfg(windows)]
+    fn capture_reader<R>(&self, reader: R, stream: StartupStream)
+    where
+        R: Read + AsRawHandle + Send + 'static,
+    {
+        let buffer = match stream {
+            StartupStream::Stdout => Arc::downgrade(&self.stdout),
+            StartupStream::Stderr => Arc::downgrade(&self.stderr),
+        };
+        let stop = Arc::clone(&self.stop);
+        let handle = thread::spawn(move || drain_reader_to_buffer(reader, buffer, stop));
+        if let Ok(mut handles) = self.handles.lock() {
+            handles.push(handle);
+        }
+    }
+
+    #[cfg(not(windows))]
     fn capture_reader<R>(&self, reader: R, stream: StartupStream)
     where
         R: Read + Send + 'static,
     {
         let buffer = match stream {
-            StartupStream::Stdout => Arc::clone(&self.stdout),
-            StartupStream::Stderr => Arc::clone(&self.stderr),
+            StartupStream::Stdout => Arc::downgrade(&self.stdout),
+            StartupStream::Stderr => Arc::downgrade(&self.stderr),
         };
         let handle = thread::spawn(move || drain_reader_to_buffer(reader, buffer));
         if let Ok(mut handles) = self.handles.lock() {
@@ -1365,12 +1521,24 @@ impl StartupOutputCapture {
     }
 
     fn finish(self) -> StartupOutputSnapshot {
+        #[cfg(windows)]
+        self.stop.store(true, Ordering::Release);
+        self.join_readers();
+        self.snapshot()
+    }
+
+    #[cfg(windows)]
+    fn stop_readers(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.join_readers();
+    }
+
+    fn join_readers(&self) {
         if let Ok(mut handles) = self.handles.lock() {
             for handle in handles.drain(..) {
                 let _ = handle.join();
             }
         }
-        self.snapshot()
     }
 
     fn snapshot(&self) -> StartupOutputSnapshot {
@@ -1430,7 +1598,57 @@ impl BoundedOutput {
     }
 }
 
-fn drain_reader_to_buffer<R>(mut reader: R, buffer: Arc<Mutex<BoundedOutput>>)
+#[cfg(windows)]
+fn drain_reader_to_buffer<R>(
+    mut reader: R,
+    buffer: std::sync::Weak<Mutex<BoundedOutput>>,
+    stop: Arc<AtomicBool>,
+)
+where
+    R: Read + AsRawHandle,
+{
+    let mut chunk = [0u8; 1024];
+    loop {
+        let Some(buffer) = buffer.upgrade() else {
+            break;
+        };
+        let mut available = 0u32;
+        let readable = unsafe {
+            PeekNamedPipe(
+                reader.as_raw_handle() as HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if readable == 0 {
+            break;
+        }
+        if available == 0 {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            drop(buffer);
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        let count = available.min(chunk.len() as u32) as usize;
+        match reader.read(&mut chunk[..count]) {
+            Ok(0) => break,
+            Ok(count) => {
+                if let Ok(mut buffer) = buffer.lock() {
+                    buffer.append(&chunk[..count]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn drain_reader_to_buffer<R>(mut reader: R, buffer: std::sync::Weak<Mutex<BoundedOutput>>)
 where
     R: Read,
 {
@@ -1439,6 +1657,9 @@ where
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(count) => {
+                let Some(buffer) = buffer.upgrade() else {
+                    break;
+                };
                 if let Ok(mut buffer) = buffer.lock() {
                     buffer.append(&chunk[..count]);
                 }
@@ -1506,6 +1727,8 @@ fn clean_up_failed_start_with_controls(
     let output = if confirmed {
         output_capture.finish()
     } else {
+        #[cfg(windows)]
+        output_capture.stop_readers();
         output_capture.snapshot()
     };
     let mut message = format_startup_failure(reason, &output);
@@ -1589,6 +1812,10 @@ trait ProcessKiller {
 
 trait ProcessInspector {
     fn inspect(&self, pid: u32) -> Result<InspectedProcess, String>;
+
+    fn spawned_process_start_id(&self, child: &Child) -> Result<String, String> {
+        child_process_start_id(child)
+    }
 }
 
 trait ListenerInspector {
@@ -1667,6 +1894,13 @@ fn verify_proxy_process(
     inspector: &dyn ProcessInspector,
 ) -> Result<VerifiedProxyProcess, String> {
     let pid = record.pid();
+    if matches!(record, ProxyPidRecord::Managed(metadata) if metadata.recovery) {
+        return Ok(VerifiedProxyProcess::Unknown {
+            pid,
+            reason: "spawn-known recovery ownership is pending health, process, and listener activation"
+                .to_string(),
+        });
+    }
     let process = match inspector.inspect(pid) {
         Ok(process) => process,
         Err(error) => {
@@ -2173,41 +2407,396 @@ fn configure_no_window(command: &mut Command) {
 }
 
 #[cfg(windows)]
-fn inspect_listener_pid(port: u16) -> Result<Option<u32>, String> {
-    let script = format!(
-        "$rows = @(Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue | Where-Object {{ $_.LocalAddress -eq '127.0.0.1' }} | Select-Object -ExpandProperty OwningProcess -Unique); \
-         if ($rows.Count -eq 0) {{ exit 3 }}; \
-         if ($rows.Count -ne 1) {{ [Console]::Error.Write(($rows -join ',')); exit 4 }}; \
-         [Console]::Out.Write([string]$rows[0])"
-    );
+#[derive(Clone, Copy)]
+enum WindowsInspectionKind {
+    Process,
+    #[cfg(test)]
+    Listener,
+}
+
+#[cfg(windows)]
+impl WindowsInspectionKind {
+    fn timeout_error(self) -> &'static str {
+        match self {
+            Self::Process => "Gateway process inspection timed out",
+            #[cfg(test)]
+            Self::Listener => "Gateway listener inspection timed out",
+        }
+    }
+
+    fn start_error(self) -> &'static str {
+        match self {
+            Self::Process => "failed to start Gateway process inspection",
+            #[cfg(test)]
+            Self::Listener => "failed to start Gateway listener inspection",
+        }
+    }
+
+    fn stop_error(self) -> &'static str {
+        match self {
+            Self::Process => "failed to stop Gateway process inspection",
+            #[cfg(test)]
+            Self::Listener => "failed to stop Gateway listener inspection",
+        }
+    }
+
+    fn wait_error(self) -> &'static str {
+        match self {
+            Self::Process => "failed to wait for Gateway process inspection",
+            #[cfg(test)]
+            Self::Listener => "failed to wait for Gateway listener inspection",
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_inspection(
+    script: &str,
+    kind: WindowsInspectionKind,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     let mut command = Command::new("powershell");
-    command.args(["-NoProfile", "-Command", &script]);
+    command.args(["-NoProfile", "-Command", script]);
     configure_no_window(&mut command);
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to inspect listener on port {port}: {error}"))?;
+    run_bounded_inspection_command(command, Instant::now() + timeout, kind)
+}
 
-    if output.status.code() == Some(3) {
-        return Ok(None);
-    }
-    if output.status.code() == Some(4) {
-        return Err(format!(
-            "multiple TCP listener owners were reported for 127.0.0.1:{port}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    if !output.status.success() {
-        return Err(format!(
-            "Get-NetTCPConnection failed for 127.0.0.1:{port} with status {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+#[cfg(windows)]
+struct WindowsInspectionJob(HANDLE);
+
+#[cfg(windows)]
+impl WindowsInspectionJob {
+    fn new(kind: WindowsInspectionKind) -> Result<Self, String> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(kind.start_error().to_string());
+        }
+
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if configured == 0 {
+            unsafe { CloseHandle(handle) };
+            return Err(kind.start_error().to_string());
+        }
+        Ok(Self(handle))
     }
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    text.parse::<u32>()
-        .map(Some)
-        .map_err(|error| format!("invalid listener PID {text:?} for port {port}: {error}"))
+    fn assign(&self, child: &Child, kind: WindowsInspectionKind) -> Result<(), String> {
+        let assigned = unsafe {
+            AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE)
+        };
+        if assigned == 0 {
+            Err(kind.start_error().to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn terminate(&self, kind: WindowsInspectionKind) -> Result<(), String> {
+        if unsafe { TerminateJobObject(self.0, 1) } == 0 {
+            Err(kind.stop_error().to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsInspectionJob {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn inspection_output_file(kind: WindowsInspectionKind) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_DELETE)
+        .custom_flags(FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE);
+
+    for attempt in 0..32u32 {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codexhub-inspection-{}-{nonce}-{attempt}.tmp",
+            std::process::id()
+        ));
+        match options.open(path) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(kind.start_error().to_string()),
+        }
+    }
+    Err(kind.start_error().to_string())
+}
+
+#[cfg(windows)]
+fn read_inspection_output(mut file: fs::File) -> Vec<u8> {
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file
+        .take((WINDOWS_INSPECTION_OUTPUT_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes);
+    bytes.truncate(WINDOWS_INSPECTION_OUTPUT_LIMIT);
+    bytes
+}
+
+#[cfg(windows)]
+fn resume_suspended_inspection_child(
+    child: &Child,
+    kind: WindowsInspectionKind,
+) -> Result<(), String> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(kind.start_error().to_string());
+    }
+
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+    let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    let mut thread_id = None;
+    while found {
+        if entry.th32OwnerProcessID == child.id() {
+            thread_id = Some(entry.th32ThreadID);
+            break;
+        }
+        found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+
+    let Some(thread_id) = thread_id else {
+        return Err(kind.start_error().to_string());
+    };
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread.is_null() {
+        return Err(kind.start_error().to_string());
+    }
+    let resumed = unsafe { ResumeThread(thread) };
+    unsafe { CloseHandle(thread) };
+    if resumed == u32::MAX {
+        Err(kind.start_error().to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn stop_and_reap_inspection_child(
+    child: &mut Child,
+    job: &WindowsInspectionJob,
+    deadline: Instant,
+    kind: WindowsInspectionKind,
+) -> Result<(), String> {
+    job.terminate(kind)?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => thread::sleep(
+                Duration::from_millis(20)
+                    .min(deadline.saturating_duration_since(Instant::now())),
+            ),
+            Ok(None) => return Ok(()),
+            Err(_) => return Err(kind.stop_error().to_string()),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_bounded_inspection_command(
+    mut command: Command,
+    deadline: Instant,
+    kind: WindowsInspectionKind,
+) -> Result<std::process::Output, String> {
+    let stdout = inspection_output_file(kind)?;
+    let stderr = inspection_output_file(kind)?;
+    command.stdout(Stdio::from(
+        stdout
+            .try_clone()
+            .map_err(|_| kind.start_error().to_string())?,
+    ));
+    command.stderr(Stdio::from(
+        stderr
+            .try_clone()
+            .map_err(|_| kind.start_error().to_string())?,
+    ));
+
+    let job = WindowsInspectionJob::new(kind)?;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    let mut child = command.spawn().map_err(|_| kind.start_error().to_string())?;
+    if let Err(error) = job.assign(&child, kind) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = resume_suspended_inspection_child(&child, kind) {
+        let _ = stop_and_reap_inspection_child(&mut child, &job, deadline, kind);
+        return Err(error);
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let cleanup_budget = (remaining / 4).min(Duration::from_millis(250));
+    let inspection_deadline = deadline.checked_sub(cleanup_budget).unwrap_or(deadline);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < inspection_deadline => {
+                thread::sleep(Duration::from_millis(20).min(
+                    inspection_deadline.saturating_duration_since(Instant::now()),
+                ))
+            }
+            Ok(None) => {
+                stop_and_reap_inspection_child(&mut child, &job, deadline, kind)?;
+                return Err(kind.timeout_error().to_string());
+            }
+            Err(_) => {
+                stop_and_reap_inspection_child(&mut child, &job, deadline, kind)?;
+                return Err(kind.wait_error().to_string());
+            }
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: read_inspection_output(stdout),
+        stderr: read_inspection_output(stderr),
+    })
+}
+
+#[cfg(windows)]
+fn windows_filetime_start_id(filetime: FILETIME) -> String {
+    let ticks = ((filetime.dwHighDateTime as u64) << 32) | filetime.dwLowDateTime as u64;
+    format!("windows-filetime-ms:{}", ticks / 10_000)
+}
+
+#[cfg(windows)]
+fn process_start_id_from_handle(handle: HANDLE) -> Result<String, String> {
+    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exit: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user: FILETIME = unsafe { std::mem::zeroed() };
+    if unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err("failed to read Gateway process creation identity".to_string());
+    }
+    Ok(windows_filetime_start_id(creation))
+}
+
+#[cfg(windows)]
+fn child_process_start_id(child: &Child) -> Result<String, String> {
+    process_start_id_from_handle(child.as_raw_handle() as HANDLE)
+}
+
+#[cfg(not(windows))]
+fn child_process_start_id(child: &Child) -> Result<String, String> {
+    match inspect_process(child.id())? {
+        InspectedProcess::Running(info) => info
+            .process_start_id
+            .ok_or_else(|| "spawned Gateway process has no process creation identity".to_string()),
+        InspectedProcess::Missing => Err("spawned Gateway process disappeared".to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn process_start_id_for_pid(pid: u32) -> Result<String, String> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return Err("failed to open Gateway process for creation identity".to_string());
+    }
+    let result = process_start_id_from_handle(handle);
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+#[cfg(windows)]
+fn inspect_listener_pid(port: u16) -> Result<Option<u32>, String> {
+    const AF_INET: u32 = 2;
+    const LOOPBACK_NETWORK_ORDER: u32 = 0x0100_007f;
+    let mut size = 0u32;
+    loop {
+        let sizing = unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if sizing == NO_ERROR {
+            return Ok(None);
+        }
+        if sizing != ERROR_INSUFFICIENT_BUFFER {
+            return Err(format!(
+                "failed to size the Windows TCP listener table: error {sizing}"
+            ));
+        }
+        if size < std::mem::size_of::<u32>() as u32 {
+            return Ok(None);
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let status = unsafe {
+            GetExtendedTcpTable(
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if status == ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+        if status != NO_ERROR {
+            return Err(format!(
+                "failed to inspect the Windows TCP listener table: error {status}"
+            ));
+        }
+
+        let table = unsafe { &*(buffer.as_ptr().cast::<MIB_TCPTABLE_OWNER_PID>()) };
+        let max_entries = (buffer.len() - std::mem::size_of::<u32>())
+            / std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        let num_entries = (table.dwNumEntries as usize).min(max_entries);
+        let rows = unsafe {
+            std::slice::from_raw_parts(table.table.as_ptr(), num_entries)
+        };
+        let mut owners = rows
+            .iter()
+            .filter(|row: &&MIB_TCPROW_OWNER_PID| {
+                row.dwLocalAddr == LOOPBACK_NETWORK_ORDER
+                    && (row.dwLocalPort as u16).to_be() == port
+            })
+            .map(|row| row.dwOwningPid)
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners.dedup();
+        return match owners.as_slice() {
+            [] => Ok(None),
+            [pid] => Ok(Some(*pid)),
+            _ => Err(format!(
+                "multiple TCP listener owners were reported for 127.0.0.1:{port}: {owners:?}"
+            )),
+        };
+    }
 }
 
 #[cfg(not(windows))]
@@ -2251,14 +2840,13 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
     let script = format!(
         "$p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction SilentlyContinue; \
          if ($null -eq $p) {{ exit 3 }}; \
-         [Console]::Out.Write((@{{ command_line = [string]$p.CommandLine; process_start_id = [string]$p.CreationDate }} | ConvertTo-Json -Compress))"
+         [Console]::Out.Write((@{{ command_line = [string]$p.CommandLine }} | ConvertTo-Json -Compress))"
     );
-    let mut command = Command::new("powershell");
-    command.args(["-NoProfile", "-Command", &script]);
-    configure_no_window(&mut command);
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to inspect PID {pid} with PowerShell/CIM: {error}"))?;
+    let output = run_windows_inspection(
+        &script,
+        WindowsInspectionKind::Process,
+        WINDOWS_INSPECTION_TIMEOUT,
+    )?;
 
     if output.status.code() == Some(3) {
         return Ok(InspectedProcess::Missing);
@@ -2274,16 +2862,16 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
     #[derive(Deserialize)]
     struct WindowsProcessInspection {
         command_line: String,
-        process_start_id: String,
     }
     let inspection: WindowsProcessInspection =
         serde_json::from_slice(&output.stdout).map_err(|error| {
             format!("failed to parse process identity for PID {pid}: {error}")
         })?;
+    let process_start_id = process_start_id_for_pid(pid)?;
     Ok(InspectedProcess::Running(
         ProcessInfo::from_command_line_with_start_id(
             inspection.command_line,
-            (!inspection.process_start_id.is_empty()).then_some(inspection.process_start_id),
+            Some(process_start_id),
         ),
     ))
 }
@@ -2390,6 +2978,10 @@ mod tests {
         ProcessInspector, ProcessKiller, ProxyLifecycleBackend, ProxyPaths, ProxyPidMetadata,
         ProxyPidRecord, StartupOutcome, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
+    #[cfg(windows)]
+    use super::{
+        run_bounded_inspection_command, run_windows_inspection, WindowsInspectionKind,
+    };
     use crate::Settings;
     use std::cell::RefCell;
     use std::fs;
@@ -2397,6 +2989,8 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    #[cfg(windows)]
+    use std::process::Stdio;
     use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicU32, Ordering},
@@ -2404,6 +2998,104 @@ mod tests {
     };
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_inspection_command_kills_and_reaps_a_hung_child() {
+        let sentinel = "private-inspection-sentinel";
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "$PID | Set-Content -NoNewline -Path $env:CODEXHUB_TEST_PID_PATH; Write-Error '{sentinel}'; Start-Sleep -Seconds 10"
+            ),
+        ]);
+        let root = temp_root("bounded-inspection-command");
+        let pid_path = root.join("helper.pid");
+        command.env("CODEXHUB_TEST_PID_PATH", &pid_path);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        super::configure_no_window(&mut command);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let error =
+            run_bounded_inspection_command(command, deadline, WindowsInspectionKind::Process)
+                .expect_err("hung inspection must time out");
+
+        assert_eq!(error, "Gateway process inspection timed out");
+        assert!(!error.contains(sentinel));
+        let pid = fs::read_to_string(&pid_path)
+            .expect("helper PID")
+            .parse::<u32>()
+            .expect("numeric helper PID");
+        assert!(matches!(
+            super::inspect_process(pid),
+            Ok(InspectedProcess::Missing)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inspection_returns_when_a_descendant_inherits_output_handles() {
+        let root = temp_root("inspection-descendant");
+        let descendant_pid_path = root.join("descendant.pid");
+        let escaped_path = descendant_pid_path
+            .to_string_lossy()
+            .replace(char::from(39), "''");
+        let script = format!(
+            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 10' -NoNewWindow -PassThru; $child.Id | Set-Content -NoNewline -Path '{escaped_path}'; [Console]::Out.Write('parent-exited')"
+        );
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = run_windows_inspection(
+                &script,
+                WindowsInspectionKind::Process,
+                Duration::from_secs(5),
+            );
+            let _ = result_tx.send(result);
+        });
+
+        let output = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("inspection must not wait for a descendant-held output pipe")
+            .expect("parent inspection should exit successfully");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "parent-exited");
+        worker.join().expect("inspection worker joins");
+        let descendant_pid = fs::read_to_string(descendant_pid_path)
+            .expect("descendant PID")
+            .parse::<u32>()
+            .expect("numeric descendant PID");
+        assert!(matches!(
+            super::inspect_process(descendant_pid),
+            Ok(InspectedProcess::Missing)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_and_listener_inspection_timeouts_are_sanitized() {
+        for (kind, expected) in [
+            (
+                WindowsInspectionKind::Process,
+                "Gateway process inspection timed out",
+            ),
+            (
+                WindowsInspectionKind::Listener,
+                "Gateway listener inspection timed out",
+            ),
+        ] {
+            let sentinel = "private-command-line-sentinel";
+            let error = run_windows_inspection(
+                &format!("Write-Error '{sentinel}'; Start-Sleep -Seconds 5"),
+                kind,
+                Duration::from_millis(100),
+            )
+            .expect_err("hung PowerShell inspection must time out");
+
+            assert_eq!(error, expected);
+            assert!(!error.contains(sentinel));
+        }
+    }
 
     #[test]
     fn status_returns_not_running_when_health_endpoint_is_unavailable() {
@@ -2448,6 +3140,79 @@ mod tests {
             snapshot.status.message,
             format!("Gateway running with PID {pid}")
         );
+    }
+
+    #[test]
+    fn reconciled_snapshot_upgrades_spawn_known_recovery_after_identity_returns() {
+        let root = temp_root("reconciled-recovery-upgrade");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        let recovery = ProxyPidRecord::Managed(ProxyPidMetadata::recovery(
+            pid,
+            port,
+            &paths.proxy_script_path(),
+        ));
+        super::write_pid_record(&paths, &recovery).expect("write recovery PID metadata");
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = FixedListenerInspector::new(Some(pid));
+
+        let snapshot = reconciled_snapshot_with_controls(
+            &paths,
+            &|_| Ok(Some(healthy_response())),
+            &inspector,
+            &listener,
+        )
+        .expect("recovery identity should be upgraded");
+
+        assert!(snapshot.status.proxy_running);
+        let identity = snapshot.identity.expect("upgraded identity");
+        assert_eq!(identity.pid, pid);
+        assert_eq!(identity.process_start_id, Some(super::test_process_start_id(pid)));
+        let ProxyPidRecord::Managed(metadata) = read_pid_record(&paths)
+            .expect("read upgraded PID metadata")
+            .expect("upgraded PID metadata")
+        else {
+            panic!("expected managed PID metadata");
+        };
+        assert!(!metadata.recovery);
+        assert_eq!(metadata.process_start_id, identity.process_start_id);
+    }
+
+    #[test]
+    fn reconciled_snapshot_does_not_activate_recovery_when_listener_differs() {
+        let root = temp_root("recovery-listener-mismatch");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        let recovery = ProxyPidRecord::Managed(ProxyPidMetadata::recovery(
+            pid,
+            port,
+            &paths.proxy_script_path(),
+        ));
+        super::write_pid_record(&paths, &recovery).expect("write recovery PID metadata");
+
+        let error = reconciled_snapshot_with_controls(
+            &paths,
+            &|_| Ok(Some(healthy_response())),
+            &RecordingInspector::new(fake_proxy_process(&paths, port)),
+            &FixedListenerInspector::new(Some(54_321)),
+        )
+        .expect_err("listener mismatch must block recovery activation");
+
+        assert!(error.contains("listener PID 54321"));
+        let ProxyPidRecord::Managed(metadata) = read_pid_record(&paths)
+            .expect("read recovery PID metadata")
+            .expect("recovery PID metadata")
+        else {
+            panic!("expected managed PID metadata");
+        };
+        assert!(metadata.recovery);
+        assert_eq!(metadata.process_start_id, None);
     }
 
     #[test]
@@ -2511,6 +3276,48 @@ mod tests {
         assert_eq!(identity.pid, listener_pid.load(Ordering::SeqCst));
         kill_process(identity.pid).expect("clean up test child");
         let _ = super::remove_pid(&paths);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_spawn_inspection_timeout_cleans_up_gateway_without_leaking_output() {
+        let root = temp_root("post-spawn-inspection-timeout");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
+        let spawned_pid = Arc::new(AtomicU32::new(0));
+        let health_calls = std::cell::Cell::new(0usize);
+        let started = Instant::now();
+
+        let error = start_with_paths_and_controls(
+            &paths,
+            Duration::from_secs(1),
+            Duration::ZERO,
+            &|_| {
+                let call = health_calls.get();
+                health_calls.set(call + 1);
+                Ok((call > 0).then(healthy_response))
+            },
+            &TimeoutAfterSpawnInspector,
+            &FixedListenerInspector::new(None),
+            |child, _, _, _, _, _| {
+                spawned_pid.store(child.id(), Ordering::SeqCst);
+                Ok(StartupOutcome::Healthy(healthy_response()))
+            },
+        )
+        .expect_err("post-spawn process inspection must time out");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(error.message.contains("Gateway process inspection timed out"));
+        assert!(!error.message.contains("private-post-spawn-sentinel"));
+        assert_eq!(read_pid(&paths).expect("PID removed"), None);
+        let pid = spawned_pid.load(Ordering::SeqCst);
+        let _cleanup = PidCleanup::new(pid);
+        assert!(matches!(
+            super::inspect_process(pid),
+            Ok(InspectedProcess::Missing)
+        ));
     }
 
     #[test]
@@ -2934,6 +3741,82 @@ time.sleep(10)
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn startup_output_finish_returns_when_descendant_inherits_pipe() {
+        let root = temp_root("startup-output-descendant");
+        let descendant_pid_path = root.join("descendant.pid");
+        let escaped_path = descendant_pid_path
+            .to_string_lossy()
+            .replace(char::from(39), "''");
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 10' -NoNewWindow -PassThru; $child.Id | Set-Content -NoNewline -Path '{escaped_path}'; [Console]::Out.Write('parent-exited')"
+            ),
+        ]);
+        configure_start_stdio(&mut command);
+        super::configure_no_window(&mut command);
+        let mut child = command.spawn().expect("spawn output parent");
+        let capture = capture_child_stdio(&mut child);
+        child.wait().expect("output parent exits");
+        let descendant_pid = fs::read_to_string(descendant_pid_path)
+            .expect("descendant PID")
+            .parse::<u32>()
+            .expect("numeric descendant PID");
+        let _cleanup = PidCleanup::new(descendant_pid);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = result_tx.send(capture.finish());
+        });
+
+        let output = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("finish must not wait for descendant-held pipe");
+        worker.join().expect("capture worker joins");
+        assert_eq!(output.stdout, "parent-exited");
+    }
+
+    #[test]
+    fn failed_start_cleanup_releases_output_capture_when_kill_is_unconfirmed() {
+        let root = temp_root("unconfirmed-capture-release");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
+        let mut command = Command::new(find_python(&paths));
+        command.args(["-c", "import time; time.sleep(30)"]);
+        configure_start_stdio(&mut command);
+        let mut child = command.spawn().expect("spawn cleanup child");
+        let pid = child.id();
+        let capture = capture_child_stdio(&mut child);
+        let stdout = Arc::downgrade(&capture.stdout);
+        let stderr = Arc::downgrade(&capture.stderr);
+        let record = ProxyPidRecord::Managed(ProxyPidMetadata::recovery(
+            pid,
+            port,
+            &paths.proxy_script_path(),
+        ));
+
+        let _ = clean_up_failed_start_with_controls(
+            &paths,
+            &mut child,
+            capture,
+            "startup reconciliation failed".to_string(),
+            &record,
+            &ErroringInspector,
+            &UnconfirmedTerminator,
+        );
+
+        assert!(stdout.upgrade().is_none());
+        assert!(stderr.upgrade().is_none());
+        kill_process(pid).expect("clean up live child");
+        let _ = child.wait();
+        let _ = super::remove_pid(&paths);
+    }
+
     #[test]
     fn failed_start_cleanup_is_bounded_and_persists_identity_when_kill_is_unconfirmed() {
         let root = temp_root("bounded-failed-cleanup");
@@ -3068,6 +3951,33 @@ time.sleep(10)
 
         assert!(matches!(verification, VerifiedProxyProcess::Unknown { pid: value, .. } if value == pid));
         assert_eq!(read_pid(&paths).expect("legacy PID preserved"), Some(pid));
+    }
+
+    #[test]
+    fn recovery_with_identity_is_not_destructively_verified_before_activation() {
+        let root = temp_root("recovery-not-destructive");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_fake_proxy_script(&paths, "print('test')");
+        let record = ProxyPidRecord::Managed(ProxyPidMetadata::recovery_with_identity(
+            12_345,
+            port,
+            &paths.proxy_script_path(),
+            super::test_process_start_id(12_345),
+        ));
+
+        let verification = super::verify_proxy_process(
+            &record,
+            &paths,
+            port,
+            &RecordingInspector::new(fake_proxy_process(&paths, port)),
+        )
+        .expect("verification result");
+
+        assert!(matches!(
+            verification,
+            VerifiedProxyProcess::Unknown { pid: 12_345, .. }
+        ));
     }
 
     #[test]
@@ -3723,6 +4633,19 @@ time.sleep(10)
             self.inspected.borrow_mut().push(pid);
             Ok(self.process.clone())
         }
+
+        fn spawned_process_start_id(
+            &self,
+            _child: &std::process::Child,
+        ) -> Result<String, String> {
+            match &self.process {
+                InspectedProcess::Running(info) => info
+                    .process_start_id
+                    .clone()
+                    .ok_or_else(|| "test process has no start identity".to_string()),
+                InspectedProcess::Missing => Err("test process is missing".to_string()),
+            }
+        }
     }
 
     struct ErroringInspector;
@@ -3730,6 +4653,37 @@ time.sleep(10)
     impl ProcessInspector for ErroringInspector {
         fn inspect(&self, _pid: u32) -> Result<InspectedProcess, String> {
             Err("process inspection unavailable".to_string())
+        }
+    }
+
+    #[cfg(windows)]
+    struct TimeoutAfterSpawnInspector;
+
+    #[cfg(windows)]
+    impl ProcessInspector for TimeoutAfterSpawnInspector {
+        fn inspect(&self, _pid: u32) -> Result<InspectedProcess, String> {
+            run_windows_inspection(
+                "Write-Error 'private-post-spawn-sentinel'; Start-Sleep -Seconds 10",
+                WindowsInspectionKind::Process,
+                Duration::from_millis(200),
+            )
+            .map(|_| InspectedProcess::Missing)
+        }
+    }
+
+    struct PidCleanup {
+        pid: u32,
+    }
+
+    impl PidCleanup {
+        fn new(pid: u32) -> Self {
+            Self { pid }
+        }
+    }
+
+    impl Drop for PidCleanup {
+        fn drop(&mut self) {
+            let _ = kill_process(self.pid);
         }
     }
 }
