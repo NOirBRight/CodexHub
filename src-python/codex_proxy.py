@@ -7569,6 +7569,27 @@ def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[st
     return item
 
 
+def _validate_generated_required_spawn_call(
+    value: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    validated_call_ids: set[str],
+) -> None:
+    raw_arguments = value.get("arguments")
+    if (
+        _multi_agent_function_call_name(value) != "spawn_agent"
+        or raw_arguments in (None, "")
+        or _json_object_from_arguments(raw_arguments) is None
+    ):
+        return
+    identities = [identity for identity in (value.get("call_id"), value.get("id")) if isinstance(identity, str)]
+    if any(identity in validated_call_ids for identity in identities):
+        return
+    _validate_external_worker_selectors(value, event_context, surface=surface)
+    validated_call_ids.update(identity for identity in identities if identity)
+
+
 def _coerce_required_subagent_tool_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
@@ -7590,15 +7611,24 @@ def _coerce_required_subagent_tool_calls(
         stored = event_context.setdefault("_required_subagent_coerced_item_ids", set())
         coerced_item_ids = stored if isinstance(stored, set) else set()
         event_context["_required_subagent_coerced_item_ids"] = coerced_item_ids
+        stored_generated = event_context.setdefault("_required_subagent_generated_spawn_item_ids", set())
+        generated_spawn_item_ids = stored_generated if isinstance(stored_generated, set) else set()
+        event_context["_required_subagent_generated_spawn_item_ids"] = generated_spawn_item_ids
+        stored_validated = event_context.setdefault("_required_subagent_validated_generated_spawn_ids", set())
+        validated_generated_spawn_ids = stored_validated if isinstance(stored_validated, set) else set()
+        event_context["_required_subagent_validated_generated_spawn_ids"] = validated_generated_spawn_ids
     else:
         coerced_item_ids = set()
+        generated_spawn_item_ids = set()
+        validated_generated_spawn_ids = set()
     rewritten, changed = _coerce_required_subagent_tool_calls_inner(
         value,
         spec,
         coerced_item_ids,
+        generated_spawn_item_ids,
         event_context,
         surface,
-        set(),
+        validated_generated_spawn_ids,
     )
     if changed:
         _write_required_subagent_repair_event(event_context, spec, surface="coerce")
@@ -7731,6 +7761,7 @@ def _coerce_required_subagent_tool_calls_inner(
     value: Any,
     spec: Mapping[str, Any],
     coerced_item_ids: set[str],
+    generated_spawn_item_ids: set[str],
     event_context: Mapping[str, Any] | None,
     surface: str,
     validated_generated_spawn_ids: set[str],
@@ -7743,6 +7774,7 @@ def _coerce_required_subagent_tool_calls_inner(
                 item,
                 spec,
                 coerced_item_ids,
+                generated_spawn_item_ids,
                 event_context,
                 surface,
                 validated_generated_spawn_ids,
@@ -7763,6 +7795,19 @@ def _coerce_required_subagent_tool_calls_inner(
         if spec.get("tool_name") == "spawn_agent" and original_arguments is not None:
             arguments = _with_preserved_spawn_agent_type(arguments, original_arguments)
         expected = json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":"))
+        if spec.get("tool_name") == "spawn_agent" and item_id in generated_spawn_item_ids:
+            _validate_generated_required_spawn_call(
+                {
+                    "type": "function_call",
+                    "id": item_id,
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": expected,
+                },
+                event_context,
+                surface=surface,
+                validated_call_ids=validated_generated_spawn_ids,
+            )
         if value.get("arguments") != expected:
             rewritten = dict(value)
             rewritten["arguments"] = expected
@@ -7776,17 +7821,14 @@ def _coerce_required_subagent_tool_calls_inner(
         if isinstance(item_id, str) and item_id:
             coerced_item_ids.add(item_id)
         if original_tool_name != "spawn_agent" and _multi_agent_function_call_name(replacement) == "spawn_agent":
-            raw_arguments = replacement.get("arguments")
-            arguments = _json_object_from_arguments(raw_arguments)
-            call_identity = replacement.get("call_id") or item_id
-            if (
-                arguments is not None
-                and raw_arguments not in (None, "")
-                and (not isinstance(call_identity, str) or call_identity not in validated_generated_spawn_ids)
-            ):
-                _validate_external_worker_selectors(replacement, event_context, surface=surface)
-                if isinstance(call_identity, str) and call_identity:
-                    validated_generated_spawn_ids.add(call_identity)
+            if isinstance(item_id, str) and item_id:
+                generated_spawn_item_ids.add(item_id)
+            _validate_generated_required_spawn_call(
+                replacement,
+                event_context,
+                surface=surface,
+                validated_call_ids=validated_generated_spawn_ids,
+            )
         return (replacement, True) if replacement != value else (value, False)
 
     changed = False
@@ -7796,6 +7838,7 @@ def _coerce_required_subagent_tool_calls_inner(
             item,
             spec,
             coerced_item_ids,
+            generated_spawn_item_ids,
             event_context,
             surface,
             validated_generated_spawn_ids,

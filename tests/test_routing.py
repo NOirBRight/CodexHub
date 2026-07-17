@@ -15099,6 +15099,41 @@ Execution constraints:
             + [b"data: [DONE]\n", b""]
         )
 
+    def _native_wait_sse_events(self, *, call_id):
+        wait_arguments = json.dumps({"targets": ["synthetic-child"], "timeout_ms": 1000})
+        wait_item = {
+            "id": f"fc_{call_id}",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "wait_agent",
+            "arguments": wait_arguments,
+        }
+        return [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**wait_item, "status": "in_progress", "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": wait_item["id"],
+                "output_index": 0,
+                "arguments": wait_arguments,
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": wait_item},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": f"resp_{call_id}",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [wait_item],
+                },
+            },
+        ]
+
     def test_responses_caller_chat_upstream_sse_relay_returns_carrier_and_replays(self):
         event_context = {
             "inbound_format": "responses",
@@ -15297,6 +15332,100 @@ Execution constraints:
             outcome="rejected",
             classification="missing_selector",
             surface="sse",
+        )
+
+    def test_native_responses_sse_rejects_selectorless_required_spawn_before_arguments_done_emission(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+            "tool_protocol": "responses_structured",
+            "subagent_legal_actions": [
+                {
+                    "tool_name": "spawn_agent",
+                    "arguments": {"message": "required replacement", "fork_context": False},
+                }
+            ],
+        }
+        events = self._native_wait_sse_events(call_id="native-required-missing")
+        emitted = [
+            compatible_sse_line(
+                b"data: " + json.dumps(events[0]).encode("utf-8") + b"\n",
+                "synthetic-provider",
+                event_context=event_context,
+            )
+        ]
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            emitted.append(
+                compatible_sse_line(
+                    b"data: " + json.dumps(events[1]).encode("utf-8") + b"\n",
+                    "synthetic-provider",
+                    event_context=event_context,
+                )
+            )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.assertFalse(any(b"response.function_call_arguments.done" in line for line in emitted))
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="missing_selector",
+            surface="sse",
+        )
+
+    def test_native_responses_sse_valid_generated_worker_validates_once_and_carries_binding(self):
+        requested_binding = {
+            "agent_type": "worker",
+            "model": "synthetic-original-model",
+            "reasoning": "high",
+        }
+        event_context = {
+            "inbound_format": "responses",
+            "_spawn_selector_required": True,
+            "_worker_binding_required": True,
+            "_worker_requested_binding": requested_binding,
+            "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+            "tool_protocol": "responses_structured",
+            "subagent_legal_actions": [
+                {
+                    "tool_name": "spawn_agent",
+                    "arguments": {
+                        "agent_type": "worker",
+                        "message": "required replacement",
+                        "fork_context": False,
+                    },
+                }
+            ],
+        }
+        transformed = [
+            compatible_sse_line(
+                b"data: " + json.dumps(event).encode("utf-8") + b"\n",
+                "synthetic-provider",
+                event_context=event_context,
+            )
+            for event in self._native_wait_sse_events(call_id="native-required-worker")
+        ]
+        payloads = [json.loads(line.removeprefix(b"data: ")) for line in transformed]
+        done_call = next(payload["item"] for payload in payloads if payload.get("type") == "response.output_item.done")
+        completed_call = next(
+            payload["response"]["output"][0]
+            for payload in payloads
+            if payload.get("type") == "response.completed"
+        )
+        accepted = [
+            event
+            for event in self.write_proxy_event.call_args_list
+            if event.args == ("worker_selector_validated",)
+            and event.kwargs.get("outcome") == "accepted"
+            and event.kwargs.get("classification") == "worker_preserved"
+            and event.kwargs.get("surface") == "sse"
+        ]
+
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(json.loads(done_call["arguments"])["agent_type"], "worker")
+        self.assertEqual(
+            completed_call["_codexhub_worker_requested_binding"],
+            done_call["_codexhub_worker_requested_binding"],
         )
 
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
