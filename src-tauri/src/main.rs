@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod diagnostics;
 mod gateway;
+mod gateway_lifecycle;
 mod history;
 mod models;
 mod openai_usage;
@@ -316,8 +317,7 @@ fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> R
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
-    official_refresh::refresh_before_official_activation()?;
-    proxy::start()
+    proxy::start_after(official_refresh::refresh_before_official_activation)
 }
 
 #[tauri::command]
@@ -327,8 +327,7 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
-    official_refresh::refresh_before_official_activation()?;
-    proxy::restart()
+    proxy::restart_after(official_refresh::refresh_before_official_activation)
 }
 
 #[tauri::command]
@@ -749,7 +748,7 @@ fn run_tray_action(app: &AppHandle, id: &str) {
             report_tray_action(app, "Start Gateway", start_proxy());
         }
         TRAY_STOP_GATEWAY => {
-            report_tray_action(app, "Stop Gateway", proxy::stop());
+            report_tray_action(app, "Stop Gateway", stop_proxy());
         }
         TRAY_RESTART_GATEWAY => {
             report_tray_action(app, "Restart Gateway", restart_proxy());
@@ -986,36 +985,38 @@ fn run_gui() {
 
 fn start_gateway_on_launch() {
     tauri::async_runtime::spawn_blocking(|| {
-        if let Err(error) = official_refresh::refresh_at_startup() {
-            log::warn!("startup Official model refresh failed: {error}");
-        }
         official_refresh::start_scheduled_refresh_loop();
         let Ok(settings) = config::get_settings() else {
             return;
         };
-        if let Err(error) = start_gateway_after_startup(
-            settings.auto_start_gateway,
-            official_refresh::refresh_before_official_activation,
-            proxy::start,
-        ) {
+        let start = || {
+            proxy::start_after(|| {
+                if let Err(error) = official_refresh::refresh_at_startup() {
+                    log::warn!("startup Official model refresh failed: {error}");
+                }
+                official_refresh::refresh_before_official_activation()
+            })
+        };
+        if let Err(error) = start_gateway_after_startup(settings.auto_start_gateway, start) {
             eprintln!("failed to start CodexHub gateway on app launch: {error}");
+        } else if !settings.auto_start_gateway {
+            if let Err(error) = official_refresh::refresh_at_startup() {
+                log::warn!("startup Official model refresh failed: {error}");
+            }
         }
     });
 }
 
-fn start_gateway_after_startup<ActivateOfficial, StartGateway>(
+fn start_gateway_after_startup<StartGateway>(
     auto_start_gateway: bool,
-    activate_official: ActivateOfficial,
     start_gateway: StartGateway,
 ) -> Result<bool, String>
 where
-    ActivateOfficial: FnOnce() -> Result<(), String>,
     StartGateway: FnOnce() -> Result<AppStatus, String>,
 {
     if !auto_start_gateway {
         return Ok(false);
     }
-    activate_official()?;
     start_gateway()?;
     Ok(true)
 }
@@ -1041,20 +1042,16 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn auto_start_refuses_to_launch_the_gateway_without_a_safe_official_snapshot() {
+    fn auto_start_propagates_coordinated_precondition_failure_once() {
         let starts = Cell::new(0);
-        let error = start_gateway_after_startup(
-            true,
-            || Err("safe Official snapshot is unavailable".to_string()),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(status())
-            },
-        )
-        .expect_err("unsafe Official activation must block auto-start");
+        let error = start_gateway_after_startup(true, || {
+            starts.set(starts.get() + 1);
+            Err("safe Official snapshot is unavailable".to_string())
+        })
+        .expect_err("coordinated precondition must block auto-start");
 
         assert!(error.contains("safe Official snapshot"));
-        assert_eq!(starts.get(), 0);
+        assert_eq!(starts.get(), 1);
     }
 
     #[test]

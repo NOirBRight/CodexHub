@@ -1,3 +1,7 @@
+use crate::gateway_lifecycle::{
+    coordinator as gateway_lifecycle, GatewayIdentity, GatewayLifecycleBackend,
+    GatewayLifecycleSnapshot, GatewayStartOutcome,
+};
 use crate::AppStatus;
 use crate::Settings;
 use crate::{build_info, runtime_paths, safe_file};
@@ -29,20 +33,42 @@ const MANAGED_OVERLAY_MARKER_END: &str = "# END CODEX PROXY SESSION CONFIG";
 const DEBUG_DIAGNOSTIC_BOOTSTRAP: &str = "import atexit, os, sys; from pathlib import Path; import codex_proxy, diagnostic_recorder; from diagnostic_control import DiagnosticControlBridge; runtime_home = Path(os.environ['CODEXHUB_DIAGNOSTICS_RUNTIME_HOME']); recorder = diagnostic_recorder.for_compile_flavor(runtime_home, 'debug', build_version=os.environ['CODEXHUB_DIAGNOSTICS_BUILD_VERSION'], source_revision=os.environ['CODEXHUB_DIAGNOSTICS_SOURCE_REVISION']); codex_proxy.GATEWAY_DIAGNOSTIC_RECORDER = recorder; control = DiagnosticControlBridge(recorder, runtime_home); control.start(); atexit.register(recorder.shutdown); atexit.register(control.shutdown); raise SystemExit(codex_proxy.main(sys.argv[2:]))";
 
 pub fn status() -> Result<AppStatus, String> {
-    status_with_paths(&ProxyPaths::runtime()?)
+    let backend = ProxyLifecycleBackend::runtime()?;
+    gateway_lifecycle()
+        .status(&backend)
+        .map(|snapshot| snapshot.status)
 }
 
-pub fn start() -> Result<AppStatus, String> {
-    start_with_paths(&ProxyPaths::runtime()?)
+pub fn start_after<Prepare>(prepare: Prepare) -> Result<AppStatus, String>
+where
+    Prepare: FnOnce() -> Result<(), String>,
+{
+    let backend = ProxyLifecycleBackend::runtime()?;
+    gateway_lifecycle()
+        .start(&backend, prepare)
+        .map(|snapshot| snapshot.status)
 }
 
 pub fn stop() -> Result<AppStatus, String> {
-    stop_with_paths(&ProxyPaths::runtime()?)
+    let backend = ProxyLifecycleBackend::runtime()?;
+    gateway_lifecycle().stop(&backend)
 }
 
-pub fn restart() -> Result<AppStatus, String> {
-    stop()?;
-    start()
+pub fn restart_after<Prepare>(prepare: Prepare) -> Result<AppStatus, String>
+where
+    Prepare: FnOnce() -> Result<(), String>,
+{
+    let backend = ProxyLifecycleBackend::runtime()?;
+    gateway_lifecycle()
+        .restart(&backend, prepare)
+        .map(|snapshot| snapshot.status)
+}
+
+/// Ownership-safe handoff for #112 terminal-exit cleanup. #139 intentionally
+/// exposes the identity without acting on application exit or update restart.
+#[allow(dead_code)]
+pub(crate) fn session_owned_identity() -> Option<GatewayIdentity> {
+    gateway_lifecycle().session_owned_identity()
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +131,48 @@ impl ProxyPaths {
 
     fn proxy_script_dir(&self) -> PathBuf {
         self.repo_root.join("src-python")
+    }
+}
+
+struct ProxyLifecycleBackend {
+    paths: ProxyPaths,
+}
+
+impl ProxyLifecycleBackend {
+    fn runtime() -> Result<Self, String> {
+        Ok(Self {
+            paths: ProxyPaths::runtime()?,
+        })
+    }
+}
+
+impl GatewayLifecycleBackend for ProxyLifecycleBackend {
+    fn snapshot(&self) -> Result<GatewayLifecycleSnapshot, String> {
+        reconciled_snapshot_with_controls(
+            &self.paths,
+            &health,
+            &SystemProcessInspector,
+            &SystemListenerInspector,
+        )
+    }
+
+    fn start(&self) -> Result<GatewayStartOutcome, String> {
+        start_outcome_with_paths(&self.paths)
+    }
+
+    fn stop(&self) -> Result<AppStatus, String> {
+        stop_with_paths(&self.paths)
+    }
+
+    fn can_reuse(&self, snapshot: &GatewayLifecycleSnapshot) -> bool {
+        let Some(identity) = snapshot.identity.as_ref() else {
+            return false;
+        };
+        let current_script = self.paths.proxy_script_path();
+        normalized_path_text(&identity.script_path)
+            == normalized_path_text(&current_script.to_string_lossy())
+            && identity.script_sha256.is_some()
+            && identity.script_sha256 == file_sha256(&current_script)
     }
 }
 
@@ -267,6 +335,18 @@ impl ProxyPidMetadata {
     }
 }
 
+impl From<&ProxyPidMetadata> for GatewayIdentity {
+    fn from(metadata: &ProxyPidMetadata) -> Self {
+        Self {
+            pid: metadata.pid,
+            port: metadata.port,
+            script_path: metadata.script_path.clone(),
+            script_sha256: metadata.script_sha256.clone(),
+            started_at_unix_ms: metadata.started_at_unix_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProxyPidRecord {
     Managed(ProxyPidMetadata),
@@ -294,6 +374,121 @@ impl ProxyPidRecord {
             Self::Legacy(_) => None,
         }
     }
+}
+
+fn reconciled_snapshot_with_controls(
+    paths: &ProxyPaths,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+) -> Result<GatewayLifecycleSnapshot, String> {
+    let settings = read_settings(paths)?;
+    let mode = read_mode(paths)?;
+    let health = health_probe(settings.proxy_port)?;
+    let running_health = health.as_ref().filter(|response| response.is_running());
+    let pid_record = read_pid_record(paths)?;
+
+    let Some(response) = running_health else {
+        if let Some(record) = pid_record {
+            match verify_proxy_process(&record, paths, settings.proxy_port, inspector)? {
+                VerifiedProxyProcess::Verified { pid } => {
+                    return Err(format!(
+                        "managed Gateway PID {pid} exists but health is unavailable on port {}; stop it through the lifecycle coordinator before starting another process",
+                        settings.proxy_port
+                    ));
+                }
+                VerifiedProxyProcess::Missing { .. } | VerifiedProxyProcess::Mismatch { .. } => {
+                    remove_pid(paths)?
+                }
+            }
+        }
+        return Ok(GatewayLifecycleSnapshot {
+            status: AppStatus {
+                mode,
+                proxy_running: false,
+                proxy_port: settings.proxy_port,
+                proxy_build: None,
+                message: "Gateway is not running".to_string(),
+                history_sync_status: None,
+                history_sync_message: None,
+            },
+            identity: None,
+        });
+    };
+
+    let Some(pid_record) = pid_record else {
+        return Err(format!(
+            "Gateway health responds on port {}, but no managed PID identity exists; refusing to claim or replace the external listener",
+            settings.proxy_port
+        ));
+    };
+    let pid = pid_record.pid();
+    if pid_record.expected_port(settings.proxy_port) != settings.proxy_port {
+        remove_pid(paths)?;
+        return Err(format!(
+            "Gateway health responds on port {}, but managed PID {pid} records port {}; removed stale PID identity without stopping either process",
+            settings.proxy_port,
+            pid_record.expected_port(settings.proxy_port)
+        ));
+    }
+
+    match verify_proxy_process(&pid_record, paths, settings.proxy_port, inspector)? {
+        VerifiedProxyProcess::Verified { .. } => {}
+        VerifiedProxyProcess::Missing { .. } => {
+            remove_pid(paths)?;
+            return Err(format!(
+                "Gateway health responds on port {}, but managed PID {pid} no longer exists; removed stale PID identity without stopping the listener",
+                settings.proxy_port
+            ));
+        }
+        VerifiedProxyProcess::Mismatch { reason, .. } => {
+            remove_pid(paths)?;
+            return Err(format!(
+                "Gateway health responds on port {}, but managed PID {pid} ownership could not be verified ({reason}); removed stale PID identity without stopping either process",
+                settings.proxy_port
+            ));
+        }
+    }
+
+    let listener_pid = listener_inspector.listening_pid(settings.proxy_port)?;
+    let Some(listener_pid) = listener_pid else {
+        remove_pid(paths)?;
+        return Err(format!(
+            "Gateway health responds on port {}, but no TCP listener owner could be reconciled; removed managed PID {pid} without stopping the process",
+            settings.proxy_port
+        ));
+    };
+    if listener_pid != pid {
+        remove_pid(paths)?;
+        return Err(format!(
+            "Gateway health responds on port {}, but listener PID {listener_pid} differs from managed PID {pid}; removed stale PID identity without stopping either process",
+            settings.proxy_port
+        ));
+    }
+
+    let identity = match &pid_record {
+        ProxyPidRecord::Managed(metadata) => GatewayIdentity::from(metadata),
+        ProxyPidRecord::Legacy(pid) => GatewayIdentity {
+            pid: *pid,
+            port: settings.proxy_port,
+            script_path: comparable_path(&paths.proxy_script_path()),
+            script_sha256: file_sha256(&paths.proxy_script_path()),
+            started_at_unix_ms: 0,
+        },
+    };
+
+    Ok(GatewayLifecycleSnapshot {
+        status: AppStatus {
+            mode,
+            proxy_running: true,
+            proxy_port: settings.proxy_port,
+            proxy_build: response.build.clone(),
+            message: format!("Gateway running with PID {pid}"),
+            history_sync_status: None,
+            history_sync_message: None,
+        },
+        identity: Some(identity),
+    })
 }
 
 fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
@@ -327,9 +522,14 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     })
 }
 
+#[cfg(test)]
 fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
+    start_outcome_with_paths(paths).map(|outcome| outcome.snapshot.status)
+}
+
+fn start_outcome_with_paths(paths: &ProxyPaths) -> Result<GatewayStartOutcome, String> {
     replace_managed_proxy_from_previous_bundle(paths)?;
-    start_with_paths_and_timeout(paths, START_TIMEOUT)
+    start_outcome_with_paths_and_timeout(paths, START_TIMEOUT)
 }
 
 fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), String> {
@@ -339,8 +539,8 @@ fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), 
     let current_script = paths.proxy_script_path();
     let path_matches = normalized_path_text(&metadata.script_path)
         == normalized_path_text(&current_script.to_string_lossy());
-    let fingerprint_matches = metadata.script_sha256.is_some()
-        && metadata.script_sha256 == file_sha256(&current_script);
+    let fingerprint_matches =
+        metadata.script_sha256.is_some() && metadata.script_sha256 == file_sha256(&current_script);
     if path_matches && fingerprint_matches {
         return Ok(());
     }
@@ -363,30 +563,24 @@ fn file_sha256(path: &Path) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
-fn start_with_paths_and_timeout(
+fn start_outcome_with_paths_and_timeout(
     paths: &ProxyPaths,
     timeout: Duration,
-) -> Result<AppStatus, String> {
-    start_with_paths_and_timing(paths, timeout, Duration::from_millis(200), &health)
-}
-
-fn start_with_paths_and_timing(
-    paths: &ProxyPaths,
-    timeout: Duration,
-    poll_interval: Duration,
-    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
-) -> Result<AppStatus, String> {
-    start_with_paths_and_waiter(
+) -> Result<GatewayStartOutcome, String> {
+    start_with_paths_and_controls(
         paths,
         timeout,
-        poll_interval,
-        health_probe,
+        Duration::from_millis(200),
+        &health,
+        &SystemProcessInspector,
+        &SystemListenerInspector,
         |child, port, timeout, poll_interval, health_probe, _output_capture| {
             wait_for_startup_health(child, port, timeout, poll_interval, health_probe)
         },
     )
 }
 
+#[cfg(test)]
 fn start_with_paths_and_waiter<F>(
     paths: &ProxyPaths,
     timeout: Duration,
@@ -404,22 +598,47 @@ where
         &StartupOutputCapture,
     ) -> Result<StartupOutcome, String>,
 {
-    let settings = read_settings(paths)?;
-    let mode = read_mode(paths)?;
-    if let Some(response) = health_probe(settings.proxy_port)? {
-        if response.is_running() {
-            return Ok(AppStatus {
-                mode,
-                proxy_running: true,
-                proxy_port: settings.proxy_port,
-                proxy_build: response.build,
-                message: "Proxy is already running".to_string(),
-                history_sync_status: None,
-                history_sync_message: None,
-            });
-        }
+    start_with_paths_and_controls(
+        paths,
+        timeout,
+        poll_interval,
+        health_probe,
+        &SystemProcessInspector,
+        &SystemListenerInspector,
+        wait_for_startup,
+    )
+    .map(|outcome| outcome.snapshot.status)
+}
+
+fn start_with_paths_and_controls<F>(
+    paths: &ProxyPaths,
+    timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+    wait_for_startup: F,
+) -> Result<GatewayStartOutcome, String>
+where
+    F: FnOnce(
+        &mut Child,
+        u16,
+        Duration,
+        Duration,
+        &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+        &StartupOutputCapture,
+    ) -> Result<StartupOutcome, String>,
+{
+    let existing =
+        reconciled_snapshot_with_controls(paths, health_probe, inspector, listener_inspector)?;
+    if existing.identity.is_some() {
+        return Ok(GatewayStartOutcome {
+            snapshot: existing,
+            spawned: false,
+        });
     }
 
+    let settings = read_settings(paths)?;
     let script = paths.proxy_script_path();
     if !script.exists() {
         return Err(format!("proxy script not found: {}", script.display()));
@@ -445,28 +664,104 @@ where
     })?;
     let output_capture = capture_child_stdio(&mut child);
     let pid = child.id();
-    if let Err(error) = write_pid(paths, pid, settings.proxy_port, &script) {
-        let _ = terminate_child(&mut child);
-        return Err(error);
-    }
 
-    match wait_for_startup(
+    let startup = match wait_for_startup(
         &mut child,
         settings.proxy_port,
         timeout,
         poll_interval,
         health_probe,
         &output_capture,
-    )? {
-        StartupOutcome::Healthy(response) => Ok(AppStatus {
-            mode,
-            proxy_running: true,
-            proxy_port: settings.proxy_port,
-            proxy_build: response.build,
-            message: format!("Proxy started with PID {pid}"),
-            history_sync_status: None,
-            history_sync_message: None,
-        }),
+    ) {
+        Ok(startup) => startup,
+        Err(error) => {
+            return Err(clean_up_failed_start(
+                paths,
+                &mut child,
+                output_capture,
+                error,
+            ))
+        }
+    };
+
+    match startup {
+        StartupOutcome::Healthy(response) if response.is_running() => {
+            let record =
+                ProxyPidRecord::Managed(ProxyPidMetadata::new(pid, settings.proxy_port, &script));
+            let verification =
+                verify_proxy_process(&record, paths, settings.proxy_port, inspector)?;
+            if verification != (VerifiedProxyProcess::Verified { pid }) {
+                return Err(clean_up_failed_start(
+                    paths,
+                    &mut child,
+                    output_capture,
+                    format!(
+                        "spawned Gateway PID {pid} ownership could not be reconciled: {verification:?}"
+                    ),
+                ));
+            }
+
+            let listener_pid = match listener_inspector.listening_pid(settings.proxy_port) {
+                Ok(listener_pid) => listener_pid,
+                Err(error) => {
+                    return Err(clean_up_failed_start(
+                        paths,
+                        &mut child,
+                        output_capture,
+                        error,
+                    ))
+                }
+            };
+            if listener_pid != Some(pid) {
+                let detail = listener_pid
+                    .map(|listener_pid| format!("listener PID {listener_pid}"))
+                    .unwrap_or_else(|| "no listener PID".to_string());
+                return Err(clean_up_failed_start(
+                    paths,
+                    &mut child,
+                    output_capture,
+                    format!(
+                        "spawned Gateway PID {pid} became healthy, but {detail} owns port {}",
+                        settings.proxy_port
+                    ),
+                ));
+            }
+
+            if let Err(error) = write_pid(paths, pid, settings.proxy_port, &script) {
+                return Err(clean_up_failed_start(
+                    paths,
+                    &mut child,
+                    output_capture,
+                    error,
+                ));
+            }
+            match reconciled_snapshot_with_controls(
+                paths,
+                health_probe,
+                inspector,
+                listener_inspector,
+            ) {
+                Ok(snapshot) => Ok(GatewayStartOutcome {
+                    snapshot,
+                    spawned: true,
+                }),
+                Err(error) => Err(clean_up_failed_start(
+                    paths,
+                    &mut child,
+                    output_capture,
+                    error,
+                )),
+            }
+        }
+        StartupOutcome::Healthy(_) => Err(clean_up_failed_start(
+            paths,
+            &mut child,
+            output_capture,
+            format!(
+                "proxy returned a non-running health response at http://127.0.0.1:{}/health",
+                settings.proxy_port
+            ),
+        )),
         StartupOutcome::Exited(status) => {
             let _ = remove_pid(paths);
             let output = output_capture.finish();
@@ -475,20 +770,43 @@ where
                 &output,
             ))
         }
-        StartupOutcome::TimedOut => {
-            let _ = terminate_child(&mut child);
-            let _ = remove_pid(paths);
-            let output = output_capture.finish();
-            Err(format_startup_failure(
+        StartupOutcome::TimedOut => Err(clean_up_failed_start(
+            paths,
+            &mut child,
+            output_capture,
+            format_startup_failure(
                 format!(
                     "proxy did not become healthy within {} seconds at http://127.0.0.1:{}/health",
                     timeout.as_secs(),
                     settings.proxy_port
                 ),
-                &output,
-            ))
-        }
+                &StartupOutputSnapshot::default(),
+            ),
+        )),
     }
+}
+
+fn clean_up_failed_start(
+    paths: &ProxyPaths,
+    child: &mut Child,
+    output_capture: StartupOutputCapture,
+    reason: String,
+) -> String {
+    let termination_error = terminate_child(child).err();
+    let pid_error = remove_pid(paths).err();
+    let output = output_capture.finish();
+    let mut message = format_startup_failure(reason, &output);
+    if let Some(error) = termination_error {
+        message.push_str(&format!(
+            "\nfailed to terminate spawned child safely: {error}"
+        ));
+    }
+    if let Some(error) = pid_error {
+        message.push_str(&format!(
+            "\nfailed to remove unpublished PID identity: {error}"
+        ));
+    }
+    message
 }
 
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
@@ -727,7 +1045,10 @@ fn build_start_command(
             .arg(script)
             .env("CODEXHUB_DIAGNOSTICS_RUNTIME_HOME", paths.codex_dir.clone())
             .env("CODEXHUB_DIAGNOSTICS_BUILD_VERSION", build.semantic_version)
-            .env("CODEXHUB_DIAGNOSTICS_SOURCE_REVISION", build.source_revision);
+            .env(
+                "CODEXHUB_DIAGNOSTICS_SOURCE_REVISION",
+                build.source_revision,
+            );
     } else {
         command.arg(script);
     }
@@ -948,6 +1269,10 @@ trait ProcessInspector {
     fn inspect(&self, pid: u32) -> Result<InspectedProcess, String>;
 }
 
+trait ListenerInspector {
+    fn listening_pid(&self, port: u16) -> Result<Option<u32>, String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InspectedProcess {
     Missing,
@@ -997,6 +1322,14 @@ struct SystemProcessInspector;
 impl ProcessInspector for SystemProcessInspector {
     fn inspect(&self, pid: u32) -> Result<InspectedProcess, String> {
         inspect_process(pid)
+    }
+}
+
+struct SystemListenerInspector;
+
+impl ListenerInspector for SystemListenerInspector {
+    fn listening_pid(&self, port: u16) -> Result<Option<u32>, String> {
+        inspect_listener_pid(port)
     }
 }
 
@@ -1454,6 +1787,80 @@ fn configure_no_window(command: &mut Command) {
 }
 
 #[cfg(windows)]
+fn inspect_listener_pid(port: u16) -> Result<Option<u32>, String> {
+    let script = format!(
+        "$rows = @(Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue | Where-Object {{ $_.LocalAddress -eq '127.0.0.1' }} | Select-Object -ExpandProperty OwningProcess -Unique); \
+         if ($rows.Count -eq 0) {{ exit 3 }}; \
+         if ($rows.Count -ne 1) {{ [Console]::Error.Write(($rows -join ',')); exit 4 }}; \
+         [Console]::Out.Write([string]$rows[0])"
+    );
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-Command", &script]);
+    configure_no_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to inspect listener on port {port}: {error}"))?;
+
+    if output.status.code() == Some(3) {
+        return Ok(None);
+    }
+    if output.status.code() == Some(4) {
+        return Err(format!(
+            "multiple TCP listener owners were reported for 127.0.0.1:{port}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "Get-NetTCPConnection failed for 127.0.0.1:{port} with status {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    text.parse::<u32>()
+        .map(Some)
+        .map_err(|error| format!("invalid listener PID {text:?} for port {port}: {error}"))
+}
+
+#[cfg(not(windows))]
+fn inspect_listener_pid(port: u16) -> Result<Option<u32>, String> {
+    let output = match Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(
+                "listener ownership reconciliation requires lsof on this platform".to_string(),
+            )
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect listener on port {port}: {error}"
+            ))
+        }
+    };
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(None);
+    }
+    let mut pids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    match pids.as_slice() {
+        [] => Ok(None),
+        [pid] => Ok(Some(*pid)),
+        _ => Err(format!(
+            "multiple TCP listener owners were reported for 127.0.0.1:{port}: {pids:?}"
+        )),
+    }
+}
+
+#[cfg(windows)]
 fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
     let script = format!(
         "$p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction SilentlyContinue; \
@@ -1565,10 +1972,11 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 mod tests {
     use super::{
         build_start_command, comparable_path, configure_start_stdio, detect_mode, find_python,
-        read_pid, read_pid_record, start_with_paths, start_with_paths_and_waiter, status_with_paths,
-        stop_with_paths, stop_with_paths_and_controls, write_pid, InspectedProcess, ProcessInfo,
-        ProcessInspector, ProcessKiller, ProxyPaths, ProxyPidMetadata, ProxyPidRecord,
-        StartupOutcome, DEBUG_DIAGNOSTIC_BOOTSTRAP,
+        kill_process, read_pid, read_pid_record, reconciled_snapshot_with_controls,
+        start_with_paths, start_with_paths_and_controls, start_with_paths_and_waiter,
+        status_with_paths, stop_with_paths, stop_with_paths_and_controls, write_pid,
+        InspectedProcess, ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller,
+        ProxyPaths, ProxyPidMetadata, ProxyPidRecord, StartupOutcome, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
     use crate::Settings;
     use std::cell::RefCell;
@@ -1577,6 +1985,10 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    };
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1592,6 +2004,179 @@ mod tests {
         assert!(!status.proxy_running);
         assert_eq!(status.proxy_port, read_settings_port(&paths));
         assert_eq!(status.proxy_build, None);
+    }
+
+    #[test]
+    fn reconciled_snapshot_requires_matching_health_pid_process_and_listener_identity() {
+        let root = temp_root("reconciled-snapshot");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write PID metadata");
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = FixedListenerInspector::new(Some(pid));
+
+        let snapshot = reconciled_snapshot_with_controls(
+            &paths,
+            &|_| Ok(Some(healthy_response())),
+            &inspector,
+            &listener,
+        )
+        .expect("reconciled snapshot");
+
+        assert!(snapshot.status.proxy_running);
+        assert_eq!(
+            snapshot.identity.as_ref().map(|identity| identity.pid),
+            Some(pid)
+        );
+        assert_eq!(
+            snapshot.status.message,
+            format!("Gateway running with PID {pid}")
+        );
+    }
+
+    #[test]
+    fn reconciled_snapshot_rejects_listener_pid_mismatch_and_removes_stale_pid() {
+        let root = temp_root("reconciled-listener-mismatch");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        write_pid(&paths, 12_345, port, &paths.proxy_script_path()).expect("write PID metadata");
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = FixedListenerInspector::new(Some(54_321));
+
+        let error = reconciled_snapshot_with_controls(
+            &paths,
+            &|_| Ok(Some(healthy_response())),
+            &inspector,
+            &listener,
+        )
+        .expect_err("mismatched listener must not publish Running");
+
+        assert!(error.contains("listener PID 54321"));
+        assert!(error.contains("managed PID 12345"));
+        assert_eq!(read_pid(&paths).expect("read PID"), None);
+    }
+
+    #[test]
+    fn start_does_not_publish_pid_until_health_and_listener_reconcile() {
+        let root = temp_root("late-pid-publication");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
+        let listener_pid = Arc::new(AtomicU32::new(0));
+        let listener = AtomicListenerInspector::new(Arc::clone(&listener_pid));
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let health_calls = std::cell::Cell::new(0usize);
+
+        let outcome = start_with_paths_and_controls(
+            &paths,
+            Duration::from_secs(1),
+            Duration::ZERO,
+            &|_| {
+                let call = health_calls.get();
+                health_calls.set(call + 1);
+                Ok((call > 0).then(healthy_response))
+            },
+            &inspector,
+            &listener,
+            |child, _, _, _, _, _| {
+                assert_eq!(read_pid(&paths).expect("read unpublished PID"), None);
+                listener_pid.store(child.id(), Ordering::SeqCst);
+                Ok(StartupOutcome::Healthy(healthy_response()))
+            },
+        )
+        .expect("start after reconciliation");
+
+        let identity = outcome.snapshot.identity.expect("published identity");
+        assert!(outcome.spawned);
+        assert_eq!(read_pid(&paths).expect("read PID"), Some(identity.pid));
+        assert_eq!(identity.pid, listener_pid.load(Ordering::SeqCst));
+        kill_process(identity.pid).expect("clean up test child");
+        let _ = super::remove_pid(&paths);
+    }
+
+    #[test]
+    fn start_listener_mismatch_terminates_spawned_child_and_removes_pid() {
+        let root = temp_root("spawned-listener-mismatch");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
+        let spawned_pid = Arc::new(AtomicU32::new(0));
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = FixedListenerInspector::new(Some(999_999));
+        let health_calls = std::cell::Cell::new(0usize);
+
+        let error = start_with_paths_and_controls(
+            &paths,
+            Duration::from_secs(1),
+            Duration::ZERO,
+            &|_| {
+                let call = health_calls.get();
+                health_calls.set(call + 1);
+                Ok((call > 0).then(healthy_response))
+            },
+            &inspector,
+            &listener,
+            |child, _, _, _, _, _| {
+                spawned_pid.store(child.id(), Ordering::SeqCst);
+                Ok(StartupOutcome::Healthy(healthy_response()))
+            },
+        )
+        .expect_err("listener mismatch must fail startup");
+
+        assert!(error.contains("listener PID 999999"));
+        assert_eq!(read_pid(&paths).expect("read PID"), None);
+        let pid = spawned_pid.load(Ordering::SeqCst);
+        let inspected = super::inspect_process(pid);
+        if matches!(inspected, Ok(InspectedProcess::Running(_))) {
+            let _ = kill_process(pid);
+        }
+        assert!(matches!(inspected, Ok(InspectedProcess::Missing)));
+    }
+
+    #[test]
+    fn start_listener_inspection_failure_terminates_spawned_child() {
+        let root = temp_root("spawned-listener-inspection-error");
+        let paths = test_paths(&root);
+        let port = free_port();
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
+        let spawned_pid = Arc::new(AtomicU32::new(0));
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let health_calls = std::cell::Cell::new(0usize);
+
+        let error = start_with_paths_and_controls(
+            &paths,
+            Duration::from_secs(1),
+            Duration::ZERO,
+            &|_| {
+                let call = health_calls.get();
+                health_calls.set(call + 1);
+                Ok((call > 0).then(healthy_response))
+            },
+            &inspector,
+            &FailingListenerInspector,
+            |child, _, _, _, _, _| {
+                spawned_pid.store(child.id(), Ordering::SeqCst);
+                Ok(StartupOutcome::Healthy(healthy_response()))
+            },
+        )
+        .expect_err("listener inspection failure must fail startup");
+
+        assert!(error.contains("listener inspection unavailable"));
+        assert_eq!(read_pid(&paths).expect("read PID"), None);
+        let pid = spawned_pid.load(Ordering::SeqCst);
+        let inspected = super::inspect_process(pid);
+        if matches!(inspected, Ok(InspectedProcess::Running(_))) {
+            let _ = kill_process(pid);
+        }
+        assert!(matches!(inspected, Ok(InspectedProcess::Missing)));
     }
 
     #[test]
@@ -2059,7 +2644,10 @@ time.sleep(10)
             .collect::<std::collections::BTreeMap<_, _>>();
 
         assert_eq!(envs.get("CODEX_HOME"), Some(&Some(runtime_home)));
-        assert_eq!(envs.get("CODEXHUB_CODEX_TARGET_HOME"), Some(&Some(target_home)));
+        assert_eq!(
+            envs.get("CODEXHUB_CODEX_TARGET_HOME"),
+            Some(&Some(target_home))
+        );
         assert_eq!(paths.codex_config_path(), root.join(".codex/config.toml"));
     }
 
@@ -2172,7 +2760,10 @@ time.sleep(10)
                 .map_err(|error| format!("update in-place script: {error}"))?;
 
             let new_status = start_with_paths(&paths)?;
-            ensure(new_status.proxy_running, "upgraded in-place bundle should start")?;
+            ensure(
+                new_status.proxy_running,
+                "upgraded in-place bundle should start",
+            )?;
             let new_pid = read_pid(&paths)?
                 .ok_or_else(|| "upgraded in-place bundle should own the proxy PID".to_string())?;
             ensure(
@@ -2281,6 +2872,56 @@ time.sleep(10)
     fn write_fake_proxy_script(paths: &ProxyPaths, body: &str) {
         fs::create_dir_all(paths.proxy_script_dir()).unwrap();
         fs::write(paths.proxy_script_path(), body.trim_start()).unwrap();
+    }
+
+    fn healthy_response() -> super::HealthResponse {
+        super::HealthResponse {
+            ok: Some(true),
+            build: Some("test".to_string()),
+        }
+    }
+
+    struct FixedListenerInspector {
+        pid: Option<u32>,
+    }
+
+    impl FixedListenerInspector {
+        fn new(pid: Option<u32>) -> Self {
+            Self { pid }
+        }
+    }
+
+    impl ListenerInspector for FixedListenerInspector {
+        fn listening_pid(&self, _port: u16) -> Result<Option<u32>, String> {
+            Ok(self.pid)
+        }
+    }
+
+    struct AtomicListenerInspector {
+        pid: Arc<AtomicU32>,
+    }
+
+    impl AtomicListenerInspector {
+        fn new(pid: Arc<AtomicU32>) -> Self {
+            Self { pid }
+        }
+    }
+
+    impl ListenerInspector for AtomicListenerInspector {
+        fn listening_pid(&self, _port: u16) -> Result<Option<u32>, String> {
+            match self.pid.load(Ordering::SeqCst) {
+                0 => Ok(None),
+                pid => Ok(Some(pid)),
+            }
+        }
+    }
+
+    struct FailingListenerInspector;
+
+    impl ListenerInspector for FailingListenerInspector {
+        fn listening_pid(&self, _port: u16) -> Result<Option<u32>, String> {
+            Err("listener inspection unavailable".to_string())
+        }
     }
 
     fn fake_proxy_process(paths: &ProxyPaths, port: u16) -> InspectedProcess {
