@@ -22,6 +22,7 @@ mod web_bridge;
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Window, WindowEvent};
 
 #[cfg(desktop)]
@@ -41,6 +42,7 @@ const TRAY_TOAST_EVENT: &str = "codexhub:toast";
 
 #[derive(Debug, Clone, Serialize)]
 struct TrayToast {
+    id: String,
     text: String,
     tone: String,
 }
@@ -205,7 +207,7 @@ impl AppStatus {
             proxy_port: app_flavor::default_gateway_port(),
             proxy_build: None,
             message: message.into(),
-            gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
+            gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Unavailable,
             history_sync_status: None,
             history_sync_message: None,
         }
@@ -749,13 +751,13 @@ fn run_tray_action(app: &AppHandle, id: &str) {
             );
         }
         TRAY_START_GATEWAY => {
-            report_tray_action(app, "Start Gateway", start_proxy());
+            run_tray_lifecycle_action(app, "Start Gateway", start_proxy);
         }
         TRAY_STOP_GATEWAY => {
-            report_tray_action(app, "Stop Gateway", stop_proxy());
+            run_tray_lifecycle_action(app, "Stop Gateway", stop_proxy);
         }
         TRAY_RESTART_GATEWAY => {
-            report_tray_action(app, "Restart Gateway", restart_proxy());
+            run_tray_lifecycle_action(app, "Restart Gateway", restart_proxy);
         }
         TRAY_EXIT => app.exit(0),
         _ => {}
@@ -763,23 +765,60 @@ fn run_tray_action(app: &AppHandle, id: &str) {
 }
 
 fn report_tray_action(app: &AppHandle, action: &str, result: Result<AppStatus, String>) {
-    let toast = tray_toast_for(action, result);
+    let toast = tray_toast_for(next_tray_toast_id(), action, result);
+    emit_tray_toast(app, toast);
+}
+
+fn run_tray_lifecycle_action(
+    app: &AppHandle,
+    action: &'static str,
+    work: fn() -> Result<AppStatus, String>,
+) {
+    let toast_id = next_tray_toast_id();
+    emit_tray_toast(app, tray_loading_toast(toast_id.clone(), action));
+    let app = app.clone();
+    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+        let result = work();
+        emit_tray_toast(&app, tray_toast_for(toast_id, action, result));
+    }));
+}
+
+fn emit_tray_toast(app: &AppHandle, toast: TrayToast) {
     if let Err(error) = app.emit(TRAY_TOAST_EVENT, toast) {
         log::warn!("failed to emit tray action feedback: {error}");
     }
 }
 
-fn tray_toast_for(action: &str, result: Result<AppStatus, String>) -> TrayToast {
+fn tray_loading_toast(id: String, action: &str) -> TrayToast {
+    TrayToast {
+        id,
+        text: format!("{action}..."),
+        tone: "loading".to_string(),
+    }
+}
+
+fn tray_toast_for(id: String, action: &str, result: Result<AppStatus, String>) -> TrayToast {
     match result {
         Ok(status) => TrayToast {
+            id,
             text: format!("{action}: {}", status.message),
             tone: "success".to_string(),
         },
         Err(error) => TrayToast {
+            id,
             text: format!("{action} failed: {error}"),
             tone: "error".to_string(),
         },
     }
+}
+
+fn next_tray_toast_id() -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "tray-lifecycle-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -1069,7 +1108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{start_gateway_after_startup, tray_toast_for, AppStatus};
+    use super::{start_gateway_after_startup, tray_loading_toast, tray_toast_for, AppStatus};
     use std::cell::Cell;
 
     #[test]
@@ -1087,14 +1126,21 @@ mod tests {
 
     #[test]
     fn tray_state_actions_always_produce_success_or_error_feedback() {
-        let success = tray_toast_for("Start Gateway", Ok(status()));
+        let loading = tray_loading_toast("same-toast".to_string(), "Start Gateway");
+        assert_eq!(loading.id, "same-toast");
+        assert_eq!(loading.tone, "loading");
+
+        let success = tray_toast_for("same-toast".to_string(), "Start Gateway", Ok(status()));
+        assert_eq!(success.id, loading.id);
         assert_eq!(success.tone, "success");
         assert!(success.text.contains("Start Gateway"));
 
         let failure = tray_toast_for(
+            "same-toast".to_string(),
             "Start Gateway",
             Err("safe snapshot unavailable".to_string()),
         );
+        assert_eq!(failure.id, loading.id);
         assert_eq!(failure.tone, "error");
         assert!(failure.text.contains("safe snapshot unavailable"));
     }

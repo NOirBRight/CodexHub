@@ -1,6 +1,6 @@
 use crate::AppStatus;
 use crate::gateway_transaction::{
-    GatewayLifecyclePhase, LifecycleTransactionGate,
+    GatewayLifecyclePhase, LifecycleGateAccess, LifecycleTransactionGate,
 };
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -11,6 +11,7 @@ pub struct GatewayIdentity {
     pub port: u16,
     pub script_path: String,
     pub script_sha256: Option<String>,
+    pub process_start_id: Option<String>,
     pub started_at_unix_ms: u64,
 }
 
@@ -26,11 +27,26 @@ pub(crate) struct GatewayStartOutcome {
     pub(crate) spawned: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct GatewayStartFailure {
+    pub(crate) message: String,
+    pub(crate) recovery_identity: Option<GatewayIdentity>,
+}
+
+impl From<String> for GatewayStartFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            recovery_identity: None,
+        }
+    }
+}
+
 pub(crate) trait GatewayLifecycleBackend {
     fn lifecycle_gate_path(&self) -> &Path;
     fn snapshot(&self) -> Result<GatewayLifecycleSnapshot, String>;
     fn transitional_status(&self, phase: GatewayLifecyclePhase) -> Result<AppStatus, String>;
-    fn start(&self) -> Result<GatewayStartOutcome, String>;
+    fn start(&self) -> Result<GatewayStartOutcome, GatewayStartFailure>;
     fn stop(&self) -> Result<AppStatus, String>;
 
     fn can_reuse(&self, _snapshot: &GatewayLifecycleSnapshot) -> bool {
@@ -65,7 +81,7 @@ pub(crate) struct GatewayLifecycleCoordinator {
 }
 
 impl GatewayLifecycleCoordinator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -73,33 +89,40 @@ impl GatewayLifecycleCoordinator {
     where
         B: GatewayLifecycleBackend,
     {
-        if let Some(phase) = LifecycleTransactionGate::inspect(backend.lifecycle_gate_path())? {
-            let status = backend.transitional_status(phase)?;
-            let mut state = self.lock_state();
-            state.phase = phase;
-            state.published = None;
-            state.last_error = None;
-            return Ok(GatewayLifecycleSnapshot {
-                status,
-                identity: None,
-            });
-        }
-        let _transaction =
-            LifecycleTransactionGate::acquire_silent(backend.lifecycle_gate_path())?;
-        let mut state = self.lock_state();
+        let _transaction = match LifecycleTransactionGate::inspect_or_acquire(
+            backend.lifecycle_gate_path(),
+        )? {
+            LifecycleGateAccess::Held(phase) => {
+                let status = backend.transitional_status(phase)?;
+                let mut state = self.lock_state();
+                state.phase = phase;
+                state.published = None;
+                state.last_error = None;
+                return Ok(GatewayLifecycleSnapshot {
+                    status,
+                    identity: None,
+                });
+            }
+            LifecycleGateAccess::Acquired(transaction) => transaction,
+        };
         match backend.snapshot() {
             Ok(snapshot) if snapshot.identity.is_some() => {
+                let mut state = self.lock_state();
                 Self::publish_snapshot(&mut state, &snapshot, false)?;
                 Ok(snapshot)
             }
             Ok(snapshot) => {
+                let mut state = self.lock_state();
                 state.phase = LifecyclePhase::Stopped;
                 state.published = None;
                 state.session_owned = None;
                 state.last_error = None;
                 Ok(snapshot)
             }
-            Err(error) => Self::fail_reconciliation(&mut state, error),
+            Err(error) => {
+                let mut state = self.lock_state();
+                Self::fail_reconciliation(&mut state, error)
+            }
         }
     }
 
@@ -155,9 +178,9 @@ impl GatewayLifecycleCoordinator {
                 Self::publish_snapshot(&mut state, &outcome.snapshot, outcome.spawned)?;
                 Ok(outcome.snapshot)
             }
-            Err(error) => {
+            Err(failure) => {
                 let mut state = self.lock_state();
-                Self::fail(&mut state, error)
+                Self::fail_with_recovery(&mut state, failure)
             }
         }
     }
@@ -263,9 +286,9 @@ impl GatewayLifecycleCoordinator {
                 Self::publish_snapshot(&mut state, &outcome.snapshot, outcome.spawned)?;
                 Ok(outcome.snapshot)
             }
-            Err(error) => {
+            Err(failure) => {
                 let mut state = self.lock_state();
-                Self::fail(&mut state, error)
+                Self::fail_with_recovery(&mut state, failure)
             }
         }
     }
@@ -348,6 +371,17 @@ impl GatewayLifecycleCoordinator {
         Err(error)
     }
 
+    fn fail_with_recovery<T>(
+        state: &mut GatewayLifecycleState,
+        failure: GatewayStartFailure,
+    ) -> Result<T, String> {
+        state.phase = LifecyclePhase::Failed;
+        state.published = None;
+        state.session_owned = failure.recovery_identity;
+        state.last_error = Some(failure.message.clone());
+        Err(failure.message)
+    }
+
     fn fail_preserving_identity<T>(
         state: &mut GatewayLifecycleState,
         error: String,
@@ -418,21 +452,18 @@ mod tests {
 
         let second_coordinator = Arc::clone(&coordinator);
         let second_backend = Arc::clone(&backend);
-        let (second_attempt_tx, second_attempt_rx) = mpsc::channel();
+        let contention_ack = LifecycleTransactionGate::enable_test_contention_ack(
+            backend.lifecycle_gate_path(),
+        )
+        .expect("enable start contention acknowledgement");
         let (second_done_tx, second_done_rx) = mpsc::channel();
         let second = thread::spawn(move || {
-            second_attempt_tx.send(()).expect("publish second attempt");
             let result = second_coordinator.start(second_backend.as_ref(), || Ok(()));
             second_done_tx.send(()).expect("publish second completion");
             result
         });
-        second_attempt_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("second contender attempted start");
-        assert!(matches!(
-            second_done_rx.recv_timeout(Duration::from_millis(150)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        wait_for_file(&contention_ack);
+        assert!(matches!(second_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         pause.release.wait();
 
         let first = first
@@ -510,21 +541,18 @@ mod tests {
 
         let start_coordinator = Arc::clone(&coordinator);
         let start_backend = Arc::clone(&backend);
-        let (start_attempt_tx, start_attempt_rx) = mpsc::channel();
+        let contention_ack = LifecycleTransactionGate::enable_test_contention_ack(
+            backend.lifecycle_gate_path(),
+        )
+        .expect("enable restart/start contention acknowledgement");
         let (start_done_tx, start_done_rx) = mpsc::channel();
         let concurrent_start = thread::spawn(move || {
-            start_attempt_tx.send(()).expect("publish start attempt");
             let result = start_coordinator.start(start_backend.as_ref(), || Ok(()));
             start_done_tx.send(()).expect("publish start completion");
             result
         });
-        start_attempt_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("concurrent start attempted");
-        assert!(matches!(
-            start_done_rx.recv_timeout(Duration::from_millis(150)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        wait_for_file(&contention_ack);
+        assert!(matches!(start_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         pause.release.wait();
 
         let replacement = restart
@@ -561,21 +589,18 @@ mod tests {
 
         let stop_coordinator = Arc::clone(&coordinator);
         let stop_backend = Arc::clone(&backend);
-        let (stop_attempt_tx, stop_attempt_rx) = mpsc::channel();
+        let contention_ack = LifecycleTransactionGate::enable_test_contention_ack(
+            backend.lifecycle_gate_path(),
+        )
+        .expect("enable start/stop contention acknowledgement");
         let (stop_done_tx, stop_done_rx) = mpsc::channel();
         let stop = thread::spawn(move || {
-            stop_attempt_tx.send(()).expect("publish stop attempt");
             let result = stop_coordinator.stop(stop_backend.as_ref());
             stop_done_tx.send(()).expect("publish stop completion");
             result
         });
-        stop_attempt_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("concurrent stop attempted");
-        assert!(matches!(
-            stop_done_rx.recv_timeout(Duration::from_millis(150)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        wait_for_file(&contention_ack);
+        assert!(matches!(stop_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         pause.release.wait();
 
         assert!(start.join().expect("start thread").is_ok());
@@ -602,6 +627,23 @@ mod tests {
         assert_eq!(error, "spawn failed");
         assert_eq!(coordinator.published_identity(), None);
         assert_eq!(coordinator.session_owned_identity(), None);
+        assert_eq!(coordinator.phase(), LifecyclePhase::Failed);
+    }
+
+    #[test]
+    fn coordinator_failed_start_preserves_structured_recovery_handoff() {
+        let recovery = fake_identity(73);
+        let coordinator = GatewayLifecycleCoordinator::new();
+        let backend = FakeLifecycleBackend::stopped()
+            .fail_next_start_with_recovery("startup failed", recovery.clone());
+
+        let error = coordinator
+            .start(&backend, || Ok(()))
+            .expect_err("start should surface recovery failure");
+
+        assert_eq!(error, "startup failed");
+        assert_eq!(coordinator.published_identity(), None);
+        assert_eq!(coordinator.session_owned_identity(), Some(recovery));
         assert_eq!(coordinator.phase(), LifecyclePhase::Failed);
     }
 
@@ -721,8 +763,20 @@ mod tests {
             port: 9099,
             script_path: "C:/CodexHub/codex_proxy.py".to_string(),
             script_sha256: Some("fake-sha256".to_string()),
+            process_start_id: Some(format!("fake-start-{pid}")),
             started_at_unix_ms: u64::from(pid),
         }
+    }
+
+    fn wait_for_file(path: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("gate-boundary contention acknowledgement was not published: {}", path.display());
     }
 
     struct FakeLifecycleBackend {
@@ -739,6 +793,7 @@ mod tests {
         pause_next_start: Option<PauseControl>,
         pause_next_stop: Option<PauseControl>,
         fail_next_start: Option<String>,
+        fail_next_start_recovery: Option<GatewayIdentity>,
         fail_next_stop: Option<String>,
         replace_on_start: bool,
         leave_running_on_stop: bool,
@@ -762,6 +817,7 @@ mod tests {
                     pause_next_start: None,
                     pause_next_stop: None,
                     fail_next_start: None,
+                    fail_next_start_recovery: None,
                     fail_next_stop: None,
                     replace_on_start: false,
                     leave_running_on_stop: false,
@@ -801,6 +857,18 @@ mod tests {
 
         fn fail_next_start(self, message: &str) -> Self {
             self.state.lock().unwrap().fail_next_start = Some(message.to_string());
+            self
+        }
+
+        fn fail_next_start_with_recovery(
+            self,
+            message: &str,
+            recovery: GatewayIdentity,
+        ) -> Self {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_start = Some(message.to_string());
+            state.fail_next_start_recovery = Some(recovery);
+            drop(state);
             self
         }
 
@@ -874,7 +942,7 @@ mod tests {
             Ok(Self::snapshot_from_state(&state))
         }
 
-        fn start(&self) -> Result<GatewayStartOutcome, String> {
+        fn start(&self) -> Result<GatewayStartOutcome, GatewayStartFailure> {
             let (pause, snapshot) = {
                 let mut state = self.state.lock().unwrap();
                 if state.identity.is_some() && !state.replace_on_start {
@@ -886,7 +954,10 @@ mod tests {
                 }
                 state.identity = None;
                 if let Some(failure) = state.fail_next_start.take() {
-                    return Err(failure);
+                    return Err(GatewayStartFailure {
+                        message: failure,
+                        recovery_identity: state.fail_next_start_recovery.take(),
+                    });
                 }
                 let identity = fake_identity(state.next_pid);
                 state.spawn_count += 1;

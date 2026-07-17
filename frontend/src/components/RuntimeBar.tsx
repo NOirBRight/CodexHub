@@ -30,7 +30,7 @@ export function RuntimeBar({
 }: RuntimeBarProps) {
   const { t } = useTranslation();
   const running = status?.proxy_running ?? false;
-  const lifecycleTransitionActive = ["starting", "stopping", "restarting"].includes(
+  const lifecycleTransitionActive = ["unavailable", "starting", "stopping", "restarting"].includes(
     status?.gateway_lifecycle ?? "",
   );
   const port = status?.proxy_port ?? settings?.proxy_port ?? 9099;

@@ -71,6 +71,11 @@ pub fn switch_mode_with_takeover(
 
     let mut status =
         switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;
+    let lifecycle = crate::proxy::status()?;
+    status.proxy_running = lifecycle.proxy_running;
+    status.proxy_port = lifecycle.proxy_port;
+    status.proxy_build = lifecycle.proxy_build;
+    status.gateway_lifecycle = lifecycle.gateway_lifecycle;
     let settings = get_settings_with_paths(&paths).unwrap_or_default();
     let target_provider = if mode == "custom" || settings.unified_codex_history {
         "custom"
@@ -929,8 +934,8 @@ fn switch_mode_with_paths_takeover_as_owner(
         proxy_running: false,
         proxy_port: settings.proxy_port,
         proxy_build: None,
-        message: format!("Switched to {mode} mode; proxy lifecycle is handled separately"),
-        gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
+        message: format!("Switched to {mode} mode; Gateway lifecycle is handled separately"),
+        gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Unavailable,
         history_sync_status: None,
         history_sync_message: None,
     })
@@ -1766,6 +1771,10 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_eq!(status.mode, "custom");
         assert_eq!(status.proxy_port, 4555);
         assert!(!status.proxy_running);
+        assert_eq!(
+            status.gateway_lifecycle,
+            crate::gateway_transaction::GatewayLifecyclePhase::Unavailable
+        );
         assert!(status.message.contains("custom"));
 
         let commands = runner.commands.borrow();

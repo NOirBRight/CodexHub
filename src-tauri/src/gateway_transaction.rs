@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const PHASE_PUBLICATION_TIMEOUT: Duration = Duration::from_millis(250);
 const PHASE_PUBLICATION_POLL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayLifecyclePhase {
+    Unavailable,
     #[default]
     Stopped,
     Starting,
@@ -22,6 +22,7 @@ pub enum GatewayLifecyclePhase {
 impl GatewayLifecyclePhase {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Unavailable => "unavailable",
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -33,6 +34,7 @@ impl GatewayLifecyclePhase {
 
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
+            "unavailable" => Some(Self::Unavailable),
             "stopped" => Some(Self::Stopped),
             "starting" => Some(Self::Starting),
             "running" => Some(Self::Running),
@@ -55,15 +57,26 @@ pub(crate) struct LifecycleTransactionGate {
     phase_path: PathBuf,
 }
 
+pub(crate) enum LifecycleGateAccess {
+    Acquired(LifecycleTransactionGate),
+    Held(GatewayLifecyclePhase),
+}
+
+impl LifecycleGateAccess {
+    #[cfg(test)]
+    pub(crate) fn held_phase(&self) -> Option<GatewayLifecyclePhase> {
+        match self {
+            Self::Acquired(_) => None,
+            Self::Held(phase) => Some(*phase),
+        }
+    }
+}
+
 impl LifecycleTransactionGate {
+    #[cfg(test)]
     pub(crate) fn acquire_silent(path: &Path) -> Result<Self, String> {
         let file = open_gate_file(path)?;
-        file.lock().map_err(|error| {
-            format!(
-                "failed to acquire Gateway lifecycle transaction gate {}: {error}",
-                path.display()
-            )
-        })?;
+        lock_gate_file(&file, path)?;
         Ok(Self {
             file,
             phase_path: phase_path(path),
@@ -75,12 +88,7 @@ impl LifecycleTransactionGate {
         phase: GatewayLifecyclePhase,
     ) -> Result<Self, String> {
         let file = open_gate_file(path)?;
-        file.lock().map_err(|error| {
-            format!(
-                "failed to acquire Gateway lifecycle transaction gate {}: {error}",
-                path.display()
-            )
-        })?;
+        lock_gate_file(&file, path)?;
         let phase_path = phase_path(path);
         if let Err(error) = fs::write(&phase_path, phase.as_str()) {
             let _ = file.unlock();
@@ -92,36 +100,25 @@ impl LifecycleTransactionGate {
         Ok(Self { file, phase_path })
     }
 
-    /// Returns the phase held by another process, or `None` while this caller
-    /// can own the transaction gate. A bounded retry closes the tiny interval
-    /// between OS-lock acquisition and phase publication.
-    pub(crate) fn inspect(path: &Path) -> Result<Option<GatewayLifecyclePhase>, String> {
-        let deadline = Instant::now() + PHASE_PUBLICATION_TIMEOUT;
+    /// Atomically returns either an owned silent guard or the phase published
+    /// by a lifecycle holder. Phase-less status holders are waited out rather
+    /// than misclassified as corrupt after an arbitrary timeout.
+    pub(crate) fn inspect_or_acquire(path: &Path) -> Result<LifecycleGateAccess, String> {
+        let file = open_gate_file(path)?;
         loop {
-            let file = open_gate_file(path)?;
             match file.try_lock() {
                 Ok(()) => {
-                    let _ = fs::remove_file(phase_path(path));
-                    file.unlock().map_err(|error| {
-                        format!(
-                            "failed to release Gateway lifecycle transaction gate {}: {error}",
-                            path.display()
-                        )
-                    })?;
-                    return Ok(None);
+                    let phase_path = phase_path(path);
+                    let _ = fs::remove_file(&phase_path);
+                    return Ok(LifecycleGateAccess::Acquired(Self { file, phase_path }));
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if let Ok(value) = fs::read_to_string(phase_path(path)) {
                         if let Some(phase) = GatewayLifecyclePhase::parse(&value) {
-                            return Ok(Some(phase));
+                            return Ok(LifecycleGateAccess::Held(phase));
                         }
                     }
-                    if Instant::now() >= deadline {
-                        return Err(format!(
-                            "Gateway lifecycle transaction gate {} is held without a readable phase",
-                            path.display()
-                        ));
-                    }
+                    notify_test_contention(path);
                     thread::sleep(PHASE_PUBLICATION_POLL);
                 }
                 Err(std::fs::TryLockError::Error(error)) => {
@@ -133,6 +130,60 @@ impl LifecycleTransactionGate {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn enable_test_contention_ack(path: &Path) -> Result<PathBuf, String> {
+        let watch = test_contention_watch_path(path);
+        let ack = test_contention_ack_path(path);
+        let _ = fs::remove_file(&ack);
+        fs::write(&watch, b"watch").map_err(|error| {
+            format!(
+                "failed to enable lifecycle contention acknowledgement {}: {error}",
+                watch.display()
+            )
+        })?;
+        Ok(ack)
+    }
+}
+
+fn lock_gate_file(file: &File, path: &Path) -> Result<(), String> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            notify_test_contention(path);
+            file.lock().map_err(|error| {
+                format!(
+                    "failed to acquire Gateway lifecycle transaction gate {}: {error}",
+                    path.display()
+                )
+            })
+        }
+        Err(std::fs::TryLockError::Error(error)) => Err(format!(
+            "failed to acquire Gateway lifecycle transaction gate {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(test)]
+fn notify_test_contention(path: &Path) {
+    let watch = test_contention_watch_path(path);
+    if watch.exists() {
+        let _ = fs::write(test_contention_ack_path(path), b"would-block");
+    }
+}
+
+#[cfg(not(test))]
+fn notify_test_contention(_path: &Path) {}
+
+#[cfg(test)]
+fn test_contention_watch_path(path: &Path) -> PathBuf {
+    sidecar_path(path, ".test-contention-watch")
+}
+
+#[cfg(test)]
+fn test_contention_ack_path(path: &Path) -> PathBuf {
+    sidecar_path(path, ".test-contention-ack")
 }
 
 impl Drop for LifecycleTransactionGate {
@@ -166,14 +217,18 @@ fn open_gate_file(path: &Path) -> Result<File, String> {
 }
 
 fn phase_path(path: &Path) -> PathBuf {
+    sidecar_path(path, ".phase")
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
-    value.push(".phase");
+    value.push(suffix);
     PathBuf::from(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GatewayLifecyclePhase, LifecycleTransactionGate};
+    use super::{GatewayLifecyclePhase, LifecycleGateAccess, LifecycleTransactionGate};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -182,7 +237,6 @@ mod tests {
 
     const HELPER_ENV: &str = "CODEXHUB_LIFECYCLE_GATE_HELPER";
     const LOCK_ENV: &str = "CODEXHUB_LIFECYCLE_GATE_PATH";
-    const ATTEMPTED_ENV: &str = "CODEXHUB_LIFECYCLE_GATE_ATTEMPTED";
     const ENTERED_ENV: &str = "CODEXHUB_LIFECYCLE_GATE_ENTERED";
     const RELEASE_ENV: &str = "CODEXHUB_LIFECYCLE_GATE_RELEASE";
 
@@ -192,12 +246,9 @@ mod tests {
             return;
         }
         let lock_path = PathBuf::from(std::env::var_os(LOCK_ENV).expect("helper lock path"));
-        let attempted =
-            PathBuf::from(std::env::var_os(ATTEMPTED_ENV).expect("helper attempted path"));
         let entered = PathBuf::from(std::env::var_os(ENTERED_ENV).expect("helper entered path"));
         let release = PathBuf::from(std::env::var_os(RELEASE_ENV).expect("helper release path"));
 
-        fs::write(&attempted, b"attempted").expect("publish helper attempt");
         let _guard = LifecycleTransactionGate::acquire(
             &lock_path,
             GatewayLifecyclePhase::Starting,
@@ -211,36 +262,35 @@ mod tests {
     fn lifecycle_gate_serializes_real_processes_and_reports_holder_phase() {
         let root = test_root("cross-process");
         let lock_path = root.join("lifecycle.lock");
-        let first_attempted = root.join("first-attempted");
         let first_entered = root.join("first-entered");
         let first_release = root.join("first-release");
-        let second_attempted = root.join("second-attempted");
         let second_entered = root.join("second-entered");
         let second_release = root.join("second-release");
 
         let mut first = spawn_helper(
             &lock_path,
-            &first_attempted,
             &first_entered,
             &first_release,
         );
         wait_until(Duration::from_secs(10), || first_entered.exists());
+        let second_attempted = LifecycleTransactionGate::enable_test_contention_ack(&lock_path)
+            .expect("enable gate-boundary contention ack");
         let mut second = spawn_helper(
             &lock_path,
-            &second_attempted,
             &second_entered,
             &second_release,
         );
 
         wait_until(Duration::from_secs(10), || second_attempted.exists());
-        thread::sleep(Duration::from_millis(100));
         assert!(
             !second_entered.exists(),
             "second process must remain blocked while the first owns the production gate"
         );
         assert_eq!(
-            LifecycleTransactionGate::inspect(&lock_path).expect("inspect held gate"),
-            Some(GatewayLifecyclePhase::Starting)
+            LifecycleTransactionGate::inspect_or_acquire(&lock_path)
+                .expect("inspect held gate")
+                .held_phase(),
+            Some(GatewayLifecyclePhase::Starting),
         );
 
         fs::write(&first_release, b"release").expect("release first helper");
@@ -249,15 +299,40 @@ mod tests {
         assert!(first.wait().expect("wait first helper").success());
         assert!(second.wait().expect("wait second helper").success());
         assert_eq!(
-            LifecycleTransactionGate::inspect(&lock_path).expect("inspect released gate"),
-            None
+            LifecycleTransactionGate::inspect_or_acquire(&lock_path)
+                .expect("inspect released gate")
+                .held_phase(),
+            None,
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn silent_status_holder_is_waited_out_without_phase_timeout_or_inspect_gap() {
+        let root = test_root("silent-status");
+        let lock_path = root.join("lifecycle.lock");
+        let holder = LifecycleTransactionGate::acquire_silent(&lock_path).expect("silent holder");
+        let attempted = LifecycleTransactionGate::enable_test_contention_ack(&lock_path)
+            .expect("enable contention ack");
+        let contender_path = lock_path.clone();
+        let contender = thread::spawn(move || {
+            LifecycleTransactionGate::inspect_or_acquire(&contender_path)
+        });
+
+        wait_until(Duration::from_secs(10), || attempted.exists());
+        drop(holder);
+        let access = contender
+            .join()
+            .expect("status contender thread")
+            .expect("silent holder must not be misclassified");
+
+        assert!(matches!(access, LifecycleGateAccess::Acquired(_)));
+        drop(access);
         let _ = fs::remove_dir_all(root);
     }
 
     fn spawn_helper(
         lock_path: &Path,
-        attempted: &Path,
         entered: &Path,
         release: &Path,
     ) -> std::process::Child {
@@ -269,7 +344,6 @@ mod tests {
             ])
             .env(HELPER_ENV, "1")
             .env(LOCK_ENV, lock_path)
-            .env(ATTEMPTED_ENV, attempted)
             .env(ENTERED_ENV, entered)
             .env(RELEASE_ENV, release)
             .stdin(Stdio::null())
