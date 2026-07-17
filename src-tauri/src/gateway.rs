@@ -5042,15 +5042,11 @@ fn gateway_base_without_v1(settings: &Settings) -> String {
 }
 
 fn yaml_scalar(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|char| char.is_ascii_alphanumeric() || "-_./:".contains(char))
-    {
-        value.to_string()
-    } else {
-        serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-    }
+    // Always emit a double-quoted scalar. YAML double-quoted strings accept
+    // JSON escaping, so every value round-trips as a string even when it
+    // resembles a number, boolean, null, timestamp, anchor, alias, or
+    // collection — a lexical allowlist cannot prove any of those.
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn is_top_level_yaml_key(line: &str, key: &str) -> bool {
@@ -6394,10 +6390,10 @@ mod tests {
         assert!(ollama_models.iter().any(|model| model["id"] == "glm-5.2"));
         assert!(volc_models.iter().any(|model| model["id"] == "glm-5.2"));
         assert!(omp_text.contains("codexhub-ollama-cloud:"));
-        assert!(omp_text.contains("baseUrl: http://127.0.0.1:9099/v1/providers/ollama-cloud"));
+        assert!(omp_text.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/ollama-cloud\""));
         assert!(omp_text.contains("codexhub-volc:"));
-        assert!(omp_text.contains("baseUrl: http://127.0.0.1:9099/v1/providers/volc"));
-        assert!(omp_text.contains("id: glm-5.2"));
+        assert!(omp_text.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/volc\""));
+        assert!(omp_text.contains("id: \"glm-5.2\""));
     }
 
     #[test]
@@ -6556,15 +6552,121 @@ mod tests {
 
         assert!(text.contains("codexhub-openai:"));
         assert!(text.contains("api: openai-responses"));
-        assert!(text.contains("id: gpt-5.5"));
+        assert!(text.contains("id: \"gpt-5.5\""));
         assert!(text.contains("x-codex-client-id: omp"));
-        assert!(text.contains("id: gpt-5.5-fast"));
-        assert!(text.contains("id: gpt-5.4-fast"));
+        assert!(text.contains("id: \"gpt-5.5-fast\""));
         assert!(text.contains("codexhub-minimax:"));
         assert!(text.contains("api: openai-completions"));
-        assert!(text.contains("id: minimax-m3"));
+        assert!(text.contains("id: \"minimax-m3\""));
         assert!(text.contains("name: \"MiniMax M3\""));
         assert!(!text.contains("minimax/minimax-m3-lite"));
+    }
+
+    fn yaml_string(value: &serde_yaml::Value) -> &str {
+        match value {
+            serde_yaml::Value::String(text) => text.as_str(),
+            other => panic!("expected YAML string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn omp_models_yaml_keeps_implicitly_typed_scalars_as_strings() {
+        let settings = Settings {
+            gateway_client_key: "2026-07-17".to_string(),
+            ..Settings::default()
+        };
+        let mut provider = client_export_test_providers().remove(0);
+        provider.models = vec![
+            Model {
+                id: "5.4".to_string(),
+                display_name: Some("5.4".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "true".to_string(),
+                display_name: Some("null".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "1e3".to_string(),
+                display_name: Some("~".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "0x10".to_string(),
+                display_name: Some("[a, b]".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "*alias".to_string(),
+                display_name: Some("&anchor".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+        ];
+        let providers = vec![provider];
+
+        let text = omp_models_yml_text(&settings, &providers, "minimax/5.4").unwrap();
+        let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+
+        let provider_doc = document
+            .get("providers")
+            .and_then(|providers| providers.get("codexhub-minimax"))
+            .expect("provider document");
+        assert_eq!(
+            yaml_string(provider_doc.get("baseUrl").expect("baseUrl")),
+            "http://127.0.0.1:9099/v1/providers/minimax"
+        );
+        assert_eq!(
+            yaml_string(provider_doc.get("apiKey").expect("apiKey")),
+            "2026-07-17"
+        );
+        let models = provider_doc
+            .get("models")
+            .and_then(|models| models.as_sequence())
+            .expect("models");
+        let expected = [
+            ("5.4", "5.4"),
+            ("true", "null"),
+            ("1e3", "~"),
+            ("0x10", "[a, b]"),
+            ("*alias", "&anchor"),
+        ];
+        assert_eq!(models.len(), expected.len());
+        for (model, (id, name)) in models.iter().zip(expected) {
+            assert_eq!(yaml_string(model.get("id").expect("model id")), id);
+            assert_eq!(yaml_string(model.get("name").expect("model name")), name);
+        }
+    }
+
+    #[test]
+    fn omp_models_yaml_official_numeric_display_names_parse_as_strings() {
+        let settings = Settings::default();
+        let providers = client_export_test_providers();
+
+        let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
+        let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+
+        let models = document
+            .get("providers")
+            .and_then(|providers| providers.get("codexhub-openai"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_sequence())
+            .expect("official models");
+        // The official source is environment-dependent (local subscription
+        // cache vs static fallback), so the hermetic invariant is that every
+        // emitted official id/name parses back as a YAML string, whatever the
+        // concrete catalog is. Deterministic numeric-name coverage lives in
+        // the custom-provider fixture test above.
+        assert!(!models.is_empty());
+        for model in models {
+            yaml_string(model.get("id").expect("model id"));
+            yaml_string(model.get("name").expect("model name"));
+        }
     }
 
     #[test]
@@ -6599,7 +6701,7 @@ mod tests {
             omp_models_yml_text(&settings, &providers, "ollama-cloud/nemotron-3-nano:30b").unwrap();
 
         assert!(text.contains("codexhub-ollama-cloud:"));
-        assert!(text.contains("id: nemotron-3-nano:30b"));
+        assert!(text.contains("id: \"nemotron-3-nano:30b\""));
         assert!(!text.contains("contextWindow:"));
     }
 
@@ -7644,12 +7746,11 @@ mod tests {
         assert!(config.contains("  vision: codexhub-openai/gpt-5.5"));
         let models = fs::read_to_string(&models_path).unwrap();
         assert!(models.contains("providers:\n  codexhub-openai:"));
-        assert!(models.contains("baseUrl: http://127.0.0.1:9099/v1/providers/openai"));
+        assert!(models.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/openai\""));
         assert!(models.contains("api: openai-responses"));
-        assert!(models.contains("apiKey: codexhub-proxy"));
-        assert!(models.contains("id: gpt-5.5"));
-        assert!(models.contains("id: gpt-5.5-fast"));
-        assert!(models.contains("id: gpt-5.4-fast"));
+        assert!(models.contains("apiKey: \"codexhub-proxy\""));
+        assert!(models.contains("id: \"gpt-5.5\""));
+        assert!(models.contains("id: \"gpt-5.5-fast\""));
     }
 
     #[test]
