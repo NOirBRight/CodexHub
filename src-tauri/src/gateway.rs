@@ -119,6 +119,7 @@ struct GatewayClientProviderGroup {
     endpoint_selection: GatewayClientEndpointSelection,
     responses_path: String,
     chat_completions_path: String,
+    supports_developer_role: bool,
     models: Vec<GatewayClientProviderModel>,
 }
 
@@ -2328,6 +2329,14 @@ fn gateway_client_provider_endpoint_selection(
     }
 }
 
+fn gateway_client_provider_supports_developer_role(provider_id: &str, providers: &[Provider]) -> bool {
+    providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .and_then(|provider| provider.supports_developer_role)
+        .unwrap_or(true)
+}
+
 fn gateway_client_provider_label(provider_id: &str, providers: &[Provider]) -> String {
     if provider_id == "openai" {
         return "OpenAI".to_string();
@@ -2397,6 +2406,10 @@ fn gateway_client_provider_groups_from_exported(
                 endpoint_selection,
                 responses_path: gateway_client_provider_responses_path(&provider_id),
                 chat_completions_path: gateway_client_provider_chat_path(&provider_id),
+                supports_developer_role: gateway_client_provider_supports_developer_role(
+                    &provider_id,
+                    providers,
+                ),
                 models: Vec::new(),
             });
             index
@@ -4392,7 +4405,7 @@ fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProvider
         "apiKey": settings.gateway_client_key,
         "authHeader": true,
         "compat": {
-            "supportsDeveloperRole": true,
+            "supportsDeveloperRole": group.supports_developer_role,
             "supportsReasoningEffort": true,
             "supportsUsageInStreaming": true,
         },
@@ -4467,8 +4480,9 @@ fn omp_models_yml_text(
     for group in &groups.providers {
         let base_url = yaml_scalar(&group.base_url);
         let api = group.endpoint_selection.pi_api();
+        let supports_developer_role = group.supports_developer_role;
         output.push_str(&format!(
-            "  {}:\n    baseUrl: {base_url}\n    api: {api}\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
+            "  {}:\n    baseUrl: {base_url}\n    api: {api}\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: {supports_developer_role}\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
             group.client_provider_id
         ));
         for gateway_model in &group.models {
@@ -5149,6 +5163,7 @@ mod tests {
             tool_protocol: None,
             tool_surface_strategy: None,
             reports_cached_input_tokens: None,
+            supports_developer_role: None,
             display_prefix: Some("minimax/".to_string()),
             sort_order: None,
             enabled: true,
@@ -5348,6 +5363,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5370,6 +5386,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5392,6 +5409,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -5419,6 +5437,7 @@ mod tests {
             tool_protocol: None,
             tool_surface_strategy: None,
             reports_cached_input_tokens: None,
+            supports_developer_role: None,
             display_prefix: Some("MiniMax.cn".to_string()),
             sort_order: Some(1),
             enabled: true,
@@ -5784,6 +5803,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5805,6 +5825,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5826,6 +5847,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -6397,6 +6419,64 @@ mod tests {
     }
 
     #[test]
+    fn pi_and_omp_configs_emit_provider_supports_developer_role() {
+        let root = unique_temp_dir("codexhub-developer-role-compat");
+        let models_path = root.join("models.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let mut providers = case_sensitive_client_export_test_providers();
+        providers.push(Provider {
+            id: "kimi".to_string(),
+            name: "Kimi".to_string(),
+            base_url: "https://api.kimi.example.test/coding/".to_string(),
+            api_key: None,
+            upstream_format: Some(UpstreamFormat::ChatCompletions),
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: Some(false),
+            display_prefix: Some("Kimi".to_string()),
+            sort_order: Some(4),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "k3".to_string(),
+                display_name: Some("Kimi K3".to_string()),
+                context_window: Some(1_048_576),
+                gateway_exported: true,
+                ..Model::default()
+            }],
+        });
+
+        let pi_models_text =
+            pi_models_text(&models_path, &settings, &providers, "kimi/k3").unwrap();
+        let omp_text = omp_models_yml_text(&settings, &providers, "kimi/k3").unwrap();
+        let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
+
+        assert_eq!(
+            pi_models_value.pointer("/providers/codexhub-kimi/compat/supportsDeveloperRole"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            pi_models_value.pointer("/providers/codexhub-volc/compat/supportsDeveloperRole"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let kimi_block = omp_text
+            .split("  codexhub-kimi:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  codexhub-").next())
+            .unwrap();
+        let volc_block = omp_text
+            .split("  codexhub-volc:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  codexhub-").next())
+            .unwrap();
+        assert!(kimi_block.contains("supportsDeveloperRole: false"));
+        assert!(volc_block.contains("supportsDeveloperRole: true"));
+    }
+
+    #[test]
     fn client_config_rejects_unexported_selected_model_case() {
         let settings = Settings::default();
         let providers = case_sensitive_client_export_test_providers();
@@ -6685,6 +6765,7 @@ mod tests {
             tool_protocol: None,
             tool_surface_strategy: None,
             reports_cached_input_tokens: None,
+            supports_developer_role: None,
             display_prefix: Some("Ollama".to_string()),
             sort_order: None,
             enabled: true,

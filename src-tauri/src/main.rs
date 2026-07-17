@@ -148,6 +148,8 @@ pub struct Provider {
     pub tool_surface_strategy: Option<ToolSurfaceStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports_cached_input_tokens: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
     pub display_prefix: Option<String>,
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]

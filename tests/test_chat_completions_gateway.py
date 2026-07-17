@@ -1174,6 +1174,161 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 200)
         self.assertIn(b"chatcmpl_transparent", b"".join(handler.wfile.writes))
 
+    def test_provider_scoped_transparent_chat_rewrites_developer_role_when_upstream_intolerant(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "kimi/k3",
+            "provider_alias": "kimi",
+            "upstream_name": "kimi",
+            "display_prefix": "Kimi",
+            "base_url": "https://api.kimi.example.test/coding",
+            "api_key": "kimi-test-token",
+            "upstream_model": "k3",
+            "upstream_format": "chat_completions",
+            "supports_developer_role": False,
+            "priority_base": 200,
+            "context_window": 1048576,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "k3",
+            "messages": [
+                {"role": "developer", "content": "You are a coding agent."},
+                {"role": "user", "content": "Hello"},
+            ],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_developer_rewrite",
+            "object": "chat.completion",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "kimi/k3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "kimi/k3": {"slug": "kimi/k3"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.kimi.example.test/coding/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(
+            sent_payload["messages"],
+            [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "developer_role_rewrite_applied"
+        ]
+        self.assertEqual(len(marker_events), 1)
+        self.assertEqual(marker_events[0]["upstream"], "kimi")
+        self.assertEqual(marker_events[0]["messages_rewritten"], 1)
+
+    def test_provider_scoped_transparent_chat_preserves_developer_role_when_upstream_tolerant(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "kimi/k3",
+            "provider_alias": "kimi",
+            "upstream_name": "kimi",
+            "display_prefix": "Kimi",
+            "base_url": "https://api.kimi.example.test/coding",
+            "api_key": "kimi-test-token",
+            "upstream_model": "k3",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1048576,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "k3",
+            "messages": [
+                {"role": "developer", "content": "You are a coding agent."},
+                {"role": "user", "content": "Hello"},
+            ],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_developer_preserved",
+            "object": "chat.completion",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "kimi/k3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "kimi/k3": {"slug": "kimi/k3"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["messages"][0]["role"], "developer")
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "developer_role_rewrite_applied"
+        ]
+        self.assertEqual(marker_events, [])
+
     def test_explicit_third_party_standard_chat_route_is_transparent_metered(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {

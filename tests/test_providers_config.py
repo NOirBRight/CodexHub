@@ -299,6 +299,100 @@ enabled = true
         self.assertEqual(minimax["max_output_tokens"], 524288)
         self.assertEqual(minimax["priority_base"], 300)
 
+    def test_supports_developer_role_parses_defaults_and_flows_into_external_index(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "kimi"
+name = "Kimi"
+base_url = "https://api.kimi.example.test/coding/"
+api_key = "literal-kimi-secret"
+upstream_format = "chat_completions"
+supports_developer_role = false
+sort_order = 1
+enabled = true
+
+  [[providers.models]]
+  id = "k3"
+  context_window = 1048576
+  sort_order = 1
+  enabled = true
+
+[[providers]]
+id = "volc"
+name = "Volcengine"
+base_url = "https://ark.example.test/api/coding/v3"
+api_key = "literal-volc-secret"
+sort_order = 2
+enabled = true
+
+  [[providers.models]]
+  id = "glm-5.2"
+  context_window = 1024000
+  sort_order = 1
+  enabled = true
+""".lstrip(),
+                encoding="utf-8",
+            )
+            providers = load_providers(path)
+
+        by_id = {provider.id: provider for provider in providers}
+        self.assertFalse(by_id["kimi"].supports_developer_role)
+        self.assertTrue(by_id["volc"].supports_developer_role)
+
+        index = build_external_model_index(providers)
+        self.assertFalse(index["kimi/k3"]["supports_developer_role"])
+        self.assertTrue(index["volc/glm-5.2"]["supports_developer_role"])
+
+    def test_save_providers_writes_supports_developer_role_only_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "kimi"
+name = "Kimi"
+base_url = "https://api.kimi.example.test/coding/"
+api_key = "literal-kimi-secret"
+supports_developer_role = false
+sort_order = 1
+enabled = true
+
+  [[providers.models]]
+  id = "k3"
+  sort_order = 1
+  enabled = true
+
+[[providers]]
+id = "volc"
+name = "Volcengine"
+base_url = "https://ark.example.test/api/coding/v3"
+api_key = "literal-volc-secret"
+sort_order = 2
+enabled = true
+
+  [[providers.models]]
+  id = "glm-5.2"
+  sort_order = 1
+  enabled = true
+""".lstrip(),
+                encoding="utf-8",
+            )
+            providers = load_providers(path)
+            save_providers(providers, path)
+            written = path.read_text(encoding="utf-8")
+            reloaded = load_providers(path)
+
+        kimi_block = written.split('id = "kimi"', 1)[1].split("[[providers]]", 1)[0]
+        volc_block = written.split('id = "volc"', 1)[1].split("[[providers]]", 1)[0]
+        self.assertIn("supports_developer_role = false", kimi_block)
+        self.assertNotIn("supports_developer_role", volc_block)
+        by_id = {provider.id: provider for provider in reloaded}
+        self.assertFalse(by_id["kimi"].supports_developer_role)
+        self.assertTrue(by_id["volc"].supports_developer_role)
+
     def test_tool_surface_strategy_resolves_provider_default_and_model_override_in_both_indexes(self):
         generic = build_external_model_index(
             [

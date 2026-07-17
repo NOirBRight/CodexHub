@@ -58,6 +58,7 @@ export interface Provider {
   tool_protocol?: ToolProtocol | null;
   tool_surface_strategy?: ToolSurfaceStrategy | null;
   reports_cached_input_tokens?: boolean | null;
+  supports_developer_role?: boolean | null;
   display_prefix?: string | null;
   sort_order?: number | null;
   enabled: boolean;
