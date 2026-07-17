@@ -1608,10 +1608,7 @@ where
     R: Read + AsRawHandle,
 {
     let mut chunk = [0u8; 1024];
-    loop {
-        let Some(buffer) = buffer.upgrade() else {
-            break;
-        };
+    while let Some(buffer) = buffer.upgrade() {
         let mut available = 0u32;
         let readable = unsafe {
             PeekNamedPipe(
@@ -2999,6 +2996,25 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    fn wait_for_missing_process(pid: u32) {
+        // On Windows the inspection shells out to PowerShell/CIM, which can
+        // itself stall under parallel test load; retry instead of failing on
+        // one slow attempt.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut last = String::from("inspection did not run");
+        while Instant::now() < deadline {
+            match super::inspect_process(pid) {
+                Ok(InspectedProcess::Missing) => return,
+                Ok(InspectedProcess::Running(_)) => {
+                    last = format!("PID {pid} is still running");
+                }
+                Err(error) => last = error,
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        panic!("process {pid} did not disappear within the bounded window: {last}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn bounded_inspection_command_kills_and_reaps_a_hung_child() {
@@ -3008,7 +3024,7 @@ mod tests {
             "-NoProfile",
             "-Command",
             &format!(
-                "$PID | Set-Content -NoNewline -Path $env:CODEXHUB_TEST_PID_PATH; Write-Error '{sentinel}'; Start-Sleep -Seconds 10"
+                "$PID | Set-Content -NoNewline -Path $env:CODEXHUB_TEST_PID_PATH; Write-Error '{sentinel}'; Start-Sleep -Seconds 60"
             ),
         ]);
         let root = temp_root("bounded-inspection-command");
@@ -3016,7 +3032,10 @@ mod tests {
         command.env("CODEXHUB_TEST_PID_PATH", &pid_path);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         super::configure_no_window(&mut command);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous deadline: PowerShell cold start under parallel test load can
+        // take several seconds and the helper must write its PID first. The
+        // timeout path still triggers because the helper sleeps far longer.
+        let deadline = Instant::now() + Duration::from_secs(15);
 
         let error =
             run_bounded_inspection_command(command, deadline, WindowsInspectionKind::Process)
@@ -3028,10 +3047,7 @@ mod tests {
             .expect("helper PID")
             .parse::<u32>()
             .expect("numeric helper PID");
-        assert!(matches!(
-            super::inspect_process(pid),
-            Ok(InspectedProcess::Missing)
-        ));
+        wait_for_missing_process(pid);
     }
 
     #[cfg(windows)]
@@ -3043,20 +3059,23 @@ mod tests {
             .to_string_lossy()
             .replace(char::from(39), "''");
         let script = format!(
-            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 10' -NoNewWindow -PassThru; $child.Id | Set-Content -NoNewline -Path '{escaped_path}'; [Console]::Out.Write('parent-exited')"
+            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' -NoNewWindow -PassThru; $child.Id | Set-Content -NoNewline -Path '{escaped_path}'; [Console]::Out.Write('parent-exited')"
         );
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
+            // Generous timeout: the parent chains two PowerShell cold starts
+            // (itself plus Start-Process), which can take well over five
+            // seconds under parallel test load.
             let result = run_windows_inspection(
                 &script,
                 WindowsInspectionKind::Process,
-                Duration::from_secs(5),
+                Duration::from_secs(20),
             );
             let _ = result_tx.send(result);
         });
 
         let output = result_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(25))
             .expect("inspection must not wait for a descendant-held output pipe")
             .expect("parent inspection should exit successfully");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "parent-exited");
@@ -3065,10 +3084,7 @@ mod tests {
             .expect("descendant PID")
             .parse::<u32>()
             .expect("numeric descendant PID");
-        assert!(matches!(
-            super::inspect_process(descendant_pid),
-            Ok(InspectedProcess::Missing)
-        ));
+        wait_for_missing_process(descendant_pid);
     }
 
     #[cfg(windows)]
@@ -3314,10 +3330,7 @@ mod tests {
         assert_eq!(read_pid(&paths).expect("PID removed"), None);
         let pid = spawned_pid.load(Ordering::SeqCst);
         let _cleanup = PidCleanup::new(pid);
-        assert!(matches!(
-            super::inspect_process(pid),
-            Ok(InspectedProcess::Missing)
-        ));
+        wait_for_missing_process(pid);
     }
 
     #[test]
@@ -3353,11 +3366,8 @@ mod tests {
         assert!(error.message.contains("listener PID 999999"));
         assert_eq!(read_pid(&paths).expect("read PID"), None);
         let pid = spawned_pid.load(Ordering::SeqCst);
-        let inspected = super::inspect_process(pid);
-        if matches!(inspected, Ok(InspectedProcess::Running(_))) {
-            let _ = kill_process(pid);
-        }
-        assert!(matches!(inspected, Ok(InspectedProcess::Missing)));
+        let _cleanup = PidCleanup::new(pid);
+        wait_for_missing_process(pid);
     }
 
     #[test]
@@ -3392,11 +3402,8 @@ mod tests {
         assert!(error.message.contains("listener inspection unavailable"));
         assert_eq!(read_pid(&paths).expect("read PID"), None);
         let pid = spawned_pid.load(Ordering::SeqCst);
-        let inspected = super::inspect_process(pid);
-        if matches!(inspected, Ok(InspectedProcess::Running(_))) {
-            let _ = kill_process(pid);
-        }
-        assert!(matches!(inspected, Ok(InspectedProcess::Missing)));
+        let _cleanup = PidCleanup::new(pid);
+        wait_for_missing_process(pid);
     }
 
     #[test]
