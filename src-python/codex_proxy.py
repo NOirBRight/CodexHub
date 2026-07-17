@@ -2125,6 +2125,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
                 "native_responses_tool_codec", "none"
             ),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
+            "supports_developer_role": bool(external_model.get("supports_developer_role", True)),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
 
@@ -8154,6 +8155,32 @@ def transparent_request_body(
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+def _rewrite_transparent_developer_role_messages(
+    body: bytes,
+    upstream: Mapping[str, Any],
+) -> tuple[bytes, int]:
+    if upstream.get("supports_developer_role", True) is not False:
+        return body, 0
+    payload = _safe_json_mapping(body)
+    if payload is None:
+        return body, 0
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return body, 0
+    next_messages: list[Any] = []
+    rewritten = 0
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "developer":
+            message = {**message, "role": "system"}
+            rewritten += 1
+        next_messages.append(message)
+    if not rewritten:
+        return body, 0
+    next_payload = dict(payload)
+    next_payload["messages"] = next_messages
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), rewritten
+
+
 def _is_raw_provider_probe_context(event_context: Mapping[str, Any] | None) -> bool:
     return bool((event_context or {}).get("raw_provider_probe"))
 
@@ -12482,6 +12509,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream,
                     model_id=model,
                 )
+                body, developer_role_rewrites = _rewrite_transparent_developer_role_messages(body, upstream)
+                if developer_role_rewrites:
+                    write_proxy_event(
+                        "developer_role_rewrite_applied",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        messages_rewritten=developer_role_rewrites,
+                        **proxy_request_context,
+                    )
             else:
                 compatibility_upstream = upstream
                 if upstream_format == "auto":
