@@ -776,6 +776,9 @@ class GatewayRequestAdmission:
         if self.cancelled:
             raise GatewayUserRequestedShutdown(USER_REQUESTED_SHUTDOWN_OUTCOME)
 
+    def wait_for_cancellation(self, timeout: float) -> bool:
+        return self._cancelled.wait(timeout=max(0.0, timeout))
+
     @staticmethod
     def _close_upstream_transport(transport: Any) -> None:
         close = getattr(transport, "close", None)
@@ -836,6 +839,11 @@ class GatewayShutdownController:
             return self._shutdown_budget_seconds
         return max(0.0, self._shutdown_budget_seconds - (self._clock() - started_at))
 
+    @property
+    def shutdown_requested(self) -> bool:
+        with self._lock:
+            return self._shutdown_started_at is not None
+
     def wait_for_active_requests(self) -> bool:
         return self._active_drained.wait(timeout=self.remaining_shutdown_budget_seconds())
 
@@ -871,6 +879,15 @@ def _active_gateway_request() -> GatewayRequestAdmission | None:
     return current if isinstance(current, GatewayRequestAdmission) else None
 
 
+def _sleep_for_retry_with_gateway_cancellation(delay_seconds: float) -> None:
+    admission = _active_gateway_request()
+    if admission is None:
+        time.sleep(delay_seconds)
+        return
+    if admission.wait_for_cancellation(delay_seconds):
+        admission.raise_if_cancelled()
+
+
 def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
     message = "Gateway stopped because the user requested shutdown."
     codexhub_error = _codexhub_error_payload(
@@ -892,10 +909,21 @@ def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
             "codexhub_error": codexhub_error,
         }
     return {
+        "type": USER_REQUESTED_SHUTDOWN_OUTCOME,
         "error": USER_REQUESTED_SHUTDOWN_OUTCOME,
         "detail": message,
         "codexhub_error": codexhub_error,
     }
+
+
+def _record_user_requested_shutdown() -> None:
+    write_proxy_event(
+        "request_cancelled",
+        shutdown_outcome=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        status=503,
+        error=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        detail="Gateway shutdown requested by user",
+    )
 
 
 def _gateway_event_writer_recovery_record(
@@ -11822,6 +11850,8 @@ def _typed_error_code(
 ) -> str:
     if error_type == "gateway_auth_error":
         return "gateway.auth"
+    if error_type == USER_REQUESTED_SHUTDOWN_OUTCOME:
+        return "gateway.user_requested_shutdown"
     if error_type in {"invalid_request_error", "validation_error"}:
         return "provider.request"
     if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
@@ -12243,6 +12273,9 @@ def _open_upstream_response(
     diagnostic_model = _diagnostic_context_value(event_context, "model")
     attempt = 1
     while True:
+        admission = _active_gateway_request()
+        if admission is not None:
+            admission.raise_if_cancelled()
         attempt_started_at = time.monotonic()
         try:
             response = _open_upstream_once(
@@ -12250,6 +12283,9 @@ def _open_upstream_response(
                 upstream_name=upstream_name,
                 timeout=timeout,
             )
+            if admission is not None:
+                admission.attach_upstream_transport(response)
+                admission.raise_if_cancelled()
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
             connection_disposition = _diagnostic_connection_disposition(response)
             # A returned response proves this Gateway attempt reached response
@@ -12288,6 +12324,8 @@ def _open_upstream_response(
             )
             return response
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
+            if admission is not None:
+                admission.raise_if_cancelled()
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
             connection_disposition = _diagnostic_error_connection_disposition(exc)
             try:
@@ -12373,7 +12411,7 @@ def _open_upstream_response(
                         failure_class=failure_class,
                 )
             )
-            time.sleep(delay_seconds)
+            _sleep_for_retry_with_gateway_cancellation(delay_seconds)
             attempt += 1
 
 
@@ -12502,6 +12540,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._send_json(401, _local_gateway_auth_error_payload())
             self.close_connection = True
             return
+        shutdown_controller = _gateway_shutdown_controller_for_handler(self)
+        admission = shutdown_controller.admit()
+        if admission is None:
+            _record_user_requested_shutdown()
+            self._send_user_requested_shutdown_outcome(
+                inbound_format=inbound_format,
+                downstream_sse_started=False,
+            )
+            return
+        previous_admission = _activate_gateway_request(admission)
         request_kind = RETRY_REQUEST_MAIN_GENERATION
         proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
         raw_provider_probe = raw_provider_probe_requested(self.headers, self.path)
@@ -12525,7 +12573,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_start_written = False
         write_request_start_once: Callable[[Mapping[str, Any]], None] | None = None
 
+        def send_user_requested_shutdown() -> None:
+            _record_user_requested_shutdown()
+            self._send_user_requested_shutdown_outcome(
+                inbound_format=inbound_format,
+                downstream_sse_started=downstream_sse_started,
+            )
+
         try:
+            admission.raise_if_cancelled()
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length < 0:
                 raise ValueError("Content-Length must be non-negative")
@@ -13088,6 +13144,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             LifecycleEmptyFinalResponseError,
                             LifecycleFinalFormatResponseError,
                         ) as exc:
+                            active_request = _active_gateway_request()
+                            if active_request is not None:
+                                active_request.raise_if_cancelled()
                             lifecycle_retry = isinstance(
                                 exc,
                                 (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError),
@@ -13165,7 +13224,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     failure_phase="stream_body" if stream_failure else None,
                                 )
                             )
-                            time.sleep(delay_seconds)
+                            _sleep_for_retry_with_gateway_cancellation(delay_seconds)
                             relay_attempt += 1
                             continue
                         relay_attempt += 1
@@ -13227,7 +13286,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **usage_capture,
                 **proxy_request_context,
             )
+        except GatewayUserRequestedShutdown:
+            send_user_requested_shutdown()
         except CompactEmptyResponseError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -13266,6 +13330,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="compact_empty_response",
             )
         except (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             error_code = (
                 "lifecycle_empty_final_response"
@@ -13308,6 +13375,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type=error_code,
             )
         except ImageProxyError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             if not request_start_written and callable(write_request_start_once):
                 fallback_request_observability = {
                     **caller_request_observability,
@@ -13351,6 +13421,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="image_proxy_error",
             )
         except UpstreamProtocolTranslationError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = str(exc)
             error_code = exc.cause.code
             is_apply_patch_adapter_error = error_code == APPLY_PATCH_ADAPTER_ERROR_CODE
@@ -13430,6 +13503,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type=json_error_type,
             )
         except ValueError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -13457,6 +13533,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="invalid_request_error",
             )
         except HTTPError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             if downstream_sse_started:
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
@@ -13528,6 +13607,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
         except IncompleteRead as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -13559,6 +13641,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 detail=detail,
             )
         except (OSError, URLError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -13590,6 +13675,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 detail=detail,
             )
         except Exception as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             logger.exception("unexpected proxy error request_id=%s", request_id)
             write_proxy_event(
@@ -13621,6 +13709,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 exc=exc,
                 detail=detail,
             )
+        finally:
+            _restore_gateway_request(previous_admission)
+            shutdown_controller.complete(admission)
 
     def _send_local_responses_no_content(self) -> None:
         request_id = uuid.uuid4().hex[:12]
@@ -13896,6 +13987,30 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
 
+    def _send_user_requested_shutdown_outcome(
+        self,
+        *,
+        inbound_format: str,
+        downstream_sse_started: bool,
+    ) -> None:
+        payload = user_requested_shutdown_payload(inbound_format)
+        try:
+            if downstream_sse_started:
+                if inbound_format == "chat_completions":
+                    self.wfile.write(
+                        b"data: "
+                        + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                        + b"\n\n"
+                    )
+                    self.wfile.flush()
+                else:
+                    self._write_sse_event("error", payload)
+            else:
+                self._send_json(503, payload)
+        except OSError:
+            pass
+        self.close_connection = True
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = _json_response_bytes(payload)
         self.send_response(status)
@@ -13937,6 +14052,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
         on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
+        admission = _active_gateway_request()
+
+        def raise_if_shutdown_requested() -> None:
+            if admission is not None:
+                admission.raise_if_cancelled()
+
         def observe_line(line: bytes) -> None:
             if not line or on_line is None:
                 return
@@ -13950,8 +14071,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
         transport_idle_guard_enabled = transport_timeout_seconds > 0
         model_event_idle_guard_enabled = model_event_timeout_seconds > 0 and line_resets_idle_timeout is not None
-        if keepalive_interval <= 0 and not transport_idle_guard_enabled and not model_event_idle_guard_enabled:
+        if (
+            admission is None
+            and keepalive_interval <= 0
+            and not transport_idle_guard_enabled
+            and not model_event_idle_guard_enabled
+        ):
             while True:
+                raise_if_shutdown_requested()
                 line = response.readline()
                 observe_line(line)
                 yield line
@@ -13989,6 +14116,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             raise UpstreamStreamIdleTimeoutError(timeout_seconds, phase=phase)
 
         while True:
+            raise_if_shutdown_requested()
             now = time.monotonic()
             timeout_seconds: float | None = None
             if keepalive_interval > 0:
@@ -14011,6 +14139,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if timeout_seconds is None
                     else max(0.001, min(timeout_seconds, remaining_idle))
                 )
+            if admission is not None:
+                timeout_seconds = (
+                    0.1
+                    if timeout_seconds is None
+                    else max(0.001, min(timeout_seconds, 0.1))
+                )
 
             try:
                 if timeout_seconds is None:
@@ -14018,6 +14152,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 else:
                     kind, value = lines.get(timeout=timeout_seconds)
             except queue.Empty:
+                raise_if_shutdown_requested()
                 now = time.monotonic()
                 if transport_idle_guard_enabled and (now - last_transport_at) >= transport_timeout_seconds:
                     raise_idle_timeout(transport_timeout_seconds, "transport")
@@ -14028,6 +14163,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     last_keepalive_at = time.monotonic()
                 continue
             if kind == "error":
+                raise_if_shutdown_requested()
                 raise value
             if isinstance(value, bytes) and value:
                 now = time.monotonic()
@@ -16129,18 +16265,38 @@ def run_server(host: str, port: int) -> None:
         force=True,
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
+    server.daemon_threads = True
+    shutdown_controller = GatewayShutdownController()
+    server.gateway_shutdown_controller = shutdown_controller
     logger.info("serving Codex proxy on %s:%s", host, port)
     try:
         server.serve_forever()
     finally:
+        server.server_close()
+        if shutdown_controller.shutdown_requested:
+            shutdown_controller.wait_for_active_requests()
+            flush_timeout = min(
+                GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+                shutdown_controller.remaining_shutdown_budget_seconds(),
+            )
+        else:
+            flush_timeout = GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
         writer_result = GATEWAY_EVENT_WRITER.shutdown(
-            timeout=GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+            timeout=flush_timeout,
         )
         if not writer_result.completed:
             logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
         try:
             diagnostic_shutdown = getattr(GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
-            if callable(diagnostic_shutdown) and not diagnostic_shutdown(GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS):
+            diagnostic_timeout = (
+                min(
+                    GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+                    shutdown_controller.remaining_shutdown_budget_seconds(),
+                )
+                if shutdown_controller.shutdown_requested
+                else GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
+            )
+            if callable(diagnostic_shutdown) and not diagnostic_shutdown(diagnostic_timeout):
                 logger.warning("Gateway diagnostic recorder shutdown did not drain")
         except Exception:
             logger.warning("Gateway diagnostic recorder shutdown failed")

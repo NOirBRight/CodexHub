@@ -8,8 +8,10 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from urllib.request import Request
 
 import codex_proxy
+import pytest
 from codex_proxy import CodexProxyHandler
 
 
@@ -133,6 +135,159 @@ def test_user_requested_shutdown_outcome_is_sanitized_for_every_downstream_forma
         assert "prompt" not in serialized
         assert "task" not in serialized
         assert "bearer" not in serialized
+
+
+def test_requests_arriving_after_admission_closure_never_open_an_upstream_transport() -> None:
+    controller = codex_proxy.GatewayShutdownController()
+    controller.close_admission()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
+    server.gateway_shutdown_controller = controller
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+
+    try:
+        host, port = server.server_address
+        connection = HTTPConnection(host, port, timeout=2)
+        with patch.object(
+            codex_proxy,
+            "_open_upstream_response",
+            side_effect=AssertionError("closed admission must not open upstream work"),
+        ) as open_upstream:
+            connection.request(
+                "POST",
+                "/v1/responses",
+                body=b'{"model":"gpt-5.6-terra","input":"must not reach upstream"}',
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+        connection.close()
+
+        assert response.status == 503
+        assert payload == codex_proxy.user_requested_shutdown_payload("responses")
+        open_upstream.assert_not_called()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_request_racing_admission_closure_never_opens_or_retries_upstream_work() -> None:
+    controller = codex_proxy.GatewayShutdownController()
+    admission = controller.admit()
+    assert admission is not None
+    previous = codex_proxy._activate_gateway_request(admission)
+
+    try:
+        controller.close_admission()
+        with patch.object(codex_proxy, "_open_upstream_once") as open_upstream:
+            with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
+                codex_proxy._open_upstream_response(
+                    Request("https://example.invalid/v1/responses", data=b"{}", method="POST"),
+                    upstream_name="official",
+                    upstream_format="responses",
+                    timeout=30,
+                )
+        open_upstream.assert_not_called()
+    finally:
+        codex_proxy._restore_gateway_request(previous)
+        controller.complete(admission)
+
+
+def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -> None:
+    controller = codex_proxy.GatewayShutdownController()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
+    server.gateway_shutdown_controller = controller
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.start()
+    upstream_entered = threading.Event()
+    result: dict[str, object] = {}
+
+    def wait_for_shutdown(*_args, **_kwargs):
+        upstream_entered.set()
+        admission = codex_proxy._active_gateway_request()
+        assert admission is not None
+        assert admission.wait_for_cancellation(2.0)
+        admission.raise_if_cancelled()
+
+    def post_active_request() -> None:
+        host, port = server.server_address
+        connection = HTTPConnection(host, port, timeout=4)
+        connection.request(
+            "POST",
+            "/v1/responses",
+            body=b'{"model":"gpt-5.6-terra","input":"active request"}',
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        result["status"] = response.status
+        result["payload"] = json.loads(response.read().decode("utf-8"))
+        connection.close()
+
+    client_thread = threading.Thread(target=post_active_request)
+    try:
+        with (
+            patch.object(codex_proxy, "_open_upstream_response", side_effect=wait_for_shutdown) as open_upstream,
+            patch.object(codex_proxy, "write_proxy_event") as write_event,
+        ):
+            client_thread.start()
+            assert upstream_entered.wait(timeout=2)
+
+            host, port = server.server_address
+            shutdown_connection = HTTPConnection(host, port, timeout=2)
+            shutdown_connection.request("POST", "/shutdown")
+            shutdown_response = shutdown_connection.getresponse()
+            assert shutdown_response.status == 200
+            shutdown_response.read()
+            shutdown_connection.close()
+
+            client_thread.join(timeout=3)
+            assert not client_thread.is_alive()
+            assert result == {
+                "status": 503,
+                "payload": codex_proxy.user_requested_shutdown_payload("responses"),
+            }
+            assert open_upstream.call_count == 1
+            shutdown_event = next(
+                call.kwargs
+                for call in write_event.call_args_list
+                if call.args and call.args[0] == "request_cancelled"
+            )
+            assert shutdown_event["shutdown_outcome"] == "user_requested_shutdown"
+            assert "active request" not in repr(shutdown_event)
+    finally:
+        if client_thread.is_alive():
+            client_thread.join(timeout=1)
+        if server_thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+def test_run_server_uses_the_remaining_shared_shutdown_budget_for_flush() -> None:
+    now = [0.0]
+    controller = codex_proxy.GatewayShutdownController(
+        clock=lambda: now[0],
+        shutdown_budget_seconds=2.0,
+    )
+    controller.close_admission()
+    server = Mock()
+    writer = Mock()
+    writer.shutdown.return_value = SimpleNamespace(completed=True, outcome="drained")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with (
+            patch.object(codex_proxy, "PROXY_TEXT_LOG_PATH", Path(tmpdir) / "proxy.log"),
+            patch.object(codex_proxy.logging, "basicConfig"),
+            patch.object(codex_proxy.logging, "FileHandler"),
+            patch.object(codex_proxy.logging, "StreamHandler"),
+            patch.object(codex_proxy, "ThreadingHTTPServer", return_value=server),
+            patch.object(codex_proxy, "GatewayShutdownController", return_value=controller),
+            patch.object(codex_proxy, "GATEWAY_EVENT_WRITER", writer),
+        ):
+            codex_proxy.run_server("127.0.0.1", 8080)
+
+    writer.shutdown.assert_called_once_with(timeout=2.0)
 
 
 def test_run_server_drains_the_event_writer_when_the_server_exits() -> None:
