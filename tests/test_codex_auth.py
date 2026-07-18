@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
@@ -10,6 +11,19 @@ from unittest.mock import patch
 
 import codex_auth
 from codex_auth import CodexAuthError
+
+
+def write_dead_legacy_lock(lock_path: Path) -> subprocess.Popen:
+    """Write a legacy record whose PID is provably dead (recoverable).
+
+    The returned process must stay referenced for the test duration: closing
+    its handle would make the dead PID unresolvable on Windows.
+    """
+    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
+    child_pid = child.pid
+    assert child.wait(timeout=5) == 0
+    lock_path.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="utf-8")
+    return child
 
 
 def _make_jwt(payload: dict) -> str:
@@ -180,14 +194,14 @@ class RefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = _make_auth_json(Path(tmp), access_token=old_token, refresh_token="rt.orig")
             lock_path = path.with_name("auth.json.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
             auth_data = json.loads(path.read_text(encoding="utf-8"))
             fake = _FakeResponse({"access_token": new_token, "refresh_token": "rt.fresh"})
 
             with patch("codex_auth.urlopen", return_value=fake):
                 codex_auth.refresh(auth_data, path)
 
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tokens"]["access_token"], new_token)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)

@@ -3,7 +3,9 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 import io
 import json
+import os
 import sqlite3
+import subprocess
 import tempfile
 from pathlib import Path
 import unittest
@@ -25,6 +27,19 @@ from history_overlay import (
     restore_official_history_from_unified,
     restore_repair_backups,
 )
+
+
+def write_dead_legacy_lock(lock_path: Path) -> subprocess.Popen:
+    """Write a legacy record whose PID is provably dead (recoverable).
+
+    The returned process must stay referenced for the test duration: closing
+    its handle would make the dead PID unresolvable on Windows.
+    """
+    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
+    child_pid = child.pid
+    assert child.wait(timeout=5) == 0
+    lock_path.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="utf-8")
+    return child
 
 
 class HistoryOverlayTests(unittest.TestCase):
@@ -67,12 +82,12 @@ class HistoryOverlayTests(unittest.TestCase):
             ledger_path = backup_root / "ledger.json"
             backup_root.mkdir(parents=True)
             ledger_lock_path = ledger_path.with_name("ledger.json.lock")
-            ledger_lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(ledger_lock_path)
             ledger = apply_history_overlay(codex_dir, backup_root, ledger_path)
 
             self.assertEqual(len(ledger["state"][0]["thread_ids"]), 1)
             self.assertEqual(len(ledger["jsonl"]), 1)
-            self.assertFalse(ledger_lock_path.exists())
+            self.assertEqual(ledger_lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
             connection = sqlite3.connect(db_path)
             try:
                 providers = dict(connection.execute("SELECT id, model_provider FROM threads"))

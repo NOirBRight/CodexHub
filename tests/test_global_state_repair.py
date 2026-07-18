@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 from global_state_repair import repair_global_state
+
+
+def write_dead_legacy_lock(lock_path: Path) -> subprocess.Popen:
+    """Write a legacy record whose PID is provably dead (recoverable).
+
+    The returned process must stay referenced for the test duration: closing
+    its handle would make the dead PID unresolvable on Windows.
+    """
+    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
+    child_pid = child.pid
+    assert child.wait(timeout=5) == 0
+    lock_path.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="utf-8")
+    return child
 
 
 class GlobalStateRepairTests(unittest.TestCase):
@@ -70,12 +85,12 @@ class GlobalStateRepairTests(unittest.TestCase):
             backup_path = tmp / "backup" / ".codex-global-state.json"
             state_path.write_text(json.dumps(original), encoding="utf-8")
             lock_path = state_path.with_name(".codex-global-state.json.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
 
             result = repair_global_state(state_path, backup_path)
 
             self.assertTrue(result["changed"])
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
             self.assertNotIn(
                 "selected-remote-host-id",
                 json.loads(state_path.read_text(encoding="utf-8")),
