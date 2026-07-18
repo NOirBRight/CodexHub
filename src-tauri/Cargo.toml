@@ -18,6 +18,10 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
+# preserve_order is enabled crate-wide deliberately (#176): client exports
+# (OpenCode/Pi/ZCode) must emit keys in configured/catalog order rather than
+# BTreeMap alphabetical. All export maps are built from Vec iteration or
+# json! literals, so insertion order is deterministic everywhere.
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 dirs = "5"

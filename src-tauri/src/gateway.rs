@@ -4421,6 +4421,15 @@ fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String>
     Ok(removed)
 }
 
+fn opencode_reasoning_variants(
+    supported_reasoning_levels: &[String],
+) -> Map<String, serde_json::Value> {
+    supported_reasoning_levels
+        .iter()
+        .map(|level| (level.clone(), json!({ "reasoningEffort": level.clone() })))
+        .collect::<Map<_, _>>()
+}
+
 fn opencode_config_text(
     settings: &Settings,
     providers: &[Provider],
@@ -4449,16 +4458,8 @@ fn opencode_config_text(
                     })
                     .cloned()
                     .unwrap_or_else(|| gateway_model.supported_reasoning_levels[0].clone());
-                let variants = gateway_model
-                    .supported_reasoning_levels
-                    .iter()
-                    .map(|level| {
-                        (
-                            level.clone(),
-                            json!({ "reasoningEffort": level.clone() }),
-                        )
-                    })
-                    .collect::<Map<_, _>>();
+                let variants =
+                    opencode_reasoning_variants(&gateway_model.supported_reasoning_levels);
                 if let Some(object) = entry.as_object_mut() {
                     object.insert("options".to_string(), json!({ "reasoningEffort": default_effort }));
                     object.insert("variants".to_string(), Value::Object(variants));
@@ -5306,8 +5307,9 @@ fn has_nonempty_payload(bytes: &[u8]) -> bool {
 mod tests {
     use super::{
         apply_opencode_config_with_paths, gateway_client_provider_groups_from_exported,
-        gateway_models_from_config, gateway_models_from_sources, official_models_from_metadata,
-        omp_models_yml_text, opencode_config_text, pi_models_text, pi_settings_text,
+        gateway_models_from_config, gateway_models_from_sources, official_gateway_reasoning_levels,
+        official_models_from_metadata, omp_models_yml_text, opencode_config_text,
+        opencode_reasoning_variants, pi_models_text, pi_settings_text,
         read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, runtime_proxy_dir,
@@ -6993,6 +6995,17 @@ mod tests {
     }
 
     #[test]
+    fn opencode_variants_preserve_official_catalog_reasoning_order() {
+        let variants = opencode_reasoning_variants(&official_gateway_reasoning_levels());
+        let keys: Vec<&str> = variants.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["low", "medium", "high", "xhigh", "max"],
+            "official variants must follow catalog order, not alphabetical"
+        );
+    }
+
+    #[test]
     fn opencode_config_preserves_configured_reasoning_variant_order() {
         let settings = Settings::default();
         let providers = reasoning_contract_client_export_test_providers();
@@ -7023,6 +7036,12 @@ mod tests {
         assert_eq!(
             value.pointer("/provider/codexhub-volc/models/glm-5.2-flash/modalities/input"),
             Some(&serde_json::json!(["text"]))
+        );
+        // The projection has no output-modality source; omit rather than fabricate.
+        assert!(
+            value
+                .pointer("/provider/codexhub-volc/models/glm-5.2/modalities/output")
+                .is_none()
         );
     }
 
