@@ -100,6 +100,7 @@ class ProviderConfig:
         default=None, init=False, repr=False, compare=False
     )
     reports_cached_input_tokens: bool = False
+    supports_developer_role: bool = True
     display_prefix: str | None = None
     sort_order: int = 0
     enabled: bool = True
@@ -233,6 +234,7 @@ def build_external_model_index(
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
                 "reports_cached_input_tokens": provider.reports_cached_input_tokens,
+                "supports_developer_role": provider.supports_developer_role,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -449,6 +451,7 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
             tool_surface_strategy=provider_tool_surface_strategy,
             native_responses_tool_codec=provider_native_responses_tool_codec,
             reports_cached_input_tokens=_bool_field(raw_provider.get("reports_cached_input_tokens"), False),
+            supports_developer_role=_bool_field(raw_provider.get("supports_developer_role"), True),
             display_prefix=_optional_string_field(raw_provider.get("display_prefix")),
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
@@ -647,6 +650,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             )
         if provider.reports_cached_input_tokens:
             chunks.append(_toml_bool_line("reports_cached_input_tokens", provider.reports_cached_input_tokens))
+        if not provider.supports_developer_role:
+            chunks.append(_toml_bool_line("supports_developer_role", provider.supports_developer_role))
         chunks.extend(
             [
                 _toml_int_line("sort_order", provider.sort_order),

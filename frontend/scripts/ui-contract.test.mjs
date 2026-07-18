@@ -319,6 +319,38 @@ test("runtime data uses app-level cached refreshes instead of page lifecycle rel
   assert.doesNotMatch(providersSource, /async function load\(\)/);
 });
 
+test("Gateway lifecycle transitions disable Start and failed actions clear stale Running state", async () => {
+  const [appSource, runtimeBarSource, typesSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(runtimeBarPath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+  const runtimeAction = appSource.match(/const runRuntimeAction = useCallback\(async \([\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.match(typesSource, /gateway_lifecycle: "unavailable" \| "stopped" \| "starting" \| "running" \| "stopping" \| "restarting" \| "failed"/);
+  assert.match(runtimeBarSource, /const lifecycleTransitionActive = \["unavailable", "starting", "stopping", "restarting"\]\.includes/);
+  assert.match(runtimeBarSource, /disabled=\{Boolean\(busy\) \|\| !status \|\| lifecycleTransitionActive\}/);
+  assert.match(appSource, /data: key === "status" \? null : cache\.data/);
+  assert.match(runtimeAction, /catch \(err\) \{[\s\S]*await refreshRuntimeStatus\(\{ force: true \}\)/);
+  assert.match(runtimeAction, /updateToast\(toastId, \{[\s\S]*tone: "error"/);
+});
+
+test("settings restart failures and tray lifecycle feedback preserve truthful runtime state", async () => {
+  const [appSource, mainSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+  ]);
+  const saveSettings = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  const trayListener = appSource.match(/listen<TrayToastPayload>\("codexhub:toast",[\s\S]*?\n    \}\)/)?.[0] ?? "";
+
+  assert.match(saveSettings, /catch \(err\) \{[\s\S]*await refreshRuntimeStatus\(\{ force: true \}\)/);
+  assert.match(appSource, /type TrayToastPayload = \{[\s\S]*id: string;[\s\S]*tone: "loading" \| "success" \| "error"/);
+  assert.match(trayListener, /trayToastIds\.current\.get\(event\.payload\.id\)/);
+  assert.match(trayListener, /updateToast\(existingToastId,/);
+  assert.match(mainSource, /emit_tray_toast\([\s\S]*"loading"/);
+  assert.match(mainSource, /tauri::async_runtime::spawn_blocking/);
+});
+
 test("provider page state, editors, actions, and shared helpers stay in focused modules", async () => {
   const [pageSource, usageSource, navigationSource, editorSource, controlsSource, modelSource, catalogActionsSource, dateSource, labelsSource, updateSource, officialModelsSource, endpointSource, formSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
@@ -580,8 +612,10 @@ test("desktop startup opens the gateway backend and reuses the existing app inst
     "gateway startup should run after packaged resources are registered",
   );
   assert.match(mainSource, /fn start_gateway_on_launch\(\)/);
-  assert.match(mainSource, /tauri::async_runtime::spawn_blocking\(\|\|/);
-  assert.match(mainSource, /proxy::start\(\)/);
+  assert.match(mainSource, /std::thread::spawn\(move \|\|/);
+  assert.match(mainSource, /proxy::start_after\(\|\|/);
+  assert.match(mainSource, /launch_ready\.signal\(\)/);
+  assert.match(mainSource, /ready_rx\.recv\(\)/);
   assert.match(cargoSource, /tauri-plugin-single-instance\s*=\s*"2"/);
   assert.match(mainSource, /tauri_plugin_single_instance::init\(\|app,[\s\S]*show_main_window\(app\)/);
 });

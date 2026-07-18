@@ -2125,6 +2125,8 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
                 "native_responses_tool_codec", "none"
             ),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
+            "supports_developer_role": bool(external_model.get("supports_developer_role", True)),
+            "supported_reasoning_levels": tuple(external_model.get("supported_reasoning_levels") or ()),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
 
@@ -2170,6 +2172,42 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
     return False
 
 
+def _request_carries_reasoning_control(payload: Mapping[str, Any]) -> bool:
+    effort = payload.get("reasoning_effort")
+    if isinstance(effort, str) and effort:
+        return True
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        return True
+    if isinstance(reasoning, Mapping) and reasoning:
+        return True
+    template_kwargs = payload.get("chat_template_kwargs")
+    if isinstance(template_kwargs, Mapping):
+        template_effort = template_kwargs.get("reasoning_effort")
+        if isinstance(template_effort, str) and template_effort:
+            return True
+    return False
+
+
+def _reasoning_policy_for_request(
+    inbound_payload: Any,
+    upstream: Mapping[str, Any] | None,
+    model: str | None,
+) -> str | None:
+    if not isinstance(inbound_payload, Mapping) or not isinstance(upstream, Mapping):
+        return None
+    if _request_carries_reasoning_control(inbound_payload):
+        return "explicit"
+    levels = upstream.get("supported_reasoning_levels")
+    if not levels and model:
+        candidate = generated_catalog_by_slug().get(canonical_model_id(model))
+        if isinstance(candidate, Mapping):
+            levels = candidate.get("supported_reasoning_levels")
+    if levels:
+        return "provider-default"
+    return None
+
+
 def _validate_reasoning_effort_for_upstream(
     payload: Any,
     upstream: Mapping[str, Any],
@@ -2183,6 +2221,9 @@ def _validate_reasoning_effort_for_upstream(
         requested_efforts.append(reasoning.get("effort"))
     elif isinstance(reasoning, str):
         requested_efforts.append(reasoning)
+    template_kwargs = payload.get("chat_template_kwargs")
+    if isinstance(template_kwargs, Mapping):
+        requested_efforts.append(template_kwargs.get("reasoning_effort"))
     is_ultra = any(
         isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
     )
@@ -8119,6 +8160,8 @@ def transparent_request_body(
                 changed = True
             if official_responses_backend and _normalize_responses_string_input(next_payload):
                 changed = True
+            if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
+                changed = True
             if changed:
                 return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         return body
@@ -8149,9 +8192,126 @@ def transparent_request_body(
         changed = True
     if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
         changed = True
+    if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
+        changed = True
     if not changed:
         return body
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _rewrite_transparent_developer_role_messages(
+    body: bytes,
+    upstream: Mapping[str, Any],
+) -> tuple[bytes, int]:
+    if upstream.get("supports_developer_role", True) is not False:
+        return body, 0
+    payload = _safe_json_mapping(body)
+    if payload is None:
+        return body, 0
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return body, 0
+    next_messages: list[Any] = []
+    rewritten = 0
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "developer":
+            message = {**message, "role": "system"}
+            rewritten += 1
+        next_messages.append(message)
+    if not rewritten:
+        return body, 0
+    next_payload = dict(payload)
+    next_payload["messages"] = next_messages
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), rewritten
+
+
+# JSON Schema positions whose values are themselves schemas (or maps/lists of
+# schemas). Value positions such as ``default``, ``enum``, ``const``, or
+# ``examples`` must never be rewritten, so normalization is schema-aware rather
+# than a blind recursive boolean replacement.
+_TOOL_SCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "defs", "definitions", "dependentSchemas")
+_TOOL_SCHEMA_VALUE_KEYS = (
+    "items",
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "propertyNames",
+    "if",
+    "then",
+    "else",
+    "not",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "contentSchema",
+)
+_TOOL_SCHEMA_LIST_KEYS = ("allOf", "anyOf", "oneOf", "prefixItems")
+
+
+def _normalize_tool_json_schema_items(value: list[Any], state: dict[str, int]) -> list[Any]:
+    return [
+        _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
+        for item in value
+    ]
+
+
+def _normalize_tool_json_schema(node: Any, state: dict[str, int]) -> Any:
+    """Replace boolean subschemas with equivalent object forms.
+
+    ``true`` and ``{}`` accept any instance; ``false`` and ``{"not": {}}``
+    accept none. Some upstreams (for example Moonshot-flavored validators)
+    reject boolean property schemas outright, so transparent routes normalize
+    them without changing validation semantics.
+    """
+    if isinstance(node, bool):
+        state["rewritten"] += 1
+        return {} if node else {"not": {}}
+    if not isinstance(node, dict):
+        return node
+    next_node = dict(node)
+    for key in _TOOL_SCHEMA_MAP_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, dict):
+            next_node[key] = {
+                name: _normalize_tool_json_schema(subschema, state) if isinstance(subschema, (dict, bool)) else subschema
+                for name, subschema in value.items()
+            }
+    for key in _TOOL_SCHEMA_VALUE_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, (dict, bool)):
+            next_node[key] = _normalize_tool_json_schema(value, state)
+        elif isinstance(value, list):
+            next_node[key] = _normalize_tool_json_schema_items(value, state)
+    for key in _TOOL_SCHEMA_LIST_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, list):
+            next_node[key] = _normalize_tool_json_schema_items(value, state)
+    return next_node
+
+
+def _normalize_transparent_tool_schema_booleans(body: bytes) -> tuple[bytes, int]:
+    payload = _safe_json_mapping(body)
+    if payload is None:
+        return body, 0
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return body, 0
+    state = {"rewritten": 0}
+    next_tools: list[Any] = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict):
+                parameters = function.get("parameters")
+                if isinstance(parameters, (dict, bool)):
+                    parameters = _normalize_tool_json_schema(parameters, state)
+                    function = {**function, "parameters": parameters}
+                    tool = {**tool, "function": function}
+        next_tools.append(tool)
+    if not state["rewritten"]:
+        return body, 0
+    next_payload = dict(payload)
+    next_payload["tools"] = next_tools
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), state["rewritten"]
 
 
 def _is_raw_provider_probe_context(event_context: Mapping[str, Any] | None) -> bool:
@@ -8754,22 +8914,28 @@ def compatible_request_body(
         changed = True
 
     if upstream_name == "ollama_cloud":
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = reasoning.get("effort")
-            replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(effort) if isinstance(effort, str) else None
-            if replacement is not None:
-                reasoning["effort"] = replacement
-                changed = True
-        else:
-            replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(reasoning) if isinstance(reasoning, str) else None
-            if replacement is not None:
-                payload["reasoning"] = replacement
-                changed = True
+        if _apply_ollama_reasoning_effort_alias(payload):
+            changed = True
 
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _apply_ollama_reasoning_effort_alias(payload: dict[str, Any]) -> bool:
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(effort) if isinstance(effort, str) else None
+        if replacement is not None:
+            reasoning["effort"] = replacement
+            return True
+        return False
+    replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(reasoning) if isinstance(reasoning, str) else None
+    if replacement is not None:
+        payload["reasoning"] = replacement
+        return True
+    return False
 
 
 APPLY_PATCH_FUNCTION_NAME = "apply_patch"
@@ -12366,9 +12532,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_kind = RETRY_REQUEST_MAIN_GENERATION
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
             vision_proxy_policy = vision_proxy_policy_for_route(route_decision, behavior_profile)
+            reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
                 **_route_decision_event_fields(route_decision),
                 "vision_proxy_policy": vision_proxy_policy,
+                **({"reasoning_policy": reasoning_policy} if reasoning_policy else {}),
             }
             proxy_request_context = {
                 **proxy_request_context,
@@ -12482,6 +12650,32 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream,
                     model_id=model,
                 )
+                body, developer_role_rewrites = _rewrite_transparent_developer_role_messages(body, upstream)
+                if developer_role_rewrites:
+                    write_proxy_event(
+                        "developer_role_rewrite_applied",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        messages_rewritten=developer_role_rewrites,
+                        **proxy_request_context,
+                    )
+                # Unconditional by design: rewriting boolean JSON Schemas to
+                # their equivalent object forms is semantics-preserving for
+                # every upstream, and intolerant validators (e.g. Moonshot)
+                # fail closed without it. No provider capability gate.
+                body, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(body)
+                if tool_schema_rewrites:
+                    write_proxy_event(
+                        "tool_schema_boolean_normalized",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        schemas_rewritten=tool_schema_rewrites,
+                        **proxy_request_context,
+                    )
             else:
                 compatibility_upstream = upstream
                 if upstream_format == "auto":

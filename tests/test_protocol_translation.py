@@ -227,6 +227,71 @@ class ProtocolTranslationTests(unittest.TestCase):
             protocol_translation.chat_completion_to_response_body(body)
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
+    def test_chat_template_reasoning_effort_translates_to_responses_reasoning(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"reasoning_effort": "max"},
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+        ).encode("utf-8")
+        translated = json.loads(protocol_translation.chat_completions_request_to_responses_body(body))
+        self.assertEqual(translated["reasoning"], {"effort": "max"})
+        self.assertNotIn("chat_template_kwargs", translated)
+        self.assertNotIn("stream_options", translated)
+        self.assertTrue(translated["stream"])
+
+    def test_chat_reasoning_controls_translate_to_responses_effort(self):
+        for payload, expected in (
+            ({"reasoning_effort": "high"}, {"effort": "high"}),
+            ({"reasoning": "xhigh"}, {"effort": "xhigh"}),
+            ({"reasoning": {"effort": "low"}}, {"effort": "low"}),
+        ):
+            with self.subTest(payload=payload):
+                body = json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        **payload,
+                    }
+                ).encode("utf-8")
+                translated = json.loads(protocol_translation.chat_completions_request_to_responses_body(body))
+                self.assertEqual(translated["reasoning"], expected)
+
+    def test_conflicting_chat_reasoning_controls_fail_closed(self):
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"reasoning_effort": "max"},
+            }
+        ).encode("utf-8")
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.chat_completions_request_to_responses_body(body)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_unmappable_chat_template_kwargs_and_stream_options_fail_closed(self):
+        for extra in (
+            {"chat_template_kwargs": {"enable_thinking": True}},
+            {"chat_template_kwargs": {"reasoning_effort": "max", "enable_thinking": False}},
+            {"stream_options": {"include_usage": True, "chunk_delimiter": "\n"}},
+            {"reasoning": {"effort": "high", "summary": "auto"}},
+        ):
+            with self.subTest(extra=extra):
+                body = json.dumps(
+                    {
+                        "model": "glm-5.2",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        **extra,
+                    }
+                ).encode("utf-8")
+                with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+                    protocol_translation.chat_completions_request_to_responses_body(body)
+                self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
     def test_chat_completion_chunking_rejects_lossy_message_semantics(self):
         for message in (
             {"role": "assistant", "content": None, "refusal": "I cannot help with that."},
@@ -646,7 +711,7 @@ class ProtocolTranslationTests(unittest.TestCase):
     def test_chat_semantic_fields_without_responses_equivalents_fail_closed(self):
         payloads = {
             "reasoning": {
-                "reasoning_effort": "high",
+                "reasoning": {"effort": "high", "summary": "auto"},
                 "messages": [{"role": "user", "content": "Hello"}],
             },
             "refusal": {

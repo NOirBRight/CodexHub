@@ -30,6 +30,9 @@ export function RuntimeBar({
 }: RuntimeBarProps) {
   const { t } = useTranslation();
   const running = status?.proxy_running ?? false;
+  const lifecycleTransitionActive = ["unavailable", "starting", "stopping", "restarting"].includes(
+    status?.gateway_lifecycle ?? "",
+  );
   const port = status?.proxy_port ?? settings?.proxy_port ?? 9099;
   const address = `${settings?.gateway_bind_address || "127.0.0.1"}:${port}`;
   const runtimeHint = formatRuntimeHint(message);
@@ -78,7 +81,7 @@ export function RuntimeBar({
         <button
           type="button"
           className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-surface text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-          disabled={Boolean(busy)}
+          disabled={Boolean(busy) || !status || lifecycleTransitionActive}
           onClick={running ? onStop : onStart}
           aria-label={running ? t("runtime.stopRuntime") : t("runtime.startRuntime")}
           title={running ? t("runtime.stopRuntime") : t("runtime.startRuntime")}
