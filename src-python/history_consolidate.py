@@ -4,13 +4,15 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import json
+import ntpath
 import os
+import posixpath
 from pathlib import Path
 import re
 import shutil
 import sqlite3
 import tempfile
-from typing import Any, Iterable
+from typing import Any
 
 from atomic_io import atomic_write_text
 
@@ -30,9 +32,9 @@ GLOBAL_STATE_THREAD_LIST_KEYS = (
     "pinned-thread-ids",
 )
 GLOBAL_STATE_LIST_UNION_KEYS = (
-    "electron-saved-workspace-roots",
     "project-order",
 )
+SAVED_WORKSPACE_ROOTS_KEY = "electron-saved-workspace-roots"
 ELECTRON_PERSISTED_THREAD_DICT_KEYS = (
     "heartbeat-thread-permissions-by-id",
 )
@@ -382,6 +384,101 @@ def merge_dict_missing(destination: dict[str, Any], source: dict[str, Any]) -> i
     return added
 
 
+def _uses_windows_path_semantics(value: str) -> bool:
+    return os.name == "nt" or bool(ntpath.splitdrive(value)[0]) or value.startswith(("\\\\", "//"))
+
+
+def canonicalize_workspace_root(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if _uses_windows_path_semantics(value):
+        normalized = ntpath.normcase(ntpath.normpath(value.replace("/", "\\")))
+        return normalized.replace("\\", "/")
+    return posixpath.normpath(value)
+
+
+def canonicalize_workspace_roots(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    canonical: dict[str, str] = {}
+    for value in values:
+        normalized = canonicalize_workspace_root(value)
+        if normalized is not None:
+            canonical[normalized] = normalized
+    return [canonical[key] for key in sorted(canonical)]
+
+
+def _workspace_roots_from_state(state: dict[str, Any]) -> list[Any]:
+    values = state.get(SAVED_WORKSPACE_ROOTS_KEY)
+    return list(values) if isinstance(values, list) else []
+
+
+def preview_saved_workspace_roots(
+    active_state: dict[str, Any], source_state: dict[str, Any]
+) -> dict[str, Any]:
+    active_roots = _workspace_roots_from_state(active_state)
+    source_values = source_state.get(SAVED_WORKSPACE_ROOTS_KEY)
+    source_roots = canonicalize_workspace_roots(source_values)
+    active_keys = {
+        normalized
+        for value in active_roots
+        for normalized in [canonicalize_workspace_root(value)]
+        if normalized is not None
+    }
+    added_roots = [root for root in source_roots if root not in active_keys]
+    return {
+        "active_roots": active_roots,
+        "source_roots": source_roots,
+        "added_roots": added_roots,
+        "active_key_present": SAVED_WORKSPACE_ROOTS_KEY in active_state,
+        "source_key_present": SAVED_WORKSPACE_ROOTS_KEY in source_state,
+    }
+
+
+def _copy_owned_global_state(source: dict[str, Any], import_saved_workspace_roots: bool) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key in GLOBAL_STATE_THREAD_DICT_KEYS:
+        if isinstance(source.get(key), dict):
+            copied[key] = source[key]
+    for key in GLOBAL_STATE_THREAD_LIST_KEYS + GLOBAL_STATE_LIST_UNION_KEYS:
+        if isinstance(source.get(key), list):
+            copied[key] = source[key]
+    if isinstance(source.get(REMOTE_AUTOCONNECT_KEY), dict):
+        copied[REMOTE_AUTOCONNECT_KEY] = source[REMOTE_AUTOCONNECT_KEY]
+
+    source_epa = source.get(ATOM_STATE_KEY)
+    if isinstance(source_epa, dict):
+        copied_epa: dict[str, Any] = {}
+        for key in ELECTRON_PERSISTED_THREAD_DICT_KEYS:
+            if isinstance(source_epa.get(key), dict):
+                copied_epa[key] = source_epa[key]
+        for key in ELECTRON_PERSISTED_LIST_KEYS:
+            if isinstance(source_epa.get(key), dict):
+                copied_epa[key] = source_epa[key]
+        if isinstance(source_epa.get(REMOTE_AUTOCONNECT_KEY), dict):
+            copied_epa[REMOTE_AUTOCONNECT_KEY] = source_epa[REMOTE_AUTOCONNECT_KEY]
+        if copied_epa:
+            copied[ATOM_STATE_KEY] = copied_epa
+
+    if import_saved_workspace_roots:
+        roots = canonicalize_workspace_roots(source.get(SAVED_WORKSPACE_ROOTS_KEY))
+        if roots:
+            copied[SAVED_WORKSPACE_ROOTS_KEY] = roots
+    return copied
+
+
+def _load_global_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    state = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(state, dict):
+        raise ValueError(f"global state must be an object: {path}")
+    return state
+
+
 def remove_remote_selection_values(container: dict[str, Any]) -> int:
     changed = 0
     for key in REMOTE_SELECTION_KEYS:
@@ -403,28 +500,44 @@ def sanitize_global_state_remote_selection(state: dict[str, Any]) -> int:
     return changed
 
 
-def merge_global_state(codex_dir: Path, source_dir: Path, backup_root: Path) -> dict[str, int | str]:
+def merge_global_state(
+    codex_dir: Path,
+    source_dir: Path,
+    backup_root: Path,
+    import_saved_workspace_roots: bool = False,
+) -> dict[str, Any]:
     source_path = source_dir / ".codex-global-state.json"
     active_path = codex_dir / ".codex-global-state.json"
     if not source_path.exists():
-        return {"skipped": "source-missing"}
+        preview = preview_saved_workspace_roots(_load_global_state(active_path), {})
+        preview["policy"] = "explicit-import" if import_saved_workspace_roots else "preserve-active"
+        preview["applied"] = False
+        return {"skipped": "source-missing", "saved_workspace_roots": preview}
+
+    source = _load_global_state(source_path)
+    preview = preview_saved_workspace_roots(_load_global_state(active_path), source)
+    preview["policy"] = "explicit-import" if import_saved_workspace_roots else "preserve-active"
+    preview["applied"] = False
     if not active_path.exists():
         active_path.parent.mkdir(parents=True, exist_ok=True)
-        source = json.loads(source_path.read_text(encoding="utf-8-sig"))
-        removed_remote_keys = sanitize_global_state_remote_selection(source) if isinstance(source, dict) else 0
+        removed_remote_keys = sanitize_global_state_remote_selection(source)
+        active = _copy_owned_global_state(source, import_saved_workspace_roots)
         atomic_write_text(
             active_path,
-            json.dumps(source, ensure_ascii=False, separators=(",", ":")) + "\n",
+            json.dumps(active, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-        return {"copied": 1, "removed_remote_keys": removed_remote_keys}
+        preview["applied"] = import_saved_workspace_roots and bool(preview["added_roots"])
+        return {
+            "copied": 1,
+            "removed_remote_keys": removed_remote_keys,
+            "saved_workspace_roots": preview,
+        }
 
-    source = json.loads(source_path.read_text(encoding="utf-8-sig"))
-    active = json.loads(active_path.read_text(encoding="utf-8-sig"))
+    active = _load_global_state(active_path)
     changed = 0
     changed += sanitize_global_state_remote_selection(active)
-    if isinstance(source, dict):
-        sanitize_global_state_remote_selection(source)
+    sanitize_global_state_remote_selection(source)
 
     for key in GLOBAL_STATE_THREAD_DICT_KEYS:
         if isinstance(source.get(key), dict):
@@ -440,6 +553,13 @@ def merge_global_state(codex_dir: Path, source_dir: Path, backup_root: Path) -> 
             if new != old:
                 active[key] = new
                 changed += 1
+
+    if import_saved_workspace_roots and preview["added_roots"]:
+        old_roots = active.get(SAVED_WORKSPACE_ROOTS_KEY)
+        old_roots = list(old_roots) if isinstance(old_roots, list) else []
+        active[SAVED_WORKSPACE_ROOTS_KEY] = old_roots + preview["added_roots"]
+        changed += 1
+        preview["applied"] = True
 
     source_epa = source.get("electron-persisted-atom-state")
     active_epa = active.get("electron-persisted-atom-state")
@@ -475,7 +595,56 @@ def merge_global_state(codex_dir: Path, source_dir: Path, backup_root: Path) -> 
             json.dumps(active, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-    return {"changed_fields": changed}
+    return {"changed_fields": changed, "saved_workspace_roots": preview}
+
+
+def import_saved_workspace_roots(
+    codex_dir: Path, source_dir: Path, backup_root: Path, apply: bool = False
+) -> dict[str, Any]:
+    active_path = codex_dir / ".codex-global-state.json"
+    source_path = source_dir / ".codex-global-state.json"
+    active = _load_global_state(active_path)
+    source = _load_global_state(source_path)
+    preview = preview_saved_workspace_roots(active, source)
+    result: dict[str, Any] = {
+        "preview": preview,
+        "applied": False,
+        "backup_root": str(backup_root),
+        "backup_created": False,
+    }
+    if not apply or not preview["added_roots"]:
+        return result
+
+    backup_root.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        backup_root / "meta.json",
+        json.dumps(
+            {
+                "created_at": utc_now_iso(),
+                "codex_dir": str(codex_dir),
+                "source_dir": str(source_dir),
+                "operation": "import-saved-workspace-roots",
+            },
+            indent=2,
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if active_path.exists():
+        backup_file(active_path, codex_dir, backup_root, "active-before")
+        result["backup_created"] = True
+
+    updated = dict(active)
+    updated[SAVED_WORKSPACE_ROOTS_KEY] = preview["active_roots"] + preview["added_roots"]
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        active_path,
+        json.dumps(updated, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    result["applied"] = True
+    return result
 
 
 def provider_counts_from_jsonl(codex_dir: Path) -> Counter[str]:
@@ -508,18 +677,50 @@ def provider_counts_from_state(codex_dir: Path) -> list[dict[str, Any]]:
 
 
 def status(codex_dir: Path) -> dict[str, Any]:
+    state = _load_global_state(codex_dir / ".codex-global-state.json")
+    saved_workspace_roots = preview_saved_workspace_roots(state, {})
+    saved_workspace_roots["canonical_active_roots"] = canonicalize_workspace_roots(
+        saved_workspace_roots["active_roots"]
+    )
     return {
         "codex_dir": str(codex_dir),
         "jsonl": dict(provider_counts_from_jsonl(codex_dir)),
         "state": provider_counts_from_state(codex_dir),
+        "saved_workspace_roots": saved_workspace_roots,
     }
 
 
-def official_main(codex_dir: Path, source_dir: Path, backup_root: Path, target_provider: str) -> dict[str, Any]:
+def official_main(
+    codex_dir: Path,
+    source_dir: Path,
+    backup_root: Path,
+    target_provider: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     if target_provider not in PROVIDER_VALUES:
         raise ValueError(f"unsupported target provider: {target_provider}")
     if not source_dir.exists():
         raise FileNotFoundError(source_dir)
+
+    if dry_run:
+        with tempfile.TemporaryDirectory(prefix="history-consolidate-dry-run-") as temp_dir:
+            simulation_root = Path(temp_dir)
+            simulated_active = simulation_root / "active"
+            simulated_source = simulation_root / "source"
+            if codex_dir.exists():
+                shutil.copytree(codex_dir, simulated_active)
+            else:
+                simulated_active.mkdir(parents=True)
+            shutil.copytree(source_dir, simulated_source)
+            result = official_main(
+                simulated_active,
+                simulated_source,
+                simulation_root / "backup",
+                target_provider,
+            )
+        result["dry_run"] = True
+        result["backup_root"] = str(backup_root)
+        return result
 
     backup_root.mkdir(parents=True, exist_ok=True)
     meta = {
@@ -556,21 +757,69 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Consolidate Codex single-history provider buckets.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    status_parser = subparsers.add_parser("status")
+    status_parser = subparsers.add_parser(
+        "status", help="Report history/provider counts and saved workspace roots separately."
+    )
     status_parser.add_argument("--codex-dir", required=True, type=Path)
 
-    official_parser = subparsers.add_parser("official-main")
+    official_parser = subparsers.add_parser(
+        "official-main", help="Consolidate history without importing saved workspace roots."
+    )
     official_parser.add_argument("--codex-dir", required=True, type=Path)
     official_parser.add_argument("--source-dir", required=True, type=Path)
     official_parser.add_argument("--backup-root", required=True, type=Path)
     official_parser.add_argument("--target-provider", required=True, choices=sorted(PROVIDER_VALUES))
+    official_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview history changes without writing active state."
+    )
+
+    import_parser = subparsers.add_parser(
+        "import-saved-workspace-roots",
+        help="Preview exact canonical saved-workspace additions; use --apply only after reviewing them.",
+    )
+    import_parser.add_argument("--codex-dir", required=True, type=Path)
+    import_parser.add_argument("--source-dir", required=True, type=Path)
+    import_parser.add_argument("--backup-root", required=True, type=Path)
+    import_parser.add_argument(
+        "--preview",
+        action="store_true",
+        required=True,
+        help="Required preview gate; exact additions are printed before any --apply write.",
+    )
+    import_parser.add_argument(
+        "--apply", action="store_true", help="Apply the reviewed additions and create a pre-write backup."
+    )
 
     args = parser.parse_args(argv)
     if args.command == "status":
         print_result(status(args.codex_dir))
         return 0
     if args.command == "official-main":
-        print_result(official_main(args.codex_dir, args.source_dir, args.backup_root, args.target_provider))
+        print_result(
+            official_main(
+                args.codex_dir,
+                args.source_dir,
+                args.backup_root,
+                args.target_provider,
+                dry_run=args.dry_run,
+            )
+        )
+        return 0
+    if args.command == "import-saved-workspace-roots":
+        preview = preview_saved_workspace_roots(
+            _load_global_state(args.codex_dir / ".codex-global-state.json"),
+            _load_global_state(args.source_dir / ".codex-global-state.json"),
+        )
+        print_result({"dry_run": True, "saved_workspace_roots": preview})
+        if args.apply:
+            print_result(
+                import_saved_workspace_roots(
+                    args.codex_dir,
+                    args.source_dir,
+                    args.backup_root,
+                    apply=True,
+                )
+            )
         return 0
     raise ValueError(args.command)
 
