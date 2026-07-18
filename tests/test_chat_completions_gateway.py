@@ -1396,6 +1396,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.ollama_cloud_alias_upstream_model", return_value=None),
+            patch("codex_proxy.ollama_cloud_runtime_upstream", return_value=None),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
