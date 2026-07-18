@@ -992,14 +992,17 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(webBridgeSource, /optional_bool_arg\(&request\.args, &\["forceRefresh", "force_refresh"\]\)/);
   assert.match(openAiUsageSource, /account\/usage\/read/);
   assert.match(openAiUsageSource, /codex app-server/);
-  assert.match(openAiUsageSource, /const CACHE_REFRESH_INTERVAL_SECONDS: u64 = 12 \* 60 \* 60;/);
-  assert.match(openAiUsageSource, /const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;/);
+  assert.match(openAiUsageSource, /const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 3 \* 60;/);
+  assert.match(openAiUsageSource, /struct UsageRefreshCoordinator/);
+  assert.match(openAiUsageSource, /static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new\(\);/);
   assert.match(openAiUsageSource, /struct CodexAccountUsageCache/);
   assert.match(openAiUsageSource, /struct OpenAiUsageLimit/);
   assert.match(openAiUsageSource, /usageLimits/);
   assert.match(openAiUsageSource, /write_usage_cache/);
   assert.match(openAiUsageSource, /read_usage_cache/);
-  assert.match(openAiUsageSource, /read_codex_account_usage_with_retries/);
+  assert.match(openAiUsageSource, /last_completed_at/);
+  assert.match(openAiUsageSource, /struct AppServerChild/);
+  assert.doesNotMatch(openAiUsageSource, /USAGE_REFRESH_MAX_ATTEMPTS|read_codex_account_usage_with_retries/);
   assert.doesNotMatch(openAiUsageSource, /OPENAI_ADMIN_KEY|organization\/usage\/completions|OPENAI_USAGE_COMPLETIONS_URL/);
 
   const officialUsagePanel = providersSource.match(/function OfficialOpenAIUsagePanel[\s\S]*function OfficialOpenAIUsageTooltip/)?.[0] ?? "";
@@ -1022,11 +1025,11 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(providersSource, /storeOfficialOpenAIUsageSnapshot\(snapshot\)/);
   assert.match(providersSource, /async function primeOfficialOpenAIUsage\(\)/);
   assert.match(providersSource, /await loadOfficialOpenAIUsage\(false, false, undefined, \{ showBusy: false \}\)/);
-  assert.match(providersSource, /void loadOfficialOpenAIUsage\(true\)/);
+  assert.match(providersSource, /void loadOfficialOpenAIUsage\(false\)/);
   assert.match(providersSource, /async function loadOfficialOpenAIUsage\([\s\S]*forceRefresh = true[\s\S]*notify = false[\s\S]*toastId\?: string[\s\S]*options\?: \{ showBusy\?: boolean \}/);
   assert.match(providersSource, /api\.openaiUsageCompletions\(\{[\s\S]*forceRefresh[\s\S]*\}\)/);
   assert.match(providersSource, /void primeOfficialOpenAIUsage\(\)/);
-  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(true\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
+  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(false\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
   assert.match(providersSource, /if \(officialUsageSnapshotRef\.current\) \{[\s\S]*setOfficialUsageError\(null\);[\s\S]*setOfficialUsageHidden\(false\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /selectedId === OFFICIAL_ID[\s\S]*loadOfficialOpenAIUsage/);
   assert.match(providersSource, /if \(selectedId !== OFFICIAL_ID \|\| codexAuthState !== "authorized"\) \{/);
