@@ -738,6 +738,164 @@ PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
 GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
 GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+GATEWAY_USER_REQUESTED_SHUTDOWN_BUDGET_SECONDS = 2.0
+USER_REQUESTED_SHUTDOWN_OUTCOME = "user_requested_shutdown"
+
+
+class GatewayUserRequestedShutdown(RuntimeError):
+    """Raised in a request worker after the local Gateway begins retirement."""
+
+
+class GatewayRequestAdmission:
+    """One admitted Gateway request and the upstream transport it may cancel."""
+
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._upstream_transport: Any | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def attach_upstream_transport(self, transport: Any) -> None:
+        with self._lock:
+            self._upstream_transport = transport
+            cancelled = self._cancelled.is_set()
+        if cancelled:
+            self._close_upstream_transport(transport)
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        with self._lock:
+            transport = self._upstream_transport
+        if transport is not None:
+            self._close_upstream_transport(transport)
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise GatewayUserRequestedShutdown(USER_REQUESTED_SHUTDOWN_OUTCOME)
+
+    @staticmethod
+    def _close_upstream_transport(transport: Any) -> None:
+        close = getattr(transport, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+class GatewayShutdownController:
+    """Authenticated local control-plane state for Gateway retirement."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        shutdown_budget_seconds: float = GATEWAY_USER_REQUESTED_SHUTDOWN_BUDGET_SECONDS,
+    ) -> None:
+        self._clock = clock
+        self._shutdown_budget_seconds = max(0.0, shutdown_budget_seconds)
+        self._lock = threading.Lock()
+        self._admission_open = True
+        self._shutdown_started_at: float | None = None
+        self._active: set[GatewayRequestAdmission] = set()
+        self._active_drained = threading.Event()
+        self._active_drained.set()
+
+    def admit(self) -> GatewayRequestAdmission | None:
+        with self._lock:
+            if not self._admission_open:
+                return None
+            admission = GatewayRequestAdmission()
+            self._active.add(admission)
+            self._active_drained.clear()
+            return admission
+
+    def complete(self, admission: GatewayRequestAdmission) -> None:
+        with self._lock:
+            self._active.discard(admission)
+            if not self._active:
+                self._active_drained.set()
+
+    def close_admission(self) -> int:
+        with self._lock:
+            self._admission_open = False
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = self._clock()
+            active = tuple(self._active)
+        for admission in active:
+            admission.cancel()
+        return len(active)
+
+    def remaining_shutdown_budget_seconds(self) -> float:
+        with self._lock:
+            started_at = self._shutdown_started_at
+        if started_at is None:
+            return self._shutdown_budget_seconds
+        return max(0.0, self._shutdown_budget_seconds - (self._clock() - started_at))
+
+    def wait_for_active_requests(self) -> bool:
+        return self._active_drained.wait(timeout=self.remaining_shutdown_budget_seconds())
+
+
+GATEWAY_SHUTDOWN_CONTROLLER = GatewayShutdownController()
+_GATEWAY_REQUEST_ADMISSION = threading.local()
+
+
+def _gateway_shutdown_controller_for_handler(handler: Any) -> GatewayShutdownController:
+    server = getattr(handler, "server", None)
+    controller = getattr(server, "gateway_shutdown_controller", None)
+    return controller if isinstance(controller, GatewayShutdownController) else GATEWAY_SHUTDOWN_CONTROLLER
+
+
+def _activate_gateway_request(admission: GatewayRequestAdmission) -> GatewayRequestAdmission | None:
+    previous = getattr(_GATEWAY_REQUEST_ADMISSION, "current", None)
+    _GATEWAY_REQUEST_ADMISSION.current = admission
+    return previous if isinstance(previous, GatewayRequestAdmission) else None
+
+
+def _restore_gateway_request(previous: GatewayRequestAdmission | None) -> None:
+    if previous is None:
+        try:
+            del _GATEWAY_REQUEST_ADMISSION.current
+        except AttributeError:
+            pass
+        return
+    _GATEWAY_REQUEST_ADMISSION.current = previous
+
+
+def _active_gateway_request() -> GatewayRequestAdmission | None:
+    current = getattr(_GATEWAY_REQUEST_ADMISSION, "current", None)
+    return current if isinstance(current, GatewayRequestAdmission) else None
+
+
+def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
+    message = "Gateway stopped because the user requested shutdown."
+    codexhub_error = _codexhub_error_payload(
+        source="gateway",
+        message=message,
+        status=503,
+        error=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        error_type=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        failure_class=RETRY_FAILURE_PERMANENT,
+    )
+    if inbound_format == "chat_completions":
+        return {
+            "error": {
+                "message": message,
+                "type": USER_REQUESTED_SHUTDOWN_OUTCOME,
+                "code": USER_REQUESTED_SHUTDOWN_OUTCOME,
+                "status": 503,
+            },
+            "codexhub_error": codexhub_error,
+        }
+    return {
+        "error": USER_REQUESTED_SHUTDOWN_OUTCOME,
+        "detail": message,
+        "codexhub_error": codexhub_error,
+    }
 
 
 def _gateway_event_writer_recovery_record(
@@ -12283,7 +12441,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 self._send_json(401, _local_gateway_auth_error_payload())
                 self.close_connection = True
                 return
-            self._send_json(200, {"ok": True, "message": "shutdown scheduled"})
+            controller = _gateway_shutdown_controller_for_handler(self)
+            controller.close_admission()
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "outcome": USER_REQUESTED_SHUTDOWN_OUTCOME,
+                },
+            )
             self.close_connection = True
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
