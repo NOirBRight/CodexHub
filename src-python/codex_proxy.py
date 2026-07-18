@@ -8230,7 +8230,7 @@ def _rewrite_transparent_developer_role_messages(
 # ``examples`` must never be rewritten, so normalization is schema-aware rather
 # than a blind recursive boolean replacement.
 _TOOL_SCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "defs", "definitions", "dependentSchemas")
-_TOOL_SCHEMA_SINGLE_KEYS = (
+_TOOL_SCHEMA_VALUE_KEYS = (
     "items",
     "additionalItems",
     "additionalProperties",
@@ -8245,6 +8245,13 @@ _TOOL_SCHEMA_SINGLE_KEYS = (
     "contentSchema",
 )
 _TOOL_SCHEMA_LIST_KEYS = ("allOf", "anyOf", "oneOf", "prefixItems")
+
+
+def _normalize_tool_json_schema_items(value: list[Any], state: dict[str, int]) -> list[Any]:
+    return [
+        _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
+        for item in value
+    ]
 
 
 def _normalize_tool_json_schema(node: Any, state: dict[str, int]) -> Any:
@@ -8268,22 +8275,16 @@ def _normalize_tool_json_schema(node: Any, state: dict[str, int]) -> Any:
                 name: _normalize_tool_json_schema(subschema, state) if isinstance(subschema, (dict, bool)) else subschema
                 for name, subschema in value.items()
             }
-    for key in _TOOL_SCHEMA_SINGLE_KEYS:
+    for key in _TOOL_SCHEMA_VALUE_KEYS:
         value = next_node.get(key)
         if isinstance(value, (dict, bool)):
             next_node[key] = _normalize_tool_json_schema(value, state)
         elif isinstance(value, list):
-            next_node[key] = [
-                _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
-                for item in value
-            ]
+            next_node[key] = _normalize_tool_json_schema_items(value, state)
     for key in _TOOL_SCHEMA_LIST_KEYS:
         value = next_node.get(key)
         if isinstance(value, list):
-            next_node[key] = [
-                _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
-                for item in value
-            ]
+            next_node[key] = _normalize_tool_json_schema_items(value, state)
     return next_node
 
 
@@ -8311,7 +8312,6 @@ def _normalize_transparent_tool_schema_booleans(body: bytes) -> tuple[bytes, int
     next_payload = dict(payload)
     next_payload["tools"] = next_tools
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), state["rewritten"]
-
 
 
 def _is_raw_provider_probe_context(event_context: Mapping[str, Any] | None) -> bool:
@@ -12661,6 +12661,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         messages_rewritten=developer_role_rewrites,
                         **proxy_request_context,
                     )
+                # Unconditional by design: rewriting boolean JSON Schemas to
+                # their equivalent object forms is semantics-preserving for
+                # every upstream, and intolerant validators (e.g. Moonshot)
+                # fail closed without it. No provider capability gate.
                 body, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(body)
                 if tool_schema_rewrites:
                     write_proxy_event(

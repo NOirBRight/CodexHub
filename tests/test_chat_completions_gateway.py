@@ -1509,6 +1509,30 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 200)
         self.assertEqual(self._tool_schema_marker_events(), [])
 
+    def test_normalize_tool_schema_booleans_ignores_non_tool_booleans(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "metadata": {"flag": True, "nested": {"off": False}},
+        }).encode("utf-8")
+
+        next_body, rewritten = codex_proxy._normalize_transparent_tool_schema_booleans(body)
+
+        self.assertEqual(rewritten, 0)
+        self.assertEqual(next_body, body)
+
+    def test_normalize_tool_schema_booleans_without_tools_is_byte_identical(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "hi"}],
+        }).encode("utf-8")
+
+        next_body, rewritten = codex_proxy._normalize_transparent_tool_schema_booleans(body)
+
+        self.assertEqual(rewritten, 0)
+        self.assertIs(next_body, body)
+
     def _ollama_glm_external_model(self):
         return {
             "alias": "ollama-cloud/glm-5.2",
