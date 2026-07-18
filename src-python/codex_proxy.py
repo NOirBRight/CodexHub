@@ -2126,6 +2126,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             ),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
             "supports_developer_role": bool(external_model.get("supports_developer_role", True)),
+            "supported_reasoning_levels": tuple(external_model.get("supported_reasoning_levels") or ()),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
 
@@ -2171,6 +2172,42 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
     return False
 
 
+def _request_carries_reasoning_control(payload: Mapping[str, Any]) -> bool:
+    effort = payload.get("reasoning_effort")
+    if isinstance(effort, str) and effort:
+        return True
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        return True
+    if isinstance(reasoning, Mapping) and reasoning:
+        return True
+    template_kwargs = payload.get("chat_template_kwargs")
+    if isinstance(template_kwargs, Mapping):
+        template_effort = template_kwargs.get("reasoning_effort")
+        if isinstance(template_effort, str) and template_effort:
+            return True
+    return False
+
+
+def _reasoning_policy_for_request(
+    inbound_payload: Any,
+    upstream: Mapping[str, Any] | None,
+    model: str | None,
+) -> str | None:
+    if not isinstance(inbound_payload, Mapping) or not isinstance(upstream, Mapping):
+        return None
+    if _request_carries_reasoning_control(inbound_payload):
+        return "explicit"
+    levels = upstream.get("supported_reasoning_levels")
+    if not levels and model:
+        candidate = generated_catalog_by_slug().get(canonical_model_id(model))
+        if isinstance(candidate, Mapping):
+            levels = candidate.get("supported_reasoning_levels")
+    if levels:
+        return "provider-default"
+    return None
+
+
 def _validate_reasoning_effort_for_upstream(
     payload: Any,
     upstream: Mapping[str, Any],
@@ -2184,6 +2221,9 @@ def _validate_reasoning_effort_for_upstream(
         requested_efforts.append(reasoning.get("effort"))
     elif isinstance(reasoning, str):
         requested_efforts.append(reasoning)
+    template_kwargs = payload.get("chat_template_kwargs")
+    if isinstance(template_kwargs, Mapping):
+        requested_efforts.append(template_kwargs.get("reasoning_effort"))
     is_ultra = any(
         isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
     )
@@ -8120,6 +8160,8 @@ def transparent_request_body(
                 changed = True
             if official_responses_backend and _normalize_responses_string_input(next_payload):
                 changed = True
+            if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
+                changed = True
             if changed:
                 return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         return body
@@ -8149,6 +8191,8 @@ def transparent_request_body(
     if _normalize_responses_message_input_items(next_payload):
         changed = True
     if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
+        changed = True
+    if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
         changed = True
     if not changed:
         return body
@@ -8781,22 +8825,28 @@ def compatible_request_body(
         changed = True
 
     if upstream_name == "ollama_cloud":
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = reasoning.get("effort")
-            replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(effort) if isinstance(effort, str) else None
-            if replacement is not None:
-                reasoning["effort"] = replacement
-                changed = True
-        else:
-            replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(reasoning) if isinstance(reasoning, str) else None
-            if replacement is not None:
-                payload["reasoning"] = replacement
-                changed = True
+        if _apply_ollama_reasoning_effort_alias(payload):
+            changed = True
 
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _apply_ollama_reasoning_effort_alias(payload: dict[str, Any]) -> bool:
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(effort) if isinstance(effort, str) else None
+        if replacement is not None:
+            reasoning["effort"] = replacement
+            return True
+        return False
+    replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(reasoning) if isinstance(reasoning, str) else None
+    if replacement is not None:
+        payload["reasoning"] = replacement
+        return True
+    return False
 
 
 APPLY_PATCH_FUNCTION_NAME = "apply_patch"
@@ -12393,9 +12443,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_kind = RETRY_REQUEST_MAIN_GENERATION
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
             vision_proxy_policy = vision_proxy_policy_for_route(route_decision, behavior_profile)
+            reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
                 **_route_decision_event_fields(route_decision),
                 "vision_proxy_policy": vision_proxy_policy,
+                **({"reasoning_policy": reasoning_policy} if reasoning_policy else {}),
             }
             proxy_request_context = {
                 **proxy_request_context,
