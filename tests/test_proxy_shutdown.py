@@ -36,7 +36,9 @@ def _run_server_with_event_writer_result(writer_result):
 
 
 def test_shutdown_endpoint_stops_server() -> None:
+    controller = codex_proxy.GatewayShutdownController()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
+    server.gateway_shutdown_controller = controller
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
 
@@ -201,6 +203,23 @@ def test_request_racing_admission_closure_never_opens_or_retries_upstream_work()
                     timeout=30,
                 )
         open_upstream.assert_not_called()
+    finally:
+        codex_proxy._restore_gateway_request(previous)
+        controller.complete(admission)
+
+
+def test_cancelled_admission_interrupts_retry_wait_without_sleep() -> None:
+    controller = codex_proxy.GatewayShutdownController()
+    admission = controller.admit()
+    assert admission is not None
+    previous = codex_proxy._activate_gateway_request(admission)
+
+    try:
+        controller.close_admission()
+        with patch.object(codex_proxy.time, "sleep") as sleep:
+            with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
+                codex_proxy._sleep_for_retry_with_gateway_cancellation(30.0)
+        sleep.assert_not_called()
     finally:
         codex_proxy._restore_gateway_request(previous)
         controller.complete(admission)
