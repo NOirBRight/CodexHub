@@ -60,6 +60,8 @@ const enUS = {
     closeToTray: "Close to tray",
     debugDiagnostics: "Debug diagnostics",
     gatewayHint: "Gateway is the local OpenAI-compatible server in front of Hub",
+    gatewayRetirementWarning: "Active Codex Tasks may be interrupted. Continue?",
+    gatewayRetirementCancelled: "Gateway action cancelled before interrupting active Codex Tasks.",
     maximizeOrRestore: "Maximize or restore",
     minimize: "Minimize",
     proxyRunning: "Proxy running",

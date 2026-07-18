@@ -94,7 +94,9 @@ where
 }
 
 pub fn stop() -> Result<AppStatus, String> {
-    let backend = ProxyLifecycleBackend::runtime()?;
+    let backend = ProxyLifecycleBackend::runtime_with_session_owned_identity(
+        gateway_lifecycle().session_owned_identity(),
+    )?;
     gateway_lifecycle().stop(&backend)
 }
 
@@ -102,7 +104,9 @@ pub fn restart_after<Prepare>(prepare: Prepare) -> Result<AppStatus, String>
 where
     Prepare: FnOnce() -> Result<(), String>,
 {
-    let backend = ProxyLifecycleBackend::runtime()?;
+    let backend = ProxyLifecycleBackend::runtime_with_session_owned_identity(
+        gateway_lifecycle().session_owned_identity(),
+    )?;
     gateway_lifecycle()
         .restart(&backend, prepare)
         .map(|snapshot| snapshot.status)
@@ -185,14 +189,22 @@ impl ProxyPaths {
 struct ProxyLifecycleBackend {
     paths: ProxyPaths,
     lifecycle_gate_path: PathBuf,
+    session_owned_identity: Option<GatewayIdentity>,
 }
 
 impl ProxyLifecycleBackend {
     fn runtime() -> Result<Self, String> {
+        Self::runtime_with_session_owned_identity(None)
+    }
+
+    fn runtime_with_session_owned_identity(
+        session_owned_identity: Option<GatewayIdentity>,
+    ) -> Result<Self, String> {
         let paths = ProxyPaths::runtime()?;
         Ok(Self {
             lifecycle_gate_path: paths.lifecycle_gate_path(),
             paths,
+            session_owned_identity,
         })
     }
 }
@@ -240,7 +252,7 @@ impl GatewayLifecycleBackend for ProxyLifecycleBackend {
     }
 
     fn stop(&self) -> Result<AppStatus, String> {
-        stop_with_paths(&self.paths)
+        stop_session_owned_with_paths(&self.paths, self.session_owned_identity.as_ref())
     }
 
     fn can_reuse(&self, snapshot: &GatewayLifecycleSnapshot) -> bool {
@@ -1087,6 +1099,337 @@ fn clean_up_failed_start(
         inspector,
         &SystemChildTerminator,
     )
+}
+
+const USER_REQUESTED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const USER_REQUESTED_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+trait ShutdownClock {
+    fn elapsed(&self) -> Duration;
+    fn sleep(&self, duration: Duration);
+}
+
+struct SystemShutdownClock {
+    started_at: Instant,
+}
+
+impl SystemShutdownClock {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl ShutdownClock for SystemShutdownClock {
+    fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        if !duration.is_zero() {
+            thread::sleep(duration);
+        }
+    }
+}
+
+struct ShutdownBudget<'a> {
+    clock: &'a dyn ShutdownClock,
+}
+
+impl<'a> ShutdownBudget<'a> {
+    fn new(clock: &'a dyn ShutdownClock) -> Self {
+        Self { clock }
+    }
+
+    fn remaining(&self) -> Duration {
+        USER_REQUESTED_SHUTDOWN_TIMEOUT.saturating_sub(self.clock.elapsed())
+    }
+
+    fn cap(&self, maximum: Duration) -> Duration {
+        self.remaining().min(maximum)
+    }
+
+    fn sleep_to_next_poll(&self) -> bool {
+        let wait = self.remaining().min(USER_REQUESTED_SHUTDOWN_POLL_INTERVAL);
+        if wait.is_zero() {
+            return false;
+        }
+        self.clock.sleep(wait);
+        true
+    }
+}
+
+fn stop_session_owned_with_paths(
+    paths: &ProxyPaths,
+    session_owned_identity: Option<&GatewayIdentity>,
+) -> Result<AppStatus, String> {
+    let clock = SystemShutdownClock::new();
+    stop_session_owned_with_paths_and_controls(
+        paths,
+        session_owned_identity,
+        &SystemProcessKiller,
+        &SystemProcessInspector,
+        &SystemListenerInspector,
+        &request_shutdown_with_timeout,
+        &health_with_timeout,
+        &clock,
+    )
+}
+
+fn stop_session_owned_with_paths_and_controls(
+    paths: &ProxyPaths,
+    session_owned_identity: Option<&GatewayIdentity>,
+    killer: &dyn ProcessKiller,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+    shutdown_request: &dyn Fn(u16, &str, Duration) -> Result<(), String>,
+    health_probe: &dyn Fn(u16, Duration) -> Result<Option<HealthResponse>, String>,
+    clock: &dyn ShutdownClock,
+) -> Result<AppStatus, String> {
+    let budget = ShutdownBudget::new(clock);
+    let settings = read_settings(paths)?;
+    let mode = read_mode(paths)?;
+    let pid_record = read_pid_record(paths)?;
+    let lifecycle_port = pid_record
+        .as_ref()
+        .map(|record| record.expected_port(settings.proxy_port))
+        .unwrap_or(settings.proxy_port);
+    let was_running = gateway_running_with_budget(lifecycle_port, health_probe, &budget)?;
+
+    let Some(pid_record) = pid_record else {
+        if was_running {
+            return Err(format!(
+                "Gateway health responds on port {lifecycle_port}, but no managed PID identity exists; refusing to send shutdown to the external listener"
+            ));
+        }
+        return stopped_gateway_status(mode, lifecycle_port, "Gateway is not running".to_string());
+    };
+
+    match verify_proxy_process(&pid_record, paths, lifecycle_port, inspector)? {
+        VerifiedProxyProcess::Missing { pid } => {
+            remove_pid(paths)?;
+            return stopped_gateway_status(
+                mode,
+                lifecycle_port,
+                format!("Removed stale Gateway PID {pid}; user-requested shutdown found no live process"),
+            );
+        }
+        VerifiedProxyProcess::Mismatch { pid, reason } => {
+            remove_pid(paths)?;
+            return Err(format!(
+                "Gateway user-requested shutdown refused because managed PID {pid} ownership could not be verified ({reason}); removed stale identity"
+            ));
+        }
+        VerifiedProxyProcess::Unknown { pid, reason } => {
+            return Err(format!(
+                "Gateway user-requested shutdown could not inspect managed PID {pid} ({reason}); preserved durable ownership"
+            ));
+        }
+        VerifiedProxyProcess::Verified { pid } if was_running => {
+            verify_listener_owner(pid, lifecycle_port, listener_inspector, "before shutdown")?;
+            let timeout = budget.cap(SHUTDOWN_TIMEOUT);
+            if !timeout.is_zero() {
+                let _ = shutdown_request(lifecycle_port, &settings.gateway_client_key, timeout);
+            }
+        }
+        VerifiedProxyProcess::Verified { .. } => {}
+    }
+
+    let listener_stopped = if was_running {
+        wait_for_listener_stop_with_budget(lifecycle_port, health_probe, &budget)?
+    } else {
+        true
+    };
+    let process_stopped = if listener_stopped {
+        wait_for_managed_process_stop_with_budget(
+            &pid_record,
+            paths,
+            lifecycle_port,
+            inspector,
+            &budget,
+        )?
+    } else {
+        false
+    };
+
+    if process_stopped {
+        remove_pid(paths)?;
+        return stopped_gateway_status(
+            mode,
+            lifecycle_port,
+            "Gateway stopped gracefully after user-requested shutdown".to_string(),
+        );
+    }
+
+    let pid = force_kill_session_owned_gateway_at_deadline(
+        paths,
+        &pid_record,
+        session_owned_identity,
+        lifecycle_port,
+        killer,
+        inspector,
+        listener_inspector,
+    )?;
+    log::warn!(
+        "Gateway user_requested_shutdown force-close issued for the current-session PID {pid}"
+    );
+
+    match verify_proxy_process(&pid_record, paths, lifecycle_port, inspector)? {
+        VerifiedProxyProcess::Missing { .. } => {}
+        VerifiedProxyProcess::Verified { pid } => {
+            return Err(format!(
+                "Gateway user-requested shutdown force-close reached its two-second budget, but PID {pid} is still running"
+            ));
+        }
+        VerifiedProxyProcess::Mismatch { pid, reason } => {
+            return Err(format!(
+                "Gateway PID {pid} changed identity after user-requested force-close ({reason}); preserved durable ownership"
+            ));
+        }
+        VerifiedProxyProcess::Unknown { pid, reason } => {
+            return Err(format!(
+                "Gateway PID {pid} could not be inspected after user-requested force-close ({reason}); preserved durable ownership"
+            ));
+        }
+    }
+    remove_pid(paths)?;
+    stopped_gateway_status(
+        mode,
+        lifecycle_port,
+        format!("Gateway PID {pid} stopped after user-requested shutdown"),
+    )
+}
+
+fn stopped_gateway_status(mode: String, port: u16, message: String) -> Result<AppStatus, String> {
+    Ok(AppStatus {
+        mode,
+        proxy_running: false,
+        proxy_port: port,
+        proxy_build: None,
+        message,
+        gateway_lifecycle: GatewayLifecyclePhase::Stopped,
+        history_sync_status: None,
+        history_sync_message: None,
+    })
+}
+
+fn gateway_running_with_budget(
+    port: u16,
+    health_probe: &dyn Fn(u16, Duration) -> Result<Option<HealthResponse>, String>,
+    budget: &ShutdownBudget<'_>,
+) -> Result<bool, String> {
+    let timeout = budget.cap(HEALTH_TIMEOUT);
+    if timeout.is_zero() {
+        return Ok(false);
+    }
+    Ok(health_probe(port, timeout)?
+        .as_ref()
+        .map(HealthResponse::is_running)
+        .unwrap_or(false))
+}
+
+fn wait_for_listener_stop_with_budget(
+    port: u16,
+    health_probe: &dyn Fn(u16, Duration) -> Result<Option<HealthResponse>, String>,
+    budget: &ShutdownBudget<'_>,
+) -> Result<bool, String> {
+    loop {
+        if !gateway_running_with_budget(port, health_probe, budget)? {
+            return Ok(true);
+        }
+        if !budget.sleep_to_next_poll() {
+            return Ok(false);
+        }
+    }
+}
+
+fn wait_for_managed_process_stop_with_budget(
+    record: &ProxyPidRecord,
+    paths: &ProxyPaths,
+    port: u16,
+    inspector: &dyn ProcessInspector,
+    budget: &ShutdownBudget<'_>,
+) -> Result<bool, String> {
+    loop {
+        match verify_proxy_process(record, paths, port, inspector)? {
+            VerifiedProxyProcess::Missing { .. } => return Ok(true),
+            VerifiedProxyProcess::Verified { .. } => {}
+            VerifiedProxyProcess::Mismatch { pid, reason } => {
+                return Err(format!(
+                    "Gateway PID {pid} changed identity while waiting for user-requested shutdown ({reason}); preserved durable ownership"
+                ));
+            }
+            VerifiedProxyProcess::Unknown { pid, reason } => {
+                return Err(format!(
+                    "Gateway PID {pid} could not be inspected while waiting for user-requested shutdown ({reason}); preserved durable ownership"
+                ));
+            }
+        }
+        if !budget.sleep_to_next_poll() {
+            return Ok(false);
+        }
+    }
+}
+
+fn force_kill_session_owned_gateway_at_deadline(
+    paths: &ProxyPaths,
+    record: &ProxyPidRecord,
+    session_owned_identity: Option<&GatewayIdentity>,
+    port: u16,
+    killer: &dyn ProcessKiller,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+) -> Result<u32, String> {
+    let Some(session_owned_identity) = session_owned_identity else {
+        return Err(
+            "Gateway user-requested shutdown refused force-close because #139 has no current-session identity"
+                .to_string(),
+        );
+    };
+    let Some(record_identity) = record.gateway_identity() else {
+        return Err(
+            "Gateway user-requested shutdown refused force-close because the durable PID record has no verifiable current-session identity"
+                .to_string(),
+        );
+    };
+    if &record_identity != session_owned_identity {
+        return Err(
+            "Gateway user-requested shutdown refused force-close because the durable Gateway identity no longer matches #139's current-session identity"
+                .to_string(),
+        );
+    }
+
+    let pid = match verify_proxy_process(record, paths, port, inspector)? {
+        VerifiedProxyProcess::Verified { pid } => pid,
+        VerifiedProxyProcess::Missing { pid } => {
+            remove_pid(paths)?;
+            return Err(format!(
+                "managed Gateway PID {pid} disappeared before user-requested force-close; preserved truthful reconciliation"
+            ));
+        }
+        VerifiedProxyProcess::Mismatch { pid, reason } => {
+            return Err(format!(
+                "managed Gateway PID {pid} ownership could not be verified before user-requested force-close: {reason}"
+            ));
+        }
+        VerifiedProxyProcess::Unknown { pid, reason } => {
+            return Err(format!(
+                "managed Gateway PID {pid} inspection is unavailable before user-requested force-close ({reason}); preserved durable ownership"
+            ));
+        }
+    };
+
+    let listener_pid = listener_inspector.listening_pid(port)?;
+    if let Some(listener_pid) = listener_pid {
+        if listener_pid != pid {
+            return Err(format!(
+                "exact managed Gateway PID {pid} does not own the current listener on port {port} immediately before user-requested force-close (PID {listener_pid}); refusing destructive action"
+            ));
+        }
+    }
+    killer.kill(pid)?;
+    Ok(pid)
 }
 
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
@@ -2167,8 +2510,12 @@ fn config_value_uses_managed_catalog(value: &str) -> bool {
 }
 
 fn health(port: u16) -> Result<Option<HealthResponse>, String> {
+    health_with_timeout(port, HEALTH_TIMEOUT)
+}
+
+fn health_with_timeout(port: u16, timeout: Duration) -> Result<Option<HealthResponse>, String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(HEALTH_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|error| format!("failed to build HTTP client: {error}"))?;
     let url = format!("http://127.0.0.1:{port}/health");
@@ -2185,8 +2532,16 @@ fn health(port: u16) -> Result<Option<HealthResponse>, String> {
 }
 
 fn request_shutdown(port: u16, gateway_client_key: &str) -> Result<(), String> {
+    request_shutdown_with_timeout(port, gateway_client_key, SHUTDOWN_TIMEOUT)
+}
+
+fn request_shutdown_with_timeout(
+    port: u16,
+    gateway_client_key: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(SHUTDOWN_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|error| format!("failed to build HTTP client: {error}"))?;
     let url = format!("http://127.0.0.1:{port}/shutdown");
@@ -2970,7 +3325,8 @@ mod tests {
         force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
         reconciled_snapshot_with_controls,
         start_with_paths, start_with_paths_and_controls, start_with_paths_and_waiter,
-        status_with_paths, stop_with_paths, stop_with_paths_and_controls, verify_proxy_command_line,
+        status_with_paths, stop_session_owned_with_paths_and_controls, stop_with_paths,
+        stop_with_paths_and_controls, verify_proxy_command_line, ShutdownClock,
         write_pid, ChildTerminator, InspectedProcess, ListenerInspector, ProcessInfo,
         ProcessInspector, ProcessKiller, ProxyLifecycleBackend, ProxyPaths, ProxyPidMetadata,
         ProxyPidRecord, StartupOutcome, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
@@ -2990,7 +3346,7 @@ mod tests {
     use std::process::Stdio;
     use std::collections::VecDeque;
     use std::sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     };
     use std::thread;
@@ -3701,6 +4057,95 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
     }
 
     #[test]
+    fn session_shutdown_uses_one_two_second_budget_and_refuses_replaced_identity() {
+        let root = temp_root("session-shutdown-replaced-identity");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let record = read_pid_record(&paths)
+            .expect("read pid record")
+            .expect("managed pid record");
+        let current_identity = record.gateway_identity().expect("managed Gateway identity");
+        let replaced_identity = GatewayIdentity {
+            pid: pid + 1,
+            ..current_identity
+        };
+        let clock = FakeShutdownClock::default();
+        let request_timeouts = RefCell::new(Vec::new());
+        let killer = RecordingKiller::default();
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = FixedListenerInspector::new(Some(pid));
+
+        let error = stop_session_owned_with_paths_and_controls(
+            &paths,
+            Some(&replaced_identity),
+            &killer,
+            &inspector,
+            &listener,
+            &|_port, _key, timeout| {
+                request_timeouts.borrow_mut().push(timeout);
+                Ok(())
+            },
+            &|_port, _timeout| Ok(Some(healthy_response())),
+            &clock,
+        )
+        .expect_err("replaced identity must never be force-killed");
+
+        assert!(error.contains("current-session identity"), "{error}");
+        assert_eq!(request_timeouts.borrow().as_slice(), &[Duration::from_millis(800)]);
+        assert_eq!(clock.elapsed(), Duration::from_secs(2));
+        assert!(killer.killed.borrow().is_empty());
+        assert_eq!(read_pid(&paths).expect("pid preserved"), Some(pid));
+    }
+
+    #[test]
+    fn session_shutdown_force_kills_only_the_exact_owned_identity_at_the_deadline() {
+        let root = temp_root("session-shutdown-owned-identity");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let record = read_pid_record(&paths)
+            .expect("read pid record")
+            .expect("managed pid record");
+        let current_identity = record.gateway_identity().expect("managed Gateway identity");
+        let clock = FakeShutdownClock::default();
+        let alive = Arc::new(AtomicBool::new(true));
+        let listener_pid = Arc::new(AtomicU32::new(pid));
+        let killer = KillAwareKiller::new(Arc::clone(&alive), Arc::clone(&listener_pid));
+        let inspector = KillAwareInspector::new(Arc::clone(&alive), fake_proxy_process(&paths, port));
+        let listener = AtomicListenerInspector::new(listener_pid);
+
+        let status = stop_session_owned_with_paths_and_controls(
+            &paths,
+            Some(&current_identity),
+            &killer,
+            &inspector,
+            &listener,
+            &|_port, _key, timeout| {
+                assert_eq!(timeout, Duration::from_millis(800));
+                Ok(())
+            },
+            &|_port, _timeout| {
+                Ok(alive
+                    .load(Ordering::SeqCst)
+                    .then(healthy_response))
+            },
+            &clock,
+        )
+        .expect("exact session-owned Gateway should be force-stopped at deadline");
+
+        assert!(!status.proxy_running);
+        assert!(status.message.contains("user-requested shutdown"));
+        assert_eq!(killer.killed.borrow().as_slice(), &[pid]);
+        assert_eq!(clock.elapsed(), Duration::from_secs(2));
+        assert_eq!(read_pid(&paths).expect("pid removed"), None);
+    }
+
+    #[test]
     fn start_timeout_error_includes_captured_stdout_and_stderr() {
         let root = temp_root("start-timeout-output");
         let paths = test_paths(&root);
@@ -4300,6 +4745,7 @@ time.sleep(10)
             let backend = ProxyLifecycleBackend {
                 lifecycle_gate_path: paths.lifecycle_gate_path(),
                 paths: paths.clone(),
+                session_owned_identity: None,
             };
             let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
 
@@ -4620,6 +5066,73 @@ time.sleep(10)
         fn kill(&self, pid: u32) -> Result<(), String> {
             self.killed.borrow_mut().push(pid);
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeShutdownClock {
+        elapsed: RefCell<Duration>,
+    }
+
+    impl FakeShutdownClock {
+        fn elapsed_value(&self) -> Duration {
+            *self.elapsed.borrow()
+        }
+    }
+
+    impl ShutdownClock for FakeShutdownClock {
+        fn elapsed(&self) -> Duration {
+            self.elapsed_value()
+        }
+
+        fn sleep(&self, duration: Duration) {
+            *self.elapsed.borrow_mut() += duration;
+        }
+    }
+
+    struct KillAwareKiller {
+        killed: RefCell<Vec<u32>>,
+        alive: Arc<AtomicBool>,
+        listener_pid: Arc<AtomicU32>,
+    }
+
+    impl KillAwareKiller {
+        fn new(alive: Arc<AtomicBool>, listener_pid: Arc<AtomicU32>) -> Self {
+            Self {
+                killed: RefCell::new(Vec::new()),
+                alive,
+                listener_pid,
+            }
+        }
+    }
+
+    impl ProcessKiller for KillAwareKiller {
+        fn kill(&self, pid: u32) -> Result<(), String> {
+            self.killed.borrow_mut().push(pid);
+            self.alive.store(false, Ordering::SeqCst);
+            self.listener_pid.store(0, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct KillAwareInspector {
+        alive: Arc<AtomicBool>,
+        running: InspectedProcess,
+    }
+
+    impl KillAwareInspector {
+        fn new(alive: Arc<AtomicBool>, running: InspectedProcess) -> Self {
+            Self { alive, running }
+        }
+    }
+
+    impl ProcessInspector for KillAwareInspector {
+        fn inspect(&self, _pid: u32) -> Result<InspectedProcess, String> {
+            if self.alive.load(Ordering::SeqCst) {
+                Ok(self.running.clone())
+            } else {
+                Ok(InspectedProcess::Missing)
+            }
         }
     }
 
