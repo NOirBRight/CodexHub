@@ -438,16 +438,9 @@ def preview_saved_workspace_roots(
     }
 
 
-def _copy_global_state_for_active(source: dict[str, Any], import_saved_workspace_roots: bool) -> dict[str, Any]:
+def _copy_global_state_for_active(source: dict[str, Any]) -> dict[str, Any]:
     copied = dict(source)
-    if import_saved_workspace_roots:
-        roots = canonicalize_workspace_roots(source.get(SAVED_WORKSPACE_ROOTS_KEY))
-        if roots:
-            copied[SAVED_WORKSPACE_ROOTS_KEY] = roots
-        else:
-            copied.pop(SAVED_WORKSPACE_ROOTS_KEY, None)
-    else:
-        copied.pop(SAVED_WORKSPACE_ROOTS_KEY, None)
+    copied.pop(SAVED_WORKSPACE_ROOTS_KEY, None)
     return copied
 
 
@@ -461,6 +454,22 @@ def _copy_dry_run_inputs(source_dir: Path, destination_dir: Path) -> None:
         source_path = source_dir / name
         if source_path.is_file():
             shutil.copy2(source_path, destination_dir / name)
+
+    source_db_paths = sqlite_db_paths(source_dir)
+    for index, source_db_path in enumerate(source_db_paths[1:], start=1):
+        local_home = destination_dir / ".dry-run-sqlite-home" / str(index)
+        local_home.mkdir(parents=True, exist_ok=True)
+        local_db_path = local_home / STATE_DB_FILENAME
+        for suffix in ("", "-wal", "-shm"):
+            source_path = source_db_path.with_name(source_db_path.name + suffix)
+            if source_path.is_file():
+                shutil.copy2(source_path, local_db_path.with_name(local_db_path.name + suffix))
+    if len(source_db_paths) > 1:
+        sqlite_home = destination_dir / ".dry-run-sqlite-home" / "1"
+        (destination_dir / "config.toml").write_text(
+            f"sqlite_home = '{sqlite_home.as_posix()}'\n",
+            encoding="utf-8",
+        )
 
 
 def _load_global_state(path: Path) -> dict[str, Any]:
@@ -497,30 +506,28 @@ def merge_global_state(
     codex_dir: Path,
     source_dir: Path,
     backup_root: Path,
-    import_saved_workspace_roots: bool = False,
 ) -> dict[str, Any]:
     source_path = source_dir / ".codex-global-state.json"
     active_path = codex_dir / ".codex-global-state.json"
     if not source_path.exists():
         preview = preview_saved_workspace_roots(_load_global_state(active_path), {})
-        preview["policy"] = "explicit-import" if import_saved_workspace_roots else "preserve-active"
+        preview["policy"] = "preserve-active"
         preview["applied"] = False
         return {"skipped": "source-missing", "saved_workspace_roots": preview}
 
     source = _load_global_state(source_path)
     preview = preview_saved_workspace_roots(_load_global_state(active_path), source)
-    preview["policy"] = "explicit-import" if import_saved_workspace_roots else "preserve-active"
+    preview["policy"] = "preserve-active"
     preview["applied"] = False
     if not active_path.exists():
         active_path.parent.mkdir(parents=True, exist_ok=True)
         removed_remote_keys = sanitize_global_state_remote_selection(source)
-        active = _copy_global_state_for_active(source, import_saved_workspace_roots)
+        active = _copy_global_state_for_active(source)
         atomic_write_text(
             active_path,
             json.dumps(active, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-        preview["applied"] = import_saved_workspace_roots and bool(preview["added_roots"])
         return {
             "copied": 1,
             "removed_remote_keys": removed_remote_keys,
@@ -546,13 +553,6 @@ def merge_global_state(
             if new != old:
                 active[key] = new
                 changed += 1
-
-    if import_saved_workspace_roots and preview["added_roots"]:
-        old_roots = active.get(SAVED_WORKSPACE_ROOTS_KEY)
-        old_roots = list(old_roots) if isinstance(old_roots, list) else []
-        active[SAVED_WORKSPACE_ROOTS_KEY] = old_roots + preview["added_roots"]
-        changed += 1
-        preview["applied"] = True
 
     source_epa = source.get("electron-persisted-atom-state")
     active_epa = active.get("electron-persisted-atom-state")

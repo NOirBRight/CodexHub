@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from history_consolidate import (
     canonicalize_workspace_root,
@@ -182,6 +184,67 @@ class HistoryConsolidateTests(unittest.TestCase):
             self.assertTrue(result["dry_run"])
             self.assertFalse(result["global_state"]["saved_workspace_roots"]["applied"])
             self.assertEqual(json.loads(active_state_path.read_text(encoding="utf-8")), active_state)
+            self.assertFalse((root / "backup").exists())
+
+    def test_official_main_dry_run_does_not_write_external_env_sqlite_home(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            active = root / "active"
+            official = root / "official"
+            external = root / "external-sqlite"
+            active.mkdir(parents=True)
+            official.mkdir(parents=True)
+            external.mkdir(parents=True)
+            create_state(active / "state_5.sqlite", [("active", "custom", "active")])
+            create_state(official / "state_5.sqlite", [("source", "openai", "source")])
+            external_db = external / "state_5.sqlite"
+            create_state(external_db, [("external", "openai", "external")])
+            before = external_db.read_bytes()
+            before_sidecars = {
+                path.name: path.read_bytes()
+                for path in external.glob("state_5.sqlite-*")
+                if path.is_file()
+            }
+
+            with mock.patch.dict(os.environ, {"CODEX_SQLITE_HOME": str(external)}):
+                result = official_main(active, official, root / "backup", "custom", dry_run=True)
+
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(external_db.read_bytes(), before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in external.glob("state_5.sqlite-*")
+                    if path.is_file()
+                },
+                before_sidecars,
+            )
+            self.assertNotIn(str(external), json.dumps(result))
+            self.assertTrue(all(".dry-run-sqlite-home" in item["path"] for item in result["state"][1:]))
+            self.assertFalse((root / "backup").exists())
+
+    def test_official_main_dry_run_previews_source_sqlite_home_config_inside_simulation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            active = root / "active"
+            official = root / "official"
+            source_sqlite_home = official / "sqlite-home"
+            active.mkdir(parents=True)
+            official.mkdir(parents=True)
+            source_sqlite_home.mkdir(parents=True)
+            create_state(active / "state_5.sqlite", [("active", "custom", "active")])
+            create_state(official / "state_5.sqlite", [("source", "openai", "source")])
+            create_state(source_sqlite_home / "state_5.sqlite", [("source-home", "openai", "source-home")])
+            config = f"sqlite_home = '{source_sqlite_home.as_posix()}'\n"
+            (active / "config.toml").write_text(config, encoding="utf-8")
+            (official / "config.toml").write_text(config, encoding="utf-8")
+
+            result = official_main(active, official, root / "backup", "custom", dry_run=True)
+
+            self.assertEqual(len(result["state"]), 2)
+            self.assertIn(".dry-run-sqlite-home", result["state"][1]["path"])
+            self.assertTrue(result["state"][1]["path"].endswith("state_5.sqlite"))
+            self.assertNotIn(str(source_sqlite_home), json.dumps(result))
             self.assertFalse((root / "backup").exists())
 
     def test_official_main_merges_source_branch_then_active_tail_and_normalizes_provider(self):
