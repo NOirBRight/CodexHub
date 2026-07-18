@@ -11,7 +11,11 @@
 [CmdletBinding()]
 param(
     [string]$PortableDir = "D:\Workstation\CodexHub\.worktrees\issue-150\output\portable\CodexHub_0.1.6_portable_a54fdc25",
-    [int]$BridgePort = 1421
+    [int]$BridgePort = 14231,
+    # Bridge: launch `CodexHub.exe web-bridge --port N` (isolated CLI process,
+    # no single-instance conflict with a running app). App: launch the full app.
+    [ValidateSet("Bridge", "App")]
+    [string]$Mode = "Bridge"
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,8 +58,9 @@ function Measure-ChildStarts([int]$ParentPid, [scriptblock]$Action) {
             Start-Sleep -Milliseconds 100
         }
     }
+    $actionOutput = $null
     try {
-        & $Action
+        $actionOutput = & $Action
     }
     finally {
         Start-Sleep -Seconds 2
@@ -63,13 +68,20 @@ function Measure-ChildStarts([int]$ParentPid, [scriptblock]$Action) {
         $output = @(Receive-Job $job -ErrorAction SilentlyContinue)
         Remove-Job $job -Force -ErrorAction SilentlyContinue
     }
-    return @($output | Select-Object -Unique)
+    return @{
+        starts = @($output | Select-Object -Unique)
+        action = $actionOutput
+    }
 }
 
-$running = Get-Process -Name CodexHub -ErrorAction SilentlyContinue
-if ($running) { throw "another CodexHub instance is running (PID $($running.Id -join ',')); close it first" }
-
-$app = Start-Process -FilePath $exe -PassThru
+if ($Mode -eq "App") {
+    $running = Get-Process -Name CodexHub -ErrorAction SilentlyContinue
+    if ($running) { throw "another CodexHub instance is running (PID $($running.Id -join ',')); close it first" }
+    $app = Start-Process -FilePath $exe -PassThru
+}
+else {
+    $app = Start-Process -FilePath $exe -ArgumentList @("web-bridge", "--port", "$BridgePort") -PassThru -WindowStyle Hidden
+}
 $script:exitCode = 1
 try {
     $deadline = (Get-Date).AddSeconds(90)
@@ -82,7 +94,7 @@ try {
         catch { Start-Sleep -Seconds 1 }
     }
     if (-not $up) { throw "web bridge did not come up on port $BridgePort" }
-    Write-Host "app up (PID $($app.Id)); waiting for startup probes to settle"
+    Write-Host "target up (PID $($app.Id), mode $Mode); waiting for startup probes to settle"
 
     # Startup Official model refresh may spawn its own app-server children;
     # wait until none remain so phase counts are attributable to usage probes.
@@ -102,28 +114,50 @@ try {
 
     # Phase 1: automatic refresh without a cache -> exactly one child.
     Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
-    $starts = Measure-ChildStarts $app.Id { Invoke-Usage $false | Out-Null }
+    $m = Measure-ChildStarts $app.Id { Invoke-Usage $false }
+    Write-Host "phase1 response: $($m.action | ConvertTo-Json -Compress -Depth 3)"
+    $starts = @($m.starts)
     Write-Host "phase1 automatic-no-cache: $($starts.Count) child start(s) [$($starts -join ',')]"
     if ($starts.Count -ne 1) { throw "phase1 expected exactly 1 child start" }
     if (-not (Test-Path -LiteralPath $cachePath)) { throw "phase1 expected the cache to be written" }
 
     # Phase 2: automatic refresh with a valid cache -> zero child starts.
-    $starts = Measure-ChildStarts $app.Id { Invoke-Usage $false | Out-Null }
+    $m = Measure-ChildStarts $app.Id { Invoke-Usage $false }
+    $starts = @($m.starts)
     Write-Host "phase2 automatic-cache-valid: $($starts.Count) child start(s)"
     if ($starts.Count -ne 0) { throw "phase2 expected zero child starts" }
 
     # Phase 3: explicit manual refresh -> exactly one bounded child.
-    $starts = Measure-ChildStarts $app.Id { Invoke-Usage $true | Out-Null }
+    $m = Measure-ChildStarts $app.Id { Invoke-Usage $true }
+    $starts = @($m.starts)
     Write-Host "phase3 manual-forced: $($starts.Count) child start(s) [$($starts -join ',')]"
     if ($starts.Count -ne 1) { throw "phase3 expected exactly 1 child start" }
 
-    # Phase 4: immediate second manual refresh -> coalesced, zero child starts.
-    $starts = Measure-ChildStarts $app.Id { Invoke-Usage $true | Out-Null }
-    Write-Host "phase4 manual-coalesced: $($starts.Count) child start(s)"
-    if ($starts.Count -ne 0) { throw "phase4 expected zero child starts" }
+    # Phase 4: a second manual refresh fired while a manual probe is still
+    # in flight must coalesce -> exactly one child across both requests.
+    $m = Measure-ChildStarts $app.Id {
+        $bg = Start-Job -ArgumentList $bridge -ScriptBlock {
+            param($uri)
+            Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" `
+                -Body '{"command":"openai_usage_completions","args":{"forceRefresh":true}}' -TimeoutSec 60 | Out-Null
+        }
+        $inFlight = $false
+        $deadline = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $deadline -and -not $inFlight) {
+            if (Get-AppServerChildren $app.Id) { $inFlight = $true; break }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $inFlight) { throw "phase4 probe did not start" }
+        Invoke-Usage $true | Out-Null
+        $bg | Wait-Job | Out-Null
+        $bg | Remove-Job -Force
+    }
+    $starts = @($m.starts)
+    Write-Host "phase4 manual-during-inflight: $($starts.Count) child start(s) [$($starts -join ',')]"
+    if ($starts.Count -ne 1) { throw "phase4 expected exactly 1 child start total" }
 
     # Phase 5: three concurrent manual refreshes -> exactly one child total.
-    $starts = Measure-ChildStarts $app.Id {
+    $m = Measure-ChildStarts $app.Id {
         $jobs = 1..3 | ForEach-Object {
             Start-Job -ArgumentList $bridge -ScriptBlock {
                 param($uri)
@@ -134,6 +168,7 @@ try {
         $jobs | Wait-Job | Out-Null
         $jobs | Remove-Job -Force
     }
+    $starts = @($m.starts)
     Write-Host "phase5 concurrent-manual: $($starts.Count) child start(s) [$($starts -join ',')]"
     if ($starts.Count -ne 1) { throw "phase5 expected exactly 1 child start total" }
 
