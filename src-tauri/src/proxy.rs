@@ -1160,34 +1160,41 @@ impl<'a> ShutdownBudget<'a> {
     }
 }
 
+struct UserRequestedShutdownControls<'a> {
+    killer: &'a dyn ProcessKiller,
+    inspector: &'a dyn ProcessInspector,
+    listener_inspector: &'a dyn ListenerInspector,
+    shutdown_request: &'a dyn Fn(u16, &str, Duration) -> Result<(), String>,
+    health_probe: &'a dyn Fn(u16, Duration) -> Result<Option<HealthResponse>, String>,
+    clock: &'a dyn ShutdownClock,
+}
+
 fn stop_session_owned_with_paths(
     paths: &ProxyPaths,
     session_owned_identity: Option<&GatewayIdentity>,
 ) -> Result<AppStatus, String> {
     let clock = SystemShutdownClock::new();
+    let controls = UserRequestedShutdownControls {
+        killer: &SystemProcessKiller,
+        inspector: &SystemProcessInspector,
+        listener_inspector: &SystemListenerInspector,
+        shutdown_request: &request_shutdown_with_timeout,
+        health_probe: &health_with_timeout,
+        clock: &clock,
+    };
     stop_session_owned_with_paths_and_controls(
         paths,
         session_owned_identity,
-        &SystemProcessKiller,
-        &SystemProcessInspector,
-        &SystemListenerInspector,
-        &request_shutdown_with_timeout,
-        &health_with_timeout,
-        &clock,
+        &controls,
     )
 }
 
 fn stop_session_owned_with_paths_and_controls(
     paths: &ProxyPaths,
     session_owned_identity: Option<&GatewayIdentity>,
-    killer: &dyn ProcessKiller,
-    inspector: &dyn ProcessInspector,
-    listener_inspector: &dyn ListenerInspector,
-    shutdown_request: &dyn Fn(u16, &str, Duration) -> Result<(), String>,
-    health_probe: &dyn Fn(u16, Duration) -> Result<Option<HealthResponse>, String>,
-    clock: &dyn ShutdownClock,
+    controls: &UserRequestedShutdownControls<'_>,
 ) -> Result<AppStatus, String> {
-    let budget = ShutdownBudget::new(clock);
+    let budget = ShutdownBudget::new(controls.clock);
     let settings = read_settings(paths)?;
     let mode = read_mode(paths)?;
     let pid_record = read_pid_record(paths)?;
@@ -1195,7 +1202,7 @@ fn stop_session_owned_with_paths_and_controls(
         .as_ref()
         .map(|record| record.expected_port(settings.proxy_port))
         .unwrap_or(settings.proxy_port);
-    let was_running = gateway_running_with_budget(lifecycle_port, health_probe, &budget)?;
+    let was_running = gateway_running_with_budget(lifecycle_port, controls.health_probe, &budget)?;
 
     let Some(pid_record) = pid_record else {
         if was_running {
@@ -1206,7 +1213,7 @@ fn stop_session_owned_with_paths_and_controls(
         return stopped_gateway_status(mode, lifecycle_port, "Gateway is not running".to_string());
     };
 
-    match verify_proxy_process(&pid_record, paths, lifecycle_port, inspector)? {
+    match verify_proxy_process(&pid_record, paths, lifecycle_port, controls.inspector)? {
         VerifiedProxyProcess::Missing { pid } => {
             remove_pid(paths)?;
             return stopped_gateway_status(
@@ -1227,17 +1234,26 @@ fn stop_session_owned_with_paths_and_controls(
             ));
         }
         VerifiedProxyProcess::Verified { pid } if was_running => {
-            verify_listener_owner(pid, lifecycle_port, listener_inspector, "before shutdown")?;
+            verify_listener_owner(
+                pid,
+                lifecycle_port,
+                controls.listener_inspector,
+                "before shutdown",
+            )?;
             let timeout = budget.cap(SHUTDOWN_TIMEOUT);
             if !timeout.is_zero() {
-                let _ = shutdown_request(lifecycle_port, &settings.gateway_client_key, timeout);
+                let _ = (controls.shutdown_request)(
+                    lifecycle_port,
+                    &settings.gateway_client_key,
+                    timeout,
+                );
             }
         }
         VerifiedProxyProcess::Verified { .. } => {}
     }
 
     let listener_stopped = if was_running {
-        wait_for_listener_stop_with_budget(lifecycle_port, health_probe, &budget)?
+        wait_for_listener_stop_with_budget(lifecycle_port, controls.health_probe, &budget)?
     } else {
         true
     };
@@ -1246,7 +1262,7 @@ fn stop_session_owned_with_paths_and_controls(
             &pid_record,
             paths,
             lifecycle_port,
-            inspector,
+            controls.inspector,
             &budget,
         )?
     } else {
@@ -1267,15 +1283,15 @@ fn stop_session_owned_with_paths_and_controls(
         &pid_record,
         session_owned_identity,
         lifecycle_port,
-        killer,
-        inspector,
-        listener_inspector,
+        controls.killer,
+        controls.inspector,
+        controls.listener_inspector,
     )?;
     log::warn!(
         "Gateway user_requested_shutdown force-close issued for the current-session PID {pid}"
     );
 
-    match verify_proxy_process(&pid_record, paths, lifecycle_port, inspector)? {
+    match verify_proxy_process(&pid_record, paths, lifecycle_port, controls.inspector)? {
         VerifiedProxyProcess::Missing { .. } => {}
         VerifiedProxyProcess::Verified { pid } => {
             return Err(format!(
@@ -3326,7 +3342,8 @@ mod tests {
         reconciled_snapshot_with_controls,
         start_with_paths, start_with_paths_and_controls, start_with_paths_and_waiter,
         status_with_paths, stop_session_owned_with_paths_and_controls, stop_with_paths,
-        stop_with_paths_and_controls, verify_proxy_command_line, ShutdownClock,
+        stop_with_paths_and_controls, verify_proxy_command_line, GatewayIdentity, ShutdownClock,
+        UserRequestedShutdownControls,
         write_pid, ChildTerminator, InspectedProcess, ListenerInspector, ProcessInfo,
         ProcessInspector, ProcessKiller, ProxyLifecycleBackend, ProxyPaths, ProxyPidMetadata,
         ProxyPidRecord, StartupOutcome, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
@@ -4077,19 +4094,24 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         let killer = RecordingKiller::default();
         let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
         let listener = FixedListenerInspector::new(Some(pid));
+        let shutdown_request = |_port: u16, _key: &str, timeout: Duration| -> Result<(), String> {
+            request_timeouts.borrow_mut().push(timeout);
+            Ok(())
+        };
+        let health_probe = |_port, _timeout| Ok(Some(healthy_response()));
+        let controls = UserRequestedShutdownControls {
+            killer: &killer,
+            inspector: &inspector,
+            listener_inspector: &listener,
+            shutdown_request: &shutdown_request,
+            health_probe: &health_probe,
+            clock: &clock,
+        };
 
         let error = stop_session_owned_with_paths_and_controls(
             &paths,
             Some(&replaced_identity),
-            &killer,
-            &inspector,
-            &listener,
-            &|_port, _key, timeout| {
-                request_timeouts.borrow_mut().push(timeout);
-                Ok(())
-            },
-            &|_port, _timeout| Ok(Some(healthy_response())),
-            &clock,
+            &controls,
         )
         .expect_err("replaced identity must never be force-killed");
 
@@ -4118,23 +4140,28 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         let killer = KillAwareKiller::new(Arc::clone(&alive), Arc::clone(&listener_pid));
         let inspector = KillAwareInspector::new(Arc::clone(&alive), fake_proxy_process(&paths, port));
         let listener = AtomicListenerInspector::new(listener_pid);
+        let shutdown_request = |_port: u16, _key: &str, timeout: Duration| -> Result<(), String> {
+            assert_eq!(timeout, Duration::from_millis(800));
+            Ok(())
+        };
+        let health_probe = |_port, _timeout| {
+            Ok(alive
+                .load(Ordering::SeqCst)
+                .then(healthy_response))
+        };
+        let controls = UserRequestedShutdownControls {
+            killer: &killer,
+            inspector: &inspector,
+            listener_inspector: &listener,
+            shutdown_request: &shutdown_request,
+            health_probe: &health_probe,
+            clock: &clock,
+        };
 
         let status = stop_session_owned_with_paths_and_controls(
             &paths,
             Some(&current_identity),
-            &killer,
-            &inspector,
-            &listener,
-            &|_port, _key, timeout| {
-                assert_eq!(timeout, Duration::from_millis(800));
-                Ok(())
-            },
-            &|_port, _timeout| {
-                Ok(alive
-                    .load(Ordering::SeqCst)
-                    .then(healthy_response))
-            },
-            &clock,
+            &controls,
         )
         .expect("exact session-owned Gateway should be force-stopped at deadline");
 

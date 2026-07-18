@@ -808,10 +808,21 @@ fn tray_loading_toast(id: String, action: &str) -> TrayToast {
 }
 
 fn tray_retiring_gateway_loading_toast(id: String, action: &str) -> TrayToast {
+    let locale = config::get_settings()
+        .map(|settings| settings.locale)
+        .unwrap_or_default();
     TrayToast {
         id,
-        text: format!("{action}: active Codex Tasks may be interrupted. {action}..."),
+        text: format!("{} {action}...", gateway_retirement_warning_for_locale(&locale)),
         tone: "loading".to_string(),
+    }
+}
+
+fn gateway_retirement_warning_for_locale(locale: &str) -> &'static str {
+    if locale == "zh-CN" {
+        "活跃的 Codex 任务可能会被中断。"
+    } else {
+        "Active Codex Tasks may be interrupted."
     }
 }
 
@@ -1127,8 +1138,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        start_gateway_after_startup, tray_loading_toast, tray_retiring_gateway_loading_toast,
-        tray_toast_for, AppStatus,
+        gateway_retirement_warning_for_locale, start_gateway_after_startup, tray_loading_toast,
+        tray_retiring_gateway_loading_toast, tray_toast_for, AppStatus,
     };
     use std::cell::Cell;
 
@@ -1154,7 +1165,10 @@ mod tests {
         let retiring = tray_retiring_gateway_loading_toast("same-toast".to_string(), "Stop Gateway");
         assert_eq!(retiring.id, loading.id);
         assert_eq!(retiring.tone, "loading");
-        assert!(retiring.text.contains("active Codex Tasks may be interrupted"));
+        assert_eq!(
+            gateway_retirement_warning_for_locale("zh-CN"),
+            "活跃的 Codex 任务可能会被中断。"
+        );
 
         let success = tray_toast_for("same-toast".to_string(), "Start Gateway", Ok(status()));
         assert_eq!(success.id, loading.id);

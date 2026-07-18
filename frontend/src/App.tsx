@@ -597,6 +597,9 @@ export default function App() {
 
   const startAppUpdateInstall = useCallback(
     async (source: "settings" | "toast" = "settings") => {
+      if (!window.confirm(t("runtime.gatewayRetirementWarning"))) {
+        return;
+      }
       const toastId = updateAvailableToastId.current;
       if (toastId) {
         dismissToast(toastId);

@@ -109,6 +109,18 @@ def test_closing_admission_cancels_every_active_upstream_transport() -> None:
     assert controller.admit() is None
 
 
+def test_transport_attached_after_admission_closes_is_cancelled_without_upstream_work() -> None:
+    controller = codex_proxy.GatewayShutdownController()
+    admission = controller.admit()
+    assert admission is not None
+
+    controller.close_admission()
+    late_transport = Mock()
+    admission.attach_upstream_transport(late_transport)
+
+    late_transport.close.assert_called_once_with()
+
+
 def test_shutdown_budget_is_shared_by_many_active_requests() -> None:
     now = [10.0]
     controller = codex_proxy.GatewayShutdownController(
@@ -262,6 +274,26 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
             server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
+
+
+def test_downstream_already_closed_does_not_hide_user_requested_shutdown_cleanup() -> None:
+    class BrokenStream:
+        def write(self, _payload: bytes) -> None:
+            raise BrokenPipeError("downstream already closed")
+
+        def flush(self) -> None:
+            raise BrokenPipeError("downstream already closed")
+
+    handler = object.__new__(CodexProxyHandler)
+    handler.wfile = BrokenStream()
+    handler.close_connection = False
+
+    handler._send_user_requested_shutdown_outcome(
+        inbound_format="responses",
+        downstream_sse_started=True,
+    )
+
+    assert handler.close_connection is True
 
 
 def test_run_server_uses_the_remaining_shared_shutdown_budget_for_flush() -> None:
