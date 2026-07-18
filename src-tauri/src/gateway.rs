@@ -101,6 +101,12 @@ pub struct GatewayModel {
     pub supports_chat_completions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<String>>,
+}
+
+fn official_gateway_input_modalities() -> Vec<String> {
+    vec!["text".to_string(), "image".to_string()]
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +184,7 @@ struct GatewayClientProviderModel {
     id: String,
     display_name: String,
     context_window: Option<u32>,
+    input_modalities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1799,6 +1806,7 @@ fn official_models_from_metadata(
                 supports_responses: true,
                 supports_chat_completions: true,
                 context_window,
+                input_modalities: Some(official_gateway_input_modalities()),
             });
         }
     }
@@ -1835,6 +1843,11 @@ fn official_gateway_model_from_metadata(
         supports_responses: true,
         supports_chat_completions: true,
         context_window: published_context_windows.get(&id).copied(),
+        input_modalities: model
+            .input_modalities
+            .clone()
+            .filter(|modalities| !modalities.is_empty())
+            .or_else(|| Some(official_gateway_input_modalities())),
     })
 }
 
@@ -1853,6 +1866,7 @@ fn fallback_official_gateway_models(
             supports_responses: true,
             supports_chat_completions: true,
             context_window: published_context_windows.get(*id).copied(),
+            input_modalities: Some(official_gateway_input_modalities()),
         })
         .collect()
 }
@@ -1926,6 +1940,10 @@ fn gateway_models_from_sources(
                     .unwrap_or(true),
                 supports_chat_completions: true,
                 context_window: model.context_window,
+                input_modalities: model
+                    .input_modalities
+                    .clone()
+                    .filter(|modalities| !modalities.is_empty()),
             });
         }
     }
@@ -2422,6 +2440,9 @@ fn gateway_client_provider_groups_from_exported(
             id: short_id,
             display_name: model.display_name,
             context_window: model.context_window,
+            input_modalities: model
+                .input_modalities
+                .unwrap_or_else(|| vec!["text".to_string()]),
         });
     }
 
@@ -3681,6 +3702,18 @@ fn preview_pi_config_with_paths(
     })
 }
 
+fn gateway_exported_model_supports_image(
+    settings: &Settings,
+    providers: &[Provider],
+    resolved_model_id: &str,
+) -> bool {
+    gateway_models_from_config(settings, providers)
+        .iter()
+        .find(|model| model.id == resolved_model_id)
+        .and_then(|model| model.input_modalities.as_ref())
+        .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image"))
+}
+
 fn preview_omp_config_with_paths(
     config_path: &Path,
     models_path: &Path,
@@ -3693,8 +3726,19 @@ fn preview_omp_config_with_paths(
     let current_config = fs::read_to_string(config_path).ok();
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let next_config = omp_config_text(current_config.as_deref(), &selector);
+    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
+        Some(selector.as_str())
+    } else {
+        None
+    };
+    let next_config = omp_config_text(current_config.as_deref(), &selector, vision_selector);
     let next_models = omp_models_yml_text(settings, providers, &model)?;
+    let mut message =
+        "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
+            .to_string();
+    if vision_selector.is_none() {
+        message.push_str(" OMP modelRoles.vision is omitted because the selected model is exported text-only.");
+    }
     Ok(GatewayClientConfigPreview {
         client_id: "omp".to_string(),
         can_apply: true,
@@ -3706,8 +3750,7 @@ fn preview_omp_config_with_paths(
             ("models.yml", &next_models),
         ])),
         backup_required: config_path.exists() || models_path.exists(),
-        message: "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
-            .to_string(),
+        message,
     })
 }
 
@@ -3851,16 +3894,25 @@ fn apply_omp_config_with_paths(
         is_omp_codexhub_config(&current_config, &current_models),
     )?;
     let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let next_config = omp_config_text(Some(&current_config), &selector);
+    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
+        Some(selector.as_str())
+    } else {
+        None
+    };
+    let next_config = omp_config_text(Some(&current_config), &selector, vision_selector);
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     write_text_replace(config_path, &next_config)?;
     write_text_replace(models_path, &next_models)?;
+    let mut message = "OMP now routes through CodexHub Gateway.".to_string();
+    if vision_selector.is_none() {
+        message.push_str(" OMP modelRoles.vision is omitted because the selected model is exported text-only.");
+    }
     Ok(GatewayClientApplyResult {
         client_id: "omp".to_string(),
         applied: true,
         config_path: Some(config_path.to_path_buf()),
         backup_path,
-        message: "OMP now routes through CodexHub Gateway.".to_string(),
+        message,
     })
 }
 
@@ -4418,7 +4470,7 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
         "id": model.id.clone(),
         "name": model.display_name.clone(),
         "reasoning": true,
-        "input": ["text", "image"],
+        "input": model.input_modalities.clone(),
         "headers": {
             "x-codex-client-id": "pi",
         },
@@ -4436,12 +4488,14 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     value
 }
 
-fn omp_config_text(current: Option<&str>, selector: &str) -> String {
-    let block = [
+fn omp_config_text(current: Option<&str>, selector: &str, vision_selector: Option<&str>) -> String {
+    let mut block = vec![
         "modelRoles:".to_string(),
         format!("  default: {selector}"),
-        format!("  vision: {selector}"),
     ];
+    if let Some(vision_selector) = vision_selector {
+        block.push(format!("  vision: {vision_selector}"));
+    }
     let mut output = Vec::new();
     let mut inserted = false;
     let lines = current.unwrap_or_default().lines().collect::<Vec<_>>();
@@ -4488,12 +4542,17 @@ fn omp_models_yml_text(
         for gateway_model in &group.models {
             let model_id = yaml_scalar(&gateway_model.id);
             let model_name = yaml_scalar(&gateway_model.display_name);
+            let input_list = gateway_model
+                .input_modalities
+                .iter()
+                .map(|modality| format!("          - {modality}\n"))
+                .collect::<String>();
             let context_window = gateway_model
                 .context_window
                 .map(|value| format!("        contextWindow: {value}\n"))
                 .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -4608,7 +4667,7 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
         "kinds": [kind],
         "defaultKind": kind,
         "modalities": {
-            "input": ["text", "image"],
+            "input": model.input_modalities.clone(),
             "output": ["text"],
         },
         "maxOutputTokens": 32768,
@@ -4669,7 +4728,7 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
                         "output": 32768,
                     },
                     "modalities": {
-                        "input": ["text", "image"],
+                        "input": model.input_modalities.clone(),
                         "output": ["text"],
                     },
                     });
@@ -6747,6 +6806,190 @@ mod tests {
             yaml_string(model.get("id").expect("model id"));
             yaml_string(model.get("name").expect("model name"));
         }
+    }
+
+    fn image_capability_client_export_test_providers() -> Vec<Provider> {
+        vec![Provider {
+            id: "volc".to_string(),
+            name: "Volcengine".to_string(),
+            base_url: "https://ark.example.test/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("Volc".to_string()),
+            sort_order: Some(1),
+            enabled: true,
+            locked: false,
+            models: vec![
+                Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Volc GLM-5.2".to_string()),
+                    input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "glm-5.2-coder".to_string(),
+                    display_name: Some("Volc GLM-5.2 Coder".to_string()),
+                    input_modalities: Some(vec!["text".to_string()]),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "glm-5.2-air".to_string(),
+                    display_name: Some("Volc GLM-5.2 Air".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+            ],
+        }]
+    }
+
+    #[test]
+    fn client_exports_map_configured_image_capability_per_model() {
+        let root = unique_temp_dir("codexhub-image-capability");
+        let models_path = root.join("models.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let providers = image_capability_client_export_test_providers();
+
+        let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_text =
+            pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
+        let zcode_v2 =
+            super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.2")
+                .unwrap();
+        let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2).unwrap();
+
+        let omp_block = |model_id: &str| {
+            omp_text
+                .split(&format!("      - id: \"{model_id}\"\n"))
+                .nth(1)
+                .and_then(|rest| rest.split("\n      - id: ").next())
+                .unwrap_or_else(|| panic!("missing OMP model block for {model_id}"))
+                .to_string()
+        };
+        assert!(omp_block("glm-5.2").contains("input:\n          - text\n          - image\n"));
+        let coder_block = omp_block("glm-5.2-coder");
+        assert!(coder_block.contains("input:\n          - text\n"));
+        assert!(!coder_block.contains("- image"));
+        let air_block = omp_block("glm-5.2-air");
+        assert!(air_block.contains("input:\n          - text\n"));
+        assert!(!air_block.contains("- image"));
+
+        let pi_models = pi_value
+            .pointer("/providers/codexhub-volc/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let pi_inputs = |model_id: &str| {
+            pi_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(|model| model.pointer("/input"))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing Pi model entry for {model_id}"))
+        };
+        assert_eq!(pi_inputs("glm-5.2"), serde_json::json!(["text", "image"]));
+        assert_eq!(pi_inputs("glm-5.2-coder"), serde_json::json!(["text"]));
+        assert_eq!(pi_inputs("glm-5.2-air"), serde_json::json!(["text"]));
+
+        let zcode_models = zcode_catalog_value
+            .pointer("/providers/0/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let zcode_inputs = |model_id: &str| {
+            zcode_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(|model| model.pointer("/modalities/input"))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing ZCode catalog entry for {model_id}"))
+        };
+        assert_eq!(zcode_inputs("glm-5.2"), serde_json::json!(["text", "image"]));
+        assert_eq!(zcode_inputs("glm-5.2-coder"), serde_json::json!(["text"]));
+        assert_eq!(zcode_inputs("glm-5.2-air"), serde_json::json!(["text"]));
+
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2/modalities/input"),
+            Some(&serde_json::json!(["text", "image"]))
+        );
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2-coder/modalities/input"),
+            Some(&serde_json::json!(["text"]))
+        );
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2-air/modalities/input"),
+            Some(&serde_json::json!(["text"]))
+        );
+    }
+
+    #[test]
+    fn omp_apply_omits_vision_role_and_reports_when_selected_model_is_text_only() {
+        let root = unique_temp_dir("codexhub-omp-text-only");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &config_path,
+            "modelRoles:\n  default: ollama/qwen\n  vision: ollama/qwen-vision\n",
+        )
+        .unwrap();
+        let settings = Settings::default();
+        let providers = image_capability_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2-coder",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2-coder"));
+        assert!(!config.contains("vision:"));
+        assert!(result.message.contains("vision"));
+        assert!(result.message.contains("text-only"));
+    }
+
+    #[test]
+    fn omp_apply_writes_vision_role_for_image_capable_selection() {
+        let root = unique_temp_dir("codexhub-omp-image-capable");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, "modelRoles:\n  default: ollama/qwen\n").unwrap();
+        let settings = Settings::default();
+        let providers = image_capability_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2"));
+        assert!(config.contains("  vision: codexhub-volc/glm-5.2"));
+        assert!(!result.message.contains("text-only"));
     }
 
     #[test]
