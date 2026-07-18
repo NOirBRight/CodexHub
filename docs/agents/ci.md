@@ -6,8 +6,10 @@ GitHub Actions runs the required PR validation for branches targeting `dev` and 
 
 - Python tests: `python -m pytest -q`
 - Frontend build and UI contract: `npm ci`, `npm run build`, `npm run test:ui-contract` in `frontend/`
-- Rust tests: `cargo test --locked` in `src-tauri/`
+- Rust tests (normal and debug flavors): `cargo test --locked` in `src-tauri/`, plus a release-optimized flavor build
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
+- Release flavor contract: portable-build dry-run parity for the normal and debug flavors
+- Rust safe_file Linux compile and tests: standalone `rustc --test` compile of `src-tauri/src/safe_file.rs` on Ubuntu, a `clippy-driver -D warnings` lint of the same file, and the resulting cross-language test binary. This job exists because `safe_file.rs` contains `cfg(unix)` FFI that the Windows-only Rust jobs never compile; it must stay free of crate dependencies so the standalone compile keeps working.
 
 The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` file during CI because Tauri's resource glob requires at least one runtime Python resource file. The placeholder is not committed.
 

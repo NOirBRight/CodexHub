@@ -53,10 +53,12 @@ not block PR, merge, or release under the current policy.
 
 ## CI authority
 
-GitHub Actions runs all four repository jobs for every PR to `dev` or `main`
-regardless of local verification class. Local risk selection reduces duplicate
-work; it does not weaken CI. When CI is unavailable and a merge must proceed,
-reproduce the full fallback in `docs/agents/ci.md`.
+GitHub Actions runs every repository job for every PR to `dev` or `main`
+regardless of local verification class (Python tests, frontend build and UI
+contract, Rust tests for both flavors, Rust clippy, release flavor contract,
+and the safe_file Linux compile/lint/tests). Local risk selection reduces
+duplicate work; it does not weaken CI. When CI is unavailable and a merge must
+proceed, reproduce the full fallback in `docs/agents/ci.md`.
 
 Existing active work migrates incrementally: retain already completed full
 suites and formal reviews, do not restart a Worker, and verify only later

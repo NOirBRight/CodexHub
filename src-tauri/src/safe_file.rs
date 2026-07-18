@@ -38,7 +38,38 @@ fn invoke_test_pre_open_hook(path: &Path) {
 
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+// Versioned lock record. Anything else is fail-closed:
+// - unknown/future versions -> never recovered (fail closed);
+// - legacy pid/timestamp records -> recovered only when the PID is provably
+//   dead, otherwise fail closed;
+// - mixed-version caveat: binaries older than this protocol may still reclaim
+//   or unlink a protocol lock file (they classify anything non-legacy as
+//   stale); old binaries cannot be patched, so upgrades must drain running
+//   old processes before relying on overlap protection.
+// Crash-recovery bound: a holder death releases its OS byte lock, so a new
+// owner enters within LOCK_WAIT_TIMEOUT.
 const LOCK_PROTOCOL: &str = "codexhub-atomic-lock=1\n";
+
+#[cfg(windows)]
+mod win32 {
+    pub(crate) const SHARE_READ_WRITE_DELETE: u32 = 0x00000007;
+    pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+    pub(crate) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    pub(crate) const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+    pub(crate) const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+    pub(crate) const ERROR_SHARING_VIOLATION: i32 = 32;
+    pub(crate) const ERROR_LOCK_VIOLATION: i32 = 33;
+    pub(crate) const STILL_ACTIVE: u32 = 259;
+    pub(crate) const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+}
+
+#[cfg(unix)]
+mod flock_op {
+    pub(crate) const LOCK_EX: i32 = 2;
+    pub(crate) const LOCK_NB: i32 = 4;
+    pub(crate) const LOCK_UN: i32 = 8;
+    pub(crate) const ESRCH: i32 = 3;
+}
 
 pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -109,7 +140,9 @@ fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0x00000007).custom_flags(0x00200000);
+        options
+            .share_mode(win32::SHARE_READ_WRITE_DELETE)
+            .custom_flags(win32::FILE_FLAG_OPEN_REPARSE_POINT);
     }
     if create_new {
         options.create_new(true).open(path)
@@ -361,7 +394,7 @@ fn validate_lock_metadata(metadata: &fs::Metadata) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
+        if metadata.file_attributes() & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err("atomic write lock is not a regular single-link file".to_owned());
         }
     }
@@ -400,7 +433,7 @@ fn lock_file_identity(file: &File) -> Result<(u32, u64), String> {
     use std::os::windows::io::AsRawHandle;
     let mut information = ByHandleFileInformation::default();
     let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
-    if result == 0 || information.number_of_links != 1 || information.file_attributes & 0x400 != 0 {
+    if result == 0 || information.number_of_links != 1 || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err("atomic write lock is not a regular single-link file".to_owned());
     }
     let index = (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
@@ -547,7 +580,7 @@ fn pid_is_definitely_dead(pid: i64) -> bool {
     // kill(pid, 0) cannot signal the process. EPERM means it exists but is not
     // ours, so it is deliberately not reclaimed.
     let result = unsafe { kill(pid as i32, 0) };
-    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(3)
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(flock_op::ESRCH)
 }
 
 #[cfg(windows)]
@@ -556,21 +589,21 @@ fn pid_is_definitely_dead(pid: i64) -> bool {
         return true;
     }
     unsafe {
-        let handle = OpenProcess(0x1000, 0, pid as u32);
+        let handle = OpenProcess(win32::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
         if handle.is_null() {
             return false; // Access-denied and unknown are fail-safe.
         }
         let mut code = 0;
         let result = GetExitCodeProcess(handle, &mut code);
         CloseHandle(handle);
-        result != 0 && code != 259
+        result != 0 && code != win32::STILL_ACTIVE
     }
 }
 
 #[cfg(unix)]
 fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
     use std::os::fd::AsRawFd;
-    let result = unsafe { flock(file.as_raw_fd(), 2 | 4) }; // LOCK_EX | LOCK_NB
+    let result = unsafe { flock(file.as_raw_fd(), flock_op::LOCK_EX | flock_op::LOCK_NB) };
     if result == 0 {
         Ok(true)
     } else if matches!(std::io::Error::last_os_error().kind(), std::io::ErrorKind::WouldBlock) {
@@ -583,16 +616,25 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
 #[cfg(unix)]
 fn unlock(file: &File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
-    if unsafe { flock(file.as_raw_fd(), 8) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if unsafe { flock(file.as_raw_fd(), flock_op::LOCK_UN) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
 #[cfg(windows)]
 fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
     use std::os::windows::io::AsRawHandle;
     let mut overlapped = Overlapped::default();
-    let result = unsafe { LockFileEx(file.as_raw_handle(), 0x2 | 0x1, 0, 1, 0, &mut overlapped) };
+    let result = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            win32::LOCKFILE_EXCLUSIVE_LOCK | win32::LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
     if result != 0 { Ok(true) }
-    else if matches!(std::io::Error::last_os_error().raw_os_error(), Some(32 | 33)) { Ok(false) }
+    else if matches!(std::io::Error::last_os_error().raw_os_error(), Some(code) if code == win32::ERROR_SHARING_VIOLATION || code == win32::ERROR_LOCK_VIOLATION) { Ok(false) }
     else { Err(()) }
 }
 

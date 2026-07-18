@@ -979,6 +979,8 @@ mod tests {
         serde_json::to_string(&manifest).expect("serialize flavor manifest")
     }
 
+    use crate::lock_test_fixtures::write_dead_legacy_lock;
+
     fn stale_lock_path(path: &std::path::Path) -> std::path::PathBuf {
         path.with_file_name(format!(
             "{}.lock",
@@ -986,31 +988,6 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("pending-update")
         ))
-    }
-
-    /// Keeps the dead child's handle open so the PID stays resolvable on
-    /// Windows for the test duration; reaps the (already exited) child on drop.
-    struct DeadChildGuard(std::process::Child);
-
-    impl Drop for DeadChildGuard {
-        fn drop(&mut self) {
-            let _ = self.0.wait();
-        }
-    }
-
-    /// Write a legacy record whose PID is provably dead (recoverable).
-    /// The returned guard must stay alive for the test duration: dropping its
-    /// handle would make the dead PID unresolvable on Windows.
-    fn write_dead_legacy_lock(lock: &std::path::Path) -> DeadChildGuard {
-        let mut child = std::process::Command::new("python")
-            .arg("-c")
-            .arg("pass")
-            .spawn()
-            .expect("python is required for stale lock fixtures");
-        let pid = child.id();
-        assert!(child.wait().expect("wait dead child").success());
-        fs::write(lock, format!("pid={pid}\nacquired_at_millis=0\n")).expect("write stale lock");
-        DeadChildGuard(child)
     }
 
     fn unique_pending_update_path(name: &str) -> std::path::PathBuf {

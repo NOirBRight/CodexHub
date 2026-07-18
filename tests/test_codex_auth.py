@@ -2,7 +2,6 @@ import base64
 import json
 import os
 import stat
-import subprocess
 import tempfile
 import time
 import unittest
@@ -11,19 +10,7 @@ from unittest.mock import patch
 
 import codex_auth
 from codex_auth import CodexAuthError
-
-
-def write_dead_legacy_lock(lock_path: Path) -> subprocess.Popen:
-    """Write a legacy record whose PID is provably dead (recoverable).
-
-    The returned process must stay referenced for the test duration: closing
-    its handle would make the dead PID unresolvable on Windows.
-    """
-    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
-    child_pid = child.pid
-    assert child.wait(timeout=5) == 0
-    lock_path.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="utf-8")
-    return child
+from lock_fixtures import write_dead_legacy_lock
 
 
 def _make_jwt(payload: dict) -> str:

@@ -12,7 +12,20 @@ from typing import Callable, Iterator
 
 LOCK_WAIT_TIMEOUT_SECONDS = 10.0
 LOCK_RETRY_DELAY_SECONDS = 0.025
+# Versioned lock record. Anything else is fail-closed:
+# - unknown/future versions -> never recovered (fail closed);
+# - legacy pid/timestamp records -> recovered only when the PID is provably
+#   dead, otherwise fail closed;
+# - mixed-version caveat: binaries older than this protocol may still reclaim
+#   or unlink a protocol lock file (they classify anything non-legacy as
+#   stale); old binaries cannot be patched, so upgrades must drain running
+#   old processes before relying on overlap protection.
+# Crash-recovery bound: a holder death releases its OS byte lock, so a new
+# owner enters within LOCK_WAIT_TIMEOUT_SECONDS.
 LOCK_PROTOCOL = "codexhub-atomic-lock=1\n"
+# Win32 FILE_ATTRIBUTE_REPARSE_POINT; read via getattr so it stays zero on
+# non-Windows platforms where the attribute never appears.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _TEST_LOCK_HOOK: Callable[[str], None] | None = None
 
 
@@ -172,7 +185,7 @@ def _validate_lock_stat(metadata: os.stat_result) -> None:
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_nlink != 1
         or reparse_tag
-        or file_attributes & 0x400
+        or file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT
     ):
         raise OSError("atomic write lock is not a regular single-link file")
 
@@ -327,14 +340,14 @@ def _pid_is_definitely_dead(pid: int) -> bool:
     if os.name == "nt":
         # A process that cannot be opened is deliberately treated as live or
         # unknown. This gives up recovery rather than risking an overlap.
-        handle = _KERNEL32.OpenProcess(0x1000, False, pid)
+        handle = _KERNEL32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return False
         try:
             exit_code = wintypes.DWORD()
             if not _KERNEL32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
                 return False
-            return exit_code.value != 259  # STILL_ACTIVE
+            return exit_code.value != _STILL_ACTIVE
         finally:
             _KERNEL32.CloseHandle(handle)
     try:
@@ -353,6 +366,20 @@ def _pid_is_definitely_dead(pid: int) -> bool:
 if os.name == "nt":
     import msvcrt
     from ctypes import wintypes
+
+    _GENERIC_READ_WRITE = 0xC0000000
+    _SHARE_READ_WRITE_DELETE = 0x00000007
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _CREATE_NEW = 1
+    _OPEN_EXISTING = 3
+    _ERROR_FILE_NOT_FOUND = 2
+    _ERROR_SHARING_VIOLATION = 32
+    _ERROR_LOCK_VIOLATION = 33
+    _ERROR_FILE_EXISTS = 80
+    _STILL_ACTIVE = 259
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
 
     class _OVERLAPPED(ctypes.Structure):
         _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t), ("Offset", ctypes.c_ulong), ("OffsetHigh", ctypes.c_ulong), ("hEvent", ctypes.c_void_p)]
@@ -382,19 +409,19 @@ if os.name == "nt":
     def _open_lock_file_windows(lock_path: Path, *, created: bool) -> int:
         handle = _KERNEL32.CreateFileW(
             str(lock_path),
-            0xC0000000,
-            0x00000007,
+            _GENERIC_READ_WRITE,
+            _SHARE_READ_WRITE_DELETE,
             None,
-            1 if created else 3,
-            0x00200000,
+            _CREATE_NEW if created else _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
         invalid = ctypes.c_void_p(-1).value
         if handle in (None, invalid):
             error = ctypes.get_last_error()
-            if created and error == 80:
+            if created and error == _ERROR_FILE_EXISTS:
                 raise FileExistsError(error, "lock already exists")
-            if not created and error == 2:
+            if not created and error == _ERROR_FILE_NOT_FOUND:
                 raise FileNotFoundError(error, "lock disappeared")
             raise OSError("failed to open atomic write lock")
         return msvcrt.open_osfhandle(handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
@@ -402,9 +429,9 @@ if os.name == "nt":
     def _try_lock_windows(fd: int) -> bool:
         overlapped = _OVERLAPPED()
         handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
-        if _KERNEL32.LockFileEx(handle, 0x00000002 | 0x00000001, 0, 1, 0, ctypes.byref(overlapped)):
+        if _KERNEL32.LockFileEx(handle, _LOCKFILE_EXCLUSIVE_LOCK | _LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, ctypes.byref(overlapped)):
             return True
-        if ctypes.get_last_error() in (33, 32):  # LOCK_VIOLATION/SHARING_VIOLATION
+        if ctypes.get_last_error() in (_ERROR_LOCK_VIOLATION, _ERROR_SHARING_VIOLATION):
             return False
         raise OSError("failed to acquire atomic write lock")
 

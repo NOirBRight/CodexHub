@@ -9,6 +9,7 @@ import pytest
 
 import atomic_io
 from atomic_io import _classify_lock_bytes, _parse_legacy_pid, atomic_read_or_create_text, atomic_write_text, file_lock_for
+from lock_fixtures import write_dead_legacy_lock
 
 
 def test_atomic_write_text_replaces_existing_file(tmp_path: Path) -> None:
@@ -39,10 +40,7 @@ def test_atomic_write_text_recovers_provably_dead_legacy_lock_without_unlinking(
     target = tmp_path / "catalog.json"
     target.write_text("old", encoding="utf-8")
     lock = target.with_name("catalog.json.lock")
-    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
-    child_pid = child.pid
-    assert child.wait(timeout=5) == 0
-    lock.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="utf-8")
+    _dead_child = write_dead_legacy_lock(lock)
 
     atomic_write_text(target, "new", encoding="utf-8")
 
@@ -167,10 +165,7 @@ def test_existing_empty_lock_fails_closed(tmp_path: Path, monkeypatch: pytest.Mo
 def test_dead_legacy_lock_is_recovered_without_unlinking_its_inode(tmp_path: Path) -> None:
     target = tmp_path / "settings.json"
     lock = target.with_name("settings.json.lock")
-    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
-    child_pid = child.pid
-    assert child.wait(timeout=5) == 0
-    lock.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="ascii")
+    _dead_child = write_dead_legacy_lock(lock)
     inode = lock.stat().st_ino
 
     atomic_write_text(target, "new")

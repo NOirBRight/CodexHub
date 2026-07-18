@@ -128,7 +128,12 @@ jobs:
           python-version: '3.13'
 
       - name: Set up Rust stable
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - name: Lint safe_file with clippy for Linux
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/src-tauri
+        run: rustup run stable clippy-driver --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-lint -D warnings
 
       - name: Compile safe_file test harness for Linux
         env:

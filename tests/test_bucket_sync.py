@@ -1,23 +1,9 @@
-import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from bucket_sync import sync_dir
-
-
-def write_dead_legacy_lock(lock_path: Path) -> subprocess.Popen:
-    """Write a legacy record whose PID is provably dead (recoverable).
-
-    The returned process must stay referenced for the test duration: closing
-    its handle would make the dead PID unresolvable on Windows.
-    """
-    child = subprocess.Popen([os.environ.get("PYTHON", "python"), "-c", "pass"])
-    child_pid = child.pid
-    assert child.wait(timeout=5) == 0
-    lock_path.write_text(f"pid={child_pid}\nacquired_at_millis=0\n", encoding="utf-8")
-    return child
+from lock_fixtures import write_dead_legacy_lock
 
 
 class BucketSyncTests(unittest.TestCase):

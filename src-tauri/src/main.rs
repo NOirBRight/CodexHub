@@ -12,6 +12,8 @@ mod gateway;
 mod gateway_lifecycle;
 mod gateway_transaction;
 mod history;
+#[cfg(test)]
+mod lock_test_fixtures;
 mod models;
 mod openai_usage;
 mod official_refresh;
