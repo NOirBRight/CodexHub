@@ -288,8 +288,6 @@ class HistoryConsolidateTests(unittest.TestCase):
                         "selected-remote-host-id": "remote-ssh-discovered:am01s",
                         "remote-connection-auto-connect-by-host-id": {"remote-ssh-discovered:am01s": True},
                         "electron-saved-workspace-roots": ["C:/stale/project"],
-                        "skills": {"must-not-copy": True},
-                        "plugin-cache": {"must-not-copy": True},
                         "electron-persisted-atom-state": {
                             "selected-remote-host-id": "remote-ssh-discovered:am01s",
                             "remote-connection-auto-connect-by-host-id": {"remote-ssh-discovered:am01s": True},
@@ -298,6 +296,10 @@ class HistoryConsolidateTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (official / "skills").mkdir()
+            (official / "skills" / "must-not-copy.md").write_text("skill data", encoding="utf-8")
+            (official / "plugins").mkdir()
+            (official / "plugins" / "must-not-copy.json").write_text("plugin data", encoding="utf-8")
 
             result = merge_global_state(active, official, root / "backup")
 
@@ -305,11 +307,11 @@ class HistoryConsolidateTests(unittest.TestCase):
             state = json.loads((active / ".codex-global-state.json").read_text(encoding="utf-8"))
             self.assertNotIn("selected-remote-host-id", state)
             self.assertNotIn("electron-saved-workspace-roots", state)
-            self.assertNotIn("skills", state)
-            self.assertNotIn("plugin-cache", state)
             self.assertEqual(state["remote-connection-auto-connect-by-host-id"], {})
             self.assertNotIn("selected-remote-host-id", state["electron-persisted-atom-state"])
             self.assertEqual(state["electron-persisted-atom-state"]["remote-connection-auto-connect-by-host-id"], {})
+            self.assertFalse((active / "skills").exists())
+            self.assertFalse((active / "plugins").exists())
             self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
 
 

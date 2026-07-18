@@ -438,36 +438,29 @@ def preview_saved_workspace_roots(
     }
 
 
-def _copy_owned_global_state(source: dict[str, Any], import_saved_workspace_roots: bool) -> dict[str, Any]:
-    copied: dict[str, Any] = {}
-    for key in GLOBAL_STATE_THREAD_DICT_KEYS:
-        if isinstance(source.get(key), dict):
-            copied[key] = source[key]
-    for key in GLOBAL_STATE_THREAD_LIST_KEYS + GLOBAL_STATE_LIST_UNION_KEYS:
-        if isinstance(source.get(key), list):
-            copied[key] = source[key]
-    if isinstance(source.get(REMOTE_AUTOCONNECT_KEY), dict):
-        copied[REMOTE_AUTOCONNECT_KEY] = source[REMOTE_AUTOCONNECT_KEY]
-
-    source_epa = source.get(ATOM_STATE_KEY)
-    if isinstance(source_epa, dict):
-        copied_epa: dict[str, Any] = {}
-        for key in ELECTRON_PERSISTED_THREAD_DICT_KEYS:
-            if isinstance(source_epa.get(key), dict):
-                copied_epa[key] = source_epa[key]
-        for key in ELECTRON_PERSISTED_LIST_KEYS:
-            if isinstance(source_epa.get(key), dict):
-                copied_epa[key] = source_epa[key]
-        if isinstance(source_epa.get(REMOTE_AUTOCONNECT_KEY), dict):
-            copied_epa[REMOTE_AUTOCONNECT_KEY] = source_epa[REMOTE_AUTOCONNECT_KEY]
-        if copied_epa:
-            copied[ATOM_STATE_KEY] = copied_epa
-
+def _copy_global_state_for_active(source: dict[str, Any], import_saved_workspace_roots: bool) -> dict[str, Any]:
+    copied = dict(source)
     if import_saved_workspace_roots:
         roots = canonicalize_workspace_roots(source.get(SAVED_WORKSPACE_ROOTS_KEY))
         if roots:
             copied[SAVED_WORKSPACE_ROOTS_KEY] = roots
+        else:
+            copied.pop(SAVED_WORKSPACE_ROOTS_KEY, None)
+    else:
+        copied.pop(SAVED_WORKSPACE_ROOTS_KEY, None)
     return copied
+
+
+def _copy_dry_run_inputs(source_dir: Path, destination_dir: Path) -> None:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    for name in SESSION_DIR_NAMES:
+        source_path = source_dir / name
+        if source_path.is_dir():
+            shutil.copytree(source_path, destination_dir / name)
+    for name in (".codex-global-state.json", STATE_DB_FILENAME):
+        source_path = source_dir / name
+        if source_path.is_file():
+            shutil.copy2(source_path, destination_dir / name)
 
 
 def _load_global_state(path: Path) -> dict[str, Any]:
@@ -521,7 +514,7 @@ def merge_global_state(
     if not active_path.exists():
         active_path.parent.mkdir(parents=True, exist_ok=True)
         removed_remote_keys = sanitize_global_state_remote_selection(source)
-        active = _copy_owned_global_state(source, import_saved_workspace_roots)
+        active = _copy_global_state_for_active(source, import_saved_workspace_roots)
         atomic_write_text(
             active_path,
             json.dumps(active, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -707,11 +700,8 @@ def official_main(
             simulation_root = Path(temp_dir)
             simulated_active = simulation_root / "active"
             simulated_source = simulation_root / "source"
-            if codex_dir.exists():
-                shutil.copytree(codex_dir, simulated_active)
-            else:
-                simulated_active.mkdir(parents=True)
-            shutil.copytree(source_dir, simulated_source)
+            _copy_dry_run_inputs(codex_dir, simulated_active)
+            _copy_dry_run_inputs(source_dir, simulated_source)
             result = official_main(
                 simulated_active,
                 simulated_source,
