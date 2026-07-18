@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CODEX_ACCOUNT_USAGE_METHOD: &str = "account/usage/read";
 // Automatic (timer/mount) refreshes probe only when the cached snapshot is
-// older than this staleness window; aligned with the frontend panel interval
-// so a cache-valid automatic tick starts zero child processes.
-const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 3 * 60;
+// older than this staleness window — twice the frontend panel interval, so
+// every other automatic tick is cache-valid and starts zero child processes.
+const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 2 * 3 * 60;
 const DAY_SECONDS: u64 = 86_400;
 const DEFAULT_WINDOW_DAYS: u64 = 365;
 const RATE_LIMIT_LOG_FILE_LIMIT: usize = 64;
@@ -206,7 +206,6 @@ pub fn openai_usage_completions(
             force_refresh: force_refresh.unwrap_or(false),
             cache_path: &cache_path,
             rate_limit_dir: Some(paths.codex_dir()),
-            now: current_unix_time(),
         },
         read_codex_account_usage,
     )
@@ -218,26 +217,39 @@ struct UsageRefreshRequest<'a> {
     force_refresh: bool,
     cache_path: &'a Path,
     rate_limit_dir: Option<&'a Path>,
-    now: u64,
 }
 
 /// Singleflight gate for live usage probes: mount, timer, and manual refreshes
 /// share one in-flight live read, and one logical live refresh starts at most
-/// one `codex app-server` child.
-struct UsageRefreshCoordinator {
+/// one `codex app-server` child. The clock is injectable for deterministic
+/// tests; production uses `current_unix_time`.
+struct UsageRefreshCoordinator<C: Fn() -> u64 = fn() -> u64> {
     state: Mutex<UsageRefreshState>,
+    now: C,
 }
 
 struct UsageRefreshState {
-    /// Set when a live probe succeeds; a later call that started before the
-    /// completion coalesces onto the fresh cache instead of re-probing.
+    /// Set when a live probe succeeds and its cache write lands, stamped with
+    /// the completion time. A caller whose request started before that stamp
+    /// coalesces onto the fresh cache instead of re-probing.
     last_completed_at: Option<u64>,
 }
 
-impl UsageRefreshCoordinator {
-    const fn new() -> Self {
+impl UsageRefreshCoordinator<fn() -> u64> {
+    const fn new(now: fn() -> u64) -> Self {
         Self {
             state: Mutex::new(UsageRefreshState { last_completed_at: None }),
+            now,
+        }
+    }
+}
+
+impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
+    #[cfg(test)]
+    fn with_clock(now: C) -> Self {
+        Self {
+            state: Mutex::new(UsageRefreshState { last_completed_at: None }),
+            now,
         }
     }
 
@@ -255,9 +267,8 @@ impl UsageRefreshCoordinator {
             force_refresh,
             cache_path,
             rate_limit_dir,
-            now,
         } = request;
-        let call_started = now;
+        let call_started = (self.now)();
         if !force_refresh {
             if let Ok(cache) = read_usage_cache(cache_path) {
                 let age = call_started.saturating_sub(cache.fetched_at);
@@ -285,14 +296,18 @@ impl UsageRefreshCoordinator {
         let stale_cache = read_usage_cache(cache_path).ok();
         log::info!("openai usage refresh: live probe started (forced={force_refresh})");
         match fetch_usage() {
-            Ok(usage) => {
+            Ok(mut usage) => {
+                let completed_at = (self.now)();
                 let cache = CodexAccountUsageCache {
-                    fetched_at: call_started,
+                    fetched_at: completed_at,
                     usage: usage.clone(),
                 };
-                let _ = write_usage_cache(cache_path, &cache);
-                state.last_completed_at = Some(call_started);
-                let mut usage = usage;
+                // Only a durable cache write may coalesce queued callers; on a
+                // write failure they re-probe instead of erroring on a missing
+                // cache.
+                if write_usage_cache(cache_path, &cache).is_ok() {
+                    state.last_completed_at = Some(completed_at);
+                }
                 enrich_usage_with_local_rate_limits(&mut usage, rate_limit_dir);
                 snapshot_from_codex_account_usage(start_time, end_time, usage)
             }
@@ -311,7 +326,7 @@ impl UsageRefreshCoordinator {
     }
 }
 
-static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new();
+static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new(current_unix_time);
 
 #[cfg(test)]
 fn openai_usage_completions_with_cache<F>(
@@ -325,14 +340,13 @@ fn openai_usage_completions_with_cache<F>(
 where
     F: FnMut() -> Result<CodexAccountUsageResponse, String>,
 {
-    UsageRefreshCoordinator::new().completions(
+    UsageRefreshCoordinator::with_clock(move || now).completions(
         UsageRefreshRequest {
             start_time,
             end_time,
             force_refresh,
             cache_path,
             rate_limit_dir: None,
-            now,
         },
         fetch_usage,
     )
@@ -351,14 +365,13 @@ fn openai_usage_completions_with_cache_and_rate_limit_dir<F>(
 where
     F: FnMut() -> Result<CodexAccountUsageResponse, String>,
 {
-    UsageRefreshCoordinator::new().completions(
+    UsageRefreshCoordinator::with_clock(move || now).completions(
         UsageRefreshRequest {
             start_time,
             end_time,
             force_refresh,
             cache_path,
             rate_limit_dir,
-            now,
         },
         fetch_usage,
     )
@@ -530,16 +543,27 @@ fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) 
 
 /// Kills and reaps the probe child on every exit path (success, write/read
 /// error, timeout), so no CodexHub-owned app-server child is left behind.
+/// On Windows the child is also assigned to a kill-on-close Job Object so an
+/// abrupt application exit cannot orphan it.
 struct AppServerChild {
     child: Child,
+    #[cfg(windows)]
+    _job: AppServerJob,
 }
 
 impl AppServerChild {
     fn spawn(command: &mut Command) -> Result<Self, String> {
-        command
+        let child = command
             .spawn()
-            .map(|child| Self { child })
-            .map_err(|error| format!("Failed to start codex app-server for Codex account usage: {error}"))
+            .map_err(|error| format!("Failed to start codex app-server for Codex account usage: {error}"))?;
+        #[cfg(windows)]
+        {
+            let job = AppServerJob::new()?;
+            job.assign(&child)?;
+            Ok(Self { child, _job: job })
+        }
+        #[cfg(not(windows))]
+        Ok(Self { child })
     }
 
     fn child_mut(&mut self) -> &mut Child {
@@ -551,6 +575,55 @@ impl Drop for AppServerChild {
     fn drop(&mut self) {
         kill_child(&mut self.child);
         log::info!("openai usage refresh: app-server child cleanup complete");
+    }
+}
+
+#[cfg(windows)]
+struct AppServerJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl AppServerJob {
+    fn new() -> Result<Self, String> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err("Failed to prepare codex app-server cleanup job.".to_string());
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if configured == 0 {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err("Failed to prepare codex app-server cleanup job.".to_string());
+        }
+        Ok(Self(handle))
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let assigned = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as _) };
+        if assigned == 0 {
+            return Err("Failed to bind codex app-server cleanup job.".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AppServerJob {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
     }
 }
 
@@ -1735,11 +1808,24 @@ mod tests {
         assert_eq!(snapshot.total_tokens, 41);
     }
 
+    fn live_usage_fixture() -> &'static str {
+        r#"{
+          "summary": { "lifetimeTokens": 84 },
+          "dailyUsageBuckets": [
+            {"startDate": "2026-07-07", "tokens": 84}
+          ]
+        }"#
+    }
+
     #[test]
     fn concurrent_forced_refreshes_coalesce_into_one_probe() {
         let root = temp_root("openai-usage-coalesce");
         let cache_path = root.join("usage-cache.json");
-        let coordinator = UsageRefreshCoordinator::new();
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10_300));
+        let clock_for_coordinator = clock.clone();
+        let coordinator = UsageRefreshCoordinator::with_clock(move || {
+            clock_for_coordinator.load(std::sync::atomic::Ordering::SeqCst)
+        });
         let probe_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         // Two parties: the winning probe and the test driver. The queued
         // caller never touches the barrier — it waits on the singleflight gate.
@@ -1751,6 +1837,7 @@ mod tests {
                 let cache_path = &cache_path;
                 let probe_count = probe_count.clone();
                 let release_probe = release_probe.clone();
+                let clock = clock.clone();
                 scope.spawn(move || {
                     coordinator
                         .completions(
@@ -1760,22 +1847,15 @@ mod tests {
                                 force_refresh: true,
                                 cache_path,
                                 rate_limit_dir: None,
-                                now: 10_300,
                             },
                             move || {
                                 probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                // Hold the probe until both callers are queued
-                                // behind the singleflight gate.
+                                // Hold the probe while the loser queues behind
+                                // the singleflight gate two seconds later.
+                                clock.store(10_302, std::sync::atomic::Ordering::SeqCst);
                                 release_probe.wait();
-                                serde_json::from_str(
-                                    r#"{
-                                      "summary": { "lifetimeTokens": 84 },
-                                      "dailyUsageBuckets": [
-                                        {"startDate": "2026-07-07", "tokens": 84}
-                                      ]
-                                    }"#,
-                                )
-                                .map_err(|error| error.to_string())
+                                serde_json::from_str(live_usage_fixture())
+                                    .map_err(|error| error.to_string())
                             },
                         )
                         .expect("coalesced refresh")
@@ -1788,6 +1868,8 @@ mod tests {
             release_probe.wait();
         });
 
+        // The winner started at 10_300 and completed at 10_302; the loser
+        // started at 10_302 and must coalesce rather than re-probe.
         assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -1815,15 +1897,7 @@ mod tests {
             10_100,
             || {
                 attempts.set(attempts.get() + 1);
-                serde_json::from_str(
-                    r#"{
-                      "summary": { "lifetimeTokens": 84 },
-                      "dailyUsageBuckets": [
-                        {"startDate": "2026-07-07", "tokens": 84}
-                      ]
-                    }"#,
-                )
-                .map_err(|error| error.to_string())
+                serde_json::from_str(live_usage_fixture()).map_err(|error| error.to_string())
             },
         )
         .expect("forced refresh");
@@ -1836,7 +1910,7 @@ mod tests {
     fn failed_probe_leaves_coordinator_uncompleted_so_later_forced_call_probes() {
         let root = temp_root("openai-usage-failed-then-forced");
         let cache_path = root.join("usage-cache.json");
-        let coordinator = UsageRefreshCoordinator::new();
+        let coordinator = UsageRefreshCoordinator::with_clock(|| 10_300);
         let attempts = Cell::new(0);
 
         let error = coordinator
@@ -1847,7 +1921,6 @@ mod tests {
                     force_refresh: true,
                     cache_path: &cache_path,
                     rate_limit_dir: None,
-                    now: 10_300,
                 },
                 || {
                     attempts.set(attempts.get() + 1);
@@ -1865,19 +1938,10 @@ mod tests {
                     force_refresh: true,
                     cache_path: &cache_path,
                     rate_limit_dir: None,
-                    now: 10_300,
                 },
                 || {
                     attempts.set(attempts.get() + 1);
-                    serde_json::from_str(
-                        r#"{
-                          "summary": { "lifetimeTokens": 84 },
-                          "dailyUsageBuckets": [
-                            {"startDate": "2026-07-07", "tokens": 84}
-                          ]
-                        }"#,
-                    )
-                    .map_err(|error| error.to_string())
+                    serde_json::from_str(live_usage_fixture()).map_err(|error| error.to_string())
                 },
             )
             .expect("second forced refresh probes again");

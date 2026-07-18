@@ -992,9 +992,9 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(webBridgeSource, /optional_bool_arg\(&request\.args, &\["forceRefresh", "force_refresh"\]\)/);
   assert.match(openAiUsageSource, /account\/usage\/read/);
   assert.match(openAiUsageSource, /codex app-server/);
-  assert.match(openAiUsageSource, /const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 3 \* 60;/);
+  assert.match(openAiUsageSource, /const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 2 \* 3 \* 60;/);
   assert.match(openAiUsageSource, /struct UsageRefreshCoordinator/);
-  assert.match(openAiUsageSource, /static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new\(\);/);
+  assert.match(openAiUsageSource, /static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new\(current_unix_time\);/);
   assert.match(openAiUsageSource, /struct CodexAccountUsageCache/);
   assert.match(openAiUsageSource, /struct OpenAiUsageLimit/);
   assert.match(openAiUsageSource, /usageLimits/);
