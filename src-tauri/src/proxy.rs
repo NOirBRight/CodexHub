@@ -1287,6 +1287,13 @@ fn stop_session_owned_with_paths_and_controls(
         controls.inspector,
         controls.listener_inspector,
     )?;
+    let Some(pid) = pid else {
+        return stopped_gateway_status(
+            mode,
+            lifecycle_port,
+            "Gateway stopped during user-requested shutdown close budget".to_string(),
+        );
+    };
     log::warn!(
         "Gateway user_requested_shutdown force-close issued for the current-session PID {pid}"
     );
@@ -1396,7 +1403,7 @@ fn force_kill_session_owned_gateway_at_deadline(
     killer: &dyn ProcessKiller,
     inspector: &dyn ProcessInspector,
     listener_inspector: &dyn ListenerInspector,
-) -> Result<u32, String> {
+) -> Result<Option<u32>, String> {
     let Some(session_owned_identity) = session_owned_identity else {
         return Err(
             "Gateway user-requested shutdown refused force-close because #139 has no current-session identity"
@@ -1420,9 +1427,10 @@ fn force_kill_session_owned_gateway_at_deadline(
         VerifiedProxyProcess::Verified { pid } => pid,
         VerifiedProxyProcess::Missing { pid } => {
             remove_pid(paths)?;
-            return Err(format!(
-                "managed Gateway PID {pid} disappeared before user-requested force-close; preserved truthful reconciliation"
-            ));
+            log::info!(
+                "Gateway user_requested_shutdown found current-session PID {pid} already stopped at the close deadline"
+            );
+            return Ok(None);
         }
         VerifiedProxyProcess::Mismatch { pid, reason } => {
             return Err(format!(
@@ -1445,7 +1453,7 @@ fn force_kill_session_owned_gateway_at_deadline(
         }
     }
     killer.kill(pid)?;
-    Ok(pid)
+    Ok(Some(pid))
 }
 
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
@@ -4169,6 +4177,38 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         assert!(status.message.contains("user-requested shutdown"));
         assert_eq!(killer.killed.borrow().as_slice(), &[pid]);
         assert_eq!(clock.elapsed(), Duration::from_secs(2));
+        assert_eq!(read_pid(&paths).expect("pid removed"), None);
+    }
+
+    #[test]
+    fn session_shutdown_deadline_reconciles_an_already_stopped_current_identity() {
+        let root = temp_root("session-shutdown-deadline-already-stopped");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let record = read_pid_record(&paths)
+            .expect("read pid record")
+            .expect("managed pid record");
+        let current_identity = record.gateway_identity().expect("managed Gateway identity");
+        let killer = RecordingKiller::default();
+        let inspector = RecordingInspector::new(InspectedProcess::Missing);
+
+        let outcome = super::force_kill_session_owned_gateway_at_deadline(
+            &paths,
+            &record,
+            Some(&current_identity),
+            port,
+            &killer,
+            &inspector,
+            &FixedListenerInspector::new(None),
+        )
+        .expect("an already-stopped current-session Gateway is reconciled without force kill");
+
+        assert_eq!(outcome, None);
+        assert!(killer.killed.borrow().is_empty());
         assert_eq!(read_pid(&paths).expect("pid removed"), None);
     }
 
