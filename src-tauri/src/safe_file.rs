@@ -528,20 +528,13 @@ fn lock_state(text: &str) -> LockState {
 /// Parse only the exact legacy record. Timestamp-only metadata is unsafe: its
 /// wall-clock age cannot prove that a former owner has stopped writing.
 fn parse_legacy_pid(text: &str) -> Option<i64> {
-    let lines: Vec<&str> = if let Some(body) = text.strip_suffix("\r\n") {
-        if body.split("\r\n").any(|line| line.contains('\r')) {
-            return None;
-        }
-        body.split("\r\n").collect()
-    } else if let Some(body) = text.strip_suffix('\n') {
-        if body.contains('\r') {
-            return None;
-        }
-        body.split('\n').collect()
-    } else {
-        return None;
+    let crlf_body = text.strip_suffix("\r\n");
+    let (body, separator) = match crlf_body {
+        Some(body) => (body, "\r\n"),
+        None => (text.strip_suffix('\n')?, "\n"),
     };
-    if lines.len() != 2 {
+    let lines: Vec<&str> = body.split(separator).collect();
+    if lines.iter().any(|line| line.contains('\r')) || lines.len() != 2 {
         return None;
     }
 
