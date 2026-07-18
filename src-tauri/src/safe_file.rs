@@ -937,7 +937,14 @@ mod tests {
 
         let result = lock.verify_namespace_identity();
 
-        assert!(result.unwrap_err().contains("path changed"));
+        // Rejection must fail closed; the message differs by platform:
+        // Windows still resolves the delete-pending handle (identity mismatch),
+        // while Linux reports the unlinked handle's zero link count first.
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("path changed") || error.contains("not a regular single-link file"),
+            "unexpected error: {error}"
+        );
         drop(lock);
     }
 
