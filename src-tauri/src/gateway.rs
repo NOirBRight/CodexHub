@@ -4433,6 +4433,9 @@ fn opencode_config_text(
         for gateway_model in &group.models {
             let mut entry = json!({
                 "name": gateway_model.display_name,
+                "modalities": {
+                    "input": gateway_model.input_modalities,
+                },
             });
             if !gateway_model.supported_reasoning_levels.is_empty() {
                 let default_effort = gateway_model
@@ -6987,6 +6990,40 @@ mod tests {
                 },
             ],
         }]
+    }
+
+    #[test]
+    fn opencode_config_preserves_configured_reasoning_variant_order() {
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+        let text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+
+        let variants_start = text.find("\"variants\"").expect("variants object");
+        let variants_text = &text[variants_start..];
+        let low = variants_text.find("\"low\"").expect("low variant");
+        let high = variants_text.find("\"high\"").expect("high variant");
+        let xhigh = variants_text.find("\"xhigh\"").expect("xhigh variant");
+        assert!(
+            low < high && high < xhigh,
+            "variants must follow the configured order (low, high, xhigh), got: {variants_text}"
+        );
+    }
+
+    #[test]
+    fn opencode_config_exports_configured_modalities_per_model() {
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+        let text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(
+            value.pointer("/provider/codexhub-volc/models/glm-5.2/modalities/input"),
+            Some(&serde_json::json!(["text", "image"]))
+        );
+        assert_eq!(
+            value.pointer("/provider/codexhub-volc/models/glm-5.2-flash/modalities/input"),
+            Some(&serde_json::json!(["text"]))
+        );
     }
 
     #[test]
