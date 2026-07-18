@@ -245,6 +245,8 @@ export interface GatewayModel {
   supports_chat_completions: boolean;
   context_window: number;
   input_modalities?: string[] | null;
+  supported_reasoning_levels?: string[] | null;
+  default_reasoning_level?: string | null;
 }
 
 export interface GatewayUsageSummary {

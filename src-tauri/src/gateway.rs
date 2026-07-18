@@ -103,10 +103,24 @@ pub struct GatewayModel {
     pub context_window: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_reasoning_levels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_level: Option<String>,
 }
 
 fn official_gateway_input_modalities() -> Vec<String> {
     vec!["text".to_string(), "image".to_string()]
+}
+
+const OFFICIAL_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const OFFICIAL_DEFAULT_REASONING_LEVEL: &str = "medium";
+
+fn official_gateway_reasoning_levels() -> Vec<String> {
+    OFFICIAL_REASONING_LEVELS
+        .iter()
+        .map(|level| (*level).to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +199,8 @@ struct GatewayClientProviderModel {
     display_name: String,
     context_window: Option<u32>,
     input_modalities: Vec<String>,
+    supported_reasoning_levels: Vec<String>,
+    default_reasoning_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1807,6 +1823,8 @@ fn official_models_from_metadata(
                 supports_chat_completions: true,
                 context_window,
                 input_modalities: Some(official_gateway_input_modalities()),
+                supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
+                default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
             });
         }
     }
@@ -1848,6 +1866,16 @@ fn official_gateway_model_from_metadata(
             .clone()
             .filter(|modalities| !modalities.is_empty())
             .or_else(|| Some(official_gateway_input_modalities())),
+        supported_reasoning_levels: model
+            .supported_reasoning_levels
+            .clone()
+            .filter(|levels| !levels.is_empty())
+            .or_else(|| Some(official_gateway_reasoning_levels())),
+        default_reasoning_level: model
+            .default_reasoning_level
+            .clone()
+            .filter(|level| !level.is_empty())
+            .or_else(|| Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string())),
     })
 }
 
@@ -1867,6 +1895,8 @@ fn fallback_official_gateway_models(
             supports_chat_completions: true,
             context_window: published_context_windows.get(*id).copied(),
             input_modalities: Some(official_gateway_input_modalities()),
+            supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
+            default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
         })
         .collect()
 }
@@ -1923,6 +1953,10 @@ fn gateway_models_from_sources(
             if !exported_ids.insert(model_id.to_ascii_lowercase()) {
                 continue;
             }
+            let reasoning_levels = model
+                .supported_reasoning_levels
+                .clone()
+                .filter(|levels| !levels.is_empty());
             output.push(GatewayModel {
                 id: model_id.clone(),
                 display_name: model
@@ -1944,6 +1978,15 @@ fn gateway_models_from_sources(
                     .input_modalities
                     .clone()
                     .filter(|modalities| !modalities.is_empty()),
+                default_reasoning_level: if reasoning_levels.is_some() {
+                    model
+                        .default_reasoning_level
+                        .clone()
+                        .filter(|level| !level.is_empty())
+                } else {
+                    None
+                },
+                supported_reasoning_levels: reasoning_levels,
             });
         }
     }
@@ -2443,6 +2486,8 @@ fn gateway_client_provider_groups_from_exported(
             input_modalities: model
                 .input_modalities
                 .unwrap_or_else(|| vec!["text".to_string()]),
+            supported_reasoning_levels: model.supported_reasoning_levels.unwrap_or_default(),
+            default_reasoning_level: model.default_reasoning_level,
         });
     }
 
@@ -3714,6 +3759,24 @@ fn gateway_exported_model_supports_image(
         .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image"))
 }
 
+fn gateway_exported_model_default_reasoning_effort(
+    settings: &Settings,
+    providers: &[Provider],
+    resolved_model_id: &str,
+) -> Option<String> {
+    gateway_models_from_config(settings, providers)
+        .iter()
+        .find(|model| model.id == resolved_model_id)
+        .and_then(|model| {
+            let levels = model.supported_reasoning_levels.as_ref()?;
+            let default = model.default_reasoning_level.as_ref()?;
+            levels
+                .iter()
+                .any(|level| level == default)
+                .then(|| default.clone())
+        })
+}
+
 fn preview_omp_config_with_paths(
     config_path: &Path,
     models_path: &Path,
@@ -3731,7 +3794,14 @@ fn preview_omp_config_with_paths(
     } else {
         None
     };
-    let next_config = omp_config_text(current_config.as_deref(), &selector, vision_selector);
+    let default_reasoning_effort =
+        gateway_exported_model_default_reasoning_effort(settings, providers, &model);
+    let next_config = omp_config_text(
+        current_config.as_deref(),
+        &selector,
+        vision_selector,
+        default_reasoning_effort.as_deref(),
+    );
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     let mut message =
         "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
@@ -3899,7 +3969,14 @@ fn apply_omp_config_with_paths(
     } else {
         None
     };
-    let next_config = omp_config_text(Some(&current_config), &selector, vision_selector);
+    let default_reasoning_effort =
+        gateway_exported_model_default_reasoning_effort(settings, providers, &model);
+    let next_config = omp_config_text(
+        Some(&current_config),
+        &selector,
+        vision_selector,
+        default_reasoning_effort.as_deref(),
+    );
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     write_text_replace(config_path, &next_config)?;
     write_text_replace(models_path, &next_models)?;
@@ -4354,12 +4431,37 @@ fn opencode_config_text(
     for group in &groups.providers {
         let mut models = Map::new();
         for gateway_model in &group.models {
-            models.insert(
-                gateway_model.id.clone(),
-                json!({
-                    "name": gateway_model.display_name,
-                }),
-            );
+            let mut entry = json!({
+                "name": gateway_model.display_name,
+            });
+            if !gateway_model.supported_reasoning_levels.is_empty() {
+                let default_effort = gateway_model
+                    .default_reasoning_level
+                    .as_ref()
+                    .filter(|default| {
+                        gateway_model
+                            .supported_reasoning_levels
+                            .iter()
+                            .any(|level| level == *default)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| gateway_model.supported_reasoning_levels[0].clone());
+                let variants = gateway_model
+                    .supported_reasoning_levels
+                    .iter()
+                    .map(|level| {
+                        (
+                            level.clone(),
+                            json!({ "reasoningEffort": level.clone() }),
+                        )
+                    })
+                    .collect::<Map<_, _>>();
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("options".to_string(), json!({ "reasoningEffort": default_effort }));
+                    object.insert("variants".to_string(), Value::Object(variants));
+                }
+            }
+            models.insert(gateway_model.id.clone(), entry);
         }
         provider_map.insert(
             group.client_provider_id.clone(),
@@ -4469,7 +4571,7 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
-        "reasoning": true,
+        "reasoning": !model.supported_reasoning_levels.is_empty(),
         "input": model.input_modalities.clone(),
         "headers": {
             "x-codex-client-id": "pi",
@@ -4488,10 +4590,19 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     value
 }
 
-fn omp_config_text(current: Option<&str>, selector: &str, vision_selector: Option<&str>) -> String {
+fn omp_config_text(
+    current: Option<&str>,
+    selector: &str,
+    vision_selector: Option<&str>,
+    default_reasoning_effort: Option<&str>,
+) -> String {
+    let default_selector = match default_reasoning_effort {
+        Some(effort) if !effort.is_empty() => format!("{selector}:{effort}"),
+        _ => selector.to_string(),
+    };
     let mut block = vec![
         "modelRoles:".to_string(),
-        format!("  default: {selector}"),
+        format!("  default: {default_selector}"),
     ];
     if let Some(vision_selector) = vision_selector {
         block.push(format!("  vision: {vision_selector}"));
@@ -4542,6 +4653,7 @@ fn omp_models_yml_text(
         for gateway_model in &group.models {
             let model_id = yaml_scalar(&gateway_model.id);
             let model_name = yaml_scalar(&gateway_model.display_name);
+            let reasoning = !gateway_model.supported_reasoning_levels.is_empty();
             let input_list = gateway_model
                 .input_modalities
                 .iter()
@@ -4552,7 +4664,7 @@ fn omp_models_yml_text(
                 .map(|value| format!("        contextWindow: {value}\n"))
                 .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -4660,6 +4772,27 @@ fn zcode_provider_endpoint(
     }
 }
 
+fn zcode_reasoning_value(model: &GatewayClientProviderModel) -> Option<Value> {
+    if model.supported_reasoning_levels.is_empty() {
+        return None;
+    }
+    let mut variants = model.supported_reasoning_levels.clone();
+    if !variants.iter().any(|variant| variant == "off") {
+        variants.push("off".to_string());
+    }
+    let default_variant = model
+        .default_reasoning_level
+        .as_ref()
+        .filter(|default| variants.iter().any(|variant| variant == *default))
+        .cloned()
+        .unwrap_or_else(|| variants[0].clone());
+    Some(json!({
+        "enabled": true,
+        "variants": variants,
+        "defaultVariant": default_variant,
+    }))
+}
+
 fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
     let mut value = json!({
         "id": model.id.clone(),
@@ -4674,6 +4807,9 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
     });
     if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
         object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    if let (Some(object), Some(reasoning)) = (value.as_object_mut(), zcode_reasoning_value(model)) {
+        object.insert("reasoning".to_string(), reasoning);
     }
     value
 }
@@ -4737,6 +4873,11 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
                         model.context_window,
                     ) {
                         limit.insert("context".to_string(), json!(context_window));
+                    }
+                    if let (Some(object), Some(reasoning)) =
+                        (value.as_object_mut(), zcode_reasoning_value(model))
+                    {
+                        object.insert("reasoning".to_string(), reasoning);
                     }
                     value
                 },
@@ -6806,6 +6947,201 @@ mod tests {
             yaml_string(model.get("id").expect("model id"));
             yaml_string(model.get("name").expect("model name"));
         }
+    }
+
+    fn reasoning_contract_client_export_test_providers() -> Vec<Provider> {
+        vec![Provider {
+            id: "volc".to_string(),
+            name: "Volcengine".to_string(),
+            base_url: "https://ark.example.test/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("Volc".to_string()),
+            sort_order: Some(1),
+            enabled: true,
+            locked: false,
+            models: vec![
+                Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Volc GLM-5.2".to_string()),
+                    input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+                    supported_reasoning_levels: Some(vec![
+                        "low".to_string(),
+                        "high".to_string(),
+                        "xhigh".to_string(),
+                    ]),
+                    default_reasoning_level: Some("high".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "glm-5.2-flash".to_string(),
+                    display_name: Some("Volc GLM-5.2 Flash".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+            ],
+        }]
+    }
+
+    #[test]
+    fn client_exports_map_configured_reasoning_contract() {
+        let root = unique_temp_dir("codexhub-reasoning-contract");
+        let models_path = root.join("models.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+
+        let expected_reasoning = serde_json::json!({
+            "enabled": true,
+            "variants": ["low", "high", "xhigh", "off"],
+            "defaultVariant": "high",
+        });
+
+        let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
+        let zcode_models = zcode_catalog_value
+            .pointer("/providers/0/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let zcode_entry = |model_id: &str| {
+            zcode_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing ZCode catalog entry for {model_id}"))
+        };
+        assert_eq!(zcode_entry("glm-5.2")["reasoning"], expected_reasoning);
+        assert!(zcode_entry("glm-5.2-flash").get("reasoning").is_none());
+
+        let zcode_v2 =
+            super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.2")
+                .unwrap();
+        let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2).unwrap();
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2/reasoning"),
+            Some(&expected_reasoning)
+        );
+        assert!(
+            zcode_v2_value
+                .pointer("/provider/codexhub-volc/models/glm-5.2-flash/reasoning")
+                .is_none()
+        );
+
+        let opencode_text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+        let opencode_entry = |model_id: &str| {
+            opencode_value
+                .pointer(&format!("/provider/codexhub-volc/models/{model_id}"))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing OpenCode entry for {model_id}"))
+        };
+        let capable = opencode_entry("glm-5.2");
+        assert_eq!(
+            capable.pointer("/options/reasoningEffort"),
+            Some(&serde_json::Value::String("high".to_string()))
+        );
+        assert_eq!(
+            capable.pointer("/variants/low/reasoningEffort"),
+            Some(&serde_json::Value::String("low".to_string()))
+        );
+        assert_eq!(
+            capable.pointer("/variants/xhigh/reasoningEffort"),
+            Some(&serde_json::Value::String("xhigh".to_string()))
+        );
+        let incapable = opencode_entry("glm-5.2-flash");
+        assert!(incapable.get("options").is_none());
+        assert!(incapable.get("variants").is_none());
+
+        let pi_text =
+            pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let pi_models = pi_value
+            .pointer("/providers/codexhub-volc/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let pi_reasoning = |model_id: &str| {
+            pi_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(|model| model.get("reasoning"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| panic!("missing Pi reasoning flag for {model_id}"))
+        };
+        assert!(pi_reasoning("glm-5.2"));
+        assert!(!pi_reasoning("glm-5.2-flash"));
+
+        let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let omp_block = |model_id: &str| {
+            omp_text
+                .split(&format!("      - id: \"{model_id}\"\n"))
+                .nth(1)
+                .and_then(|rest| rest.split("\n      - id: ").next())
+                .unwrap_or_else(|| panic!("missing OMP model block for {model_id}"))
+                .to_string()
+        };
+        assert!(omp_block("glm-5.2").contains("reasoning: true"));
+        assert!(omp_block("glm-5.2-flash").contains("reasoning: false"));
+    }
+
+    #[test]
+    fn omp_apply_writes_default_reasoning_effort_suffix_when_configured() {
+        let root = unique_temp_dir("codexhub-omp-reasoning-default");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, "modelRoles:\n  default: ollama/qwen\n").unwrap();
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2:high"));
+        assert!(config.contains("  vision: codexhub-volc/glm-5.2\n"));
+    }
+
+    #[test]
+    fn omp_apply_keeps_bare_default_selector_without_reasoning_contract() {
+        let root = unique_temp_dir("codexhub-omp-reasoning-bare");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, "modelRoles:\n  default: ollama/qwen\n").unwrap();
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2-flash",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2-flash\n"));
+        assert!(!config.contains("glm-5.2-flash:"));
     }
 
     fn image_capability_client_export_test_providers() -> Vec<Provider> {
