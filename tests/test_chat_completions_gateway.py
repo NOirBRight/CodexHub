@@ -1329,6 +1329,186 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         ]
         self.assertEqual(marker_events, [])
 
+    def _kimi_transparent_external_model(self):
+        return {
+            "alias": "kimi/k3",
+            "provider_alias": "kimi",
+            "upstream_name": "kimi",
+            "display_prefix": "Kimi",
+            "base_url": "https://api.kimi.example.test/coding",
+            "api_key": "kimi-test-token",
+            "upstream_model": "k3",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1048576,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+
+    def _run_kimi_transparent_chat(self, body: bytes, response_id: str):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
+        upstream_body = json.dumps({
+            "id": response_id,
+            "object": "chat.completion",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "kimi/k3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "kimi/k3": {"slug": "kimi/k3"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
+                ),
+            ),
+            patch(
+                "codex_proxy.resolve_external_model_alias",
+                return_value=self._kimi_transparent_external_model(),
+            ),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        return handler, mock_urlopen
+
+    def _tool_schema_marker_events(self):
+        return [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "tool_schema_boolean_normalized"
+        ]
+
+    def test_provider_scoped_transparent_chat_normalizes_boolean_tool_schemas(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "plan something"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "manage tasks",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task": {"type": "string"},
+                                        "outputSchema": True,
+                                        "blocked": False,
+                                        "mode": {
+                                            "type": "string",
+                                            "default": True,
+                                            "enum": ["fast", True],
+                                        },
+                                    },
+                                    "required": ["task"],
+                                },
+                            },
+                        },
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_normalized")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        item_properties = sent_payload["tools"][0]["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]
+        self.assertEqual(item_properties["outputSchema"], {})
+        self.assertEqual(item_properties["blocked"], {"not": {}})
+        # Value positions are not schemas and must stay untouched.
+        self.assertIs(item_properties["mode"]["default"], True)
+        self.assertEqual(item_properties["mode"]["enum"], ["fast", True])
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = self._tool_schema_marker_events()
+        self.assertEqual(len(marker_events), 1)
+        self.assertEqual(marker_events[0]["upstream"], "kimi")
+        self.assertEqual(marker_events[0]["schemas_rewritten"], 2)
+
+    def test_provider_scoped_transparent_chat_normalizes_nested_boolean_tool_schemas(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "deep"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "deep",
+                    "parameters": {
+                        "type": "object",
+                        "$defs": {"anything": True},
+                        "properties": {
+                            "combo": {
+                                "allOf": [True, {"type": "string"}],
+                                "anyOf": [{"type": "number"}],
+                            },
+                            "extra": {"additionalProperties": False},
+                        },
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_nested")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        params = sent_payload["tools"][0]["function"]["parameters"]
+        self.assertEqual(params["$defs"]["anything"], {})
+        self.assertEqual(params["properties"]["combo"]["allOf"][0], {})
+        self.assertEqual(params["properties"]["combo"]["allOf"][1], {"type": "string"})
+        self.assertEqual(params["properties"]["combo"]["anyOf"][0], {"type": "number"})
+        self.assertEqual(params["properties"]["extra"]["additionalProperties"], {"not": {}})
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = self._tool_schema_marker_events()
+        self.assertEqual(len(marker_events), 1)
+        self.assertEqual(marker_events[0]["schemas_rewritten"], 3)
+
+    def test_provider_scoped_transparent_chat_preserves_object_only_tool_schemas(self):
+        tool_parameters = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "file path"},
+                "flag": {"type": "boolean", "default": True},
+            },
+            "required": ["path"],
+            "additionalProperties": {"type": "string"},
+        }
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "read a file"}],
+            "stream": False,
+            "tools": [{"type": "function", "function": {"name": "read", "parameters": tool_parameters}}],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_passthrough")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["tools"][0]["function"]["parameters"], tool_parameters)
+        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(self._tool_schema_marker_events(), [])
+
     def _ollama_glm_external_model(self):
         return {
             "alias": "ollama-cloud/glm-5.2",

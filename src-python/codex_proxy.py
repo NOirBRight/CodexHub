@@ -8225,6 +8225,95 @@ def _rewrite_transparent_developer_role_messages(
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), rewritten
 
 
+# JSON Schema positions whose values are themselves schemas (or maps/lists of
+# schemas). Value positions such as ``default``, ``enum``, ``const``, or
+# ``examples`` must never be rewritten, so normalization is schema-aware rather
+# than a blind recursive boolean replacement.
+_TOOL_SCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "defs", "definitions", "dependentSchemas")
+_TOOL_SCHEMA_SINGLE_KEYS = (
+    "items",
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "propertyNames",
+    "if",
+    "then",
+    "else",
+    "not",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "contentSchema",
+)
+_TOOL_SCHEMA_LIST_KEYS = ("allOf", "anyOf", "oneOf", "prefixItems")
+
+
+def _normalize_tool_json_schema(node: Any, state: dict[str, int]) -> Any:
+    """Replace boolean subschemas with equivalent object forms.
+
+    ``true`` and ``{}`` accept any instance; ``false`` and ``{"not": {}}``
+    accept none. Some upstreams (for example Moonshot-flavored validators)
+    reject boolean property schemas outright, so transparent routes normalize
+    them without changing validation semantics.
+    """
+    if isinstance(node, bool):
+        state["rewritten"] += 1
+        return {} if node else {"not": {}}
+    if not isinstance(node, dict):
+        return node
+    next_node = dict(node)
+    for key in _TOOL_SCHEMA_MAP_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, dict):
+            next_node[key] = {
+                name: _normalize_tool_json_schema(subschema, state) if isinstance(subschema, (dict, bool)) else subschema
+                for name, subschema in value.items()
+            }
+    for key in _TOOL_SCHEMA_SINGLE_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, (dict, bool)):
+            next_node[key] = _normalize_tool_json_schema(value, state)
+        elif isinstance(value, list):
+            next_node[key] = [
+                _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
+                for item in value
+            ]
+    for key in _TOOL_SCHEMA_LIST_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, list):
+            next_node[key] = [
+                _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
+                for item in value
+            ]
+    return next_node
+
+
+def _normalize_transparent_tool_schema_booleans(body: bytes) -> tuple[bytes, int]:
+    payload = _safe_json_mapping(body)
+    if payload is None:
+        return body, 0
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return body, 0
+    state = {"rewritten": 0}
+    next_tools: list[Any] = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict):
+                parameters = function.get("parameters")
+                if isinstance(parameters, (dict, bool)):
+                    parameters = _normalize_tool_json_schema(parameters, state)
+                    function = {**function, "parameters": parameters}
+                    tool = {**tool, "function": function}
+        next_tools.append(tool)
+    if not state["rewritten"]:
+        return body, 0
+    next_payload = dict(payload)
+    next_payload["tools"] = next_tools
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), state["rewritten"]
+
+
+
 def _is_raw_provider_probe_context(event_context: Mapping[str, Any] | None) -> bool:
     return bool((event_context or {}).get("raw_provider_probe"))
 
@@ -12570,6 +12659,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream=upstream_name,
                         inbound_format=inbound_format,
                         messages_rewritten=developer_role_rewrites,
+                        **proxy_request_context,
+                    )
+                body, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(body)
+                if tool_schema_rewrites:
+                    write_proxy_event(
+                        "tool_schema_boolean_normalized",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        schemas_rewritten=tool_schema_rewrites,
                         **proxy_request_context,
                     )
             else:
