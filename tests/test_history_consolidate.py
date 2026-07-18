@@ -42,6 +42,41 @@ def create_state_with_columns(path: Path, columns: list[str], rows: list[tuple[o
 
 
 class HistoryConsolidateTests(unittest.TestCase):
+    def test_default_global_merge_preserves_saved_workspace_roots_without_importing_source_roots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            active = root / ".codex"
+            official = root / "official"
+            active.mkdir(parents=True)
+            official.mkdir(parents=True)
+            (active / ".codex-global-state.json").write_text(
+                json.dumps(
+                    {
+                        "electron-saved-workspace-roots": ["C:/active/project"],
+                        "project-order": ["active-project"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (official / ".codex-global-state.json").write_text(
+                json.dumps(
+                    {
+                        "electron-saved-workspace-roots": [
+                            "C:/official/stale-project",
+                            "C:/active/project",
+                        ],
+                        "project-order": ["official-project"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            merge_global_state(active, official, root / "backup")
+
+            state = json.loads((active / ".codex-global-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["electron-saved-workspace-roots"], ["C:/active/project"])
+            self.assertEqual(state["project-order"], ["active-project", "official-project"])
+
     def test_official_main_merges_source_branch_then_active_tail_and_normalizes_provider(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
