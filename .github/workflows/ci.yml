@@ -115,6 +115,36 @@ jobs:
             cargo build --release --locked
           }
 
+  rust-safe-file-linux:
+    name: Rust safe_file Linux compile and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Rust stable
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - name: Lint safe_file with clippy for Linux
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/src-tauri
+        run: rustup run stable clippy-driver --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-lint -D warnings
+
+      - name: Compile safe_file test harness for Linux
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/src-tauri
+        run: rustc +stable --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-tests
+
+      - name: Run safe_file Linux tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src-python
+        run: ./safe-file-linux-tests
+
   release-flavor-contract:
     name: Release flavor contract
     runs-on: windows-latest

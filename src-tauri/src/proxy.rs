@@ -3507,11 +3507,11 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         let paths = test_paths(&root);
         fs::create_dir_all(paths.proxy_dir()).unwrap();
         let lock = stale_lock_path(&paths.pid_path());
-        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").expect("write stale lock");
+        let _dead_child = write_dead_legacy_lock(&lock);
 
         write_pid(&paths, 42, 4555, &paths.proxy_script_path()).expect("write pid");
 
-        assert!(!lock.exists());
+        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
         assert_eq!(read_pid(&paths).expect("read pid"), Some(42));
     }
 
@@ -4410,6 +4410,8 @@ time.sleep(10)
         fs::create_dir_all(&path).unwrap();
         path
     }
+
+    use crate::lock_test_fixtures::write_dead_legacy_lock;
 
     fn stale_lock_path(path: &Path) -> PathBuf {
         path.with_file_name(format!(

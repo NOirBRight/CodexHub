@@ -1676,7 +1676,7 @@ mod tests {
         let root = temp_root("openai-usage-stale-lock");
         let cache_path = root.join("usage-cache.json");
         let lock = stale_lock_path(&cache_path);
-        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").expect("write stale lock");
+        let _dead_child = write_dead_legacy_lock(&lock);
         let usage: CodexAccountUsageResponse = serde_json::from_str(
             r#"{
               "summary": { "lifetimeTokens": 84 },
@@ -1693,7 +1693,7 @@ mod tests {
 
         write_usage_cache(&cache_path, &cache).expect("write usage cache");
 
-        assert!(!lock.exists());
+        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
         let written = fs::read_to_string(&cache_path).expect("cache text");
         assert!(written.contains(r#""fetched_at":10300"#));
         assert!(written.contains("2026-07-07"));
@@ -1785,6 +1785,8 @@ mod tests {
         let cache = CodexAccountUsageCache { fetched_at, usage };
         fs::write(path, serde_json::to_string(&cache).unwrap()).unwrap();
     }
+
+    use crate::lock_test_fixtures::write_dead_legacy_lock;
 
     fn stale_lock_path(path: &Path) -> PathBuf {
         path.with_file_name(format!(

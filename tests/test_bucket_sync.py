@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from bucket_sync import sync_dir
+from lock_fixtures import write_dead_legacy_lock
 
 
 class BucketSyncTests(unittest.TestCase):
@@ -85,13 +86,13 @@ class BucketSyncTests(unittest.TestCase):
             target = destination / "session.jsonl"
             target.write_bytes(b"a\nb\n")
             lock_path = target.with_name("session.jsonl.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
 
             counts = sync_dir(source, destination)
 
             self.assertEqual(target.read_bytes(), b"a\nb\nc\n")
             self.assertEqual(counts, {"merged": 1})
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
 
     def test_non_jsonl_overwrite_recovers_stale_atomic_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,13 +105,13 @@ class BucketSyncTests(unittest.TestCase):
             target = destination / "state.json"
             target.write_bytes(b'{"old":true}\n')
             lock_path = target.with_name("state.json.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
 
             counts = sync_dir(source, destination)
 
             self.assertEqual(target.read_bytes(), b'{"new":true}\n')
             self.assertEqual(counts, {"overwritten": 1})
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
 
 
 if __name__ == "__main__":

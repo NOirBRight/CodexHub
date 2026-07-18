@@ -944,11 +944,11 @@ mod tests {
     fn pending_update_write_recovers_stale_atomic_lock() {
         let path = unique_pending_update_path("stale-lock");
         let lock = stale_lock_path(&path);
-        fs::write(&lock, "pid=0\nacquired_at_millis=0\n").expect("write stale lock");
+        let _dead_child = write_dead_legacy_lock(&lock);
 
         write_pending_update(&path, "0.1.1").expect("write pending update");
 
-        assert!(!lock.exists());
+        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
         assert_eq!(
             read_pending_update(&path)
                 .expect("read pending update")
@@ -978,6 +978,8 @@ mod tests {
         }
         serde_json::to_string(&manifest).expect("serialize flavor manifest")
     }
+
+    use crate::lock_test_fixtures::write_dead_legacy_lock;
 
     fn stale_lock_path(path: &std::path::Path) -> std::path::PathBuf {
         path.with_file_name(format!(

@@ -7,6 +7,7 @@ from pathlib import Path
 import unittest
 
 from history_consolidate import merge_global_state, official_main
+from lock_fixtures import write_dead_legacy_lock
 
 
 def write_session(path: Path, thread_id: str, provider: str, markers: list[str]) -> None:
@@ -128,7 +129,7 @@ class HistoryConsolidateTests(unittest.TestCase):
             official.mkdir(parents=True)
             active_state_path = active / ".codex-global-state.json"
             lock_path = active_state_path.with_name(".codex-global-state.json.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
             (official / ".codex-global-state.json").write_text(
                 json.dumps(
                     {
@@ -151,7 +152,7 @@ class HistoryConsolidateTests(unittest.TestCase):
             self.assertEqual(state["remote-connection-auto-connect-by-host-id"], {})
             self.assertNotIn("selected-remote-host-id", state["electron-persisted-atom-state"])
             self.assertEqual(state["electron-persisted-atom-state"]["remote-connection-auto-connect-by-host-id"], {})
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
 
 
 if __name__ == "__main__":
