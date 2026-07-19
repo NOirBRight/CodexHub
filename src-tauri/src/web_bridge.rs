@@ -279,7 +279,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             .map_err(|error| format!("invalid providers argument: {error}"))?;
             to_value(config::save_providers(providers))
         }
-        "get_settings" => to_value(config::get_settings()),
+        "get_settings" => to_value(
+            config::get_settings().and_then(autostart::reconcile_settings),
+        ),
         "get_app_flavor" => to_value(Ok(crate::app_flavor::current_info())),
         "save_settings" => {
             let settings = serde_json::from_value(
@@ -553,6 +555,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             "enabled",
         )?)),
         "remove_autostart" => to_value(autostart::remove_autostart()),
+        "get_autostart_status" => to_value(autostart::get_autostart_status()),
         "open_codex_app" => to_value(crate::open_codex_app()),
         command => Err(format!("unknown CodexHub command: {command}")),
     }

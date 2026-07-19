@@ -356,7 +356,7 @@ fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
 
 #[tauri::command]
 fn get_settings() -> Result<Settings, String> {
-    config::get_settings()
+    autostart::reconcile_settings(config::get_settings()?)
 }
 
 #[tauri::command]
@@ -696,6 +696,11 @@ fn set_autostart(enabled: bool) -> Result<String, String> {
 #[tauri::command]
 fn remove_autostart() -> Result<String, String> {
     autostart::remove_autostart()
+}
+
+#[tauri::command]
+fn get_autostart_status() -> Result<autostart::AutostartStatus, String> {
+    autostart::get_autostart_status()
 }
 
 #[tauri::command]
@@ -1106,6 +1111,7 @@ fn run_gui() {
             sync_catalog,
             set_autostart,
             remove_autostart,
+            get_autostart_status,
             open_codex_app,
             window_minimize,
             window_toggle_maximize,

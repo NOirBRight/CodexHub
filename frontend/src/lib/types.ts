@@ -514,6 +514,12 @@ export interface Settings {
   proxy_port: number;
 }
 
+export interface AutostartStatus {
+  enabled: boolean;
+  authoritative: boolean;
+  state: "enabled" | "missing" | "malformed-or-stale" | "unsupported-readback";
+}
+
 export interface CodexContextGuardStatus {
   enabled: boolean;
   codex_enabled: boolean;

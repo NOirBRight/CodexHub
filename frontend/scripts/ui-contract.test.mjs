@@ -1524,10 +1524,11 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
 });
 
 test("settings drawer separates software and gateway autostart controls", async () => {
-  const [drawerSource, settingsSource, typesSource, appSource, mainSource, zhSource, enSource] = await Promise.all([
+  const [drawerSource, settingsSource, typesSource, tauriSource, appSource, mainSource, zhSource, enSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
     readFile(settingsLibPath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
     readFile(appPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
     readFile(zhLocalePath, "utf8"),
@@ -1548,6 +1549,11 @@ test("settings drawer separates software and gateway autostart controls", async 
   assert.match(drawerSource, /auto_start_software: value/);
   assert.match(drawerSource, /auto_start_gateway: value/);
   assert.match(typesSource, /auto_start_software: boolean;/);
+  assert.match(typesSource, /interface AutostartStatus/);
+  assert.match(typesSource, /authoritative: boolean;/);
+  assert.match(tauriSource, /getAutostartStatus:\s*\(\)\s*=>\s*call<AutostartStatus>\("get_autostart_status"\)/);
+  assert.match(mainSource, /autostart::reconcile_settings\(config::get_settings\(\)\?\)/);
+  assert.match(mainSource, /get_autostart_status/);
   assert.match(typesSource, /auto_start_gateway: boolean;/);
   assert.doesNotMatch(typesSource, /auto_start_proxy: boolean;/);
   assert.match(settingsSource, /auto_start_software:\s*true/);
