@@ -12,11 +12,34 @@ $taskName = if ($env:CODEXHUB_APP_FLAVOR -eq "debug") { "CodexHubBetaProxy" } el
 $expected = [System.IO.Path]::GetFullPath($Executable)
 
 function Get-OwnedTaskXml {
-    $output = & schtasks /Query /TN $taskName /XML 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        return $null
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & schtasks /Query /TN $taskName /XML 2>&1
+        $exitCode = $LASTEXITCODE
     }
-    return ($output -join "`n")
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($exitCode -eq 0) {
+        return ($output -join "`n")
+    }
+
+    try {
+        $service = New-Object -ComObject "Schedule.Service"
+        $service.Connect()
+        $folder = $service.GetFolder("\")
+        $null = $folder.GetTask($taskName)
+    }
+    catch {
+        if ($_.Exception.HResult -eq -2147024894) {
+            return $null
+        }
+        throw "Unable to determine whether the CodexHub-owned autostart registration is absent."
+    }
+
+    throw "Unable to query the existing CodexHub-owned autostart registration (exit code $exitCode)."
 }
 
 $xmlText = Get-OwnedTaskXml
