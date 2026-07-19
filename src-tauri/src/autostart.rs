@@ -1,4 +1,5 @@
 use crate::config::{self, CommandOutcome, CommandRunner, ProcessCommandRunner};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,32 @@ pub fn remove_autostart() -> Result<String, String> {
     let runner = ProcessCommandRunner;
 
     remove_autostart_with_dependencies(OperatingSystem::current(), &paths, &filesystem, &runner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AutostartStatus {
+    pub enabled: bool,
+    pub authoritative: bool,
+    pub state: &'static str,
+}
+
+pub fn get_autostart_status() -> Result<AutostartStatus, String> {
+    let paths = RuntimePathProvider;
+    get_autostart_status_with_dependencies(
+        OperatingSystem::current(),
+        &paths,
+        &ProcessCommandRunner,
+    )
+}
+
+pub fn reconcile_settings(mut settings: crate::Settings) -> Result<crate::Settings, String> {
+    let status = get_autostart_status()?;
+    if status.authoritative && settings.auto_start_software != status.enabled {
+        settings.auto_start_software = status.enabled;
+        config::save_settings(settings)
+    } else {
+        Ok(settings)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,7 +197,13 @@ fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<
         "LIMITED".to_string(),
         "/F".to_string(),
     ];
-    run_autostart_command("create Windows autostart task", program, &args, runner)?;
+    run_windows_command("create Windows autostart task", program, &args, runner)?;
+
+    let status = query_windows_autostart(exe, runner)?;
+    if !status.enabled {
+        let _ = delete_windows_task(runner);
+        return Err("Windows autostart registration failed readback verification".to_string());
+    }
 
     Ok(format!(
         "Autostart enabled via Windows Task Scheduler task {}",
@@ -179,6 +212,19 @@ fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<
 }
 
 fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String> {
+    delete_windows_task(runner)?;
+    let status = query_windows_task(runner)?;
+    if status.is_some() {
+        return Err("Windows autostart removal failed readback verification".to_string());
+    }
+
+    Ok(format!(
+        "Autostart removed from Windows Task Scheduler task {}",
+        windows_task_name()
+    ))
+}
+
+fn delete_windows_task(runner: &dyn CommandRunner) -> Result<(), String> {
     let program = Path::new("schtasks");
     let args = vec![
         "/Delete".to_string(),
@@ -192,15 +238,141 @@ fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String
         .map_err(|error| format!("{label} failed to start: {error}"))?;
 
     if outcome.code != Some(0) && !is_windows_task_missing(&outcome) {
-        return Err(config::format_command_failure(
-            label, program, &args, &outcome,
+        return Err(format!(
+            "{label} failed{}",
+            outcome
+                .code
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
         ));
     }
 
-    Ok(format!(
-        "Autostart removed from Windows Task Scheduler task {}",
-        windows_task_name()
-    ))
+    Ok(())
+}
+
+fn get_autostart_status_with_dependencies(
+    os: OperatingSystem,
+    paths: &dyn AutostartPathProvider,
+    runner: &dyn CommandRunner,
+) -> Result<AutostartStatus, String> {
+    if os != OperatingSystem::Windows {
+        return Ok(AutostartStatus {
+            enabled: false,
+            authoritative: false,
+            state: "unsupported-readback",
+        });
+    }
+    let exe = paths.current_exe()?;
+    query_windows_autostart(&exe, runner)
+}
+
+fn query_windows_autostart(
+    expected_exe: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AutostartStatus, String> {
+    let Some(xml) = query_windows_task(runner)? else {
+        return Ok(AutostartStatus {
+            enabled: false,
+            authoritative: true,
+            state: "missing",
+        });
+    };
+    let command = xml_element(&xml, "Command");
+    let arguments = xml_element(&xml, "Arguments");
+    let enabled = xml_element(&xml, "Enabled");
+    let has_one_logon_trigger = xml.matches("<LogonTrigger>").count() == 1;
+    let has_one_action = xml.matches("<Exec>").count() == 1;
+    let matches = command
+        .as_deref()
+        .is_some_and(|value| windows_paths_equal(value, expected_exe))
+        && arguments
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && enabled
+            .as_deref()
+            .is_none_or(|value| value.trim().eq_ignore_ascii_case("true"))
+        && has_one_logon_trigger
+        && has_one_action;
+    Ok(AutostartStatus {
+        enabled: matches,
+        authoritative: true,
+        state: if matches { "enabled" } else { "malformed-or-stale" },
+    })
+}
+
+fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<String>, String> {
+    let program = Path::new("schtasks");
+    let args = vec![
+        "/Query".to_string(),
+        "/TN".to_string(),
+        windows_task_name().to_string(),
+        "/XML".to_string(),
+    ];
+    let outcome = runner
+        .run(program, &args)
+        .map_err(|error| format!("query Windows autostart task failed to start: {error}"))?;
+    if outcome.code == Some(0) {
+        Ok(Some(outcome.stdout))
+    } else if is_windows_task_missing(&outcome) {
+        Ok(None)
+    } else {
+        Err(format!(
+            "query Windows autostart task failed{}",
+            outcome
+                .code
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
+        ))
+    }
+}
+
+fn run_windows_command(
+    label: &str,
+    program: &Path,
+    args: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<(), String> {
+    let outcome = runner
+        .run(program, args)
+        .map_err(|_| format!("{label} failed to start"))?;
+    if outcome.code == Some(0) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} failed{}",
+            outcome
+                .code
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
+        ))
+    }
+}
+
+fn xml_element(xml: &str, name: &str) -> Option<String> {
+    let start_tag = format!("<{name}>");
+    let end_tag = format!("</{name}>");
+    let start = xml.find(&start_tag)? + start_tag.len();
+    let end = xml[start..].find(&end_tag)? + start;
+    Some(
+        xml[start..end]
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
+}
+
+fn windows_paths_equal(actual: &str, expected: &Path) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim()
+            .trim_matches('"')
+            .trim_start_matches(r"\\?\")
+            .replace('/', "\\")
+            .to_lowercase()
+    };
+    normalize(actual) == normalize(&expected.to_string_lossy())
 }
 
 fn register_macos_autostart(
@@ -395,7 +567,7 @@ fn linux_service_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, Stri
 }
 
 fn windows_task_command(exe: &Path) -> String {
-    format!("\"{}\" start", exe.to_string_lossy())
+    format!("\"{}\"", exe.to_string_lossy())
 }
 
 fn macos_plist_content(exe: &Path) -> String {
@@ -517,8 +689,9 @@ fn escape_xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        remove_autostart_with_dependencies, set_autostart_with_dependencies, AutostartFileSystem,
-        AutostartPathProvider, OperatingSystem,
+        get_autostart_status_with_dependencies, remove_autostart_with_dependencies,
+        set_autostart_with_dependencies, AutostartFileSystem, AutostartPathProvider,
+        OperatingSystem,
     };
     use crate::config::{CommandOutcome, CommandRunner};
     use std::cell::RefCell;
@@ -532,7 +705,14 @@ mod tests {
             PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
-        let runner = RecordingRunner::successful();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "created", "")),
+            Ok(command_outcome(
+                Some(0),
+                &windows_task_xml(r"C:\Program Files\CodexHub\codexhub.exe"),
+                "",
+            )),
+        ]);
 
         let message = set_autostart_with_dependencies(
             true,
@@ -547,21 +727,24 @@ mod tests {
         assert_eq!(filesystem.writes.borrow().len(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("schtasks"),
-                args: vec![
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("schtasks"),
+                    args: vec![
                     "/Create".to_string(),
                     "/TN".to_string(),
                     super::windows_task_name().to_string(),
                     "/TR".to_string(),
-                    r#""C:\Program Files\CodexHub\codexhub.exe" start"#.to_string(),
+                    r#""C:\Program Files\CodexHub\codexhub.exe""#.to_string(),
                     "/SC".to_string(),
                     "ONLOGON".to_string(),
                     "/RL".to_string(),
                     "LIMITED".to_string(),
                     "/F".to_string(),
-                ],
-            }]
+                    ],
+                },
+                windows_query_command(),
+            ]
         );
     }
 
@@ -569,22 +752,32 @@ mod tests {
     fn windows_remove_autostart_deletes_logon_task() {
         let paths = FakePaths::default();
         let filesystem = MemoryFileSystem::default();
-        let runner = RecordingRunner::successful();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "deleted", "")),
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "ERROR: The system cannot find the file specified.",
+            )),
+        ]);
 
         remove_autostart_with_dependencies(OperatingSystem::Windows, &paths, &filesystem, &runner)
             .unwrap();
 
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("schtasks"),
-                args: vec![
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("schtasks"),
+                    args: vec![
                     "/Delete".to_string(),
                     "/TN".to_string(),
                     super::windows_task_name().to_string(),
                     "/F".to_string(),
-                ],
-            }]
+                    ],
+                },
+                windows_query_command(),
+            ]
         );
     }
 
@@ -595,8 +788,18 @@ mod tests {
             PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
-        let runner =
-            RecordingRunner::failed(1, "", "ERROR: The system cannot find the file specified.");
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "ERROR: The system cannot find the file specified.",
+            )),
+            Ok(command_outcome(
+                Some(1),
+                "",
+                "ERROR: The system cannot find the file specified.",
+            )),
+        ]);
 
         set_autostart_with_dependencies(
             false,
@@ -610,16 +813,120 @@ mod tests {
         assert_eq!(*paths.current_exe_calls.borrow(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("schtasks"),
-                args: vec![
+            &[
+                RecordedCommand {
+                    program: PathBuf::from("schtasks"),
+                    args: vec![
                     "/Delete".to_string(),
                     "/TN".to_string(),
                     super::windows_task_name().to_string(),
                     "/F".to_string(),
-                ],
-            }]
+                    ],
+                },
+                windows_query_command(),
+            ]
         );
+    }
+
+    #[test]
+    fn windows_readback_rejects_stale_and_accepts_spaced_non_ascii_path() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\应用 程序\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let stale = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            &windows_task_xml(r"D:\Old\codexhub.exe"),
+            "",
+        ))]);
+        let status = get_autostart_status_with_dependencies(
+            OperatingSystem::Windows,
+            &paths,
+            &stale,
+        )
+        .unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.state, "malformed-or-stale");
+
+        let valid = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            &windows_task_xml(r"C:\应用 程序\CodexHub\codexhub.exe"),
+            "",
+        ))]);
+        assert!(get_autostart_status_with_dependencies(
+            OperatingSystem::Windows,
+            &paths,
+            &valid,
+        )
+        .unwrap()
+        .enabled);
+    }
+
+    #[test]
+    fn windows_enable_rolls_back_registration_when_readback_is_malformed() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "created", "")),
+            Ok(command_outcome(Some(0), "<Task><Actions /></Task>", "")),
+            Ok(command_outcome(Some(0), "deleted", "")),
+        ]);
+
+        let error = set_autostart_with_dependencies(
+            true,
+            OperatingSystem::Windows,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("readback verification"));
+        assert_eq!(runner.commands.borrow().len(), 3);
+        assert_eq!(runner.commands.borrow()[2].args[0], "/Delete");
+    }
+
+    #[test]
+    fn windows_missing_registration_reads_back_disabled() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(1),
+            "",
+            "ERROR: The system cannot find the file specified.",
+        ))]);
+
+        let status = get_autostart_status_with_dependencies(
+            OperatingSystem::Windows,
+            &paths,
+            &runner,
+        )
+        .unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.state, "missing");
+    }
+
+    fn windows_task_xml(command: &str) -> String {
+        format!(
+            "<Task><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings><Actions><Exec><Command>{command}</Command></Exec></Actions></Task>"
+        )
+    }
+
+    fn windows_query_command() -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("schtasks"),
+            args: vec![
+                "/Query".to_string(),
+                "/TN".to_string(),
+                super::windows_task_name().to_string(),
+                "/XML".to_string(),
+            ],
+        }
     }
 
     #[test]
@@ -1006,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn command_runner_failure_includes_exit_code_stdout_and_stderr() {
+    fn windows_command_failure_is_sanitized() {
         let paths = FakePaths::new(
             PathBuf::from(r"C:\CodexHub\codexhub.exe"),
             PathBuf::from(r"C:\Users\codexhub"),
@@ -1024,9 +1331,9 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("exit code 42"));
-        assert!(error.contains("printed stdout"));
-        assert!(error.contains("printed stderr"));
-        assert!(error.contains("schtasks"));
+        assert!(!error.contains("printed stdout"));
+        assert!(!error.contains("printed stderr"));
+        assert!(!error.contains(r"C:\CodexHub"));
     }
 
     #[test]
