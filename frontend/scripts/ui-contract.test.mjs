@@ -914,6 +914,14 @@ test("usage summary and chart use the same global time window", async () => {
   assert.match(tauriSource, /endTs/);
 });
 
+test("usage cache-hit gating includes Kimi and configured capable providers only", async () => {
+  const usageSource = await readFile(stackedUsagePath, "utf8");
+
+  assert.match(usageSource, /\["official", "openai", "official_openai", "kimi"\]/);
+  assert.match(usageSource, /provider\.reports_cached_input_tokens !== true/);
+  assert.match(usageSource, /eventReportsCacheUsage\(event, cacheCapableProviders\)/);
+});
+
 test("stacked usage chart uses neutral separators instead of misleading series outlines", async () => {
   const usageSource = await readFile(stackedUsagePath, "utf8");
   const svgSection = usageSource.match(/<svg[\s\S]*?<\/svg>/)?.[0] ?? "";
