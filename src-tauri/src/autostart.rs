@@ -261,8 +261,10 @@ fn query_windows_autostart(
             state: "missing",
         });
     };
-    let command = xml_element(&readback.xml, "Command");
-    let arguments = xml_element(&readback.xml, "Arguments");
+    let action = xml_element(&readback.xml, "Exec").unwrap_or_default();
+    let command = xml_element(&action, "Command");
+    let working_directory = xml_element(&action, "WorkingDirectory");
+    let arguments = xml_element(&action, "Arguments");
     let enabled = xml_element(&readback.xml, "Enabled");
     let principal = xml_element(&readback.xml, "Principal").unwrap_or_default();
     let trigger = xml_element(&readback.xml, "LogonTrigger").unwrap_or_default();
@@ -275,9 +277,13 @@ fn query_windows_autostart(
     let has_one_principal = xml_opening_tag_count(&readback.xml, "Principal") == 1;
     let has_one_logon_trigger = readback.xml.matches("<LogonTrigger").count() == 1;
     let has_one_action = readback.xml.matches("<Exec").count() == 1;
+    let expected_working_directory = expected_exe.parent().unwrap_or_else(|| Path::new("."));
     let matches = command
         .as_deref()
         .is_some_and(|value| windows_paths_equal(value, expected_exe))
+        && working_directory
+            .as_deref()
+            .is_some_and(|value| windows_paths_equal(value, expected_working_directory))
         && arguments
             .as_deref()
             .is_none_or(|value| value.trim().is_empty())
@@ -979,6 +985,11 @@ mod tests {
                 "</LogonType><RunLevel>HighestAvailable</RunLevel>",
             ),
             valid.replace(super::WINDOWS_TASK_DESCRIPTION, "Not a CodexHub-owned task"),
+            valid.replace("<WorkingDirectory>C:\\CodexHub</WorkingDirectory>", ""),
+            valid.replace(
+                "<WorkingDirectory>C:\\CodexHub</WorkingDirectory>",
+                "<WorkingDirectory>D:\\Wrong</WorkingDirectory>",
+            ),
             valid
                 .replace(
                     "<Principal id=\"Author\">",
@@ -1052,8 +1063,12 @@ mod tests {
     }
 
     fn windows_task_xml(command: &str) -> String {
+        let working_directory = Path::new(command)
+            .parent()
+            .expect("Windows executable fixture has a parent")
+            .to_string_lossy();
         format!(
-            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal id=\"Author\"><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Triggers><LogonTrigger><UserId>CODEXHUB-SMOKE\\smoke</UserId></LogonTrigger></Triggers><Settings /><Actions Context=\"Author\"><Exec><Command>{command}</Command></Exec></Actions></Task>",
+            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal id=\"Author\"><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Triggers><LogonTrigger><UserId>CODEXHUB-SMOKE\\smoke</UserId></LogonTrigger></Triggers><Settings /><Actions Context=\"Author\"><Exec><Command>{command}</Command><WorkingDirectory>{working_directory}</WorkingDirectory></Exec></Actions></Task>",
             super::WINDOWS_TASK_DESCRIPTION,
         )
     }

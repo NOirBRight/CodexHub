@@ -57,6 +57,7 @@ if ($null -eq $xmlText) {
 
 [xml]$task = $xmlText
 $command = [System.IO.Path]::GetFullPath([string]$task.Task.Actions.Exec.Command)
+$workingDirectoryText = [string]$task.Task.Actions.Exec.WorkingDirectory
 $arguments = [string]$task.Task.Actions.Exec.Arguments
 $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $currentSid = $currentIdentity.User.Value
@@ -66,6 +67,14 @@ $trigger = $task.Task.Triggers.LogonTrigger
 $triggerUser = [string]$trigger.UserId
 if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($command, $expected)) {
     throw "Autostart action is stale or points to a different executable."
+}
+if ([string]::IsNullOrWhiteSpace($workingDirectoryText)) {
+    throw "Autostart working directory is missing."
+}
+$workingDirectory = [System.IO.Path]::GetFullPath($workingDirectoryText)
+$expectedWorkingDirectory = [System.IO.Path]::GetDirectoryName($expected)
+if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($workingDirectory, $expectedWorkingDirectory)) {
+    throw "Autostart working directory is stale or malformed."
 }
 if (-not [string]::IsNullOrWhiteSpace($arguments) -or $null -eq $trigger) {
     throw "Autostart action or logon trigger is malformed."
