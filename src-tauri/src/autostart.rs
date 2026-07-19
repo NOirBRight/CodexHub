@@ -1105,24 +1105,33 @@ mod tests {
             "</Triggers>",
             "<BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>",
         );
+        let unknown_action = owned.replace("<Exec>", "<UnknownAction>").replace(
+            "</Exec>",
+            "</UnknownAction>",
+        );
+        let unknown_trigger = owned
+            .replace("<LogonTrigger>", "<UnknownTrigger>")
+            .replace("</LogonTrigger>", "</UnknownTrigger>");
+        let malformed = "<Task><Actions /></Task>";
 
         assert_eq!(run_uninstall_script_fixture(exe, &[&owned, &owned]), (0, true));
         assert_eq!(
             run_uninstall_script_fixture(exe, &[&owned, &replacement]),
             (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
         );
-        assert_eq!(
-            run_uninstall_script_fixture(exe, &["<Task><Actions /></Task>"]),
-            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
-        );
-        assert_eq!(
-            run_uninstall_script_fixture(exe, &[&extra_action]),
-            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
-        );
-        assert_eq!(
-            run_uninstall_script_fixture(exe, &[&extra_trigger]),
-            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
-        );
+        for (name, xml) in [
+            ("missing containers", malformed),
+            ("Exec plus ComHandler", extra_action.as_str()),
+            ("LogonTrigger plus BootTrigger", extra_trigger.as_str()),
+            ("unknown action element", unknown_action.as_str()),
+            ("unknown trigger element", unknown_trigger.as_str()),
+        ] {
+            assert_eq!(
+                run_uninstall_script_fixture(exe, &[xml, xml]),
+                (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false),
+                "{name} must preserve without deletion"
+            );
+        }
     }
 
     #[test]
