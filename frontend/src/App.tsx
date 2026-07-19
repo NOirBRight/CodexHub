@@ -597,6 +597,9 @@ export default function App() {
 
   const startAppUpdateInstall = useCallback(
     async (source: "settings" | "toast" = "settings") => {
+      if (!window.confirm(t("runtime.gatewayRetirementWarning"))) {
+        return;
+      }
       const toastId = updateAvailableToastId.current;
       if (toastId) {
         dismissToast(toastId);
@@ -933,8 +936,11 @@ export default function App() {
   const runRuntimeAction = useCallback(async (
     label: string,
     action: () => Promise<AppStatus>,
-    options?: { toast?: boolean },
+    options?: { toast?: boolean; warnBeforeGatewayRetirement?: boolean },
   ) => {
+    if (options?.warnBeforeGatewayRetirement && !window.confirm(t("runtime.gatewayRetirementWarning"))) {
+      return;
+    }
     setBusy(label);
     const toastId =
       options?.toast === false
@@ -975,6 +981,9 @@ export default function App() {
     setBusy("settings");
     try {
       const restartGateway = shouldRestartGateway(settings, next, gatewayStatus);
+      if (restartGateway && !window.confirm(t("runtime.gatewayRetirementWarning"))) {
+        return t("runtime.gatewayRetirementCancelled");
+      }
       if (settings && next.auto_start_software !== settings.auto_start_software) {
         if (next.auto_start_software) {
           await api.setAutostart(true);
@@ -1035,13 +1044,16 @@ export default function App() {
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const startProxy = useCallback(() => runRuntimeAction("start", api.startProxy), [runRuntimeAction]);
-  const stopProxy = useCallback(() => runRuntimeAction("stop", api.stopProxy), [runRuntimeAction]);
+  const stopProxy = useCallback(
+    () => runRuntimeAction("stop", api.stopProxy, { warnBeforeGatewayRetirement: true }),
+    [runRuntimeAction],
+  );
   const startProxyQuiet = useCallback(
     () => runRuntimeAction("start", api.startProxy, { toast: false }),
     [runRuntimeAction],
   );
   const stopProxyQuiet = useCallback(
-    () => runRuntimeAction("stop", api.stopProxy, { toast: false }),
+    () => runRuntimeAction("stop", api.stopProxy, { toast: false, warnBeforeGatewayRetirement: true }),
     [runRuntimeAction],
   );
   const updateProvidersCache = useCallback(

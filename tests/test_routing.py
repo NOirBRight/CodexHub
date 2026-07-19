@@ -1262,12 +1262,12 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy._open_upstream_response", side_effect=[interrupted, success]) as open_response,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(open_response.call_count, 2)
-        mock_sleep.assert_called_once()
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         downstream = b"".join(fake.wfile.writes)
         self.assertIn(b"response.completed", downstream)
@@ -1306,12 +1306,12 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy._open_upstream_response", side_effect=[interrupted, unused_success]) as open_response,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(open_response.call_count, 1)
-        mock_sleep.assert_not_called()
+        mock_retry_wait.assert_not_called()
         downstream = b"".join(fake.wfile.writes)
         self.assertIn(b"response.created", downstream)
         self.assertIn(b"response.failed", downstream)
@@ -2047,12 +2047,12 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy._official_urlopen", side_effect=[error, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 1)
-        mock_sleep.assert_not_called()
+        mock_retry_wait.assert_not_called()
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertNotIn("upstream_retry", event_names)
         self.assertNotIn("sse_retry_notice", event_names)
@@ -2088,12 +2088,12 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch("codex_proxy._official_urlopen", side_effect=[TimeoutError("connect timed out"), success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once()
+        mock_retry_wait.assert_called_once_with(2)
         retry_events = [
             call.kwargs
             for call in self.write_proxy_event.call_args_list
@@ -3244,12 +3244,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertNotIn(b"event: codexhub.retry\n", written)
@@ -3303,12 +3303,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertNotIn(b"event: codexhub.retry\n", written)
@@ -3374,12 +3374,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_transparent_retry", written)
@@ -3445,12 +3445,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_retry", written)
@@ -3513,12 +3513,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_text_retry", written)
@@ -3585,12 +3585,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[*failed_streams, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 5)
-        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [2, 2, 4, 6])
+        self.assertEqual([call.args[0] for call in mock_retry_wait.call_args_list], [2, 2, 4, 6])
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_text_retry", written)
@@ -3651,12 +3651,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[empty_stream, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_visible", written)
@@ -3722,12 +3722,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[*empty_streams, should_not_be_used]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(2)
+        mock_retry_wait.assert_called_once_with(2)
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"upstream_empty_completed_response", written)
@@ -3799,12 +3799,12 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[failed_stream]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 1)
-        mock_sleep.assert_not_called()
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"resp_tool_reset", written)

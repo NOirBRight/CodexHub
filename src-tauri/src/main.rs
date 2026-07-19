@@ -755,13 +755,13 @@ fn run_tray_action(app: &AppHandle, id: &str) {
             );
         }
         TRAY_START_GATEWAY => {
-            run_tray_lifecycle_action(app, "Start Gateway", start_proxy);
+            run_tray_lifecycle_action(app, "Start Gateway", start_proxy, false);
         }
         TRAY_STOP_GATEWAY => {
-            run_tray_lifecycle_action(app, "Stop Gateway", stop_proxy);
+            run_tray_lifecycle_action(app, "Stop Gateway", stop_proxy, true);
         }
         TRAY_RESTART_GATEWAY => {
-            run_tray_lifecycle_action(app, "Restart Gateway", restart_proxy);
+            run_tray_lifecycle_action(app, "Restart Gateway", restart_proxy, true);
         }
         TRAY_EXIT => app.exit(0),
         _ => {}
@@ -777,9 +777,15 @@ fn run_tray_lifecycle_action(
     app: &AppHandle,
     action: &'static str,
     work: fn() -> Result<AppStatus, String>,
+    retires_gateway: bool,
 ) {
     let toast_id = next_tray_toast_id();
-    emit_tray_toast(app, tray_loading_toast(toast_id.clone(), action));
+    let loading_toast = if retires_gateway {
+        tray_retiring_gateway_loading_toast(toast_id.clone(), action)
+    } else {
+        tray_loading_toast(toast_id.clone(), action)
+    };
+    emit_tray_toast(app, loading_toast);
     let app = app.clone();
     std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
         let result = work();
@@ -798,6 +804,25 @@ fn tray_loading_toast(id: String, action: &str) -> TrayToast {
         id,
         text: format!("{action}..."),
         tone: "loading".to_string(),
+    }
+}
+
+fn tray_retiring_gateway_loading_toast(id: String, action: &str) -> TrayToast {
+    let locale = config::get_settings()
+        .map(|settings| settings.locale)
+        .unwrap_or_default();
+    TrayToast {
+        id,
+        text: format!("{} {action}...", gateway_retirement_warning_for_locale(&locale)),
+        tone: "loading".to_string(),
+    }
+}
+
+fn gateway_retirement_warning_for_locale(locale: &str) -> &'static str {
+    if locale == "zh-CN" {
+        "活跃的 Codex 任务可能会被中断。"
+    } else {
+        "Active Codex Tasks may be interrupted."
     }
 }
 
@@ -1112,7 +1137,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{start_gateway_after_startup, tray_loading_toast, tray_toast_for, AppStatus};
+    use super::{
+        gateway_retirement_warning_for_locale, start_gateway_after_startup, tray_loading_toast,
+        tray_retiring_gateway_loading_toast, tray_toast_for, AppStatus,
+    };
     use std::cell::Cell;
 
     #[test]
@@ -1133,6 +1161,14 @@ mod tests {
         let loading = tray_loading_toast("same-toast".to_string(), "Start Gateway");
         assert_eq!(loading.id, "same-toast");
         assert_eq!(loading.tone, "loading");
+
+        let retiring = tray_retiring_gateway_loading_toast("same-toast".to_string(), "Stop Gateway");
+        assert_eq!(retiring.id, loading.id);
+        assert_eq!(retiring.tone, "loading");
+        assert_eq!(
+            gateway_retirement_warning_for_locale("zh-CN"),
+            "活跃的 Codex 任务可能会被中断。"
+        );
 
         let success = tray_toast_for("same-toast".to_string(), "Start Gateway", Ok(status()));
         assert_eq!(success.id, loading.id);
