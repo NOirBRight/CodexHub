@@ -261,7 +261,7 @@ fn windows_uninstall_cleanup_script_with_prelude(
     let expected_exe = powershell_literal(&expected_exe.to_string_lossy());
     let description = powershell_literal(WINDOWS_TASK_DESCRIPTION);
     format!(
-        "{}function Resolve-Sid($value){{if([string]::IsNullOrWhiteSpace($value)){{return $null}};try{{return ([Security.Principal.SecurityIdentifier]::new($value)).Value}}catch{{try{{return ([Security.Principal.NTAccount]::new($value)).Translate([Security.Principal.SecurityIdentifier]).Value}}catch{{return $null}}}}}};function Get-TaskOrNull{{try{{return $folder.GetTask({task})}}catch{{if($_.Exception.HResult -eq -2147024894){{return $null}};throw}}}};function Test-Owned($task){{try{{[xml]$xml=$task.Xml;$principals=@($xml.Task.Principals.Principal);$triggers=@($xml.Task.Triggers.LogonTrigger);$actions=@($xml.Task.Actions.Exec);if($principals.Count -ne 1 -or $triggers.Count -ne 1 -or $actions.Count -ne 1){{return $false}};$principal=$principals[0];$trigger=$triggers[0];$action=$actions[0];$principalSid=Resolve-Sid ([string]$principal.UserId);$triggerSid=Resolve-Sid ([string]$trigger.UserId);if($null -eq $principalSid -or $null -eq $triggerSid -or $principalSid -ne $triggerSid){{return $false}};$expected=[IO.Path]::GetFullPath({expected_exe});$command=[IO.Path]::GetFullPath([string]$action.Command);$working=[IO.Path]::GetFullPath([string]$action.WorkingDirectory);$arguments=[string]$action.Arguments;$runLevel=[string]$principal.RunLevel;$triggerEnabled=[string]$trigger.Enabled;$taskEnabled=[string]$xml.Task.Settings.Enabled;return $task.Path -eq ('\\'+{task}) -and [string]$xml.Task.RegistrationInfo.Description -eq {description} -and [StringComparer]::OrdinalIgnoreCase.Equals($command,$expected) -and [StringComparer]::OrdinalIgnoreCase.Equals($working,[IO.Path]::GetDirectoryName($expected)) -and [string]::IsNullOrWhiteSpace($arguments) -and [string]$principal.LogonType -eq 'InteractiveToken' -and ([string]::IsNullOrWhiteSpace($runLevel) -or $runLevel -eq 'LeastPrivilege') -and ([string]::IsNullOrWhiteSpace($triggerEnabled) -or $triggerEnabled -eq 'true') -and ([string]::IsNullOrWhiteSpace($taskEnabled) -or $taskEnabled -eq 'true')}}catch{{return $false}}}};$first=Get-TaskOrNull;if($null -eq $first){{exit 0}};if(-not (Test-Owned $first)){{exit 3}};$firstXml=$first.Xml;$second=Get-TaskOrNull;if($null -eq $second -or $second.Xml -cne $firstXml -or -not (Test-Owned $second)){{exit 3}};$folder.DeleteTask({task},0);if($null -ne (Get-TaskOrNull)){{exit 4}};exit 0",
+        "{}function Resolve-Sid($value){{if([string]::IsNullOrWhiteSpace($value)){{return $null}};try{{return ([Security.Principal.SecurityIdentifier]::new($value)).Value}}catch{{try{{return ([Security.Principal.NTAccount]::new($value)).Translate([Security.Principal.SecurityIdentifier]).Value}}catch{{return $null}}}}}};function Get-TaskOrNull{{try{{return $folder.GetTask({task})}}catch{{if($_.Exception.HResult -eq -2147024894){{return $null}};throw}}}};function Test-Owned($task){{try{{[xml]$xml=$task.Xml;$principalContainer=$xml.Task.Principals;$triggerContainer=$xml.Task.Triggers;$actionContainer=$xml.Task.Actions;if($null -eq $principalContainer -or $null -eq $triggerContainer -or $null -eq $actionContainer){{return $false}};$principals=@($principalContainer.ChildNodes|Where-Object{{$_.NodeType -eq [Xml.XmlNodeType]::Element}});$triggers=@($triggerContainer.ChildNodes|Where-Object{{$_.NodeType -eq [Xml.XmlNodeType]::Element}});$actions=@($actionContainer.ChildNodes|Where-Object{{$_.NodeType -eq [Xml.XmlNodeType]::Element}});if($principals.Count -ne 1 -or $principals[0].LocalName -ne 'Principal' -or $triggers.Count -ne 1 -or $triggers[0].LocalName -ne 'LogonTrigger' -or $actions.Count -ne 1 -or $actions[0].LocalName -ne 'Exec'){{return $false}};$principal=$principals[0];$trigger=$triggers[0];$action=$actions[0];$principalSid=Resolve-Sid ([string]$principal.UserId);$triggerSid=Resolve-Sid ([string]$trigger.UserId);if($null -eq $principalSid -or $null -eq $triggerSid -or $principalSid -ne $triggerSid){{return $false}};$expected=[IO.Path]::GetFullPath({expected_exe});$command=[IO.Path]::GetFullPath([string]$action.Command);$working=[IO.Path]::GetFullPath([string]$action.WorkingDirectory);$arguments=[string]$action.Arguments;$runLevel=[string]$principal.RunLevel;$triggerEnabled=[string]$trigger.Enabled;$taskEnabled=[string]$xml.Task.Settings.Enabled;return $task.Path -eq ('\\'+{task}) -and [string]$xml.Task.RegistrationInfo.Description -eq {description} -and [StringComparer]::OrdinalIgnoreCase.Equals($command,$expected) -and [StringComparer]::OrdinalIgnoreCase.Equals($working,[IO.Path]::GetDirectoryName($expected)) -and [string]::IsNullOrWhiteSpace($arguments) -and [string]$principal.LogonType -eq 'InteractiveToken' -and ([string]::IsNullOrWhiteSpace($runLevel) -or $runLevel -eq 'LeastPrivilege') -and ([string]::IsNullOrWhiteSpace($triggerEnabled) -or $triggerEnabled -eq 'true') -and ([string]::IsNullOrWhiteSpace($taskEnabled) -or $taskEnabled -eq 'true')}}catch{{return $false}}}};$first=Get-TaskOrNull;if($null -eq $first){{exit 0}};if(-not (Test-Owned $first)){{exit 3}};$firstXml=$first.Xml;$second=Get-TaskOrNull;if($null -eq $second -or $second.Xml -cne $firstXml -or -not (Test-Owned $second)){{exit 3}};$folder.DeleteTask({task},0);if($null -ne (Get-TaskOrNull)){{exit 4}};exit 0",
         scheduler_prelude,
     )
 }
@@ -1097,15 +1097,31 @@ mod tests {
             )
             .replace("S-1-5-21-1000", "S-1-5-21-2000");
         let replacement = owned.replace(super::WINDOWS_TASK_DESCRIPTION, "replacement");
+        let extra_action = owned.replace(
+            "</Actions>",
+            "<ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler></Actions>",
+        );
+        let extra_trigger = owned.replace(
+            "</Triggers>",
+            "<BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>",
+        );
 
-        assert_eq!(run_uninstall_script_fixture(exe, &[&owned, &owned]), 0);
+        assert_eq!(run_uninstall_script_fixture(exe, &[&owned, &owned]), (0, true));
         assert_eq!(
             run_uninstall_script_fixture(exe, &[&owned, &replacement]),
-            super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE
+            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
         );
         assert_eq!(
             run_uninstall_script_fixture(exe, &["<Task><Actions /></Task>"]),
-            super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE
+            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
+        );
+        assert_eq!(
+            run_uninstall_script_fixture(exe, &[&extra_action]),
+            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
+        );
+        assert_eq!(
+            run_uninstall_script_fixture(exe, &[&extra_trigger]),
+            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
         );
     }
 
@@ -1347,7 +1363,7 @@ mod tests {
         }
     }
 
-    fn run_uninstall_script_fixture(exe: &Path, task_xml: &[&str]) -> i32 {
+    fn run_uninstall_script_fixture(exe: &Path, task_xml: &[&str]) -> (i32, bool) {
         let mut prelude = "$ErrorActionPreference='Stop';$global:tasks=New-Object Collections.Queue;"
             .to_string();
         for xml in task_xml {
@@ -1357,13 +1373,16 @@ mod tests {
                 super::powershell_literal(xml),
             ));
         }
-        prelude.push_str("$folder=New-Object psobject;$folder|Add-Member ScriptMethod GetTask {if($global:tasks.Count -eq 0){return $null};return $global:tasks.Dequeue()};$folder|Add-Member ScriptMethod DeleteTask {$global:deleted=$true};");
+        prelude.push_str("$folder=New-Object psobject;$folder|Add-Member ScriptMethod GetTask {if($global:tasks.Count -eq 0){return $null};return $global:tasks.Dequeue()};$folder|Add-Member ScriptMethod DeleteTask {Write-Output 'CODEXHUB_DELETE_CALLED'};");
         let script = super::windows_uninstall_cleanup_script_with_prelude(exe, &prelude);
         let outcome = std::process::Command::new("powershell.exe")
             .args(super::windows_powershell_args(&script))
             .output()
             .expect("PowerShell fixture should start");
-        outcome.status.code().expect("PowerShell should return a code")
+        (
+            outcome.status.code().expect("PowerShell should return a code"),
+            String::from_utf8_lossy(&outcome.stdout).contains("CODEXHUB_DELETE_CALLED"),
+        )
     }
 
     fn windows_query_command() -> RecordedCommand {
