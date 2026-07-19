@@ -268,6 +268,10 @@ fn query_windows_autostart(
     let trigger = xml_element(&readback.xml, "LogonTrigger").unwrap_or_default();
     let principal_user = xml_element(&principal, "UserId");
     let trigger_user = xml_element(&trigger, "UserId");
+    let trigger_is_current_user = trigger_user.as_deref().is_some_and(|user| {
+        windows_identity_equal(user, &readback.current_sid)
+            || windows_identity_equal(user, &readback.current_name)
+    });
     let has_one_principal = xml_opening_tag_count(&readback.xml, "Principal") == 1;
     let has_one_logon_trigger = readback.xml.matches("<LogonTrigger").count() == 1;
     let has_one_action = readback.xml.matches("<Exec").count() == 1;
@@ -289,7 +293,7 @@ fn query_windows_autostart(
             .as_deref()
             .is_none_or(|run_level| run_level == "LeastPrivilege")
         && principal_user.as_deref() == Some(readback.current_sid.as_str())
-        && trigger_user == principal_user;
+        && trigger_is_current_user;
     Ok(AutostartStatus {
         enabled: matches,
         authoritative: true,
@@ -303,6 +307,7 @@ fn query_windows_autostart(
 
 struct WindowsTaskReadback {
     current_sid: String,
+    current_name: String,
     xml: String,
 }
 
@@ -326,12 +331,19 @@ fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<WindowsTaskRe
         return Ok(None);
     }
     let normalized = stdout.replace("\r\n", "\n");
-    let (marker, xml) = normalized
+    let (sid_marker, remainder) = normalized
         .split_once('\n')
         .ok_or_else(|| "query Windows autostart task returned malformed readback".to_string())?;
-    let current_sid = marker
+    let current_sid = sid_marker
         .strip_prefix(WINDOWS_TASK_SID_PREFIX)
         .filter(|sid| !sid.is_empty())
+        .ok_or_else(|| "query Windows autostart task returned malformed identity".to_string())?;
+    let (name_marker, xml) = remainder
+        .split_once('\n')
+        .ok_or_else(|| "query Windows autostart task returned malformed readback".to_string())?;
+    let current_name = name_marker
+        .strip_prefix(WINDOWS_TASK_NAME_PREFIX)
+        .filter(|name| !name.is_empty())
         .ok_or_else(|| "query Windows autostart task returned malformed identity".to_string())?;
     let xml = xml.trim_start_matches(['\r', '\n']);
     if !xml.contains("<Task") {
@@ -339,6 +351,7 @@ fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<WindowsTaskRe
     }
     Ok(Some(WindowsTaskReadback {
         current_sid: current_sid.to_string(),
+        current_name: current_name.to_string(),
         xml: xml.to_string(),
     }))
 }
@@ -346,6 +359,7 @@ fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<WindowsTaskRe
 const WINDOWS_TASK_DESCRIPTION: &str = "CodexHub-owned per-user autostart";
 const WINDOWS_TASK_MISSING_MARKER: &str = "CODEXHUB_TASK_MISSING";
 const WINDOWS_TASK_SID_PREFIX: &str = "CODEXHUB_CURRENT_SID=";
+const WINDOWS_TASK_NAME_PREFIX: &str = "CODEXHUB_CURRENT_NAME=";
 
 fn windows_powershell_args(script: &str) -> Vec<String> {
     vec![
@@ -386,11 +400,12 @@ fn windows_register_script(exe: &Path) -> String {
 
 fn windows_query_script() -> String {
     format!(
-        "{}$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;try{{$task=$folder.GetTask({})}}catch{{if($_.Exception.HResult -eq -2147024894){{Write-Output {};exit 0}}throw}};Write-Output ({}+$sid);Write-Output $task.Xml",
+        "{}$identity=[Security.Principal.WindowsIdentity]::GetCurrent();$sid=$identity.User.Value;$name=$identity.Name;try{{$task=$folder.GetTask({})}}catch{{if($_.Exception.HResult -eq -2147024894){{Write-Output {};exit 0}}throw}};Write-Output ({}+$sid);Write-Output ({}+$name);Write-Output $task.Xml",
         windows_scheduler_prelude(),
         powershell_literal(windows_task_name()),
         powershell_literal(WINDOWS_TASK_MISSING_MARKER),
         powershell_literal(WINDOWS_TASK_SID_PREFIX),
+        powershell_literal(WINDOWS_TASK_NAME_PREFIX),
     )
 }
 
@@ -475,6 +490,10 @@ fn windows_paths_equal(actual: &str, expected: &Path) -> bool {
             .to_lowercase()
     };
     normalize(actual) == normalize(&expected.to_string_lossy())
+}
+
+fn windows_identity_equal(actual: &str, expected: &str) -> bool {
+    actual.to_lowercase() == expected.to_lowercase()
 }
 
 fn register_macos_autostart(
@@ -919,6 +938,20 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+
+        let sid_trigger = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            &windows_query_output(r"C:\应用 程序\CodexHub\codexhub.exe").replace(
+                "<UserId>CODEXHUB-SMOKE\\smoke</UserId>",
+                "<UserId>S-1-5-21-1000</UserId>",
+            ),
+            "",
+        ))]);
+        assert!(
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &sid_trigger,)
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]
@@ -936,6 +969,10 @@ mod tests {
             valid.replace(
                 "<LogonType>InteractiveToken</LogonType>",
                 "<LogonType>Password</LogonType>",
+            ),
+            valid.replace(
+                "<UserId>CODEXHUB-SMOKE\\smoke</UserId>",
+                "<UserId>OTHER-MACHINE\\other</UserId>",
             ),
             valid.replace(
                 "</LogonType>",
@@ -975,7 +1012,7 @@ mod tests {
             Ok(command_outcome(Some(0), "created", "")),
             Ok(command_outcome(
                 Some(0),
-                "CODEXHUB_CURRENT_SID=S-1-5-21-1000\n<Task><Actions /></Task>",
+                "CODEXHUB_CURRENT_SID=S-1-5-21-1000\nCODEXHUB_CURRENT_NAME=CODEXHUB-SMOKE\\smoke\n<Task><Actions /></Task>",
                 "",
             )),
             Ok(command_outcome(Some(0), "deleted", "")),
@@ -1016,15 +1053,16 @@ mod tests {
 
     fn windows_task_xml(command: &str) -> String {
         format!(
-            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal id=\"Author\"><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>S-1-5-21-1000</UserId></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings><Actions Context=\"Author\"><Exec><Command>{command}</Command></Exec></Actions></Task>",
+            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal id=\"Author\"><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Triggers><LogonTrigger><UserId>CODEXHUB-SMOKE\\smoke</UserId></LogonTrigger></Triggers><Settings /><Actions Context=\"Author\"><Exec><Command>{command}</Command></Exec></Actions></Task>",
             super::WINDOWS_TASK_DESCRIPTION,
         )
     }
 
     fn windows_query_output(command: &str) -> String {
         format!(
-            "{}S-1-5-21-1000\n{}",
+            "{}S-1-5-21-1000\n{}codexhub-smoke\\SMOKE\n{}",
             super::WINDOWS_TASK_SID_PREFIX,
+            super::WINDOWS_TASK_NAME_PREFIX,
             windows_task_xml(command),
         )
     }
