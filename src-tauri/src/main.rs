@@ -15,8 +15,8 @@ mod history;
 #[cfg(test)]
 mod lock_test_fixtures;
 mod models;
-mod openai_usage;
 mod official_refresh;
+mod openai_usage;
 mod proxy;
 mod runtime_paths;
 mod safe_file;
@@ -318,7 +318,11 @@ async fn get_status() -> Result<AppStatus, String> {
 }
 
 #[tauri::command]
-fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> Result<AppStatus, String> {
+fn switch_mode(
+    mode: String,
+    auto_sync: bool,
+    force_takeover: Option<bool>,
+) -> Result<AppStatus, String> {
     if mode == "custom" {
         official_refresh::refresh_before_official_activation()?;
     }
@@ -724,9 +728,15 @@ fn window_toggle_maximize(window: Window) -> Result<(), String> {
 
 #[tauri::command]
 fn window_close_to_tray(window: Window) -> Result<(), String> {
-    window
-        .hide()
-        .map_err(|error| format!("failed to hide window to tray: {error}"))
+    run_app_lifecycle_action(
+        AppLifecycleAction::CloseToTray,
+        proxy::stop_session_owned_for_terminal_exit,
+        || {
+            window
+                .hide()
+                .map_err(|error| format!("failed to hide window to tray: {error}"))
+        },
+    )
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -735,6 +745,55 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppLifecycleAction {
+    CloseToTray,
+    TrayExit,
+    UpdateRestart,
+}
+
+impl AppLifecycleAction {
+    const fn requires_gateway_cleanup(self) -> bool {
+        matches!(self, Self::TrayExit | Self::UpdateRestart)
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CloseToTray => "close to tray",
+            Self::TrayExit => "tray Exit",
+            Self::UpdateRestart => "update restart",
+        }
+    }
+}
+
+pub(crate) fn run_app_lifecycle_action<Cleanup, Action, Output>(
+    lifecycle_action: AppLifecycleAction,
+    cleanup_gateway: Cleanup,
+    action: Action,
+) -> Output
+where
+    Cleanup: FnOnce() -> Result<bool, String>,
+    Action: FnOnce() -> Output,
+{
+    if lifecycle_action.requires_gateway_cleanup() {
+        match cleanup_gateway() {
+            Ok(true) => log::info!(
+                "{} stopped the current-session Gateway before the app transitioned",
+                lifecycle_action.label()
+            ),
+            Ok(false) => log::debug!(
+                "{} found no current-session Gateway to stop before the app transitioned",
+                lifecycle_action.label()
+            ),
+            Err(error) => log::warn!(
+                "{} continued after bounded current-session Gateway cleanup failed: {error}",
+                lifecycle_action.label()
+            ),
+        }
+    }
+    action()
 }
 
 fn run_tray_action(app: &AppHandle, id: &str) {
@@ -763,7 +822,11 @@ fn run_tray_action(app: &AppHandle, id: &str) {
         TRAY_RESTART_GATEWAY => {
             run_tray_lifecycle_action(app, "Restart Gateway", restart_proxy, true);
         }
-        TRAY_EXIT => app.exit(0),
+        TRAY_EXIT => run_app_lifecycle_action(
+            AppLifecycleAction::TrayExit,
+            proxy::stop_session_owned_for_terminal_exit,
+            || app.exit(0),
+        ),
         _ => {}
     }
 }
@@ -813,7 +876,10 @@ fn tray_retiring_gateway_loading_toast(id: String, action: &str) -> TrayToast {
         .unwrap_or_default();
     TrayToast {
         id,
-        text: format!("{} {action}...", gateway_retirement_warning_for_locale(&locale)),
+        text: format!(
+            "{} {action}...",
+            gateway_retirement_warning_for_locale(&locale)
+        ),
         tone: "loading".to_string(),
     }
 }
@@ -973,7 +1039,11 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = run_app_lifecycle_action(
+                    AppLifecycleAction::CloseToTray,
+                    proxy::stop_session_owned_for_terminal_exit,
+                    || window.hide(),
+                );
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1045,14 +1115,14 @@ fn run_gui() {
         .expect("error while building CodexHub Tauri application");
 
     app.run(|_app, event| {
-            if matches!(event, RunEvent::Resumed) {
-                tauri::async_runtime::spawn_blocking(|| {
-                    if let Err(error) = official_refresh::refresh_after_resume() {
-                        log::warn!("overdue Official model refresh after resume failed: {error}");
-                    }
-                });
-            }
-        });
+        if matches!(event, RunEvent::Resumed) {
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = official_refresh::refresh_after_resume() {
+                    log::warn!("overdue Official model refresh after resume failed: {error}");
+                }
+            });
+        }
+    });
 }
 
 fn start_gateway_on_launch() {
@@ -1138,10 +1208,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        gateway_retirement_warning_for_locale, start_gateway_after_startup, tray_loading_toast,
-        tray_retiring_gateway_loading_toast, tray_toast_for, AppStatus,
+        gateway_retirement_warning_for_locale, run_app_lifecycle_action,
+        start_gateway_after_startup, tray_loading_toast, tray_retiring_gateway_loading_toast,
+        tray_toast_for, AppLifecycleAction, AppStatus,
     };
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     #[test]
     fn auto_start_propagates_coordinated_precondition_failure_once() {
@@ -1162,7 +1233,8 @@ mod tests {
         assert_eq!(loading.id, "same-toast");
         assert_eq!(loading.tone, "loading");
 
-        let retiring = tray_retiring_gateway_loading_toast("same-toast".to_string(), "Stop Gateway");
+        let retiring =
+            tray_retiring_gateway_loading_toast("same-toast".to_string(), "Stop Gateway");
         assert_eq!(retiring.id, loading.id);
         assert_eq!(retiring.tone, "loading");
         assert_eq!(
@@ -1183,6 +1255,61 @@ mod tests {
         assert_eq!(failure.id, loading.id);
         assert_eq!(failure.tone, "error");
         assert!(failure.text.contains("safe snapshot unavailable"));
+    }
+
+    #[test]
+    fn close_to_tray_preserves_the_current_session_gateway() {
+        let cleanup_calls = Cell::new(0);
+        let action_calls = Cell::new(0);
+
+        run_app_lifecycle_action(
+            AppLifecycleAction::CloseToTray,
+            || {
+                cleanup_calls.set(cleanup_calls.get() + 1);
+                Ok(true)
+            },
+            || action_calls.set(action_calls.get() + 1),
+        );
+
+        assert_eq!(cleanup_calls.get(), 0);
+        assert_eq!(action_calls.get(), 1);
+    }
+
+    #[test]
+    fn tray_exit_and_update_restart_cleanup_before_the_terminal_action() {
+        for lifecycle_action in [
+            AppLifecycleAction::TrayExit,
+            AppLifecycleAction::UpdateRestart,
+        ] {
+            let events = RefCell::new(Vec::new());
+
+            run_app_lifecycle_action(
+                lifecycle_action,
+                || {
+                    events.borrow_mut().push("cleanup");
+                    Ok(true)
+                },
+                || events.borrow_mut().push("terminal"),
+            );
+
+            assert_eq!(events.into_inner(), vec!["cleanup", "terminal"]);
+        }
+    }
+
+    #[test]
+    fn bounded_cleanup_failure_does_not_block_an_orderly_terminal_action() {
+        let events = RefCell::new(Vec::new());
+
+        run_app_lifecycle_action(
+            AppLifecycleAction::TrayExit,
+            || {
+                events.borrow_mut().push("cleanup");
+                Err("Gateway identity changed".to_string())
+            },
+            || events.borrow_mut().push("terminal"),
+        );
+
+        assert_eq!(events.into_inner(), vec!["cleanup", "terminal"]);
     }
 
     fn status() -> AppStatus {
