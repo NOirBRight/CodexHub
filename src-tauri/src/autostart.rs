@@ -268,6 +268,7 @@ fn query_windows_autostart(
     let trigger = xml_element(&readback.xml, "LogonTrigger").unwrap_or_default();
     let principal_user = xml_element(&principal, "UserId");
     let trigger_user = xml_element(&trigger, "UserId");
+    let has_one_principal = xml_opening_tag_count(&readback.xml, "Principal") == 1;
     let has_one_logon_trigger = readback.xml.matches("<LogonTrigger").count() == 1;
     let has_one_action = readback.xml.matches("<Exec").count() == 1;
     let matches = command
@@ -281,9 +282,12 @@ fn query_windows_autostart(
             .is_none_or(|value| value.trim().eq_ignore_ascii_case("true"))
         && has_one_logon_trigger
         && has_one_action
+        && has_one_principal
         && xml_element(&readback.xml, "Description").as_deref() == Some(WINDOWS_TASK_DESCRIPTION)
         && xml_element(&principal, "LogonType").as_deref() == Some("InteractiveToken")
-        && xml_element(&principal, "RunLevel").as_deref() == Some("LeastPrivilege")
+        && xml_element(&principal, "RunLevel")
+            .as_deref()
+            .is_none_or(|run_level| run_level == "LeastPrivilege")
         && principal_user.as_deref() == Some(readback.current_sid.as_str())
         && trigger_user == principal_user;
     Ok(AutostartStatus {
@@ -421,9 +425,23 @@ fn run_windows_command(
 }
 
 fn xml_element(xml: &str, name: &str) -> Option<String> {
-    let start_tag = format!("<{name}>");
+    let start_prefix = format!("<{name}");
     let end_tag = format!("</{name}>");
-    let start = xml.find(&start_tag)? + start_tag.len();
+    let mut search_from = 0;
+    let opening = loop {
+        let relative = xml[search_from..].find(&start_prefix)?;
+        let candidate = search_from + relative;
+        let boundary = xml[candidate + start_prefix.len()..].chars().next()?;
+        if boundary == '>' || boundary.is_ascii_whitespace() {
+            break candidate;
+        }
+        search_from = candidate + start_prefix.len();
+    };
+    let opening_end = xml[opening..].find('>')? + opening;
+    if xml[opening..opening_end].trim_end().ends_with('/') {
+        return None;
+    }
+    let start = opening_end + 1;
     let end = xml[start..].find(&end_tag)? + start;
     Some(
         xml[start..end]
@@ -433,6 +451,18 @@ fn xml_element(xml: &str, name: &str) -> Option<String> {
             .replace("&gt;", ">")
             .replace("&amp;", "&"),
     )
+}
+
+fn xml_opening_tag_count(xml: &str, name: &str) -> usize {
+    let start_prefix = format!("<{name}");
+    xml.match_indices(&start_prefix)
+        .filter(|(start, _)| {
+            xml[start + start_prefix.len()..]
+                .chars()
+                .next()
+                .is_some_and(|boundary| boundary == '>' || boundary.is_ascii_whitespace())
+        })
+        .count()
 }
 
 fn windows_paths_equal(actual: &str, expected: &Path) -> bool {
@@ -908,10 +938,17 @@ mod tests {
                 "<LogonType>Password</LogonType>",
             ),
             valid.replace(
-                "<RunLevel>LeastPrivilege</RunLevel>",
-                "<RunLevel>HighestAvailable</RunLevel>",
+                "</LogonType>",
+                "</LogonType><RunLevel>HighestAvailable</RunLevel>",
             ),
             valid.replace(super::WINDOWS_TASK_DESCRIPTION, "Not a CodexHub-owned task"),
+            valid
+                .replace(
+                    "<Principal id=\"Author\">",
+                    "<PrincipalSpoof id=\"Author\">",
+                )
+                .replace("</Principal>", "</PrincipalSpoof>"),
+            valid.replace("</Principals>", "<Principal id=\"Other\" /></Principals>"),
             valid.replace("</Triggers>", "<LogonTrigger /></Triggers>"),
             valid.replace("</Actions>", "<Exec /></Actions>"),
         ];
@@ -979,7 +1016,7 @@ mod tests {
 
     fn windows_task_xml(command: &str) -> String {
         format!(
-            "<Task><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>S-1-5-21-1000</UserId></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings><Actions><Exec><Command>{command}</Command></Exec></Actions></Task>",
+            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal id=\"Author\"><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>S-1-5-21-1000</UserId></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings><Actions Context=\"Author\"><Exec><Command>{command}</Command></Exec></Actions></Task>",
             super::WINDOWS_TASK_DESCRIPTION,
         )
     }
