@@ -38,5 +38,11 @@ scripts/Test-WindowsAutostartUninstall.ps1 -Installer <path> -Flavor normal
 scripts/Test-WindowsAutostartUninstall.ps1 -Installer <path> -Flavor debug
 ```
 
+The normal and debug packages currently share the merged runtime identity
+(`CodexHub`, `CodexHubProxy`, and the CodexHub per-user install directory); the
+debug boundary is distinguished by its `_debug` installer artifact and compiled
+diagnostics capability. The harness selects and validates those flavor contracts
+explicitly rather than inferring identity from an environment variable.
+
 The harness and installer diagnostics deliberately report only task disposition;
 they do not print the executable path or user identity.

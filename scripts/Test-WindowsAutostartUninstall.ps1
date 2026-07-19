@@ -1,18 +1,25 @@
 param(
-    [string]$Installer = "\\VBOXSVR\CodexHubSmoke\artifacts\CodexHub_0.1.6_x64-setup.exe",
+    [Parameter(Mandatory = $true)]
+    [string]$Installer,
     [ValidateSet("normal", "debug")]
     [string]$Flavor = "normal",
-    [int]$LaunchTimeoutSeconds = 30,
-    [int]$InstallTimeoutSeconds = 180,
-    [switch]$RunUninstall,
-    [switch]$KeepAppRunning
+    [int]$InstallTimeoutSeconds = 180
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-$taskName = "CodexHubProxy"
-$controlTaskName = "CodexHubUninstallControl"
+$flavorContract = switch ($Flavor) {
+    "normal" { @{ ProductName = "CodexHub"; TaskName = "CodexHubProxy"; InstallerSuffix = "_x64-setup.exe" } }
+    "debug" { @{ ProductName = "CodexHub"; TaskName = "CodexHubProxy"; InstallerSuffix = "_debug_x64-setup.exe" } }
+}
+$productName = $flavorContract.ProductName
+$taskName = $flavorContract.TaskName
+$controlTaskName = "${taskName}UninstallControl"
 $description = "CodexHub-owned per-user autostart"
+$installerName = [IO.Path]::GetFileName($Installer)
+if (-not $installerName.EndsWith($flavorContract.InstallerSuffix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Installer artifact does not match the requested flavor."
+}
 
 function Get-Task([string]$Name) {
     $service = New-Object -ComObject "Schedule.Service"
@@ -55,7 +62,8 @@ function Register-ControlTask([string]$Name) {
 function Install-Candidate {
     $install = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
     if ($install.ExitCode -ne 0) { throw "Installer failed for $Flavor flavor." }
-    $exe = Get-ChildItem "$env:LOCALAPPDATA\CodexHub" -Filter CodexHub.exe -Recurse |
+    $installRoot = Join-Path $env:LOCALAPPDATA $productName
+    $exe = Get-ChildItem $installRoot -Filter "$productName.exe" -Recurse |
         Select-Object -First 1 -ExpandProperty FullName
     if ([string]::IsNullOrWhiteSpace($exe)) { throw "Installed executable was not found." }
     return $exe
