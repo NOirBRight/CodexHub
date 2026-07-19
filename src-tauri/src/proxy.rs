@@ -14,9 +14,9 @@ use std::io::{self, Read};
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,12 +28,11 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE, ERROR_INSUFFICIENT_BUFFER, NO_ERROR,
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, NO_ERROR,
 };
 #[cfg(windows)]
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-    TCP_TABLE_OWNER_PID_LISTENER,
+    GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
@@ -45,8 +44,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 #[cfg(windows)]
@@ -110,6 +109,19 @@ where
     gateway_lifecycle()
         .restart(&backend, prepare)
         .map(|snapshot| snapshot.status)
+}
+
+/// Stops the Gateway only when this application session owns its exact verified identity.
+///
+/// Terminal application actions use this instead of [`stop`] so a Gateway that predates the
+/// current session, or one whose identity has changed, is never asked to shut down.
+pub(crate) fn stop_session_owned_for_terminal_exit() -> Result<bool, String> {
+    let Some(session_owned_identity) = gateway_lifecycle().session_owned_identity() else {
+        return Ok(false);
+    };
+    let backend =
+        ProxyLifecycleBackend::runtime_for_terminal_session_owned_identity(session_owned_identity)?;
+    gateway_lifecycle().stop(&backend).map(|_| true)
 }
 
 /// Ownership-safe handoff for #112 terminal-exit cleanup. #139 intentionally
@@ -190,21 +202,36 @@ struct ProxyLifecycleBackend {
     paths: ProxyPaths,
     lifecycle_gate_path: PathBuf,
     session_owned_identity: Option<GatewayIdentity>,
+    require_current_session_identity: bool,
 }
 
 impl ProxyLifecycleBackend {
     fn runtime() -> Result<Self, String> {
-        Self::runtime_with_session_owned_identity(None)
+        Self::runtime_with_shutdown_identity(None, false)
     }
 
     fn runtime_with_session_owned_identity(
         session_owned_identity: Option<GatewayIdentity>,
+    ) -> Result<Self, String> {
+        Self::runtime_with_shutdown_identity(session_owned_identity, false)
+    }
+
+    fn runtime_for_terminal_session_owned_identity(
+        session_owned_identity: GatewayIdentity,
+    ) -> Result<Self, String> {
+        Self::runtime_with_shutdown_identity(Some(session_owned_identity), true)
+    }
+
+    fn runtime_with_shutdown_identity(
+        session_owned_identity: Option<GatewayIdentity>,
+        require_current_session_identity: bool,
     ) -> Result<Self, String> {
         let paths = ProxyPaths::runtime()?;
         Ok(Self {
             lifecycle_gate_path: paths.lifecycle_gate_path(),
             paths,
             session_owned_identity,
+            require_current_session_identity,
         })
     }
 }
@@ -252,7 +279,11 @@ impl GatewayLifecycleBackend for ProxyLifecycleBackend {
     }
 
     fn stop(&self) -> Result<AppStatus, String> {
-        stop_session_owned_with_paths(&self.paths, self.session_owned_identity.as_ref())
+        if self.require_current_session_identity {
+            stop_current_session_owned_with_paths(&self.paths, self.session_owned_identity.as_ref())
+        } else {
+            stop_session_owned_with_paths(&self.paths, self.session_owned_identity.as_ref())
+        }
     }
 
     fn can_reuse(&self, snapshot: &GatewayLifecycleSnapshot) -> bool {
@@ -595,12 +626,9 @@ fn reconciled_snapshot_with_controls(
                 reconciliation_port
             ));
         };
-        if let Err(reason) = verify_proxy_command_shape(
-            &pid_record,
-            paths,
-            reconciliation_port,
-            &info,
-        ) {
+        if let Err(reason) =
+            verify_proxy_command_shape(&pid_record, paths, reconciliation_port, &info)
+        {
             remove_pid(paths)?;
             return Err(format!(
                 "Gateway health responds on port {}, but managed PID {pid} ownership could not be verified ({reason}); removed stale PID identity without stopping either process",
@@ -743,7 +771,9 @@ fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
         .map_err(|failure| failure.message)
 }
 
-fn start_outcome_with_paths(paths: &ProxyPaths) -> Result<GatewayStartOutcome, GatewayStartFailure> {
+fn start_outcome_with_paths(
+    paths: &ProxyPaths,
+) -> Result<GatewayStartOutcome, GatewayStartFailure> {
     replace_managed_proxy_from_previous_bundle(paths)?;
     start_outcome_with_paths_and_timeout(paths, START_TIMEOUT)
 }
@@ -1182,17 +1212,56 @@ fn stop_session_owned_with_paths(
         health_probe: &health_with_timeout,
         clock: &clock,
     };
-    stop_session_owned_with_paths_and_controls(
-        paths,
-        session_owned_identity,
-        &controls,
-    )
+    stop_session_owned_with_paths_and_controls(paths, session_owned_identity, &controls)
+}
+
+fn stop_current_session_owned_with_paths(
+    paths: &ProxyPaths,
+    session_owned_identity: Option<&GatewayIdentity>,
+) -> Result<AppStatus, String> {
+    let clock = SystemShutdownClock::new();
+    let controls = UserRequestedShutdownControls {
+        killer: &SystemProcessKiller,
+        inspector: &SystemProcessInspector,
+        listener_inspector: &SystemListenerInspector,
+        shutdown_request: &request_shutdown_with_timeout,
+        health_probe: &health_with_timeout,
+        clock: &clock,
+    };
+    stop_current_session_owned_with_paths_and_controls(paths, session_owned_identity, &controls)
 }
 
 fn stop_session_owned_with_paths_and_controls(
     paths: &ProxyPaths,
     session_owned_identity: Option<&GatewayIdentity>,
     controls: &UserRequestedShutdownControls<'_>,
+) -> Result<AppStatus, String> {
+    stop_session_owned_with_paths_and_controls_for_intent(
+        paths,
+        session_owned_identity,
+        controls,
+        false,
+    )
+}
+
+fn stop_current_session_owned_with_paths_and_controls(
+    paths: &ProxyPaths,
+    session_owned_identity: Option<&GatewayIdentity>,
+    controls: &UserRequestedShutdownControls<'_>,
+) -> Result<AppStatus, String> {
+    stop_session_owned_with_paths_and_controls_for_intent(
+        paths,
+        session_owned_identity,
+        controls,
+        true,
+    )
+}
+
+fn stop_session_owned_with_paths_and_controls_for_intent(
+    paths: &ProxyPaths,
+    session_owned_identity: Option<&GatewayIdentity>,
+    controls: &UserRequestedShutdownControls<'_>,
+    terminal_session_only: bool,
 ) -> Result<AppStatus, String> {
     let budget = ShutdownBudget::new(controls.clock);
     let settings = read_settings(paths)?;
@@ -1202,9 +1271,16 @@ fn stop_session_owned_with_paths_and_controls(
         .as_ref()
         .map(|record| record.expected_port(settings.proxy_port))
         .unwrap_or(settings.proxy_port);
-    let was_running = gateway_running_with_budget(lifecycle_port, controls.health_probe, &budget)?;
 
     let Some(pid_record) = pid_record else {
+        if terminal_session_only {
+            return Err(
+                "Gateway terminal cleanup refused because no durable current-session identity exists"
+                    .to_string(),
+            );
+        }
+        let was_running =
+            gateway_running_with_budget(lifecycle_port, controls.health_probe, &budget)?;
         if was_running {
             return Err(format!(
                 "Gateway health responds on port {lifecycle_port}, but no managed PID identity exists; refusing to send shutdown to the external listener"
@@ -1212,6 +1288,12 @@ fn stop_session_owned_with_paths_and_controls(
         }
         return stopped_gateway_status(mode, lifecycle_port, "Gateway is not running".to_string());
     };
+
+    if terminal_session_only {
+        require_current_session_identity(&pid_record, session_owned_identity)?;
+    }
+
+    let was_running = gateway_running_with_budget(lifecycle_port, controls.health_probe, &budget)?;
 
     match verify_proxy_process(&pid_record, paths, lifecycle_port, controls.inspector)? {
         VerifiedProxyProcess::Missing { pid } => {
@@ -1395,6 +1477,31 @@ fn wait_for_managed_process_stop_with_budget(
     }
 }
 
+fn require_current_session_identity(
+    record: &ProxyPidRecord,
+    session_owned_identity: Option<&GatewayIdentity>,
+) -> Result<(), String> {
+    let Some(session_owned_identity) = session_owned_identity else {
+        return Err(
+            "Gateway terminal cleanup refused because #139 has no current-session identity"
+                .to_string(),
+        );
+    };
+    let Some(record_identity) = record.gateway_identity() else {
+        return Err(
+            "Gateway terminal cleanup refused because the durable PID record has no verifiable current-session identity"
+                .to_string(),
+        );
+    };
+    if &record_identity != session_owned_identity {
+        return Err(
+            "Gateway terminal cleanup refused because the durable Gateway identity no longer matches #139's current-session identity"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn force_kill_session_owned_gateway_at_deadline(
     paths: &ProxyPaths,
     record: &ProxyPidRecord,
@@ -1404,24 +1511,12 @@ fn force_kill_session_owned_gateway_at_deadline(
     inspector: &dyn ProcessInspector,
     listener_inspector: &dyn ListenerInspector,
 ) -> Result<Option<u32>, String> {
-    let Some(session_owned_identity) = session_owned_identity else {
-        return Err(
-            "Gateway user-requested shutdown refused force-close because #139 has no current-session identity"
-                .to_string(),
-        );
-    };
-    let Some(record_identity) = record.gateway_identity() else {
-        return Err(
-            "Gateway user-requested shutdown refused force-close because the durable PID record has no verifiable current-session identity"
-                .to_string(),
-        );
-    };
-    if &record_identity != session_owned_identity {
-        return Err(
-            "Gateway user-requested shutdown refused force-close because the durable Gateway identity no longer matches #139's current-session identity"
-                .to_string(),
-        );
-    }
+    require_current_session_identity(record, session_owned_identity).map_err(|error| {
+        error.replace(
+            "Gateway terminal cleanup refused",
+            "Gateway user-requested shutdown refused force-close",
+        )
+    })?;
 
     let pid = match verify_proxy_process(record, paths, port, inspector)? {
         VerifiedProxyProcess::Verified { pid } => pid,
@@ -1970,8 +2065,7 @@ fn drain_reader_to_buffer<R>(
     mut reader: R,
     buffer: std::sync::Weak<Mutex<BoundedOutput>>,
     stop: Arc<AtomicBool>,
-)
-where
+) where
     R: Read + AsRawHandle,
 {
     let mut chunk = [0u8; 1024];
@@ -2099,7 +2193,9 @@ fn clean_up_failed_start_with_controls(
 
     if confirmed {
         if let Err(error) = remove_pid(paths) {
-            message.push_str(&format!("\nfailed to remove terminated child PID identity: {error}"));
+            message.push_str(&format!(
+                "\nfailed to remove terminated child PID identity: {error}"
+            ));
         }
         return GatewayStartFailure {
             message,
@@ -2108,7 +2204,9 @@ fn clean_up_failed_start_with_controls(
     }
 
     match termination {
-        Ok(false) => message.push_str("\nspawned child termination could not be confirmed within the bounded cleanup window"),
+        Ok(false) => message.push_str(
+            "\nspawned child termination could not be confirmed within the bounded cleanup window",
+        ),
         Err(error) => message.push_str(&format!(
             "\nspawned child termination could not be confirmed: {error}"
         )),
@@ -2261,8 +2359,9 @@ fn verify_proxy_process(
     if matches!(record, ProxyPidRecord::Managed(metadata) if metadata.recovery) {
         return Ok(VerifiedProxyProcess::Unknown {
             pid,
-            reason: "spawn-known recovery ownership is pending health, process, and listener activation"
-                .to_string(),
+            reason:
+                "spawn-known recovery ownership is pending health, process, and listener activation"
+                    .to_string(),
         });
     }
     let process = match inspector.inspect(pid) {
@@ -2647,7 +2746,10 @@ fn read_pid_record(paths: &ProxyPaths) -> Result<Option<ProxyPidRecord>, String>
 
     if trimmed.starts_with('{') {
         let metadata: ProxyPidMetadata = serde_json::from_str(trimmed).map_err(|error| {
-            format!("invalid Gateway PID metadata in {}: {error}", path.display())
+            format!(
+                "invalid Gateway PID metadata in {}: {error}",
+                path.display()
+            )
         })?;
         if metadata.version != PID_FILE_VERSION && metadata.version != LEGACY_PID_FILE_VERSION {
             return Err(format!(
@@ -2658,7 +2760,10 @@ fn read_pid_record(paths: &ProxyPaths) -> Result<Option<ProxyPidRecord>, String>
         }
         if metadata.version == PID_FILE_VERSION
             && !metadata.recovery
-            && metadata.process_start_id.as_deref().is_none_or(str::is_empty)
+            && metadata
+                .process_start_id
+                .as_deref()
+                .is_none_or(str::is_empty)
         {
             return Err(format!(
                 "managed Gateway PID metadata version {PID_FILE_VERSION} in {} is missing the required process creation identity",
@@ -2866,9 +2971,7 @@ impl WindowsInspectionJob {
     }
 
     fn assign(&self, child: &Child, kind: WindowsInspectionKind) -> Result<(), String> {
-        let assigned = unsafe {
-            AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE)
-        };
+        let assigned = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) };
         if assigned == 0 {
             Err(kind.start_error().to_string())
         } else {
@@ -2984,8 +3087,7 @@ fn stop_and_reap_inspection_child(
         match child.try_wait() {
             Ok(Some(_)) => return Ok(()),
             Ok(None) if Instant::now() < deadline => thread::sleep(
-                Duration::from_millis(20)
-                    .min(deadline.saturating_duration_since(Instant::now())),
+                Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
             ),
             Ok(None) => return Ok(()),
             Err(_) => return Err(kind.stop_error().to_string()),
@@ -3016,7 +3118,9 @@ fn run_bounded_inspection_command(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
-    let mut child = command.spawn().map_err(|_| kind.start_error().to_string())?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| kind.start_error().to_string())?;
     if let Err(error) = job.assign(&child, kind) {
         let _ = child.kill();
         let _ = child.wait();
@@ -3033,11 +3137,10 @@ fn run_bounded_inspection_command(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < inspection_deadline => {
-                thread::sleep(Duration::from_millis(20).min(
-                    inspection_deadline.saturating_duration_since(Instant::now()),
-                ))
-            }
+            Ok(None) if Instant::now() < inspection_deadline => thread::sleep(
+                Duration::from_millis(20)
+                    .min(inspection_deadline.saturating_duration_since(Instant::now())),
+            ),
             Ok(None) => {
                 stop_and_reap_inspection_child(&mut child, &job, deadline, kind)?;
                 return Err(kind.timeout_error().to_string());
@@ -3152,9 +3255,7 @@ fn inspect_listener_pid(port: u16) -> Result<Option<u32>, String> {
         let max_entries = (buffer.len() - std::mem::size_of::<u32>())
             / std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
         let num_entries = (table.dwNumEntries as usize).min(max_entries);
-        let rows = unsafe {
-            std::slice::from_raw_parts(table.table.as_ptr(), num_entries)
-        };
+        let rows = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), num_entries) };
         let mut owners = rows
             .iter()
             .filter(|row: &&MIB_TCPROW_OWNER_PID| {
@@ -3239,10 +3340,8 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
     struct WindowsProcessInspection {
         command_line: String,
     }
-    let inspection: WindowsProcessInspection =
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            format!("failed to parse process identity for PID {pid}: {error}")
-        })?;
+    let inspection: WindowsProcessInspection = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("failed to parse process identity for PID {pid}: {error}"))?;
     let process_start_id = process_start_id_for_pid(pid)?;
     Ok(InspectedProcess::Running(
         ProcessInfo::from_command_line_with_start_id(
@@ -3347,21 +3446,20 @@ mod tests {
         build_start_command, capture_child_stdio, clean_up_failed_start_with_controls,
         comparable_path, configure_start_stdio, detect_mode, find_python,
         force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
-        reconciled_snapshot_with_controls,
-        start_with_paths, start_with_paths_and_controls, start_with_paths_and_waiter,
-        status_with_paths, stop_session_owned_with_paths_and_controls, stop_with_paths,
-        stop_with_paths_and_controls, verify_proxy_command_line, GatewayIdentity, ShutdownClock,
-        UserRequestedShutdownControls,
-        write_pid, ChildTerminator, InspectedProcess, ListenerInspector, ProcessInfo,
-        ProcessInspector, ProcessKiller, ProxyLifecycleBackend, ProxyPaths, ProxyPidMetadata,
-        ProxyPidRecord, StartupOutcome, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
+        reconciled_snapshot_with_controls, start_with_paths, start_with_paths_and_controls,
+        start_with_paths_and_waiter, status_with_paths,
+        stop_current_session_owned_with_paths_and_controls,
+        stop_session_owned_with_paths_and_controls, stop_with_paths, stop_with_paths_and_controls,
+        verify_proxy_command_line, write_pid, ChildTerminator, GatewayIdentity, InspectedProcess,
+        ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller, ProxyLifecycleBackend,
+        ProxyPaths, ProxyPidMetadata, ProxyPidRecord, ShutdownClock, StartupOutcome,
+        UserRequestedShutdownControls, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
     #[cfg(windows)]
-    use super::{
-        run_bounded_inspection_command, run_windows_inspection, WindowsInspectionKind,
-    };
+    use super::{run_bounded_inspection_command, run_windows_inspection, WindowsInspectionKind};
     use crate::Settings;
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::fs;
     use std::io::Write;
     use std::net::TcpListener;
@@ -3369,7 +3467,6 @@ mod tests {
     use std::process::Command;
     #[cfg(windows)]
     use std::process::Stdio;
-    use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
@@ -3567,7 +3664,10 @@ mod tests {
         assert!(snapshot.status.proxy_running);
         let identity = snapshot.identity.expect("upgraded identity");
         assert_eq!(identity.pid, pid);
-        assert_eq!(identity.process_start_id, Some(super::test_process_start_id(pid)));
+        assert_eq!(
+            identity.process_start_id,
+            Some(super::test_process_start_id(pid))
+        );
         let ProxyPidRecord::Managed(metadata) = read_pid_record(&paths)
             .expect("read upgraded PID metadata")
             .expect("upgraded PID metadata")
@@ -3706,7 +3806,9 @@ mod tests {
         .expect_err("post-spawn process inspection must time out");
 
         assert!(started.elapsed() < Duration::from_secs(3));
-        assert!(error.message.contains("Gateway process inspection timed out"));
+        assert!(error
+            .message
+            .contains("Gateway process inspection timed out"));
         assert!(!error.message.contains("private-post-spawn-sentinel"));
         assert_eq!(read_pid(&paths).expect("PID removed"), None);
         let pid = spawned_pid.load(Ordering::SeqCst);
@@ -3875,7 +3977,10 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         assert_eq!(metadata.port, 4555);
         assert_eq!(metadata.script_path, comparable_path(&script));
         assert_eq!(metadata.version, 2);
-        assert_eq!(metadata.process_start_id, Some(super::test_process_start_id(42)));
+        assert_eq!(
+            metadata.process_start_id,
+            Some(super::test_process_start_id(42))
+        );
         assert!(!metadata.recovery);
         let text = fs::read_to_string(paths.pid_path()).expect("pid text");
         let parsed: ProxyPidMetadata = serde_json::from_str(&text).expect("metadata json");
@@ -3892,7 +3997,10 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
 
         write_pid(&paths, 42, 4555, &paths.proxy_script_path()).expect("write pid");
 
-        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(&lock).expect("lock text"),
+            "codexhub-atomic-lock=1\n"
+        );
         assert_eq!(read_pid(&paths).expect("read pid"), Some(42));
     }
 
@@ -4060,12 +4168,7 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
             .expect("managed PID record");
 
         let error = force_kill_after_graceful_timeout(
-            &paths,
-            &record,
-            port,
-            &killer,
-            &inspector,
-            &listener,
+            &paths, &record, port, &killer, &inspector, &listener,
         )
         .expect_err("changed listener must fence force kill");
 
@@ -4116,22 +4219,108 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
             clock: &clock,
         };
 
-        let error = stop_session_owned_with_paths_and_controls(
-            &paths,
-            Some(&replaced_identity),
-            &controls,
-        )
-        .expect_err("replaced identity must never be force-killed");
+        let error =
+            stop_session_owned_with_paths_and_controls(&paths, Some(&replaced_identity), &controls)
+                .expect_err("replaced identity must never be force-killed");
 
         assert!(error.contains("current-session identity"), "{error}");
-        assert_eq!(request_timeouts.borrow().as_slice(), &[Duration::from_millis(800)]);
+        assert_eq!(
+            request_timeouts.borrow().as_slice(),
+            &[Duration::from_millis(800)]
+        );
         assert_eq!(clock.elapsed(), Duration::from_secs(2));
         assert!(killer.killed.borrow().is_empty());
         assert_eq!(read_pid(&paths).expect("pid preserved"), Some(pid));
     }
 
     #[test]
-    fn session_shutdown_force_kills_only_the_exact_owned_identity_at_the_deadline() {
+    fn terminal_cleanup_skips_preexisting_gateway_without_sending_shutdown_request() {
+        let root = temp_root("terminal-cleanup-preexisting");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let clock = FakeShutdownClock::default();
+        let request_timeouts = RefCell::new(Vec::new());
+        let killer = RecordingKiller::default();
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let shutdown_request = |_port: u16, _key: &str, timeout: Duration| -> Result<(), String> {
+            request_timeouts.borrow_mut().push(timeout);
+            Ok(())
+        };
+        let health_probe = |_port, _timeout| Ok(Some(healthy_response()));
+        let controls = UserRequestedShutdownControls {
+            killer: &killer,
+            inspector: &inspector,
+            listener_inspector: &FixedListenerInspector::new(Some(pid)),
+            shutdown_request: &shutdown_request,
+            health_probe: &health_probe,
+            clock: &clock,
+        };
+
+        let error = stop_current_session_owned_with_paths_and_controls(&paths, None, &controls)
+            .expect_err("a preexisting Gateway must not receive terminal cleanup");
+
+        assert!(error.contains("no current-session identity"), "{error}");
+        assert!(request_timeouts.borrow().is_empty());
+        assert!(inspector.inspected.borrow().is_empty());
+        assert!(killer.killed.borrow().is_empty());
+        assert_eq!(clock.elapsed(), Duration::ZERO);
+        assert_eq!(read_pid(&paths).expect("pid preserved"), Some(pid));
+    }
+
+    #[test]
+    fn terminal_cleanup_refuses_replaced_identity_before_graceful_shutdown() {
+        let root = temp_root("terminal-cleanup-replaced-identity");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let record = read_pid_record(&paths)
+            .expect("read pid record")
+            .expect("managed pid record");
+        let current_identity = record.gateway_identity().expect("managed Gateway identity");
+        let replaced_identity = GatewayIdentity {
+            pid: pid + 1,
+            ..current_identity
+        };
+        let clock = FakeShutdownClock::default();
+        let request_timeouts = RefCell::new(Vec::new());
+        let killer = RecordingKiller::default();
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let shutdown_request = |_port: u16, _key: &str, timeout: Duration| -> Result<(), String> {
+            request_timeouts.borrow_mut().push(timeout);
+            Ok(())
+        };
+        let health_probe = |_port, _timeout| Ok(Some(healthy_response()));
+        let controls = UserRequestedShutdownControls {
+            killer: &killer,
+            inspector: &inspector,
+            listener_inspector: &FixedListenerInspector::new(Some(pid)),
+            shutdown_request: &shutdown_request,
+            health_probe: &health_probe,
+            clock: &clock,
+        };
+
+        let error = stop_current_session_owned_with_paths_and_controls(
+            &paths,
+            Some(&replaced_identity),
+            &controls,
+        )
+        .expect_err("a replaced Gateway must not receive terminal cleanup");
+
+        assert!(error.contains("identity no longer matches"), "{error}");
+        assert!(request_timeouts.borrow().is_empty());
+        assert!(inspector.inspected.borrow().is_empty());
+        assert!(killer.killed.borrow().is_empty());
+        assert_eq!(clock.elapsed(), Duration::ZERO);
+        assert_eq!(read_pid(&paths).expect("pid preserved"), Some(pid));
+    }
+
+    #[test]
+    fn terminal_cleanup_force_kills_only_the_exact_owned_identity_at_the_deadline() {
         let root = temp_root("session-shutdown-owned-identity");
         let paths = test_paths(&root);
         let port = free_port();
@@ -4146,17 +4335,15 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
         let alive = Arc::new(AtomicBool::new(true));
         let listener_pid = Arc::new(AtomicU32::new(pid));
         let killer = KillAwareKiller::new(Arc::clone(&alive), Arc::clone(&listener_pid));
-        let inspector = KillAwareInspector::new(Arc::clone(&alive), fake_proxy_process(&paths, port));
+        let inspector =
+            KillAwareInspector::new(Arc::clone(&alive), fake_proxy_process(&paths, port));
         let listener = AtomicListenerInspector::new(listener_pid);
         let shutdown_request = |_port: u16, _key: &str, timeout: Duration| -> Result<(), String> {
             assert_eq!(timeout, Duration::from_millis(800));
             Ok(())
         };
-        let health_probe = |_port, _timeout| {
-            Ok(alive
-                .load(Ordering::SeqCst)
-                .then(healthy_response))
-        };
+        let health_probe =
+            |_port, _timeout| Ok(alive.load(Ordering::SeqCst).then(healthy_response));
         let controls = UserRequestedShutdownControls {
             killer: &killer,
             inspector: &inspector,
@@ -4166,7 +4353,7 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
             clock: &clock,
         };
 
-        let status = stop_session_owned_with_paths_and_controls(
+        let status = stop_current_session_owned_with_paths_and_controls(
             &paths,
             Some(&current_identity),
             &controls,
@@ -4368,9 +4555,14 @@ time.sleep(10)
         );
 
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(failure.message.contains("termination could not be confirmed"));
+        assert!(failure
+            .message
+            .contains("termination could not be confirmed"));
         assert_eq!(
-            failure.recovery_identity.as_ref().map(|identity| identity.pid),
+            failure
+                .recovery_identity
+                .as_ref()
+                .map(|identity| identity.pid),
             Some(pid)
         );
         assert_eq!(read_pid(&paths).expect("durable PID"), Some(pid));
@@ -4410,7 +4602,10 @@ time.sleep(10)
 
         assert!(failure.message.contains("inspection unavailable"));
         assert_eq!(
-            failure.recovery_identity.as_ref().map(|identity| identity.pid),
+            failure
+                .recovery_identity
+                .as_ref()
+                .map(|identity| identity.pid),
             Some(pid)
         );
         assert_eq!(read_pid(&paths).expect("durable recovery PID"), Some(pid));
@@ -4468,7 +4663,9 @@ time.sleep(10)
         )
         .expect("verification result");
 
-        assert!(matches!(verification, VerifiedProxyProcess::Unknown { pid: value, .. } if value == pid));
+        assert!(
+            matches!(verification, VerifiedProxyProcess::Unknown { pid: value, .. } if value == pid)
+        );
         assert_eq!(read_pid(&paths).expect("legacy PID preserved"), Some(pid));
     }
 
@@ -4806,13 +5003,17 @@ time.sleep(10)
 
         let result = (|| {
             let old_status = start_with_paths(&paths)?;
-            ensure(old_status.proxy_port == old_port, "old Gateway should use old port")?;
+            ensure(
+                old_status.proxy_port == old_port,
+                "old Gateway should use old port",
+            )?;
             let old_pid = read_pid(&paths)?.ok_or_else(|| "old PID missing".to_string())?;
             write_settings(&paths, new_port);
             let backend = ProxyLifecycleBackend {
                 lifecycle_gate_path: paths.lifecycle_gate_path(),
                 paths: paths.clone(),
                 session_owned_identity: None,
+                require_current_session_identity: false,
             };
             let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
 
@@ -5223,10 +5424,7 @@ time.sleep(10)
             Ok(self.process.clone())
         }
 
-        fn spawned_process_start_id(
-            &self,
-            _child: &std::process::Child,
-        ) -> Result<String, String> {
+        fn spawned_process_start_id(&self, _child: &std::process::Child) -> Result<String, String> {
             match &self.process {
                 InspectedProcess::Running(info) => info
                     .process_start_id

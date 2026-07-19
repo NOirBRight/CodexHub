@@ -671,7 +671,11 @@ fn checked_at_now() -> String {
 }
 
 fn restart_after_update(app: AppHandle) -> ! {
-    app.restart()
+    crate::run_app_lifecycle_action(
+        crate::AppLifecycleAction::UpdateRestart,
+        crate::proxy::stop_session_owned_for_terminal_exit,
+        || app.restart(),
+    )
 }
 
 #[cfg(test)]
