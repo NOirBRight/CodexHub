@@ -1358,7 +1358,7 @@ function eventReportsCacheUsage(event: GatewayUsageEvent, cacheCapableProviders:
 }
 
 function cacheCapableProviderKeys(providers: Provider[]) {
-  const keys = new Set(["official", "openai", "official_openai"].map(cacheProviderKey));
+  const keys = new Set(["official", "openai", "official_openai", "kimi"].map(cacheProviderKey));
   for (const provider of providers) {
     if (provider.reports_cached_input_tokens !== true) {
       continue;

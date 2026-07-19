@@ -749,15 +749,35 @@ def chat_completions_request_to_responses_body(
             "max_output_tokens",
             "reasoning",
             "reasoning_effort",
+            "chat_template_kwargs",
+            "stream_options",
             "n",
         },
         "Chat Completions request",
     )
-    if payload.get("reasoning") is not None or payload.get("reasoning_effort") is not None:
+    template_reasoning_effort = _chat_template_reasoning_effort(payload.get("chat_template_kwargs"))
+    _require_representable_stream_options(payload.get("stream_options"))
+    direct_reasoning_effort = _chat_reasoning_effort(payload)
+    reasoning_control_present = (
+        payload.get("reasoning") is not None or payload.get("reasoning_effort") is not None
+    )
+    if reasoning_control_present and direct_reasoning_effort is None:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
             "Cannot translate Chat Completions reasoning controls to Responses without a proven equivalent.",
         )
+    if (
+        direct_reasoning_effort is not None
+        and template_reasoning_effort is not None
+        and direct_reasoning_effort != template_reasoning_effort
+    ):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate conflicting Chat Completions reasoning controls to Responses without losing intent.",
+        )
+    effective_reasoning_effort = (
+        direct_reasoning_effort if direct_reasoning_effort is not None else template_reasoning_effort
+    )
     if "n" in payload and payload.get("n") not in (None, 1):
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -797,8 +817,61 @@ def chat_completions_request_to_responses_body(
     tool_choice = chat_tool_choice_to_responses_tool_choice(payload.get("tool_choice"))
     if tool_choice is not None:
         responses_payload["tool_choice"] = tool_choice
+    if effective_reasoning_effort is not None:
+        responses_payload["reasoning"] = {"effort": effective_reasoning_effort}
 
     return json.dumps(responses_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _chat_template_reasoning_effort(value: Any) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or set(value.keys()) != {"reasoning_effort"}
+        or not isinstance(value.get("reasoning_effort"), str)
+        or not value["reasoning_effort"]
+    ):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate Chat Completions chat_template_kwargs fields without losing them; only chat_template_kwargs.reasoning_effort is supported.",
+        )
+    return value["reasoning_effort"]
+
+
+def _require_representable_stream_options(value: Any) -> None:
+    if value is None:
+        return
+    # stream_options.include_usage is representable by construction: the
+    # Responses stream always carries usage and the reverse adapter re-injects
+    # include_usage for streaming Chat Completions callers.
+    if (
+        not isinstance(value, Mapping)
+        or set(value.keys()) != {"include_usage"}
+        or not isinstance(value.get("include_usage"), bool)
+    ):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate Chat Completions stream_options fields without losing them; only stream_options.include_usage is supported.",
+        )
+
+
+def _chat_reasoning_effort(payload: Mapping[str, Any]) -> str | None:
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, str):
+        return reasoning or None
+    if isinstance(reasoning, Mapping):
+        if (
+            set(reasoning.keys()) == {"effort"}
+            and isinstance(reasoning.get("effort"), str)
+            and reasoning["effort"]
+        ):
+            return reasoning["effort"]
+        return None
+    effort = payload.get("reasoning_effort")
+    if isinstance(effort, str) and effort:
+        return effort
+    return None
 
 
 def _chat_completion_message_output(

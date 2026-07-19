@@ -9,10 +9,14 @@ mod cli;
 mod config;
 mod diagnostics;
 mod gateway;
+mod gateway_lifecycle;
+mod gateway_transaction;
 mod history;
+#[cfg(test)]
+mod lock_test_fixtures;
 mod models;
-mod openai_usage;
 mod official_refresh;
+mod openai_usage;
 mod proxy;
 mod runtime_paths;
 mod safe_file;
@@ -20,6 +24,7 @@ mod web_bridge;
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Window, WindowEvent};
 
 #[cfg(desktop)]
@@ -39,6 +44,7 @@ const TRAY_TOAST_EVENT: &str = "codexhub:toast";
 
 #[derive(Debug, Clone, Serialize)]
 struct TrayToast {
+    id: String,
     text: String,
     tone: String,
 }
@@ -144,6 +150,8 @@ pub struct Provider {
     pub tool_surface_strategy: Option<ToolSurfaceStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports_cached_input_tokens: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
     pub display_prefix: Option<String>,
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]
@@ -187,6 +195,8 @@ pub struct AppStatus {
     pub proxy_port: u16,
     pub proxy_build: Option<String>,
     pub message: String,
+    #[serde(default)]
+    pub gateway_lifecycle: gateway_transaction::GatewayLifecyclePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_sync_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +211,7 @@ impl AppStatus {
             proxy_port: app_flavor::default_gateway_port(),
             proxy_build: None,
             message: message.into(),
+            gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Unavailable,
             history_sync_status: None,
             history_sync_message: None,
         }
@@ -307,7 +318,11 @@ async fn get_status() -> Result<AppStatus, String> {
 }
 
 #[tauri::command]
-fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> Result<AppStatus, String> {
+fn switch_mode(
+    mode: String,
+    auto_sync: bool,
+    force_takeover: Option<bool>,
+) -> Result<AppStatus, String> {
     if mode == "custom" {
         official_refresh::refresh_before_official_activation()?;
     }
@@ -316,8 +331,7 @@ fn switch_mode(mode: String, auto_sync: bool, force_takeover: Option<bool>) -> R
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
-    official_refresh::refresh_before_official_activation()?;
-    proxy::start()
+    proxy::start_after(official_refresh::refresh_before_official_activation)
 }
 
 #[tauri::command]
@@ -327,8 +341,7 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
-    official_refresh::refresh_before_official_activation()?;
-    proxy::restart()
+    proxy::restart_after(official_refresh::refresh_before_official_activation)
 }
 
 #[tauri::command]
@@ -343,7 +356,7 @@ fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
 
 #[tauri::command]
 fn get_settings() -> Result<Settings, String> {
-    config::get_settings()
+    autostart::reconcile_settings(config::get_settings()?)
 }
 
 #[tauri::command]
@@ -686,6 +699,11 @@ fn remove_autostart() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_autostart_status() -> Result<autostart::AutostartStatus, String> {
+    autostart::get_autostart_status()
+}
+
+#[tauri::command]
 fn open_codex_app() -> Result<String, String> {
     launch_codex_app()
 }
@@ -715,9 +733,15 @@ fn window_toggle_maximize(window: Window) -> Result<(), String> {
 
 #[tauri::command]
 fn window_close_to_tray(window: Window) -> Result<(), String> {
-    window
-        .hide()
-        .map_err(|error| format!("failed to hide window to tray: {error}"))
+    run_app_lifecycle_action(
+        AppLifecycleAction::CloseToTray,
+        proxy::stop_session_owned_for_terminal_exit,
+        || {
+            window
+                .hide()
+                .map_err(|error| format!("failed to hide window to tray: {error}"))
+        },
+    )
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -726,6 +750,55 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppLifecycleAction {
+    CloseToTray,
+    TrayExit,
+    UpdateRestart,
+}
+
+impl AppLifecycleAction {
+    const fn requires_gateway_cleanup(self) -> bool {
+        matches!(self, Self::TrayExit | Self::UpdateRestart)
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CloseToTray => "close to tray",
+            Self::TrayExit => "tray Exit",
+            Self::UpdateRestart => "update restart",
+        }
+    }
+}
+
+pub(crate) fn run_app_lifecycle_action<Cleanup, Action, Output>(
+    lifecycle_action: AppLifecycleAction,
+    cleanup_gateway: Cleanup,
+    action: Action,
+) -> Output
+where
+    Cleanup: FnOnce() -> Result<bool, String>,
+    Action: FnOnce() -> Output,
+{
+    if lifecycle_action.requires_gateway_cleanup() {
+        match cleanup_gateway() {
+            Ok(true) => log::info!(
+                "{} stopped the current-session Gateway before the app transitioned",
+                lifecycle_action.label()
+            ),
+            Ok(false) => log::debug!(
+                "{} found no current-session Gateway to stop before the app transitioned",
+                lifecycle_action.label()
+            ),
+            Err(error) => log::warn!(
+                "{} continued after bounded current-session Gateway cleanup failed: {error}",
+                lifecycle_action.label()
+            ),
+        }
+    }
+    action()
 }
 
 fn run_tray_action(app: &AppHandle, id: &str) {
@@ -746,37 +819,106 @@ fn run_tray_action(app: &AppHandle, id: &str) {
             );
         }
         TRAY_START_GATEWAY => {
-            report_tray_action(app, "Start Gateway", start_proxy());
+            run_tray_lifecycle_action(app, "Start Gateway", start_proxy, false);
         }
         TRAY_STOP_GATEWAY => {
-            report_tray_action(app, "Stop Gateway", proxy::stop());
+            run_tray_lifecycle_action(app, "Stop Gateway", stop_proxy, true);
         }
         TRAY_RESTART_GATEWAY => {
-            report_tray_action(app, "Restart Gateway", restart_proxy());
+            run_tray_lifecycle_action(app, "Restart Gateway", restart_proxy, true);
         }
-        TRAY_EXIT => app.exit(0),
+        TRAY_EXIT => run_app_lifecycle_action(
+            AppLifecycleAction::TrayExit,
+            proxy::stop_session_owned_for_terminal_exit,
+            || app.exit(0),
+        ),
         _ => {}
     }
 }
 
 fn report_tray_action(app: &AppHandle, action: &str, result: Result<AppStatus, String>) {
-    let toast = tray_toast_for(action, result);
+    let toast = tray_toast_for(next_tray_toast_id(), action, result);
+    emit_tray_toast(app, toast);
+}
+
+fn run_tray_lifecycle_action(
+    app: &AppHandle,
+    action: &'static str,
+    work: fn() -> Result<AppStatus, String>,
+    retires_gateway: bool,
+) {
+    let toast_id = next_tray_toast_id();
+    let loading_toast = if retires_gateway {
+        tray_retiring_gateway_loading_toast(toast_id.clone(), action)
+    } else {
+        tray_loading_toast(toast_id.clone(), action)
+    };
+    emit_tray_toast(app, loading_toast);
+    let app = app.clone();
+    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+        let result = work();
+        emit_tray_toast(&app, tray_toast_for(toast_id, action, result));
+    }));
+}
+
+fn emit_tray_toast(app: &AppHandle, toast: TrayToast) {
     if let Err(error) = app.emit(TRAY_TOAST_EVENT, toast) {
         log::warn!("failed to emit tray action feedback: {error}");
     }
 }
 
-fn tray_toast_for(action: &str, result: Result<AppStatus, String>) -> TrayToast {
+fn tray_loading_toast(id: String, action: &str) -> TrayToast {
+    TrayToast {
+        id,
+        text: format!("{action}..."),
+        tone: "loading".to_string(),
+    }
+}
+
+fn tray_retiring_gateway_loading_toast(id: String, action: &str) -> TrayToast {
+    let locale = config::get_settings()
+        .map(|settings| settings.locale)
+        .unwrap_or_default();
+    TrayToast {
+        id,
+        text: format!(
+            "{} {action}...",
+            gateway_retirement_warning_for_locale(&locale)
+        ),
+        tone: "loading".to_string(),
+    }
+}
+
+fn gateway_retirement_warning_for_locale(locale: &str) -> &'static str {
+    if locale == "zh-CN" {
+        "活跃的 Codex 任务可能会被中断。"
+    } else {
+        "Active Codex Tasks may be interrupted."
+    }
+}
+
+fn tray_toast_for(id: String, action: &str, result: Result<AppStatus, String>) -> TrayToast {
     match result {
         Ok(status) => TrayToast {
+            id,
             text: format!("{action}: {}", status.message),
             tone: "success".to_string(),
         },
         Err(error) => TrayToast {
+            id,
             text: format!("{action} failed: {error}"),
             tone: "error".to_string(),
         },
     }
+}
+
+fn next_tray_toast_id() -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "tray-lifecycle-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -902,7 +1044,11 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = run_app_lifecycle_action(
+                    AppLifecycleAction::CloseToTray,
+                    proxy::stop_session_owned_for_terminal_exit,
+                    || window.hide(),
+                );
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -965,6 +1111,7 @@ fn run_gui() {
             sync_catalog,
             set_autostart,
             remove_autostart,
+            get_autostart_status,
             open_codex_app,
             window_minimize,
             window_toggle_maximize,
@@ -974,48 +1121,77 @@ fn run_gui() {
         .expect("error while building CodexHub Tauri application");
 
     app.run(|_app, event| {
-            if matches!(event, RunEvent::Resumed) {
-                tauri::async_runtime::spawn_blocking(|| {
-                    if let Err(error) = official_refresh::refresh_after_resume() {
-                        log::warn!("overdue Official model refresh after resume failed: {error}");
-                    }
-                });
-            }
-        });
-}
-
-fn start_gateway_on_launch() {
-    tauri::async_runtime::spawn_blocking(|| {
-        if let Err(error) = official_refresh::refresh_at_startup() {
-            log::warn!("startup Official model refresh failed: {error}");
-        }
-        official_refresh::start_scheduled_refresh_loop();
-        let Ok(settings) = config::get_settings() else {
-            return;
-        };
-        if let Err(error) = start_gateway_after_startup(
-            settings.auto_start_gateway,
-            official_refresh::refresh_before_official_activation,
-            proxy::start,
-        ) {
-            eprintln!("failed to start CodexHub gateway on app launch: {error}");
+        if matches!(event, RunEvent::Resumed) {
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = official_refresh::refresh_after_resume() {
+                    log::warn!("overdue Official model refresh after resume failed: {error}");
+                }
+            });
         }
     });
 }
 
-fn start_gateway_after_startup<ActivateOfficial, StartGateway>(
+fn start_gateway_on_launch() {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut launch_ready = StartupLaunchReady::new(ready_tx);
+        official_refresh::start_scheduled_refresh_loop();
+        let Ok(settings) = config::get_settings() else {
+            return;
+        };
+        let start = || {
+            proxy::start_after(|| {
+                launch_ready.signal();
+                if let Err(error) = official_refresh::refresh_at_startup() {
+                    log::warn!("startup Official model refresh failed: {error}");
+                }
+                official_refresh::refresh_before_official_activation()
+            })
+        };
+        if let Err(error) = start_gateway_after_startup(settings.auto_start_gateway, start) {
+            eprintln!("failed to start CodexHub gateway on app launch: {error}");
+        } else if !settings.auto_start_gateway {
+            launch_ready.signal();
+            if let Err(error) = official_refresh::refresh_at_startup() {
+                log::warn!("startup Official model refresh failed: {error}");
+            }
+        }
+    });
+    // Do not expose the initial window until automatic startup either owns the
+    // cross-process gate (and publishes Starting) or has already completed.
+    let _ = ready_rx.recv();
+}
+
+struct StartupLaunchReady(Option<std::sync::mpsc::SyncSender<()>>);
+
+impl StartupLaunchReady {
+    fn new(sender: std::sync::mpsc::SyncSender<()>) -> Self {
+        Self(Some(sender))
+    }
+
+    fn signal(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl Drop for StartupLaunchReady {
+    fn drop(&mut self) {
+        self.signal();
+    }
+}
+
+fn start_gateway_after_startup<StartGateway>(
     auto_start_gateway: bool,
-    activate_official: ActivateOfficial,
     start_gateway: StartGateway,
 ) -> Result<bool, String>
 where
-    ActivateOfficial: FnOnce() -> Result<(), String>,
     StartGateway: FnOnce() -> Result<AppStatus, String>,
 {
     if !auto_start_gateway {
         return Ok(false);
     }
-    activate_official()?;
     start_gateway()?;
     Ok(true)
 }
@@ -1037,38 +1213,109 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{start_gateway_after_startup, tray_toast_for, AppStatus};
-    use std::cell::Cell;
+    use super::{
+        gateway_retirement_warning_for_locale, run_app_lifecycle_action,
+        start_gateway_after_startup, tray_loading_toast, tray_retiring_gateway_loading_toast,
+        tray_toast_for, AppLifecycleAction, AppStatus,
+    };
+    use std::cell::{Cell, RefCell};
 
     #[test]
-    fn auto_start_refuses_to_launch_the_gateway_without_a_safe_official_snapshot() {
+    fn auto_start_propagates_coordinated_precondition_failure_once() {
         let starts = Cell::new(0);
-        let error = start_gateway_after_startup(
-            true,
-            || Err("safe Official snapshot is unavailable".to_string()),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(status())
-            },
-        )
-        .expect_err("unsafe Official activation must block auto-start");
+        let error = start_gateway_after_startup(true, || {
+            starts.set(starts.get() + 1);
+            Err("safe Official snapshot is unavailable".to_string())
+        })
+        .expect_err("coordinated precondition must block auto-start");
 
         assert!(error.contains("safe Official snapshot"));
-        assert_eq!(starts.get(), 0);
+        assert_eq!(starts.get(), 1);
     }
 
     #[test]
     fn tray_state_actions_always_produce_success_or_error_feedback() {
-        let success = tray_toast_for("Start Gateway", Ok(status()));
+        let loading = tray_loading_toast("same-toast".to_string(), "Start Gateway");
+        assert_eq!(loading.id, "same-toast");
+        assert_eq!(loading.tone, "loading");
+
+        let retiring =
+            tray_retiring_gateway_loading_toast("same-toast".to_string(), "Stop Gateway");
+        assert_eq!(retiring.id, loading.id);
+        assert_eq!(retiring.tone, "loading");
+        assert_eq!(
+            gateway_retirement_warning_for_locale("zh-CN"),
+            "活跃的 Codex 任务可能会被中断。"
+        );
+
+        let success = tray_toast_for("same-toast".to_string(), "Start Gateway", Ok(status()));
+        assert_eq!(success.id, loading.id);
         assert_eq!(success.tone, "success");
         assert!(success.text.contains("Start Gateway"));
 
         let failure = tray_toast_for(
+            "same-toast".to_string(),
             "Start Gateway",
             Err("safe snapshot unavailable".to_string()),
         );
+        assert_eq!(failure.id, loading.id);
         assert_eq!(failure.tone, "error");
         assert!(failure.text.contains("safe snapshot unavailable"));
+    }
+
+    #[test]
+    fn close_to_tray_preserves_the_current_session_gateway() {
+        let cleanup_calls = Cell::new(0);
+        let action_calls = Cell::new(0);
+
+        run_app_lifecycle_action(
+            AppLifecycleAction::CloseToTray,
+            || {
+                cleanup_calls.set(cleanup_calls.get() + 1);
+                Ok(true)
+            },
+            || action_calls.set(action_calls.get() + 1),
+        );
+
+        assert_eq!(cleanup_calls.get(), 0);
+        assert_eq!(action_calls.get(), 1);
+    }
+
+    #[test]
+    fn tray_exit_and_update_restart_cleanup_before_the_terminal_action() {
+        for lifecycle_action in [
+            AppLifecycleAction::TrayExit,
+            AppLifecycleAction::UpdateRestart,
+        ] {
+            let events = RefCell::new(Vec::new());
+
+            run_app_lifecycle_action(
+                lifecycle_action,
+                || {
+                    events.borrow_mut().push("cleanup");
+                    Ok(true)
+                },
+                || events.borrow_mut().push("terminal"),
+            );
+
+            assert_eq!(events.into_inner(), vec!["cleanup", "terminal"]);
+        }
+    }
+
+    #[test]
+    fn bounded_cleanup_failure_does_not_block_an_orderly_terminal_action() {
+        let events = RefCell::new(Vec::new());
+
+        run_app_lifecycle_action(
+            AppLifecycleAction::TrayExit,
+            || {
+                events.borrow_mut().push("cleanup");
+                Err("Gateway identity changed".to_string())
+            },
+            || events.borrow_mut().push("terminal"),
+        );
+
+        assert_eq!(events.into_inner(), vec!["cleanup", "terminal"]);
     }
 
     fn status() -> AppStatus {
@@ -1078,6 +1325,7 @@ mod tests {
             proxy_port: 9099,
             proxy_build: None,
             message: "Gateway state updated".to_string(),
+            gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
             history_sync_status: None,
             history_sync_message: None,
         }

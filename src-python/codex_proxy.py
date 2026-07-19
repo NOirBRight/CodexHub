@@ -73,12 +73,17 @@ from protocol_translation import (
 )
 
 from codex_semantic_adapter import (
+    BINDING_ACCEPTED as _BINDING_ACCEPTED,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
     multi_agent_discovery_arguments as _semantic_multi_agent_discovery_arguments,
     normalize_multi_agent_arguments as _semantic_normalize_multi_agent_arguments,
     normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
+    strict_json_object as _semantic_strict_json_object,
+    validate_effective_worker_binding as _semantic_validate_effective_worker_binding,
+    validate_requested_worker_binding as _semantic_validate_requested_worker_binding,
+    validate_worker_selector as _semantic_validate_worker_selector,
 )
 
 from catalog import (
@@ -123,6 +128,7 @@ from websocket_transport import (
 import proxy_telemetry
 import bounded_event_writer
 import diagnostic_recorder
+import worker_binding_signing
 
 try:
     import zstandard
@@ -537,6 +543,17 @@ THIRD_PARTY_TOOL_NAME_ALIASES.update(
     {f"mcp__multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
 )
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
+WORKER_SELECTOR_ERROR_CODE = "external_worker_selector_rejected"
+WORKER_BINDING_ERROR_CODE = "external_worker_binding_rejected"
+WORKER_REQUESTED_BINDING_FIELD = "_codexhub_worker_requested_binding"
+WORKER_REQUESTED_BINDING_VERSION = "codexhub.requested-worker-binding.v1"
+WORKER_REQUESTED_BINDING_FIELDS = {
+    "contract_version",
+    "agent_type",
+    "model",
+    "reasoning",
+    "signature",
+}
 MULTI_AGENT_DISCOVERY_TOOLS = [
     {
         "type": "namespace",
@@ -550,10 +567,11 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "agent_type": {"type": "string"},
+                        "agent_type": {"type": "string", "enum": ["worker", "general"]},
                         "fork_context": {"type": "boolean"},
                         "message": {"type": "string"},
                     },
+                    "required": ["agent_type"],
                     "additionalProperties": True,
                 },
             },
@@ -632,6 +650,9 @@ TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
         "additionalProperties": False,
     },
 }
+TOOL_SEARCH_EMPTY_MISS_BOUND = 2
+TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION = "identical_exact_query"
+TOOL_SEARCH_UNAVAILABLE_STATUS = "unavailable"
 BROWSER_CONTEXT_MARKERS = (
     "# in app browser",
     "# browser comments",
@@ -708,6 +729,7 @@ def _runtime_codex_dir() -> Path:
 
 RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
+WORKER_BINDING_SIGNING_ROOT = RUNTIME_PROXY_DIR
 OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
 PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
@@ -716,6 +738,192 @@ PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
 GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
 GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
 GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+GATEWAY_USER_REQUESTED_SHUTDOWN_BUDGET_SECONDS = 2.0
+USER_REQUESTED_SHUTDOWN_OUTCOME = "user_requested_shutdown"
+
+
+class GatewayUserRequestedShutdown(RuntimeError):
+    """Raised in a request worker after the local Gateway begins retirement."""
+
+
+class GatewayRequestAdmission:
+    """One admitted Gateway request and the upstream transport it may cancel."""
+
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._upstream_transport: Any | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def attach_upstream_transport(self, transport: Any) -> None:
+        with self._lock:
+            self._upstream_transport = transport
+            cancelled = self._cancelled.is_set()
+        if cancelled:
+            self._close_upstream_transport(transport)
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        with self._lock:
+            transport = self._upstream_transport
+        if transport is not None:
+            self._close_upstream_transport(transport)
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise GatewayUserRequestedShutdown(USER_REQUESTED_SHUTDOWN_OUTCOME)
+
+    def wait_for_cancellation(self, timeout: float) -> bool:
+        return self._cancelled.wait(timeout=max(0.0, timeout))
+
+    @staticmethod
+    def _close_upstream_transport(transport: Any) -> None:
+        close = getattr(transport, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+class GatewayShutdownController:
+    """Authenticated local control-plane state for Gateway retirement."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        shutdown_budget_seconds: float = GATEWAY_USER_REQUESTED_SHUTDOWN_BUDGET_SECONDS,
+    ) -> None:
+        self._clock = clock
+        self._shutdown_budget_seconds = max(0.0, shutdown_budget_seconds)
+        self._lock = threading.Lock()
+        self._admission_open = True
+        self._shutdown_started_at: float | None = None
+        self._active: set[GatewayRequestAdmission] = set()
+        self._active_drained = threading.Event()
+        self._active_drained.set()
+
+    def admit(self) -> GatewayRequestAdmission | None:
+        with self._lock:
+            if not self._admission_open:
+                return None
+            admission = GatewayRequestAdmission()
+            self._active.add(admission)
+            self._active_drained.clear()
+            return admission
+
+    def complete(self, admission: GatewayRequestAdmission) -> None:
+        with self._lock:
+            self._active.discard(admission)
+            if not self._active:
+                self._active_drained.set()
+
+    def close_admission(self) -> int:
+        with self._lock:
+            self._admission_open = False
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = self._clock()
+            active = tuple(self._active)
+        for admission in active:
+            admission.cancel()
+        return len(active)
+
+    def remaining_shutdown_budget_seconds(self) -> float:
+        with self._lock:
+            started_at = self._shutdown_started_at
+        if started_at is None:
+            return self._shutdown_budget_seconds
+        return max(0.0, self._shutdown_budget_seconds - (self._clock() - started_at))
+
+    @property
+    def shutdown_requested(self) -> bool:
+        with self._lock:
+            return self._shutdown_started_at is not None
+
+    def wait_for_active_requests(self) -> bool:
+        return self._active_drained.wait(timeout=self.remaining_shutdown_budget_seconds())
+
+
+GATEWAY_SHUTDOWN_CONTROLLER = GatewayShutdownController()
+_GATEWAY_REQUEST_ADMISSION = threading.local()
+
+
+def _gateway_shutdown_controller_for_handler(handler: Any) -> GatewayShutdownController:
+    server = getattr(handler, "server", None)
+    controller = getattr(server, "gateway_shutdown_controller", None)
+    return controller if isinstance(controller, GatewayShutdownController) else GATEWAY_SHUTDOWN_CONTROLLER
+
+
+def _activate_gateway_request(admission: GatewayRequestAdmission) -> GatewayRequestAdmission | None:
+    previous = getattr(_GATEWAY_REQUEST_ADMISSION, "current", None)
+    _GATEWAY_REQUEST_ADMISSION.current = admission
+    return previous if isinstance(previous, GatewayRequestAdmission) else None
+
+
+def _restore_gateway_request(previous: GatewayRequestAdmission | None) -> None:
+    if previous is None:
+        try:
+            del _GATEWAY_REQUEST_ADMISSION.current
+        except AttributeError:
+            pass
+        return
+    _GATEWAY_REQUEST_ADMISSION.current = previous
+
+
+def _active_gateway_request() -> GatewayRequestAdmission | None:
+    current = getattr(_GATEWAY_REQUEST_ADMISSION, "current", None)
+    return current if isinstance(current, GatewayRequestAdmission) else None
+
+
+def _sleep_for_retry_with_gateway_cancellation(delay_seconds: float) -> None:
+    admission = _active_gateway_request()
+    if admission is None:
+        time.sleep(delay_seconds)
+        return
+    if admission.wait_for_cancellation(delay_seconds):
+        admission.raise_if_cancelled()
+
+
+def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
+    message = "Gateway stopped because the user requested shutdown."
+    codexhub_error = _codexhub_error_payload(
+        source="gateway",
+        message=message,
+        status=503,
+        error=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        error_type=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        failure_class=RETRY_FAILURE_PERMANENT,
+    )
+    if inbound_format == "chat_completions":
+        return {
+            "error": {
+                "message": message,
+                "type": USER_REQUESTED_SHUTDOWN_OUTCOME,
+                "code": USER_REQUESTED_SHUTDOWN_OUTCOME,
+                "status": 503,
+            },
+            "codexhub_error": codexhub_error,
+        }
+    return {
+        "type": USER_REQUESTED_SHUTDOWN_OUTCOME,
+        "error": USER_REQUESTED_SHUTDOWN_OUTCOME,
+        "detail": message,
+        "codexhub_error": codexhub_error,
+    }
+
+
+def _record_user_requested_shutdown() -> None:
+    write_proxy_event(
+        "request_cancelled",
+        shutdown_outcome=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        status=503,
+        error=USER_REQUESTED_SHUTDOWN_OUTCOME,
+        detail="Gateway shutdown requested by user",
+    )
 
 
 def _gateway_event_writer_recovery_record(
@@ -1503,8 +1711,9 @@ def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
-    _observe_gateway_diagnostic("observe_proxy_event", event, fields)
-    payload = proxy_telemetry.prepare_event_payload(event, fields, RUNTIME_CODEX_DIR)
+    public_fields = _public_event_context(fields)
+    _observe_gateway_diagnostic("observe_proxy_event", event, public_fields)
+    payload = proxy_telemetry.prepare_event_payload(event, public_fields, RUNTIME_CODEX_DIR)
     _enqueue_gateway_event_payload(payload)
 
 
@@ -1613,6 +1822,14 @@ def _capture_usage(
     usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
 
 
+def _public_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in (context or {}).items()
+        if not str(key).startswith("_")
+    }
+
+
 def _usage_observed_context(
     event_context: Mapping[str, Any] | None,
     *,
@@ -1622,11 +1839,7 @@ def _usage_observed_context(
     upstream_format: str,
     inbound_format: str,
 ) -> dict[str, Any]:
-    context = {
-        key: value
-        for key, value in (event_context or {}).items()
-        if not str(key).startswith("_")
-    }
+    context = _public_event_context(event_context)
     context.update(
         {
             "request_id": request_id,
@@ -1705,7 +1918,7 @@ def _offer_official_passthrough_usage_line(context: Mapping[str, Any], line: byt
         return
     _start_official_passthrough_usage_worker()
     try:
-        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((dict(context), line))
+        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((_public_event_context(context), line))
     except queue.Full:
         return
 
@@ -1751,7 +1964,7 @@ def _offer_usage_observed_body(context: Mapping[str, Any], body: bytes) -> None:
         return
     _start_usage_observed_worker()
     try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("body", dict(context), body, None))
+        USAGE_OBSERVED_QUEUE.put_nowait(("body", _public_event_context(context), body, None))
     except queue.Full:
         return
 
@@ -1766,7 +1979,7 @@ def _offer_usage_observed_sse_line(
         return
     _start_usage_observed_worker()
     try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("sse", dict(context), line, upstream_format))
+        USAGE_OBSERVED_QUEUE.put_nowait(("sse", _public_event_context(context), line, upstream_format))
     except queue.Full:
         return
 
@@ -1801,13 +2014,13 @@ def _usage_observed_worker() -> None:
 def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
     if event_context is None:
         return
-    payload = {key: value for key, value in event_context.items() if not str(key).startswith("_")}
+    payload = _public_event_context(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
 
 
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
-    payload = dict(context)
+    payload = _public_event_context(context)
     existing = payload.get("request_kind")
     if isinstance(existing, str) and existing and existing != request_kind:
         payload.setdefault("client_request_kind", existing)
@@ -2098,6 +2311,8 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
                 "native_responses_tool_codec", "none"
             ),
             "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
+            "supports_developer_role": bool(external_model.get("supports_developer_role", True)),
+            "supported_reasoning_levels": tuple(external_model.get("supported_reasoning_levels") or ()),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
         }
 
@@ -2143,6 +2358,42 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
     return False
 
 
+def _request_carries_reasoning_control(payload: Mapping[str, Any]) -> bool:
+    effort = payload.get("reasoning_effort")
+    if isinstance(effort, str) and effort:
+        return True
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        return True
+    if isinstance(reasoning, Mapping) and reasoning:
+        return True
+    template_kwargs = payload.get("chat_template_kwargs")
+    if isinstance(template_kwargs, Mapping):
+        template_effort = template_kwargs.get("reasoning_effort")
+        if isinstance(template_effort, str) and template_effort:
+            return True
+    return False
+
+
+def _reasoning_policy_for_request(
+    inbound_payload: Any,
+    upstream: Mapping[str, Any] | None,
+    model: str | None,
+) -> str | None:
+    if not isinstance(inbound_payload, Mapping) or not isinstance(upstream, Mapping):
+        return None
+    if _request_carries_reasoning_control(inbound_payload):
+        return "explicit"
+    levels = upstream.get("supported_reasoning_levels")
+    if not levels and model:
+        candidate = generated_catalog_by_slug().get(canonical_model_id(model))
+        if isinstance(candidate, Mapping):
+            levels = candidate.get("supported_reasoning_levels")
+    if levels:
+        return "provider-default"
+    return None
+
+
 def _validate_reasoning_effort_for_upstream(
     payload: Any,
     upstream: Mapping[str, Any],
@@ -2156,6 +2407,9 @@ def _validate_reasoning_effort_for_upstream(
         requested_efforts.append(reasoning.get("effort"))
     elif isinstance(reasoning, str):
         requested_efforts.append(reasoning)
+    template_kwargs = payload.get("chat_template_kwargs")
+    if isinstance(template_kwargs, Mapping):
+        requested_efforts.append(template_kwargs.get("reasoning_effort"))
     is_ultra = any(
         isinstance(effort, str) and effort.strip().lower() == "ultra" for effort in requested_efforts
     )
@@ -4007,6 +4261,7 @@ def _multi_agent_explicit_function_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
+    worker_selector_values: tuple[str, ...] = ("worker", "general"),
 ) -> list[dict[str, Any]]:
     namespace = MULTI_AGENT_DISCOVERY_TOOLS[0]
     tools = namespace.get("tools") if isinstance(namespace, Mapping) else None
@@ -4035,6 +4290,9 @@ def _multi_agent_explicit_function_tools(
         parameters = json.loads(json.dumps(_tool_parameters_schema(tool)))
         properties = parameters.setdefault("properties", {})
         if name == "spawn_agent" and isinstance(properties, dict):
+            agent_type = properties.get("agent_type")
+            if isinstance(agent_type, dict):
+                agent_type["enum"] = list(worker_selector_values)
             message = properties.get("message")
             if isinstance(message, dict):
                 message.setdefault(
@@ -4465,9 +4723,12 @@ def _adapt_native_responses_tool_declarations(
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if item.get("type") != "function_call":
         return None
+    request_shape = dict(item)
+    for response_only_field in ("id", "status", WORKER_REQUESTED_BINDING_FIELD):
+        request_shape.pop(response_only_field, None)
     tool_name = _multi_agent_function_call_name(item)
     if tool_name is not None:
-        rewritten = dict(item)
+        rewritten = request_shape
         rewritten.pop("namespace", None)
         rewritten["name"] = f"multi_agent_v1__{tool_name}"
         normalized, _, args_changed = _normalize_multi_agent_arguments(rewritten.get("arguments"), tool_name)
@@ -4476,11 +4737,11 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
         return rewritten
     node_name = _node_repl_function_call_name(item)
     if node_name is not None:
-        rewritten = dict(item)
+        rewritten = request_shape
         rewritten.pop("namespace", None)
         rewritten["name"] = f"{NODE_REPL_NAMESPACE}__{node_name}"
         return rewritten
-    return dict(item)
+    return request_shape
 
 
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
@@ -4617,6 +4878,7 @@ def _inject_explicit_codex_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
+    worker_selector_values: tuple[str, ...] = ("worker", "general"),
 ) -> bool:
     if tool_surface_counts is not None:
         tool_surface_counts.update(
@@ -4720,6 +4982,7 @@ def _inject_explicit_codex_tools(
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
+                worker_selector_values=worker_selector_values,
             )
         )
     if not include_multi_agent_tools:
@@ -5004,6 +5267,272 @@ def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
     return _semantic_normalize_tool_search_arguments(value)
 
 
+def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, tuple[str, int]]:
+    if not isinstance(value, list):
+        return {}
+
+    queries_by_call_id: dict[str, str] = {}
+    empty_call_ids_by_query: dict[str, list[str]] = {}
+    successful_queries: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        if item.get("type") == "tool_search_call":
+            arguments = _normalize_tool_search_arguments(item.get("arguments"))
+            if arguments is None or _is_multi_agent_discovery_arguments(arguments):
+                continue
+            queries_by_call_id[call_id] = arguments["query"]
+            continue
+        if item.get("type") != "tool_search_output":
+            continue
+        query = queries_by_call_id.pop(call_id, None)
+        tools = item.get("tools")
+        if query is None or not isinstance(tools, list):
+            continue
+        if tools:
+            successful_queries.add(query)
+            continue
+        empty_call_ids_by_query.setdefault(query, []).append(call_id)
+
+    terminal_calls: dict[str, tuple[str, int]] = {}
+    for query, call_ids in empty_call_ids_by_query.items():
+        if query in successful_queries or len(call_ids) < TOOL_SEARCH_EMPTY_MISS_BOUND:
+            continue
+        terminal_calls[call_ids[TOOL_SEARCH_EMPTY_MISS_BOUND - 1]] = (
+            query,
+            TOOL_SEARCH_EMPTY_MISS_BOUND,
+        )
+    return terminal_calls
+
+
+def _terminalize_bounded_empty_tool_search_misses(
+    payload: dict[str, Any],
+    terminal_calls: Mapping[str, tuple[str, int]],
+) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list) or not terminal_calls:
+        return False
+
+    rewritten_items: list[Any] = []
+    changed = False
+    for item in input_items:
+        if (
+            isinstance(item, Mapping)
+            and item.get("type") == "tool_search_output"
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"] in terminal_calls
+        ):
+            rewritten = dict(item)
+            rewritten["status"] = TOOL_SEARCH_UNAVAILABLE_STATUS
+            rewritten["query_classification"] = TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION
+            _, count = terminal_calls[item["call_id"]]
+            rewritten["empty_miss_count"] = count
+            rewritten["terminal"] = True
+            rewritten_items.append(rewritten)
+            changed = True
+            continue
+        rewritten_items.append(item)
+    if changed:
+        payload["input"] = rewritten_items
+    return changed
+
+
+def _restrict_bounded_tool_search_queries(payload: dict[str, Any], bounded_queries: set[str]) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not bounded_queries:
+        return False
+
+    restriction = {"enum": sorted(bounded_queries)}
+    changed = False
+    rewritten_tools: list[Any] = []
+    for tool in tools:
+        if not (
+            isinstance(tool, Mapping)
+            and tool.get("type") == "function"
+            and tool.get("name") == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+        ):
+            rewritten_tools.append(tool)
+            continue
+        rewritten_tool = dict(tool)
+        parameters = dict(_tool_parameters_schema(tool))
+        properties_value = parameters.get("properties")
+        properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
+        query_value = properties.get("query")
+        query_schema = dict(query_value) if isinstance(query_value, Mapping) else {"type": "string"}
+        if "not" in query_schema:
+            query_schema = {"allOf": [query_schema, {"not": restriction}]}
+        else:
+            query_schema["not"] = restriction
+        properties["query"] = query_schema
+        parameters["properties"] = properties
+        rewritten_tool["parameters"] = parameters
+        rewritten_tools.append(rewritten_tool)
+        changed = True
+    if changed:
+        payload["tools"] = rewritten_tools
+    return changed
+
+
+def _tool_search_query_digest(query: str) -> bytes:
+    return hashlib.sha256(query.encode("utf-8")).digest()
+
+
+def _bounded_tool_search_query_digests(event_context: Mapping[str, Any] | None) -> set[bytes]:
+    value = (event_context or {}).get("_bounded_tool_search_query_digests")
+    if not isinstance(value, (set, frozenset)):
+        return set()
+    return {digest for digest in value if isinstance(digest, bytes)}
+
+
+def _tool_search_call_arguments(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    if value.get("type") == "tool_search_call":
+        return _normalize_tool_search_arguments(value.get("arguments"))
+    if value.get("type") == "function_call" and value.get("name") == "tool_search":
+        return _normalize_tool_search_arguments(value.get("arguments"))
+    return None
+
+
+def _bounded_tool_search_unavailable_message(item: Mapping[str, Any]) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {
+                "type": "output_text",
+                "text": (
+                    "tool_search_unavailable\n"
+                    f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}\n"
+                    f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}\n"
+                    f"status: {TOOL_SEARCH_UNAVAILABLE_STATUS}\n"
+                    "terminal: true\n"
+                    "execution: suppressed"
+                ),
+            }
+        ],
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        message["id"] = item_id
+    return message
+
+
+def _suppress_bounded_tool_search_calls(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    bounded_digests = _bounded_tool_search_query_digests(event_context)
+    if not bounded_digests:
+        return value, False
+
+    if isinstance(event_context, dict):
+        candidates_value = event_context.setdefault("_tool_search_stream_candidate_item_ids", set())
+        candidate_item_ids = candidates_value if isinstance(candidates_value, set) else set()
+        event_context["_tool_search_stream_candidate_item_ids"] = candidate_item_ids
+        suppressed_value = event_context.setdefault("_bounded_tool_search_suppressed_item_ids", set())
+        suppressed_item_ids = suppressed_value if isinstance(suppressed_value, set) else set()
+        event_context["_bounded_tool_search_suppressed_item_ids"] = suppressed_item_ids
+    else:
+        candidate_item_ids = set()
+        suppressed_item_ids = set()
+
+    return _suppress_bounded_tool_search_calls_inner(
+        value,
+        bounded_digests,
+        candidate_item_ids,
+        suppressed_item_ids,
+    )
+
+
+def _suppress_bounded_tool_search_calls_inner(
+    value: Any,
+    bounded_digests: set[bytes],
+    candidate_item_ids: set[str],
+    suppressed_item_ids: set[str],
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten_items: list[Any] = []
+        for item in value:
+            replacement, item_changed = _suppress_bounded_tool_search_calls_inner(
+                item,
+                bounded_digests,
+                candidate_item_ids,
+                suppressed_item_ids,
+            )
+            if replacement is None:
+                changed = True
+                continue
+            rewritten_items.append(replacement)
+            changed = changed or item_changed
+        return (rewritten_items if changed else value), changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    event_type = value.get("type")
+    if event_type == "response.output_item.added":
+        item = value.get("item")
+        if isinstance(item, Mapping):
+            item_id = item.get("id")
+            if (
+                isinstance(item_id, str)
+                and item_id
+                and (
+                    item.get("type") == "tool_search_call"
+                    or (item.get("type") == "function_call" and item.get("name") == "tool_search")
+                )
+            ):
+                candidate_item_ids.add(item_id)
+    elif event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id in suppressed_item_ids:
+            return None, True
+        if (
+            event_type == "response.function_call_arguments.done"
+            and isinstance(item_id, str)
+            and item_id in candidate_item_ids
+        ):
+            arguments = _normalize_tool_search_arguments(value.get("arguments"))
+            if (
+                arguments is not None
+                and _tool_search_query_digest(arguments["query"]) in bounded_digests
+            ):
+                suppressed_item_ids.add(item_id)
+                return None, True
+
+    arguments = _tool_search_call_arguments(value)
+    if (
+        arguments is not None
+        and _tool_search_query_digest(arguments["query"]) in bounded_digests
+    ):
+        item_id = value.get("id")
+        if isinstance(item_id, str) and item_id:
+            suppressed_item_ids.add(item_id)
+        return _bounded_tool_search_unavailable_message(value), True
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _suppress_bounded_tool_search_calls_inner(
+            item,
+            bounded_digests,
+            candidate_item_ids,
+            suppressed_item_ids,
+        )
+        if replacement is None:
+            rewritten.pop(key, None)
+            changed = True
+            continue
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+    return (rewritten if changed else value), changed
+
+
 def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
     if not arguments:
         return False
@@ -5023,6 +5552,325 @@ def _normalize_multi_agent_arguments(
     tool_name: str | None,
 ) -> tuple[Any, str | None, bool]:
     return _semantic_normalize_multi_agent_arguments(value, tool_name)
+
+
+def _raise_worker_contract_error(
+    *,
+    event: str,
+    error_code: str,
+    classification: str,
+    surface: str | None = None,
+) -> None:
+    fields = {
+        "outcome": "rejected",
+        "classification": classification,
+    }
+    if surface is not None:
+        fields["surface"] = surface
+    write_proxy_event(event, **fields)
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            error_code,
+            "External Worker delegation contract validation failed.",
+        )
+    )
+
+
+def _validate_external_worker_selectors(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _validate_external_worker_selectors(item, event_context, surface=surface)
+        return
+    if not isinstance(value, Mapping):
+        return
+
+    if _multi_agent_function_call_name(value) == "spawn_agent":
+        raw_arguments = value.get("arguments")
+        arguments = _json_object_from_arguments(raw_arguments)
+        if arguments is not None and raw_arguments not in (None, ""):
+            agent_type = arguments.get("agent_type")
+            if agent_type == "general":
+                pass
+            elif agent_type == "worker":
+                if not _worker_caller_carrier_supported(event_context):
+                    _raise_worker_contract_error(
+                        event="worker_selector_validated",
+                        error_code=WORKER_SELECTOR_ERROR_CODE,
+                        classification="unsupported_caller_carrier",
+                        surface=surface,
+                    )
+                write_proxy_event(
+                    "worker_selector_validated",
+                    outcome="accepted",
+                    classification="worker_preserved",
+                    surface=surface,
+                )
+            elif agent_type is not None or bool((event_context or {}).get("_spawn_selector_required")):
+                validation = _semantic_validate_worker_selector(arguments)
+                _raise_worker_contract_error(
+                    event="worker_selector_validated",
+                    error_code=WORKER_SELECTOR_ERROR_CODE,
+                    classification=validation.classification,
+                    surface=surface,
+                )
+
+    for item in value.values():
+        _validate_external_worker_selectors(item, event_context, surface=surface)
+
+
+def _worker_caller_carrier_supported(event_context: Mapping[str, Any] | None) -> bool:
+    context = event_context or {}
+    caller_format = context.get("_caller_wire_format", context.get("inbound_format", "responses"))
+    return caller_format != "chat_completions"
+
+
+def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        return reasoning.get("effort")
+    if isinstance(reasoning, str):
+        return reasoning
+    return payload.get("reasoning_effort")
+
+
+def _worker_requested_binding_signature_payload(binding: Mapping[str, Any], call_id: str) -> bytes:
+    signed_binding = {
+        "contract_version": binding.get("contract_version"),
+        "agent_type": binding.get("agent_type"),
+        "model": binding.get("model"),
+        "reasoning": binding.get("reasoning"),
+    }
+    canonical = json.dumps(signed_binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return call_id.encode("utf-8") + b"\0" + canonical
+
+
+def _requested_worker_binding_signature(binding: Mapping[str, Any], call_id: str) -> str:
+    return worker_binding_signing.sign(
+        WORKER_BINDING_SIGNING_ROOT,
+        _worker_requested_binding_signature_payload(binding, call_id),
+    )
+
+
+def _worker_requested_binding_sidecar(
+    requested: Mapping[str, Any],
+    call_id: str,
+) -> dict[str, Any]:
+    validation = _semantic_validate_requested_worker_binding(requested)
+    if validation.outcome != _BINDING_ACCEPTED:
+        _raise_worker_contract_error(
+            event="worker_requested_binding_validated",
+            error_code=WORKER_BINDING_ERROR_CODE,
+            classification=validation.classification,
+        )
+    binding = {
+        "contract_version": WORKER_REQUESTED_BINDING_VERSION,
+        "agent_type": requested["agent_type"],
+        "model": requested["model"],
+        "reasoning": requested["reasoning"],
+    }
+    return {**binding, "signature": _requested_worker_binding_signature(binding, call_id)}
+
+
+def _verified_worker_requested_binding(
+    value: Any,
+    call_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if value is None:
+        return None, "missing_requested_binding_sidecar"
+    if not isinstance(value, Mapping) or set(value) != WORKER_REQUESTED_BINDING_FIELDS:
+        return None, "unknown_requested_binding_sidecar"
+    if value.get("contract_version") != WORKER_REQUESTED_BINDING_VERSION:
+        return None, "unknown_requested_binding_sidecar"
+    signature = value.get("signature")
+    binding = {
+        "contract_version": value.get("contract_version"),
+        "agent_type": value.get("agent_type"),
+        "model": value.get("model"),
+        "reasoning": value.get("reasoning"),
+    }
+    if not worker_binding_signing.verify(
+        WORKER_BINDING_SIGNING_ROOT,
+        _worker_requested_binding_signature_payload(binding, call_id),
+        signature,
+    ):
+        return None, "unknown_requested_binding_sidecar"
+    requested = {
+        "agent_type": binding["agent_type"],
+        "model": binding["model"],
+        "reasoning": binding["reasoning"],
+    }
+    validation = _semantic_validate_requested_worker_binding(requested)
+    if validation.outcome != _BINDING_ACCEPTED:
+        return None, validation.classification
+    return requested, None
+
+
+def _attach_worker_requested_binding_sidecars(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        rewritten = []
+        for item in value:
+            replacement, item_changed = _attach_worker_requested_binding_sidecars(item, event_context)
+            rewritten.append(replacement)
+            changed = changed or item_changed
+        return (rewritten if changed else value), changed
+    if not isinstance(value, dict):
+        return value, False
+
+    changed = False
+    rewritten = dict(value)
+    for key, item in value.items():
+        replacement, item_changed = _attach_worker_requested_binding_sidecars(item, event_context)
+        if item_changed:
+            rewritten[key] = replacement
+            changed = True
+
+    if _multi_agent_function_call_name(rewritten) != "spawn_agent":
+        return (rewritten if changed else value), changed
+    arguments = _json_object_from_arguments(rewritten.get("arguments"))
+    if arguments is None or arguments.get("agent_type") != "worker":
+        return (rewritten if changed else value), changed
+    call_id = rewritten.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        _raise_worker_contract_error(
+            event="worker_requested_binding_validated",
+            error_code=WORKER_BINDING_ERROR_CODE,
+            classification="missing_call_identity",
+        )
+    requested = (event_context or {}).get("_worker_requested_binding")
+    if not isinstance(requested, Mapping):
+        _raise_worker_contract_error(
+            event="worker_requested_binding_validated",
+            error_code=WORKER_BINDING_ERROR_CODE,
+            classification="missing_requested_binding_sidecar",
+        )
+    sidecar = _worker_requested_binding_sidecar(requested, call_id)
+    if rewritten.get(WORKER_REQUESTED_BINDING_FIELD) != sidecar:
+        rewritten[WORKER_REQUESTED_BINDING_FIELD] = sidecar
+        changed = True
+    return (rewritten if changed else value), changed
+
+
+def _apply_external_worker_response_contract(
+    value: Any,
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    validate_selectors: bool = True,
+    attach_sidecars: bool = True,
+) -> tuple[Any, bool]:
+    if validate_selectors:
+        _validate_external_worker_selectors(value, event_context, surface=surface)
+    if attach_sidecars:
+        return _attach_worker_requested_binding_sidecars(value, event_context)
+    return value, False
+
+
+def _validate_worker_binding_history(
+    payload: Mapping[str, Any],
+) -> None:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return
+
+    worker_calls: dict[str, Mapping[str, Any]] = {}
+    validated_call_ids: set[str] = set()
+    for item in input_items:
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if item.get("type") == "function_call" and _multi_agent_function_call_name(item) == "spawn_agent":
+            arguments = _json_object_from_arguments(item.get("arguments"))
+            agent_type = arguments.get("agent_type") if arguments is not None else None
+            if agent_type == "general":
+                continue
+            selector_validation = _semantic_validate_worker_selector(arguments)
+            if selector_validation.outcome != _BINDING_ACCEPTED:
+                _raise_worker_contract_error(
+                    event="worker_selector_validated",
+                    error_code=WORKER_SELECTOR_ERROR_CODE,
+                    classification=selector_validation.classification,
+                    surface="history",
+                )
+            if not isinstance(call_id, str) or not call_id:
+                _raise_worker_contract_error(
+                    event="worker_effective_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="missing_call_identity",
+                )
+            if call_id in worker_calls:
+                _raise_worker_contract_error(
+                    event="worker_effective_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="duplicate_worker_call_identity",
+                )
+            requested, sidecar_failure = _verified_worker_requested_binding(
+                item.get(WORKER_REQUESTED_BINDING_FIELD),
+                call_id,
+            )
+            if requested is None:
+                _raise_worker_contract_error(
+                    event="worker_requested_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification=sidecar_failure or "unknown_requested_binding_sidecar",
+                )
+            if isinstance(item, dict):
+                item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+            worker_calls[call_id] = requested
+            continue
+        if (
+            item.get("type") != "function_call_output"
+            or not isinstance(call_id, str)
+            or call_id not in worker_calls
+        ):
+            continue
+        if call_id in validated_call_ids:
+            _raise_worker_contract_error(
+                event="worker_effective_binding_validated",
+                error_code=WORKER_BINDING_ERROR_CODE,
+                classification="duplicate_worker_effective_output",
+            )
+
+        output = item.get("output")
+        readback = _semantic_strict_json_object(output)
+        if readback is None and isinstance(output, str) and output.strip():
+            _raise_worker_contract_error(
+                event="worker_effective_binding_validated",
+                error_code=WORKER_BINDING_ERROR_CODE,
+                classification="malformed_readback",
+            )
+        requested = worker_calls[call_id]
+        validation = _semantic_validate_effective_worker_binding(
+            requested,
+            readback,
+        )
+        if validation.outcome != _BINDING_ACCEPTED:
+            _raise_worker_contract_error(
+                event="worker_effective_binding_validated",
+                error_code=WORKER_BINDING_ERROR_CODE,
+                classification=validation.classification,
+            )
+        write_proxy_event(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification=validation.classification,
+        )
+        validated_call_ids.add(call_id)
+
+    if set(worker_calls) - validated_call_ids:
+        _raise_worker_contract_error(
+            event="worker_effective_binding_validated",
+            error_code=WORKER_BINDING_ERROR_CODE,
+            classification="missing_readback",
+        )
 
 
 def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
@@ -5857,6 +6705,13 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
             )
             lines.append(
                 "next_action: call multi_agent_v1__spawn_agent to create the child agent; do not call tool_search again for the same multi-agent query."
+            )
+        if item.get("query_classification") == TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION:
+            lines.append(f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}")
+            lines.append(f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}")
+            lines.append("terminal: true")
+            lines.append(
+                "required_next_action: continue without the unavailable tool; do not call tool_search again for this exact query."
             )
         _append_internal_field(lines, "tools", item.get("tools"))
     else:
@@ -6908,7 +7763,26 @@ def _required_subagent_call_item(spec: Mapping[str, Any], call_id: str | None = 
     }
 
 
+def _with_preserved_spawn_agent_type(
+    arguments: Mapping[str, Any],
+    original_arguments: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    rewritten = dict(arguments)
+    agent_type = original_arguments.get("agent_type") if original_arguments is not None else None
+    if agent_type in {"worker", "general"}:
+        rewritten["agent_type"] = agent_type
+    return rewritten
+
+
 def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
+    if spec.get("tool_name") == "spawn_agent":
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        spec = dict(spec)
+        required_arguments = spec.get("arguments")
+        spec["arguments"] = _with_preserved_spawn_agent_type(
+            dict(required_arguments) if isinstance(required_arguments, Mapping) else {},
+            original_arguments,
+        )
     call_id = value.get("call_id")
     item = _required_subagent_call_item(spec, call_id=call_id if isinstance(call_id, str) and call_id else None)
     item_id = value.get("id")
@@ -6922,9 +7796,32 @@ def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[st
     return item
 
 
+def _validate_generated_required_spawn_call(
+    value: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+    validated_call_ids: set[str],
+) -> None:
+    raw_arguments = value.get("arguments")
+    if (
+        _multi_agent_function_call_name(value) != "spawn_agent"
+        or raw_arguments in (None, "")
+        or _json_object_from_arguments(raw_arguments) is None
+    ):
+        return
+    identities = [identity for identity in (value.get("call_id"), value.get("id")) if isinstance(identity, str)]
+    if any(identity in validated_call_ids for identity in identities):
+        return
+    _validate_external_worker_selectors(value, event_context, surface=surface)
+    validated_call_ids.update(identity for identity in identities if identity)
+
+
 def _coerce_required_subagent_tool_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
+    *,
+    surface: str = "coerce",
 ) -> tuple[Any, bool]:
     if not subagent_semantic_repair_enabled(event_context):
         return value, False
@@ -6941,9 +7838,25 @@ def _coerce_required_subagent_tool_calls(
         stored = event_context.setdefault("_required_subagent_coerced_item_ids", set())
         coerced_item_ids = stored if isinstance(stored, set) else set()
         event_context["_required_subagent_coerced_item_ids"] = coerced_item_ids
+        stored_generated = event_context.setdefault("_required_subagent_generated_spawn_item_ids", set())
+        generated_spawn_item_ids = stored_generated if isinstance(stored_generated, set) else set()
+        event_context["_required_subagent_generated_spawn_item_ids"] = generated_spawn_item_ids
+        stored_validated = event_context.setdefault("_required_subagent_validated_generated_spawn_ids", set())
+        validated_generated_spawn_ids = stored_validated if isinstance(stored_validated, set) else set()
+        event_context["_required_subagent_validated_generated_spawn_ids"] = validated_generated_spawn_ids
     else:
         coerced_item_ids = set()
-    rewritten, changed = _coerce_required_subagent_tool_calls_inner(value, spec, coerced_item_ids)
+        generated_spawn_item_ids = set()
+        validated_generated_spawn_ids = set()
+    rewritten, changed = _coerce_required_subagent_tool_calls_inner(
+        value,
+        spec,
+        coerced_item_ids,
+        generated_spawn_item_ids,
+        event_context,
+        surface,
+        validated_generated_spawn_ids,
+    )
     if changed:
         _write_required_subagent_repair_event(event_context, spec, surface="coerce")
     return rewritten, changed
@@ -7017,7 +7930,15 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
         if not isinstance(item_id, str) or not isinstance(arguments_by_item_id, dict):
             return value, False
         expected = arguments_by_item_id.get(item_id)
-        if not isinstance(expected, str) or value.get("arguments") == expected:
+        if not isinstance(expected, str):
+            return value, False
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        expected_arguments = _json_object_from_arguments(expected)
+        if expected_arguments is not None:
+            expected_arguments = _with_preserved_spawn_agent_type(expected_arguments, original_arguments)
+            expected = json.dumps(expected_arguments, ensure_ascii=True, separators=(",", ":"))
+            arguments_by_item_id[item_id] = expected
+        if value.get("arguments") == expected:
             return value, False
         rewritten = dict(value)
         rewritten["arguments"] = expected
@@ -7039,6 +7960,8 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
                 return value, False
             expected_arguments = specs[next_index]
             state["next_index"] = next_index + 1
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        expected_arguments = _with_preserved_spawn_agent_type(expected_arguments, original_arguments)
         expected_json = json.dumps(dict(expected_arguments), ensure_ascii=True, separators=(",", ":"))
         if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
             arguments_by_item_id[item_id] = expected_json
@@ -7065,12 +7988,24 @@ def _coerce_required_subagent_tool_calls_inner(
     value: Any,
     spec: Mapping[str, Any],
     coerced_item_ids: set[str],
+    generated_spawn_item_ids: set[str],
+    event_context: Mapping[str, Any] | None,
+    surface: str,
+    validated_generated_spawn_ids: set[str],
 ) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
         rewritten = []
         for item in value:
-            replacement, item_changed = _coerce_required_subagent_tool_calls_inner(item, spec, coerced_item_ids)
+            replacement, item_changed = _coerce_required_subagent_tool_calls_inner(
+                item,
+                spec,
+                coerced_item_ids,
+                generated_spawn_item_ids,
+                event_context,
+                surface,
+                validated_generated_spawn_ids,
+            )
             rewritten.append(replacement)
             changed = changed or item_changed
         return (rewritten if changed else value), changed
@@ -7082,25 +8017,59 @@ def _coerce_required_subagent_tool_calls_inner(
         item_id = value.get("item_id")
         if not isinstance(item_id, str) or item_id not in coerced_item_ids:
             return value, False
-        arguments = spec.get("arguments") if isinstance(spec.get("arguments"), Mapping) else {}
+        arguments = dict(spec.get("arguments")) if isinstance(spec.get("arguments"), Mapping) else {}
+        original_arguments = _json_object_from_arguments(value.get("arguments"))
+        if spec.get("tool_name") == "spawn_agent" and original_arguments is not None:
+            arguments = _with_preserved_spawn_agent_type(arguments, original_arguments)
         expected = json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":"))
+        if spec.get("tool_name") == "spawn_agent" and item_id in generated_spawn_item_ids:
+            _validate_generated_required_spawn_call(
+                {
+                    "type": "function_call",
+                    "id": item_id,
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": expected,
+                },
+                event_context,
+                surface=surface,
+                validated_call_ids=validated_generated_spawn_ids,
+            )
         if value.get("arguments") != expected:
             rewritten = dict(value)
             rewritten["arguments"] = expected
             return rewritten, True
         return value, False
 
-    if _multi_agent_function_call_name(value) is not None:
+    original_tool_name = _multi_agent_function_call_name(value)
+    if original_tool_name is not None:
         replacement = _required_subagent_call_item_like(spec, value)
         item_id = replacement.get("id")
         if isinstance(item_id, str) and item_id:
             coerced_item_ids.add(item_id)
+        if original_tool_name != "spawn_agent" and _multi_agent_function_call_name(replacement) == "spawn_agent":
+            if isinstance(item_id, str) and item_id:
+                generated_spawn_item_ids.add(item_id)
+            _validate_generated_required_spawn_call(
+                replacement,
+                event_context,
+                surface=surface,
+                validated_call_ids=validated_generated_spawn_ids,
+            )
         return (replacement, True) if replacement != value else (value, False)
 
     changed = False
     rewritten = dict(value)
     for key, item in value.items():
-        replacement, item_changed = _coerce_required_subagent_tool_calls_inner(item, spec, coerced_item_ids)
+        replacement, item_changed = _coerce_required_subagent_tool_calls_inner(
+            item,
+            spec,
+            coerced_item_ids,
+            generated_spawn_item_ids,
+            event_context,
+            surface,
+            validated_generated_spawn_ids,
+        )
         if item_changed:
             rewritten[key] = replacement
             changed = True
@@ -7168,6 +8137,21 @@ def _write_required_subagent_repair_event(
     )
 
 
+def _reject_missing_worker_selector_for_generated_call(
+    spec: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    if spec.get("tool_name") == "spawn_agent" and bool((event_context or {}).get("_spawn_selector_required")):
+        _raise_worker_contract_error(
+            event="worker_selector_validated",
+            error_code=WORKER_SELECTOR_ERROR_CODE,
+            classification="missing_selector",
+            surface=surface,
+        )
+
+
 def _repair_missing_required_subagent_call_payload(
     payload: Any,
     event_context: Mapping[str, Any] | None,
@@ -7185,6 +8169,7 @@ def _repair_missing_required_subagent_call_payload(
     if "error" in payload or not _response_output_is_text_or_empty(payload.get("output")):
         return payload, False
 
+    _reject_missing_worker_selector_for_generated_call(spec, event_context, surface="body")
     rewritten = dict(payload)
     rewritten["status"] = "completed"
     rewritten["output"] = [_required_subagent_call_item(spec)]
@@ -7213,6 +8198,7 @@ def _repair_missing_required_subagent_call_events(
     if completed_response is None:
         return events, False
 
+    _reject_missing_worker_selector_for_generated_call(spec, event_context, surface="events")
     prefix = [
         dict(event)
         for event in events
@@ -7242,6 +8228,7 @@ def _repair_missing_required_subagent_call_sse_line(
     response_obj = response if isinstance(response, Mapping) else {}
     if not _response_output_is_text_or_empty(response_obj.get("output")):
         return None
+    _reject_missing_worker_selector_for_generated_call(spec, event_context, surface="sse")
     output = response_obj.get("output")
     output_index = len(output) if isinstance(output, list) else 0
     events = _required_subagent_call_events(spec, response_obj, output_index=output_index)
@@ -7359,6 +8346,8 @@ def transparent_request_body(
                 changed = True
             if official_responses_backend and _normalize_responses_string_input(next_payload):
                 changed = True
+            if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
+                changed = True
             if changed:
                 return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         return body
@@ -7389,9 +8378,126 @@ def transparent_request_body(
         changed = True
     if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
         changed = True
+    if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
+        changed = True
     if not changed:
         return body
     return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _rewrite_transparent_developer_role_messages(
+    body: bytes,
+    upstream: Mapping[str, Any],
+) -> tuple[bytes, int]:
+    if upstream.get("supports_developer_role", True) is not False:
+        return body, 0
+    payload = _safe_json_mapping(body)
+    if payload is None:
+        return body, 0
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return body, 0
+    next_messages: list[Any] = []
+    rewritten = 0
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "developer":
+            message = {**message, "role": "system"}
+            rewritten += 1
+        next_messages.append(message)
+    if not rewritten:
+        return body, 0
+    next_payload = dict(payload)
+    next_payload["messages"] = next_messages
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), rewritten
+
+
+# JSON Schema positions whose values are themselves schemas (or maps/lists of
+# schemas). Value positions such as ``default``, ``enum``, ``const``, or
+# ``examples`` must never be rewritten, so normalization is schema-aware rather
+# than a blind recursive boolean replacement.
+_TOOL_SCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "defs", "definitions", "dependentSchemas")
+_TOOL_SCHEMA_VALUE_KEYS = (
+    "items",
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "propertyNames",
+    "if",
+    "then",
+    "else",
+    "not",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "contentSchema",
+)
+_TOOL_SCHEMA_LIST_KEYS = ("allOf", "anyOf", "oneOf", "prefixItems")
+
+
+def _normalize_tool_json_schema_items(value: list[Any], state: dict[str, int]) -> list[Any]:
+    return [
+        _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
+        for item in value
+    ]
+
+
+def _normalize_tool_json_schema(node: Any, state: dict[str, int]) -> Any:
+    """Replace boolean subschemas with equivalent object forms.
+
+    ``true`` and ``{}`` accept any instance; ``false`` and ``{"not": {}}``
+    accept none. Some upstreams (for example Moonshot-flavored validators)
+    reject boolean property schemas outright, so transparent routes normalize
+    them without changing validation semantics.
+    """
+    if isinstance(node, bool):
+        state["rewritten"] += 1
+        return {} if node else {"not": {}}
+    if not isinstance(node, dict):
+        return node
+    next_node = dict(node)
+    for key in _TOOL_SCHEMA_MAP_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, dict):
+            next_node[key] = {
+                name: _normalize_tool_json_schema(subschema, state) if isinstance(subschema, (dict, bool)) else subschema
+                for name, subschema in value.items()
+            }
+    for key in _TOOL_SCHEMA_VALUE_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, (dict, bool)):
+            next_node[key] = _normalize_tool_json_schema(value, state)
+        elif isinstance(value, list):
+            next_node[key] = _normalize_tool_json_schema_items(value, state)
+    for key in _TOOL_SCHEMA_LIST_KEYS:
+        value = next_node.get(key)
+        if isinstance(value, list):
+            next_node[key] = _normalize_tool_json_schema_items(value, state)
+    return next_node
+
+
+def _normalize_transparent_tool_schema_booleans(body: bytes) -> tuple[bytes, int]:
+    payload = _safe_json_mapping(body)
+    if payload is None:
+        return body, 0
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return body, 0
+    state = {"rewritten": 0}
+    next_tools: list[Any] = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict):
+                parameters = function.get("parameters")
+                if isinstance(parameters, (dict, bool)):
+                    parameters = _normalize_tool_json_schema(parameters, state)
+                    function = {**function, "parameters": parameters}
+                    tool = {**tool, "function": function}
+        next_tools.append(tool)
+    if not state["rewritten"]:
+        return body, 0
+    next_payload = dict(payload)
+    next_payload["tools"] = next_tools
+    return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8"), state["rewritten"]
 
 
 def _is_raw_provider_probe_context(event_context: Mapping[str, Any] | None) -> bool:
@@ -7432,6 +8538,7 @@ def compatible_request_body(
 
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
+    requested_reasoning = _requested_reasoning_effort(payload)
     changed = False
     if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
@@ -7485,6 +8592,32 @@ def compatible_request_body(
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
+    if not raw_provider_probe:
+        _validate_worker_binding_history(payload)
+    bounded_tool_search_terminal_calls = (
+        {}
+        if raw_provider_probe
+        else _bounded_empty_tool_search_terminal_calls(payload.get("input"))
+    )
+    bounded_tool_search_queries = {
+        query for query, _count in bounded_tool_search_terminal_calls.values()
+    }
+    if isinstance(event_context, dict):
+        if bounded_tool_search_queries:
+            event_context["_bounded_tool_search_query_digests"] = frozenset(
+                _tool_search_query_digest(query) for query in bounded_tool_search_queries
+            )
+        else:
+            event_context.pop("_bounded_tool_search_query_digests", None)
+    if _terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
+        for _query, count in bounded_tool_search_terminal_calls.values():
+            write_proxy_event(
+                "tool_search_empty_miss_bound",
+                query_classification=TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
+                count=count,
+                status=TOOL_SEARCH_UNAVAILABLE_STATUS,
+            )
+        changed = True
     if raw_provider_probe:
         pass
     else:
@@ -7519,7 +8652,8 @@ def compatible_request_body(
     # broader discovery service; eager remains the #105-compatible surface.
     # Worker subagents retain their established restricted surface.
     include_tool_search = (
-        tool_surface_strategy == "deferred_core" and not subagent_worker_context
+        tool_surface_strategy == "deferred_core"
+        and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
@@ -7841,6 +8975,22 @@ def compatible_request_body(
                 changed = True
             tool_names_before = _function_tool_names(payload.get("tools"))
             tool_surface_counts: dict[str, int] = {}
+            worker_caller_carrier_supported = _worker_caller_carrier_supported(event_context)
+            if isinstance(event_context, dict):
+                if include_spawn_agent:
+                    event_context["_spawn_selector_required"] = True
+                else:
+                    event_context.pop("_spawn_selector_required", None)
+                if include_spawn_agent and worker_caller_carrier_supported:
+                    event_context["_worker_binding_required"] = True
+                    event_context["_worker_requested_binding"] = {
+                        "agent_type": "worker",
+                        "model": requested_model,
+                        "reasoning": requested_reasoning,
+                    }
+                else:
+                    event_context.pop("_worker_binding_required", None)
+                    event_context.pop("_worker_requested_binding", None)
             explicit_tools_injected = _inject_explicit_codex_tools(
                 payload,
                 include_tool_search=effective_include_tool_search,
@@ -7862,7 +9012,14 @@ def compatible_request_body(
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
+                worker_selector_values=(
+                    ("worker", "general")
+                    if worker_caller_carrier_supported
+                    else ("general",)
+                ),
             )
+            if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
+                changed = True
             write_proxy_event(
                 "external_tool_surface_prepared",
                 tool_surface_strategy=tool_surface_strategy,
@@ -7943,22 +9100,28 @@ def compatible_request_body(
         changed = True
 
     if upstream_name == "ollama_cloud":
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = reasoning.get("effort")
-            replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(effort) if isinstance(effort, str) else None
-            if replacement is not None:
-                reasoning["effort"] = replacement
-                changed = True
-        else:
-            replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(reasoning) if isinstance(reasoning, str) else None
-            if replacement is not None:
-                payload["reasoning"] = replacement
-                changed = True
+        if _apply_ollama_reasoning_effort_alias(payload):
+            changed = True
 
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _apply_ollama_reasoning_effort_alias(payload: dict[str, Any]) -> bool:
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(effort) if isinstance(effort, str) else None
+        if replacement is not None:
+            reasoning["effort"] = replacement
+            return True
+        return False
+    replacement = OLLAMA_REASONING_EFFORT_ALIASES.get(reasoning) if isinstance(reasoning, str) else None
+    if replacement is not None:
+        payload["reasoning"] = replacement
+        return True
+    return False
 
 
 APPLY_PATCH_FUNCTION_NAME = "apply_patch"
@@ -8664,6 +9827,12 @@ def compatible_response_body(
     changed = _hide_reasoning_text(payload)
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
+    payload, _ = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="body",
+        attach_sidecars=False,
+    )
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -8673,6 +9842,8 @@ def compatible_response_body(
             surface="body",
         )
     changed = changed or alias_changed
+    payload, bounded_tool_search_changed = _suppress_bounded_tool_search_calls(payload, event_context)
+    changed = changed or bounded_tool_search_changed
     payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
         payload,
         event_context,
@@ -8688,10 +9859,21 @@ def compatible_response_body(
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
-    payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
+    payload, required_tool_changed = _coerce_required_subagent_tool_calls(
+        payload,
+        event_context,
+        surface="body",
+    )
     changed = changed or required_tool_changed
     payload, required_call_changed = _repair_missing_required_subagent_call_payload(payload, event_context)
     changed = changed or required_call_changed
+    payload, requested_binding_changed = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="body",
+        validate_selectors=False,
+    )
+    changed = changed or requested_binding_changed
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -8719,6 +9901,12 @@ def compatible_sse_line(
         return b""
 
     changed = _hide_reasoning_text(payload)
+    payload, _ = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="sse",
+        attach_sidecars=False,
+    )
     payload, alias_changed = _normalize_third_party_tool_call(payload)
     if alias_changed:
         _write_adapter_event(
@@ -8728,6 +9916,10 @@ def compatible_sse_line(
             surface="sse",
         )
     changed = changed or alias_changed
+    payload, bounded_tool_search_changed = _suppress_bounded_tool_search_calls(payload, event_context)
+    if payload is None:
+        return b""
+    changed = changed or bounded_tool_search_changed
     payload, post_final_multi_agent_changed = _suppress_multi_agent_calls_after_lifecycle_final(
         payload,
         event_context,
@@ -8749,8 +9941,19 @@ def compatible_sse_line(
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
-    payload, required_tool_changed = _coerce_required_subagent_tool_calls(payload, event_context)
+    payload, required_tool_changed = _coerce_required_subagent_tool_calls(
+        payload,
+        event_context,
+        surface="sse",
+    )
     changed = changed or required_tool_changed
+    payload, requested_binding_changed = _apply_external_worker_response_contract(
+        payload,
+        event_context,
+        surface="sse",
+        validate_selectors=False,
+    )
+    changed = changed or requested_binding_changed
     repaired_line = _repair_missing_required_subagent_call_sse_line(payload, event_context, line_ending)
     if repaired_line is not None:
         return repaired_line
@@ -10647,6 +11850,8 @@ def _typed_error_code(
 ) -> str:
     if error_type == "gateway_auth_error":
         return "gateway.auth"
+    if error_type == USER_REQUESTED_SHUTDOWN_OUTCOME:
+        return "gateway.user_requested_shutdown"
     if error_type in {"invalid_request_error", "validation_error"}:
         return "provider.request"
     if error_code in {"UpstreamProtocolError", "upstream_stream_incomplete", "upstream_stream_idle_timeout"}:
@@ -11068,6 +12273,9 @@ def _open_upstream_response(
     diagnostic_model = _diagnostic_context_value(event_context, "model")
     attempt = 1
     while True:
+        admission = _active_gateway_request()
+        if admission is not None:
+            admission.raise_if_cancelled()
         attempt_started_at = time.monotonic()
         try:
             response = _open_upstream_once(
@@ -11075,6 +12283,9 @@ def _open_upstream_response(
                 upstream_name=upstream_name,
                 timeout=timeout,
             )
+            if admission is not None:
+                admission.attach_upstream_transport(response)
+                admission.raise_if_cancelled()
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
             connection_disposition = _diagnostic_connection_disposition(response)
             # A returned response proves this Gateway attempt reached response
@@ -11113,6 +12324,8 @@ def _open_upstream_response(
             )
             return response
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
+            if admission is not None:
+                admission.raise_if_cancelled()
             elapsed_ms = int(max(0.0, time.monotonic() - attempt_started_at) * 1000)
             connection_disposition = _diagnostic_error_connection_disposition(exc)
             try:
@@ -11198,7 +12411,7 @@ def _open_upstream_response(
                         failure_class=failure_class,
                 )
             )
-            time.sleep(delay_seconds)
+            _sleep_for_retry_with_gateway_cancellation(delay_seconds)
             attempt += 1
 
 
@@ -11266,7 +12479,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 self._send_json(401, _local_gateway_auth_error_payload())
                 self.close_connection = True
                 return
-            self._send_json(200, {"ok": True, "message": "shutdown scheduled"})
+            controller = _gateway_shutdown_controller_for_handler(self)
+            controller.close_admission()
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "outcome": USER_REQUESTED_SHUTDOWN_OUTCOME,
+                },
+            )
             self.close_connection = True
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
@@ -11319,6 +12540,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._send_json(401, _local_gateway_auth_error_payload())
             self.close_connection = True
             return
+        shutdown_controller = _gateway_shutdown_controller_for_handler(self)
+        admission = shutdown_controller.admit()
+        if admission is None:
+            _record_user_requested_shutdown()
+            self._send_user_requested_shutdown_outcome(
+                inbound_format=inbound_format,
+                downstream_sse_started=False,
+            )
+            return
+        previous_admission = _activate_gateway_request(admission)
         request_kind = RETRY_REQUEST_MAIN_GENERATION
         proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
         raw_provider_probe = raw_provider_probe_requested(self.headers, self.path)
@@ -11342,7 +12573,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_start_written = False
         write_request_start_once: Callable[[Mapping[str, Any]], None] | None = None
 
+        def send_user_requested_shutdown() -> None:
+            _record_user_requested_shutdown()
+            self._send_user_requested_shutdown_outcome(
+                inbound_format=inbound_format,
+                downstream_sse_started=downstream_sse_started,
+            )
+
         try:
+            admission.raise_if_cancelled()
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length < 0:
                 raise ValueError("Content-Length must be non-negative")
@@ -11515,9 +12754,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_kind = RETRY_REQUEST_MAIN_GENERATION
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
             vision_proxy_policy = vision_proxy_policy_for_route(route_decision, behavior_profile)
+            reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
                 **_route_decision_event_fields(route_decision),
                 "vision_proxy_policy": vision_proxy_policy,
+                **({"reasoning_policy": reasoning_policy} if reasoning_policy else {}),
             }
             proxy_request_context = {
                 **proxy_request_context,
@@ -11602,6 +12843,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "model": model_canonical,
                 "behavior_profile": behavior_profile,
                 **proxy_request_context,
+                "_caller_wire_format": inbound_format,
             }
 
             def emit_downstream_status(status_payload: Mapping[str, Any]) -> None:
@@ -11630,6 +12872,32 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream,
                     model_id=model,
                 )
+                body, developer_role_rewrites = _rewrite_transparent_developer_role_messages(body, upstream)
+                if developer_role_rewrites:
+                    write_proxy_event(
+                        "developer_role_rewrite_applied",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        messages_rewritten=developer_role_rewrites,
+                        **proxy_request_context,
+                    )
+                # Unconditional by design: rewriting boolean JSON Schemas to
+                # their equivalent object forms is semantics-preserving for
+                # every upstream, and intolerant validators (e.g. Moonshot)
+                # fail closed without it. No provider capability gate.
+                body, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(body)
+                if tool_schema_rewrites:
+                    write_proxy_event(
+                        "tool_schema_boolean_normalized",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        schemas_rewritten=tool_schema_rewrites,
+                        **proxy_request_context,
+                    )
             else:
                 compatibility_upstream = upstream
                 if upstream_format == "auto":
@@ -11876,6 +13144,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             LifecycleEmptyFinalResponseError,
                             LifecycleFinalFormatResponseError,
                         ) as exc:
+                            active_request = _active_gateway_request()
+                            if active_request is not None:
+                                active_request.raise_if_cancelled()
                             lifecycle_retry = isinstance(
                                 exc,
                                 (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError),
@@ -11953,7 +13224,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     failure_phase="stream_body" if stream_failure else None,
                                 )
                             )
-                            time.sleep(delay_seconds)
+                            _sleep_for_retry_with_gateway_cancellation(delay_seconds)
                             relay_attempt += 1
                             continue
                         relay_attempt += 1
@@ -12015,7 +13286,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **usage_capture,
                 **proxy_request_context,
             )
+        except GatewayUserRequestedShutdown:
+            send_user_requested_shutdown()
         except CompactEmptyResponseError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -12054,6 +13330,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="compact_empty_response",
             )
         except (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             error_code = (
                 "lifecycle_empty_final_response"
@@ -12096,6 +13375,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type=error_code,
             )
         except ImageProxyError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             if not request_start_written and callable(write_request_start_once):
                 fallback_request_observability = {
                     **caller_request_observability,
@@ -12139,6 +13421,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="image_proxy_error",
             )
         except UpstreamProtocolTranslationError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = str(exc)
             error_code = exc.cause.code
             is_apply_patch_adapter_error = error_code == APPLY_PATCH_ADAPTER_ERROR_CODE
@@ -12218,6 +13503,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type=json_error_type,
             )
         except ValueError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -12245,6 +13533,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error_type="invalid_request_error",
             )
         except HTTPError as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             if downstream_sse_started:
                 self._write_downstream_sse_error(
                     inbound_format=inbound_format,
@@ -12316,6 +13607,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
         except IncompleteRead as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -12347,6 +13641,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 detail=detail,
             )
         except (OSError, URLError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -12378,6 +13675,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 detail=detail,
             )
         except Exception as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             logger.exception("unexpected proxy error request_id=%s", request_id)
             write_proxy_event(
@@ -12409,6 +13709,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 exc=exc,
                 detail=detail,
             )
+        finally:
+            _restore_gateway_request(previous_admission)
+            shutdown_controller.complete(admission)
 
     def _send_local_responses_no_content(self) -> None:
         request_id = uuid.uuid4().hex[:12]
@@ -12684,6 +13987,30 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
 
+    def _send_user_requested_shutdown_outcome(
+        self,
+        *,
+        inbound_format: str,
+        downstream_sse_started: bool,
+    ) -> None:
+        payload = user_requested_shutdown_payload(inbound_format)
+        try:
+            if downstream_sse_started:
+                if inbound_format == "chat_completions":
+                    self.wfile.write(
+                        b"data: "
+                        + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                        + b"\n\n"
+                    )
+                    self.wfile.flush()
+                else:
+                    self._write_sse_event("error", payload)
+            else:
+                self._send_json(503, payload)
+        except OSError:
+            pass
+        self.close_connection = True
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = _json_response_bytes(payload)
         self.send_response(status)
@@ -12725,6 +14052,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
         on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
+        admission = _active_gateway_request()
+
+        def raise_if_shutdown_requested() -> None:
+            if admission is not None:
+                admission.raise_if_cancelled()
+
         def observe_line(line: bytes) -> None:
             if not line or on_line is None:
                 return
@@ -12738,8 +14071,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
         transport_idle_guard_enabled = transport_timeout_seconds > 0
         model_event_idle_guard_enabled = model_event_timeout_seconds > 0 and line_resets_idle_timeout is not None
-        if keepalive_interval <= 0 and not transport_idle_guard_enabled and not model_event_idle_guard_enabled:
+        if (
+            admission is None
+            and keepalive_interval <= 0
+            and not transport_idle_guard_enabled
+            and not model_event_idle_guard_enabled
+        ):
             while True:
+                raise_if_shutdown_requested()
                 line = response.readline()
                 observe_line(line)
                 yield line
@@ -12777,6 +14116,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             raise UpstreamStreamIdleTimeoutError(timeout_seconds, phase=phase)
 
         while True:
+            raise_if_shutdown_requested()
             now = time.monotonic()
             timeout_seconds: float | None = None
             if keepalive_interval > 0:
@@ -12799,6 +14139,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if timeout_seconds is None
                     else max(0.001, min(timeout_seconds, remaining_idle))
                 )
+            if admission is not None:
+                timeout_seconds = (
+                    0.1
+                    if timeout_seconds is None
+                    else max(0.001, min(timeout_seconds, 0.1))
+                )
 
             try:
                 if timeout_seconds is None:
@@ -12806,6 +14152,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 else:
                     kind, value = lines.get(timeout=timeout_seconds)
             except queue.Empty:
+                raise_if_shutdown_requested()
                 now = time.monotonic()
                 if transport_idle_guard_enabled and (now - last_transport_at) >= transport_timeout_seconds:
                     raise_idle_timeout(transport_timeout_seconds, "transport")
@@ -12816,6 +14163,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     last_keepalive_at = time.monotonic()
                 continue
             if kind == "error":
+                raise_if_shutdown_requested()
                 raise value
             if isinstance(value, bytes) and value:
                 now = time.monotonic()
@@ -13215,7 +14563,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             write_transparent_line(pending_line)
                     except OSError as exc:
                         self.close_connection = True
-                        event_fields = dict(event_context or {})
+                        event_fields = _public_event_context(event_context)
                         for key in (
                             "request_id",
                             "model",
@@ -13247,7 +14595,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     write_transparent_line(line)
                 except OSError as exc:
                     self.close_connection = True
-                    event_fields = dict(event_context or {})
+                    event_fields = _public_event_context(event_context)
                     for key in (
                         "request_id",
                         "model",
@@ -13557,7 +14905,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
-                event_fields = dict(event_context or {})
+                event_fields = _public_event_context(event_context)
                 event_fields.pop("request_id", None)
                 event_fields.pop("model", None)
                 event_fields.pop("upstream", None)
@@ -13580,7 +14928,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     else _responses_body_is_empty(body)
                 )
                 if status < 400 and request_kind != RETRY_REQUEST_COMPACT and empty_non_compact:
-                    event_fields = dict(event_context) if event_context else {}
+                    event_fields = _public_event_context(event_context)
                     event_fields.pop("request_id", None)
                     event_fields.pop("model", None)
                     event_fields.pop("upstream", None)
@@ -13611,6 +14959,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     for event in response_events:
                         if behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
                             event, _ = _normalize_third_party_tool_call(event)
+                            event, _ = _suppress_bounded_tool_search_calls(
+                                event,
+                                compatibility_event_context,
+                            )
+                            if event is None:
+                                continue
                             event, _ = _downgrade_invalid_third_party_tool_calls(event)
                             event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
                         event_type = event.get("type")
@@ -13664,7 +15018,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         if is_event_stream:
             def finish_downstream_stream_closed(exc: OSError) -> int:
                 self.close_connection = True
-                event_fields = dict(event_context or {})
+                event_fields = _public_event_context(event_context)
                 for key in ("request_id", "model", "upstream", "status", "error", "detail"):
                     event_fields.pop(key, None)
                 write_proxy_event(
@@ -14234,6 +15588,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         event_context=compatibility_event_context,
                     )
                     events, _ = _normalize_third_party_tool_call(events)
+                    events, _ = _suppress_bounded_tool_search_calls(
+                        events,
+                        compatibility_event_context,
+                    )
                     _write_adapter_event(
                         event_context,
                         "chat_to_responses_event_summary",
@@ -14256,10 +15614,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         **_response_events_shape_summary(events),
                     )
                     events, _ = _guard_duplicate_multi_agent_spawn_calls(events, event_context)
+                    events, _ = _apply_external_worker_response_contract(
+                        events,
+                        compatibility_event_context,
+                        surface="sse",
+                        attach_sidecars=False,
+                    )
                     events, _ = _coerce_exact_spawn_prompt_tool_calls(events, event_context)
-                    events, _ = _coerce_required_subagent_tool_calls(events, event_context)
+                    events, _ = _coerce_required_subagent_tool_calls(
+                        events,
+                        event_context,
+                        surface="sse",
+                    )
                     events, _ = _reconcile_function_call_argument_events(events)
                     events, _ = _repair_missing_required_subagent_call_events(events, event_context)
+                    events, _ = _apply_external_worker_response_contract(
+                        events,
+                        compatibility_event_context,
+                        surface="sse",
+                        validate_selectors=False,
+                    )
                     _write_adapter_event(
                         event_context,
                         "chat_to_responses_event_summary",
@@ -14891,18 +16265,38 @@ def run_server(host: str, port: int) -> None:
         force=True,
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
+    server.daemon_threads = True
+    shutdown_controller = GatewayShutdownController()
+    server.gateway_shutdown_controller = shutdown_controller
     logger.info("serving Codex proxy on %s:%s", host, port)
     try:
         server.serve_forever()
     finally:
+        server.server_close()
+        if shutdown_controller.shutdown_requested:
+            shutdown_controller.wait_for_active_requests()
+            flush_timeout = min(
+                GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+                shutdown_controller.remaining_shutdown_budget_seconds(),
+            )
+        else:
+            flush_timeout = GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
         writer_result = GATEWAY_EVENT_WRITER.shutdown(
-            timeout=GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+            timeout=flush_timeout,
         )
         if not writer_result.completed:
             logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
         try:
             diagnostic_shutdown = getattr(GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
-            if callable(diagnostic_shutdown) and not diagnostic_shutdown(GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS):
+            diagnostic_timeout = (
+                min(
+                    GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+                    shutdown_controller.remaining_shutdown_budget_seconds(),
+                )
+                if shutdown_controller.shutdown_requested
+                else GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
+            )
+            if callable(diagnostic_shutdown) and not diagnostic_shutdown(diagnostic_timeout):
                 logger.warning("Gateway diagnostic recorder shutdown did not drain")
         except Exception:
             logger.warning("Gateway diagnostic recorder shutdown failed")

@@ -60,6 +60,8 @@ const zhCN = {
     closeToTray: "最小化到托盘",
     debugDiagnostics: "调试诊断",
     gatewayHint: "Gateway 是 Hub 前面的本地 OpenAI 兼容服务",
+    gatewayRetirementWarning: "活跃的 Codex 任务可能会被中断。是否继续？",
+    gatewayRetirementCancelled: "Gateway 操作已取消，活跃的 Codex 任务未被中断。",
     maximizeOrRestore: "最大化或还原",
     minimize: "最小化",
     proxyRunning: "代理运行中",

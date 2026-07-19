@@ -1,0 +1,1537 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "wayfinder-final-migration-audit",
+  "captured_at": "2026-07-16T20:11:03.061598Z",
+  "repository": "NOirBRight/CodexHub",
+  "generator": "scripts/generate_wayfinder_final_audit.py",
+  "frontier_artifact": {
+    "repository_relative_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+    "sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd",
+    "embedded": {
+      "schema_version": 1,
+      "artifact_kind": "wayfinder-frontier-ownership-audit",
+      "captured_at": "2026-07-16T19:44:53.590618Z",
+      "repository": "NOirBRight/CodexHub",
+      "generator": "scripts/generate_wayfinder_final_audit.py",
+      "base_ref": "dev",
+      "base_revision": "51a636c98ca90a9766836a7d603c2013211bbeeb",
+      "planning_branch": "wayfinder-github-migration",
+      "planning_revision": "7d60eca9a903672948445bc079ed46316b281907",
+      "native_task_capture": {
+        "tool": "codex_app__list_threads",
+        "source_capture_file_sha256": "8d8a637e13cae1e791b79525b431c6006cbaf015b4bb1ac88f797692939d9ed5",
+        "source_capture_canonical_json_sha256": "43e40d8eb70cb8e21face20ab7a1d18b30b2a4f3903c783f87387ec6a263aa6e",
+        "captured_at": "2026-07-16T18:53:36.947Z",
+        "limit": 50,
+        "records": [
+          {
+            "issue": 159,
+            "issue_title": "Bound repeated empty tool_search misses for external models",
+            "kind": "exact_title",
+            "query": "Bound repeated empty tool_search misses for external models",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 159,
+            "issue_title": "Bound repeated empty tool_search misses for external models",
+            "kind": "issue_number",
+            "query": "Issue 159",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 161,
+            "issue_title": "Preserve Worker selector and effective binding validation for external delegation",
+            "kind": "exact_title",
+            "query": "Preserve Worker selector and effective binding validation for external delegation",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 161,
+            "issue_title": "Preserve Worker selector and effective binding validation for external delegation",
+            "kind": "issue_number",
+            "query": "Issue 161",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 139,
+            "issue_title": "Serialize Gateway lifecycle operations and prevent duplicate startup processes",
+            "kind": "exact_title",
+            "query": "Serialize Gateway lifecycle operations and prevent duplicate startup processes",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 139,
+            "issue_title": "Serialize Gateway lifecycle operations and prevent duplicate startup processes",
+            "kind": "issue_number",
+            "query": "Issue 139",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 149,
+            "issue_title": "Make Rust/Python atomic-file lock ownership and stale recovery safe",
+            "kind": "exact_title",
+            "query": "Make Rust/Python atomic-file lock ownership and stale recovery safe",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 149,
+            "issue_title": "Make Rust/Python atomic-file lock ownership and stale recovery safe",
+            "kind": "issue_number",
+            "query": "Issue 149",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 150,
+            "issue_title": "Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts",
+            "kind": "exact_title",
+            "query": "Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 150,
+            "issue_title": "Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts",
+            "kind": "issue_number",
+            "query": "Issue 150",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 111,
+            "issue_title": "Make Windows app autostart registration verifiable and reliable",
+            "kind": "exact_title",
+            "query": "Make Windows app autostart registration verifiable and reliable",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          },
+          {
+            "issue": 111,
+            "issue_title": "Make Windows app autostart registration verifiable and reliable",
+            "kind": "issue_number",
+            "query": "Issue 111",
+            "captured_at": "2026-07-16T18:53:36.947Z",
+            "schema_version": 2,
+            "unavailable_hosts": [],
+            "unavailable_host_count": 0,
+            "match_count": 0
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "number": 159,
+          "title": "Bound repeated empty tool_search misses for external models",
+          "state": "open",
+          "body_normalized_sha256": "dc9f36f3c8c8dcbdc79696205528f1743d56885216d41f821bc59c486d8bc78e",
+          "labels": [
+            "bug",
+            "ready-for-agent",
+            "wayfinder:task"
+          ],
+          "assignees": [],
+          "milestone": "0.1.6 — Codex control-plane reliability",
+          "parent": 156,
+          "blocked_by": [],
+          "children": [],
+          "url": "https://github.com/NOirBRight/CodexHub/issues/159",
+          "expected_hotset": {
+            "entries": [
+              {
+                "raw": "- `src-python/codex_proxy.py`",
+                "normalized": "src-python/codex_proxy.py",
+                "path_matchers": [
+                  "src-python/codex_proxy.py"
+                ]
+              },
+              {
+                "raw": "- `src-python/codex_semantic_adapter.py`",
+                "normalized": "src-python/codex_semantic_adapter.py",
+                "path_matchers": [
+                  "src-python/codex_semantic_adapter.py"
+                ]
+              },
+              {
+                "raw": "- `tests/test_routing.py`",
+                "normalized": "tests/test_routing.py",
+                "path_matchers": [
+                  "tests/test_routing.py"
+                ]
+              },
+              {
+                "raw": "- `tests/test_codex_semantic_adapter.py`",
+                "normalized": "tests/test_codex_semantic_adapter.py",
+                "path_matchers": [
+                  "tests/test_codex_semantic_adapter.py"
+                ]
+              },
+              {
+                "raw": "- one sanitized fixture under `tests/fixtures/` if the deterministic replay needs it",
+                "normalized": "one sanitized fixture under tests/fixtures/ if the deterministic replay needs it",
+                "path_matchers": [
+                  "tests/fixtures/**"
+                ]
+              }
+            ],
+            "matchers": [
+              "src-python/codex_proxy.py",
+              "src-python/codex_semantic_adapter.py",
+              "tests/fixtures/**",
+              "tests/test_codex_semantic_adapter.py",
+              "tests/test_routing.py"
+            ]
+          },
+          "eligibility": {
+            "label_dependency": {
+              "open": true,
+              "ready_for_agent": true,
+              "unassigned": true,
+              "open_blockers": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            },
+            "ownership_hotset": {
+              "native_task_query_count": 2,
+              "native_task_matches": 0,
+              "native_task_unavailable_hosts": 0,
+              "assignees": [],
+              "active_surface_intersections": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            }
+          }
+        },
+        {
+          "number": 161,
+          "title": "Preserve Worker selector and effective binding validation for external delegation",
+          "state": "open",
+          "body_normalized_sha256": "944ad1757538846011da360b880c53889c2aaa68d021cb3634caf1221c88e4f3",
+          "labels": [
+            "bug",
+            "ready-for-agent",
+            "wayfinder:task"
+          ],
+          "assignees": [],
+          "milestone": "0.1.6 — Codex control-plane reliability",
+          "parent": 156,
+          "blocked_by": [],
+          "children": [],
+          "url": "https://github.com/NOirBRight/CodexHub/issues/161",
+          "expected_hotset": {
+            "entries": [
+              {
+                "raw": "- `src-python/codex_semantic_adapter.py`",
+                "normalized": "src-python/codex_semantic_adapter.py",
+                "path_matchers": [
+                  "src-python/codex_semantic_adapter.py"
+                ]
+              },
+              {
+                "raw": "- `src-python/codex_proxy.py` only where the selector/effective-binding result crosses the adapter boundary",
+                "normalized": "src-python/codex_proxy.py only where the selector/effective-binding result crosses the adapter boundary",
+                "path_matchers": [
+                  "src-python/codex_proxy.py"
+                ]
+              },
+              {
+                "raw": "- `tests/test_codex_semantic_adapter.py`",
+                "normalized": "tests/test_codex_semantic_adapter.py",
+                "path_matchers": [
+                  "tests/test_codex_semantic_adapter.py"
+                ]
+              },
+              {
+                "raw": "- focused routing tests for `agent_type`/binding",
+                "normalized": "focused routing tests for agent_type/binding",
+                "path_matchers": [
+                  "tests/test_routing.py"
+                ]
+              },
+              {
+                "raw": "- one focused sanitized fixture under `tests/fixtures/` if required",
+                "normalized": "one focused sanitized fixture under tests/fixtures/ if required",
+                "path_matchers": [
+                  "tests/fixtures/**"
+                ]
+              }
+            ],
+            "matchers": [
+              "src-python/codex_proxy.py",
+              "src-python/codex_semantic_adapter.py",
+              "tests/fixtures/**",
+              "tests/test_codex_semantic_adapter.py",
+              "tests/test_routing.py"
+            ]
+          },
+          "eligibility": {
+            "label_dependency": {
+              "open": true,
+              "ready_for_agent": true,
+              "unassigned": true,
+              "open_blockers": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            },
+            "ownership_hotset": {
+              "native_task_query_count": 2,
+              "native_task_matches": 0,
+              "native_task_unavailable_hosts": 0,
+              "assignees": [],
+              "active_surface_intersections": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            }
+          }
+        },
+        {
+          "number": 139,
+          "title": "Serialize Gateway lifecycle operations and prevent duplicate startup processes",
+          "state": "open",
+          "body_normalized_sha256": "07ed44014139aafc869b96e38c4dd0c64e93bfbda0363a374c226608075c96e9",
+          "labels": [
+            "bug",
+            "ready-for-agent",
+            "wayfinder:task"
+          ],
+          "assignees": [],
+          "milestone": "0.1.6 — Codex control-plane reliability",
+          "parent": 147,
+          "blocked_by": [],
+          "children": [],
+          "url": "https://github.com/NOirBRight/CodexHub/issues/139",
+          "expected_hotset": {
+            "entries": [
+              {
+                "raw": "- src-tauri/src/proxy.rs",
+                "normalized": "src-tauri/src/proxy.rs",
+                "path_matchers": [
+                  "src-tauri/src/proxy.rs"
+                ]
+              },
+              {
+                "raw": "- src-tauri/src/main.rs",
+                "normalized": "src-tauri/src/main.rs",
+                "path_matchers": [
+                  "src-tauri/src/main.rs"
+                ]
+              },
+              {
+                "raw": "- Rust lifecycle coordinator/state tests adjacent to those modules",
+                "normalized": "Rust lifecycle coordinator/state tests adjacent to those modules",
+                "path_matchers": [
+                  "src-tauri/src/**"
+                ]
+              },
+              {
+                "raw": "- Gateway status/control frontend only if needed for Starting/Stopping/Restarting state",
+                "normalized": "Gateway status/control frontend only if needed for Starting/Stopping/Restarting state",
+                "path_matchers": [
+                  "frontend/**"
+                ]
+              }
+            ],
+            "matchers": [
+              "frontend/**",
+              "src-tauri/src/**",
+              "src-tauri/src/main.rs",
+              "src-tauri/src/proxy.rs"
+            ]
+          },
+          "eligibility": {
+            "label_dependency": {
+              "open": true,
+              "ready_for_agent": true,
+              "unassigned": true,
+              "open_blockers": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            },
+            "ownership_hotset": {
+              "native_task_query_count": 2,
+              "native_task_matches": 0,
+              "native_task_unavailable_hosts": 0,
+              "assignees": [],
+              "active_surface_intersections": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            }
+          }
+        },
+        {
+          "number": 149,
+          "title": "Make Rust/Python atomic-file lock ownership and stale recovery safe",
+          "state": "open",
+          "body_normalized_sha256": "167d2242ab99b846f86e6122f13d4ac3b25047506f153f56cdb05fd5b3b01db5",
+          "labels": [
+            "bug",
+            "ready-for-agent",
+            "wayfinder:task"
+          ],
+          "assignees": [],
+          "milestone": "0.1.6 — Codex control-plane reliability",
+          "parent": 147,
+          "blocked_by": [],
+          "children": [],
+          "url": "https://github.com/NOirBRight/CodexHub/issues/149",
+          "expected_hotset": {
+            "entries": [
+              {
+                "raw": "- src-python/atomic_io.py",
+                "normalized": "src-python/atomic_io.py",
+                "path_matchers": [
+                  "src-python/atomic_io.py"
+                ]
+              },
+              {
+                "raw": "- src-tauri/src/safe_file.rs",
+                "normalized": "src-tauri/src/safe_file.rs",
+                "path_matchers": [
+                  "src-tauri/src/safe_file.rs"
+                ]
+              },
+              {
+                "raw": "- tests/test_atomic_io.py",
+                "normalized": "tests/test_atomic_io.py",
+                "path_matchers": [
+                  "tests/test_atomic_io.py"
+                ]
+              },
+              {
+                "raw": "- Focused cross-language subprocess fixtures/tests",
+                "normalized": "Focused cross-language subprocess fixtures/tests",
+                "path_matchers": [
+                  "src-tauri/**",
+                  "tests/**"
+                ]
+              },
+              {
+                "raw": "- Only directly affected atomic-write callers whose error handling must stop swallowing non-absence failures",
+                "normalized": "Only directly affected atomic-write callers whose error handling must stop swallowing non-absence failures",
+                "path_matchers": [
+                  "src-python/**",
+                  "src-tauri/src/**"
+                ]
+              }
+            ],
+            "matchers": [
+              "src-python/**",
+              "src-python/atomic_io.py",
+              "src-tauri/**",
+              "src-tauri/src/**",
+              "src-tauri/src/safe_file.rs",
+              "tests/**",
+              "tests/test_atomic_io.py"
+            ]
+          },
+          "eligibility": {
+            "label_dependency": {
+              "open": true,
+              "ready_for_agent": true,
+              "unassigned": true,
+              "open_blockers": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            },
+            "ownership_hotset": {
+              "native_task_query_count": 2,
+              "native_task_matches": 0,
+              "native_task_unavailable_hosts": 0,
+              "assignees": [],
+              "active_surface_intersections": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            }
+          }
+        },
+        {
+          "number": 150,
+          "title": "Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts",
+          "state": "open",
+          "body_normalized_sha256": "e7dbdf0e3de5cca7e59fdec83eec20cbbd22cca7382501232e575131826513ad",
+          "labels": [
+            "bug",
+            "ready-for-agent",
+            "wayfinder:task"
+          ],
+          "assignees": [],
+          "milestone": "0.1.6 — Codex control-plane reliability",
+          "parent": 147,
+          "blocked_by": [],
+          "children": [],
+          "url": "https://github.com/NOirBRight/CodexHub/issues/150",
+          "expected_hotset": {
+            "entries": [
+              {
+                "raw": "- frontend/src/pages/ProvidersPage.tsx",
+                "normalized": "frontend/src/pages/ProvidersPage.tsx",
+                "path_matchers": [
+                  "frontend/src/pages/ProvidersPage.tsx"
+                ]
+              },
+              {
+                "raw": "- frontend/src/components/providers/OfficialOpenAIUsagePanel.tsx",
+                "normalized": "frontend/src/components/providers/OfficialOpenAIUsagePanel.tsx",
+                "path_matchers": [
+                  "frontend/src/components/providers/OfficialOpenAIUsagePanel.tsx"
+                ]
+              },
+              {
+                "raw": "- src-tauri/src/openai_usage.rs",
+                "normalized": "src-tauri/src/openai_usage.rs",
+                "path_matchers": [
+                  "src-tauri/src/openai_usage.rs"
+                ]
+              },
+              {
+                "raw": "- frontend/scripts/ui-contract.test.mjs",
+                "normalized": "frontend/scripts/ui-contract.test.mjs",
+                "path_matchers": [
+                  "frontend/scripts/ui-contract.test.mjs"
+                ]
+              },
+              {
+                "raw": "- focused Rust tests adjacent to openai_usage",
+                "normalized": "focused Rust tests adjacent to openai_usage",
+                "path_matchers": [
+                  "src-tauri/src/openai_usage.rs"
+                ]
+              }
+            ],
+            "matchers": [
+              "frontend/scripts/ui-contract.test.mjs",
+              "frontend/src/components/providers/OfficialOpenAIUsagePanel.tsx",
+              "frontend/src/pages/ProvidersPage.tsx",
+              "src-tauri/src/openai_usage.rs"
+            ]
+          },
+          "eligibility": {
+            "label_dependency": {
+              "open": true,
+              "ready_for_agent": true,
+              "unassigned": true,
+              "open_blockers": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            },
+            "ownership_hotset": {
+              "native_task_query_count": 2,
+              "native_task_matches": 0,
+              "native_task_unavailable_hosts": 0,
+              "assignees": [],
+              "active_surface_intersections": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            }
+          }
+        },
+        {
+          "number": 111,
+          "title": "Make Windows app autostart registration verifiable and reliable",
+          "state": "open",
+          "body_normalized_sha256": "ef55ac12e419ddc72949e2c2975899e2d70f1f364f283d3b28b3911d18ad0c05",
+          "labels": [
+            "bug",
+            "ready-for-agent",
+            "wayfinder:task"
+          ],
+          "assignees": [],
+          "milestone": "0.1.6 — Codex control-plane reliability",
+          "parent": 147,
+          "blocked_by": [],
+          "children": [],
+          "url": "https://github.com/NOirBRight/CodexHub/issues/111",
+          "expected_hotset": {
+            "entries": [
+              {
+                "raw": "- `src-tauri/src/autostart.rs`",
+                "normalized": "src-tauri/src/autostart.rs",
+                "path_matchers": [
+                  "src-tauri/src/autostart.rs"
+                ]
+              },
+              {
+                "raw": "- Tauri settings/autostart command and state types",
+                "normalized": "Tauri settings/autostart command and state types",
+                "path_matchers": [
+                  "src-tauri/src/**"
+                ]
+              },
+              {
+                "raw": "- `frontend/src/App.tsx`",
+                "normalized": "frontend/src/App.tsx",
+                "path_matchers": [
+                  "frontend/src/App.tsx"
+                ]
+              },
+              {
+                "raw": "- `frontend/src/pages/SettingsPage.tsx` and/or the settings drawer",
+                "normalized": "frontend/src/pages/SettingsPage.tsx and/or the settings drawer",
+                "path_matchers": [
+                  "frontend/src/components/**/Settings*",
+                  "frontend/src/components/SettingsDrawer.tsx",
+                  "frontend/src/pages/SettingsPage.tsx"
+                ]
+              },
+              {
+                "raw": "- Rust autostart tests and frontend UI-contract tests",
+                "normalized": "Rust autostart tests and frontend UI-contract tests",
+                "path_matchers": [
+                  "frontend/scripts/**",
+                  "src-tauri/src/**"
+                ]
+              },
+              {
+                "raw": "- A deterministic Windows packaged/portable smoke harness or documented verification",
+                "normalized": "A deterministic Windows packaged/portable smoke harness or documented verification",
+                "path_matchers": [
+                  "docs/**/autostart*",
+                  "docs/*autostart*",
+                  "scripts/**/autostart*",
+                  "scripts/*autostart*"
+                ]
+              }
+            ],
+            "matchers": [
+              "docs/**/autostart*",
+              "docs/*autostart*",
+              "frontend/scripts/**",
+              "frontend/src/App.tsx",
+              "frontend/src/components/**/Settings*",
+              "frontend/src/components/SettingsDrawer.tsx",
+              "frontend/src/pages/SettingsPage.tsx",
+              "scripts/**/autostart*",
+              "scripts/*autostart*",
+              "src-tauri/src/**",
+              "src-tauri/src/autostart.rs"
+            ]
+          },
+          "eligibility": {
+            "label_dependency": {
+              "open": true,
+              "ready_for_agent": true,
+              "unassigned": true,
+              "open_blockers": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            },
+            "ownership_hotset": {
+              "native_task_query_count": 2,
+              "native_task_matches": 0,
+              "native_task_unavailable_hosts": 0,
+              "assignees": [],
+              "active_surface_intersections": [],
+              "eligible": true,
+              "ineligible_reasons": []
+            }
+          }
+        }
+      ],
+      "ownership_surfaces": {
+        "worktrees": [
+          {
+            "logical_identity": "worktree:dev",
+            "branch": "dev",
+            "revision": "51a636c98ca90a9766836a7d603c2013211bbeeb",
+            "clean": true,
+            "dirty_files": [],
+            "changed_files_vs_dev": [],
+            "hotset_intersections": {
+              "159": [],
+              "161": [],
+              "139": [],
+              "149": [],
+              "150": [],
+              "111": []
+            },
+            "classification": "audited-baseline",
+            "active": true
+          },
+          {
+            "logical_identity": "worktree:wayfinder-github-migration",
+            "branch": "wayfinder-github-migration",
+            "revision": "7d60eca9a903672948445bc079ed46316b281907",
+            "clean": false,
+            "dirty_files": [
+              "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
+              "scripts/generate_wayfinder_final_audit.py",
+              "scripts/tests/test_wayfinder_final_audit_generator.py"
+            ],
+            "changed_files_vs_dev": [
+              "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
+              "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json",
+              "docs/superpowers/reviews/wayfinder-final-audit-v1.json",
+              "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+              "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
+              "scripts/generate_wayfinder_final_audit.py",
+              "scripts/tests/test_wayfinder_final_audit_generator.py"
+            ],
+            "hotset_intersections": {
+              "159": [],
+              "161": [],
+              "139": [],
+              "149": [],
+              "150": [],
+              "111": []
+            },
+            "classification": "migration-control",
+            "active": true
+          }
+        ],
+        "local_branches": [
+          {
+            "logical_identity": "local-branch:dev",
+            "name": "dev",
+            "revision": "51a636c98ca90a9766836a7d603c2013211bbeeb",
+            "changed_files_vs_dev": [],
+            "hotset_intersections": {
+              "159": [],
+              "161": [],
+              "139": [],
+              "149": [],
+              "150": [],
+              "111": []
+            },
+            "checked_out_in_worktree": true,
+            "open_prs": [],
+            "active": true
+          },
+          {
+            "logical_identity": "local-branch:main",
+            "name": "main",
+            "revision": "ddcbbee77d3faaac3e5f282d2741e8f268f20e79",
+            "changed_files_vs_dev": [],
+            "hotset_intersections": {
+              "159": [],
+              "161": [],
+              "139": [],
+              "149": [],
+              "150": [],
+              "111": []
+            },
+            "checked_out_in_worktree": false,
+            "open_prs": [],
+            "active": false
+          },
+          {
+            "logical_identity": "local-branch:milestone-roadmap-m0-completion",
+            "name": "milestone-roadmap-m0-completion",
+            "revision": "1d0738611acc1f59402c60ad84a81728add5cee4",
+            "changed_files_vs_dev": [],
+            "hotset_intersections": {
+              "159": [],
+              "161": [],
+              "139": [],
+              "149": [],
+              "150": [],
+              "111": []
+            },
+            "checked_out_in_worktree": false,
+            "open_prs": [],
+            "active": false
+          },
+          {
+            "logical_identity": "local-branch:wayfinder-github-migration",
+            "name": "wayfinder-github-migration",
+            "revision": "7d60eca9a903672948445bc079ed46316b281907",
+            "changed_files_vs_dev": [
+              "docs/superpowers/plans/2026-07-16-wayfinder-github-migration.md",
+              "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json",
+              "docs/superpowers/reviews/wayfinder-final-audit-v1.json",
+              "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+              "docs/superpowers/specs/2026-07-16-wayfinder-replanning-design.md",
+              "scripts/generate_wayfinder_final_audit.py"
+            ],
+            "hotset_intersections": {
+              "159": [],
+              "161": [],
+              "139": [],
+              "149": [],
+              "150": [],
+              "111": []
+            },
+            "checked_out_in_worktree": true,
+            "open_prs": [],
+            "active": true
+          }
+        ],
+        "open_pr_heads": []
+      },
+      "frontier": [
+        159,
+        161,
+        139,
+        149,
+        150,
+        111
+      ],
+      "global_github_audit": {
+        "open_issue_count": 63,
+        "canonical_lifecycle_violations": [],
+        "milestone_membership_expected": {
+          "0.1.6 — Codex control-plane reliability": [
+            111,
+            112,
+            138,
+            139,
+            141,
+            143,
+            149,
+            150,
+            151,
+            156,
+            159,
+            161
+          ],
+          "0.1.7 — Official GPT reliability": [
+            18,
+            19,
+            20,
+            21,
+            104,
+            109,
+            114,
+            157
+          ],
+          "0.1.8 — Third-party model certification": [
+            17,
+            22,
+            57,
+            58,
+            59,
+            61,
+            62,
+            63,
+            64,
+            65,
+            66,
+            67
+          ],
+          "0.1.9 — Managed client reliability": [
+            8,
+            28,
+            83,
+            153,
+            154,
+            155
+          ],
+          "0.1.10 — Existing product reliability": [
+            86,
+            87,
+            88,
+            113,
+            115,
+            126,
+            160
+          ]
+        },
+        "milestone_membership_actual": {
+          "0.1.6 — Codex control-plane reliability": [
+            111,
+            112,
+            138,
+            139,
+            141,
+            143,
+            149,
+            150,
+            151,
+            156,
+            159,
+            161
+          ],
+          "0.1.7 — Official GPT reliability": [
+            18,
+            19,
+            20,
+            21,
+            104,
+            109,
+            114,
+            157
+          ],
+          "0.1.8 — Third-party model certification": [
+            17,
+            22,
+            57,
+            58,
+            59,
+            61,
+            62,
+            63,
+            64,
+            65,
+            66,
+            67
+          ],
+          "0.1.9 — Managed client reliability": [
+            8,
+            28,
+            83,
+            153,
+            154,
+            155
+          ],
+          "0.1.10 — Existing product reliability": [
+            86,
+            87,
+            88,
+            113,
+            115,
+            126,
+            160
+          ]
+        },
+        "milestones": [
+          {
+            "number": 3,
+            "title": "0.1.6 — Codex control-plane reliability",
+            "description": "Exit: one reconciled Gateway lifecycle; sidebar-visible Worker materialization; bidirectional Task communication and receipts; bounded cancellation/exit/restart; recoverable Task state. Only 0.1.6 receives new work while this gate is active.",
+            "state": "open",
+            "open_issues": 12,
+            "closed_issues": 0
+          },
+          {
+            "number": 4,
+            "title": "0.1.7 — Official GPT reliability",
+            "description": "Exit: Official GPT catalog, Task/Worker communication, tool lifecycle, streaming/cancellation, and context authority are reliable enough to serve as the control group for third-party qualification.",
+            "state": "open",
+            "open_issues": 8,
+            "closed_issues": 0
+          },
+          {
+            "number": 5,
+            "title": "0.1.8 — Third-party model certification",
+            "description": "Exit: each supported provider/model/protocol/codec combination has runtime-derived capability evidence, full visible-Worker and Task communication coverage, fail-closed unknown semantics, and a #67 GO/PARTIAL/NO-GO decision.",
+            "state": "open",
+            "open_issues": 12,
+            "closed_issues": 0
+          },
+          {
+            "number": 6,
+            "title": "0.1.9 — Managed client reliability",
+            "description": "Exit: ZCode, OMP, OpenCode, and Pi preview/apply/readback/restore are transactional, identity-faithful, reasoning-faithful, and free of silent Official fallback.",
+            "state": "open",
+            "open_issues": 6,
+            "closed_issues": 0
+          },
+          {
+            "number": 7,
+            "title": "0.1.10 — Existing product reliability",
+            "description": "Exit: remaining existing pricing, Vision Proxy, diagnostics, notification, and uninstall-cleanup defects are resolved without adding new product capabilities.",
+            "state": "open",
+            "open_issues": 7,
+            "closed_issues": 0
+          },
+          {
+            "number": 1,
+            "title": "Third-party model agentic reliability",
+            "description": "Superseded on 2026-07-16 by the reliability-gated 0.1.6–0.1.10 milestones. Historical issue/decision context remains preserved; this milestone is no longer a scheduling pool.",
+            "state": "closed",
+            "open_issues": 0,
+            "closed_issues": 10
+          },
+          {
+            "number": 2,
+            "title": "Capability-driven routing rollout",
+            "description": "Superseded on 2026-07-12 by the consolidated Third-party model agentic reliability milestone (#1).",
+            "state": "closed",
+            "open_issues": 0,
+            "closed_issues": 0
+          }
+        ],
+        "open_issue_assignees": {
+          "114": [
+            "NOirBRight"
+          ]
+        },
+        "critical_contracts": {
+          "28": {
+            "number": 28,
+            "title": "Bound Gateway client probes and catalog discovery work",
+            "state": "open",
+            "body_normalized_sha256": "8a882cd0b7af8b87c803cced922f95a2527f04314180fbf6b0df2c571cc58d29",
+            "labels": [
+              "enhancement",
+              "ready-for-agent",
+              "wayfinder:task"
+            ],
+            "assignees": [],
+            "milestone": "0.1.9 — Managed client reliability",
+            "parent": 147,
+            "blocked_by": [],
+            "children": [],
+            "url": "https://github.com/NOirBRight/CodexHub/issues/28"
+          },
+          "147": {
+            "number": 147,
+            "title": "Wayfinder: CodexHub 0.1.6–0.3.0 Gateway and release roadmap",
+            "state": "open",
+            "body_normalized_sha256": "af02920412d7f51fc7d136912c677b4cd7c38127c42a4ca4b805af40d7831c32",
+            "labels": [
+              "enhancement",
+              "ready-for-human",
+              "wayfinder:map"
+            ],
+            "assignees": [],
+            "milestone": null,
+            "parent": null,
+            "blocked_by": [],
+            "children": [
+              8,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              28,
+              57,
+              58,
+              59,
+              61,
+              68,
+              71,
+              73,
+              83,
+              85,
+              86,
+              87,
+              88,
+              104,
+              109,
+              111,
+              112,
+              113,
+              114,
+              115,
+              126,
+              138,
+              139,
+              141,
+              143,
+              148,
+              149,
+              150,
+              151,
+              152,
+              153,
+              154,
+              155,
+              156,
+              157,
+              160
+            ],
+            "url": "https://github.com/NOirBRight/CodexHub/issues/147"
+          },
+          "156": {
+            "number": 156,
+            "title": "Enable sidebar-visible third-party Worker callbacks and binding readback",
+            "state": "open",
+            "body_normalized_sha256": "9e78522d36707a8806d2f97a7ef332b2c0ef26874dff16e0b5f5ac5f96f10c85",
+            "labels": [
+              "bug",
+              "ready-for-human",
+              "wayfinder:grilling"
+            ],
+            "assignees": [],
+            "milestone": "0.1.6 — Codex control-plane reliability",
+            "parent": 147,
+            "blocked_by": [
+              159,
+              161
+            ],
+            "children": [
+              159,
+              161
+            ],
+            "url": "https://github.com/NOirBRight/CodexHub/issues/156"
+          },
+          "159": {
+            "number": 159,
+            "title": "Bound repeated empty tool_search misses for external models",
+            "state": "open",
+            "body_normalized_sha256": "dc9f36f3c8c8dcbdc79696205528f1743d56885216d41f821bc59c486d8bc78e",
+            "labels": [
+              "bug",
+              "ready-for-agent",
+              "wayfinder:task"
+            ],
+            "assignees": [],
+            "milestone": "0.1.6 — Codex control-plane reliability",
+            "parent": 156,
+            "blocked_by": [],
+            "children": [],
+            "url": "https://github.com/NOirBRight/CodexHub/issues/159"
+          },
+          "160": {
+            "number": 160,
+            "title": "Remove CodexHub-owned Windows autostart registration during uninstall",
+            "state": "open",
+            "body_normalized_sha256": "da57b9a4c6f17cccb010ca6b5c87b3b54c3924551da81446cc073af0da721eeb",
+            "labels": [
+              "bug",
+              "ready-for-agent",
+              "wayfinder:task"
+            ],
+            "assignees": [],
+            "milestone": "0.1.10 — Existing product reliability",
+            "parent": 147,
+            "blocked_by": [
+              111
+            ],
+            "children": [],
+            "url": "https://github.com/NOirBRight/CodexHub/issues/160"
+          },
+          "161": {
+            "number": 161,
+            "title": "Preserve Worker selector and effective binding validation for external delegation",
+            "state": "open",
+            "body_normalized_sha256": "944ad1757538846011da360b880c53889c2aaa68d021cb3634caf1221c88e4f3",
+            "labels": [
+              "bug",
+              "ready-for-agent",
+              "wayfinder:task"
+            ],
+            "assignees": [],
+            "milestone": "0.1.6 — Codex control-plane reliability",
+            "parent": 156,
+            "blocked_by": [],
+            "children": [],
+            "url": "https://github.com/NOirBRight/CodexHub/issues/161"
+          }
+        },
+        "relations": {
+          "57": {
+            "parent": 147,
+            "blocked_by": [],
+            "children": [
+              62,
+              63,
+              64,
+              65,
+              66,
+              67
+            ]
+          },
+          "64": {
+            "parent": 57,
+            "blocked_by": [
+              62,
+              63,
+              156
+            ],
+            "children": []
+          },
+          "71": {
+            "parent": 147,
+            "blocked_by": [],
+            "children": [
+              89,
+              90,
+              91,
+              92,
+              93,
+              94
+            ]
+          },
+          "73": {
+            "parent": 147,
+            "blocked_by": [],
+            "children": [
+              74,
+              75,
+              76,
+              77,
+              78
+            ]
+          },
+          "111": {
+            "parent": 147,
+            "blocked_by": [],
+            "children": []
+          },
+          "147": {
+            "parent": null,
+            "blocked_by": [],
+            "children": [
+              8,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              28,
+              57,
+              58,
+              59,
+              61,
+              68,
+              71,
+              73,
+              83,
+              85,
+              86,
+              87,
+              88,
+              104,
+              109,
+              111,
+              112,
+              113,
+              114,
+              115,
+              126,
+              138,
+              139,
+              141,
+              143,
+              148,
+              149,
+              150,
+              151,
+              152,
+              153,
+              154,
+              155,
+              156,
+              157,
+              160
+            ]
+          },
+          "156": {
+            "parent": 147,
+            "blocked_by": [
+              159,
+              161
+            ],
+            "children": [
+              159,
+              161
+            ]
+          },
+          "159": {
+            "parent": 156,
+            "blocked_by": [],
+            "children": []
+          },
+          "160": {
+            "parent": 147,
+            "blocked_by": [
+              111
+            ],
+            "children": []
+          },
+          "161": {
+            "parent": 156,
+            "blocked_by": [],
+            "children": []
+          }
+        },
+        "comments": {
+          "8": {
+            "public_comment_id": 4994634611,
+            "purpose_prefix": "### Wayfinder baseline correction",
+            "normalized_body_sha256": "d1450f61411a1069668527e5e11733921b8b30c3ec20b32352885ff01f49912a",
+            "prefix_multiplicity": 1,
+            "exact_body_multiplicity": 1,
+            "created_at": "2026-07-16T17:13:03Z",
+            "updated_at": "2026-07-16T17:13:03Z",
+            "url": "https://github.com/NOirBRight/CodexHub/issues/8#issuecomment-4994634611"
+          },
+          "10": {
+            "public_comment_id": 4994635018,
+            "purpose_prefix": "Wayfinder closure reconciliation:",
+            "normalized_body_sha256": "8b0ce766324b6fa11722802e3c3aa597c71faa6a5c32ed5bba5cd3e91c3235ea",
+            "prefix_multiplicity": 1,
+            "exact_body_multiplicity": 1,
+            "created_at": "2026-07-16T17:13:05Z",
+            "updated_at": "2026-07-16T17:13:05Z",
+            "url": "https://github.com/NOirBRight/CodexHub/issues/10#issuecomment-4994635018"
+          },
+          "12": {
+            "public_comment_id": 4994635403,
+            "purpose_prefix": "Wayfinder closure reconciliation:",
+            "normalized_body_sha256": "60904c5c69e311986fd8fcbde71d35a51aac1ca540510beb853587a3b456d86b",
+            "prefix_multiplicity": 1,
+            "exact_body_multiplicity": 1,
+            "created_at": "2026-07-16T17:13:08Z",
+            "updated_at": "2026-07-16T17:13:08Z",
+            "url": "https://github.com/NOirBRight/CodexHub/issues/12#issuecomment-4994635403"
+          },
+          "62": {
+            "public_comment_id": 4994636467,
+            "purpose_prefix": "Wayfinder ownership reconciliation:",
+            "normalized_body_sha256": "db78e9489281b842d6128d0964a6109dbe43a31c8c381474653c963867919b63",
+            "prefix_multiplicity": 1,
+            "exact_body_multiplicity": 1,
+            "created_at": "2026-07-16T17:13:16Z",
+            "updated_at": "2026-07-16T17:13:16Z",
+            "url": "https://github.com/NOirBRight/CodexHub/issues/62#issuecomment-4994636467"
+          },
+          "147": {
+            "public_comment_id": 4994927680,
+            "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
+            "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+            "prefix_multiplicity": 1,
+            "exact_body_multiplicity": 1,
+            "created_at": "2026-07-16T17:46:29Z",
+            "updated_at": "2026-07-16T19:13:34Z",
+            "url": "https://github.com/NOirBRight/CodexHub/issues/147#issuecomment-4994927680"
+          }
+        }
+      },
+      "derivation": {
+        "label_dependency_rule": "open AND ready-for-agent AND unassigned AND zero open native blockers",
+        "ownership_hotset_rule": "two exact native queries clear AND no unavailable native host AND unassigned AND no active worktree/local-branch/open-PR changed-file intersection with the parsed Expected hotset",
+        "branch_names_used_as_ownership_evidence": false,
+        "inactive_local_branches_block_eligibility": false,
+        "inactive_branch_reason": "A local branch is active only when checked out in a worktree or used as an open PR head; every local branch is still enumerated with its file intersections.",
+        "planning_worktree_rule": "The current planning worktree is migration-control evidence only because its complete changed-file set has zero frontier product-hotset intersections.",
+        "dev_rule": "The dev worktree is independently audited for revision, cleanliness, and changed-file intersections; it is not trusted by name alone.",
+        "result": "eligible"
+      },
+      "sanitization": {
+        "native_task_ids_persisted": false,
+        "local_absolute_paths_persisted": false,
+        "worktree_identity_basis": "branch or detached revision, never filesystem path",
+        "changed_file_paths": "repository-relative"
+      }
+    }
+  },
+  "checkpoint_update_transcript": {
+    "schema_version": 1,
+    "captured_at": "2026-07-16T20:10:51.7868798Z",
+    "issue": 147,
+    "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
+    "historical_original": {
+      "source": "Task 8 execution report exact original published body",
+      "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Visible Worker gate and #159 is its ready local bounded-search child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+      "normalized_body_sha256": "0c09e6b7c4ba7abf432dc43b19860095094912a1b36b3d67c98e0c3870f40fb4"
+    },
+    "historical_provenance": {
+      "proof_kind": "tracked-transcript",
+      "prior_transcript": {
+        "schema_version": 1,
+        "captured_at": "2026-07-16T19:46:23.9035374Z",
+        "issue": 147,
+        "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
+        "historical_original": {
+          "source": "Task 8 execution report exact original published body",
+          "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Visible Worker gate and #159 is its ready local bounded-search child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+          "normalized_body_sha256": "0c09e6b7c4ba7abf432dc43b19860095094912a1b36b3d67c98e0c3870f40fb4"
+        },
+        "pre_update": {
+          "public_comment_id": 4994927680,
+          "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+          "readback_at": "2026-07-16T19:46:23.9088831Z"
+        },
+        "desired": {
+          "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+          "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+          "frontier_artifact_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+          "frontier_artifact_sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd"
+        },
+        "operation_decision": "patch",
+        "post_readback": {
+          "public_comment_id": 4994927680,
+          "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+          "prefix_multiplicity": 1,
+          "exact_body_multiplicity": 1,
+          "readback_at": "2026-07-16T19:46:23.9091773Z"
+        },
+        "historical_provenance": {
+          "proof_kind": "task8-execution-report",
+          "prior_transcript": null
+        }
+      }
+    },
+    "pre_update": {
+      "public_comment_id": 4994927680,
+      "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+      "readback_at": "2026-07-16T20:10:50.9689816Z"
+    },
+    "desired": {
+      "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+      "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+      "frontier_artifact_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+      "frontier_artifact_sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd"
+    },
+    "operation_decision": "exact-no-op",
+    "post_readback": {
+      "public_comment_id": 4994927680,
+      "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+      "prefix_multiplicity": 1,
+      "exact_body_multiplicity": 1,
+      "readback_at": "2026-07-16T20:10:51.7469770Z"
+    }
+  },
+  "derivation": {
+    "frontier": [
+      159,
+      161,
+      139,
+      149,
+      150,
+      111
+    ],
+    "label_dependency_eligibility": {
+      "159": {
+        "open": true,
+        "ready_for_agent": true,
+        "unassigned": true,
+        "open_blockers": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "161": {
+        "open": true,
+        "ready_for_agent": true,
+        "unassigned": true,
+        "open_blockers": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "139": {
+        "open": true,
+        "ready_for_agent": true,
+        "unassigned": true,
+        "open_blockers": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "149": {
+        "open": true,
+        "ready_for_agent": true,
+        "unassigned": true,
+        "open_blockers": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "150": {
+        "open": true,
+        "ready_for_agent": true,
+        "unassigned": true,
+        "open_blockers": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "111": {
+        "open": true,
+        "ready_for_agent": true,
+        "unassigned": true,
+        "open_blockers": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      }
+    },
+    "ownership_hotset_eligibility": {
+      "159": {
+        "native_task_query_count": 2,
+        "native_task_matches": 0,
+        "native_task_unavailable_hosts": 0,
+        "assignees": [],
+        "active_surface_intersections": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "161": {
+        "native_task_query_count": 2,
+        "native_task_matches": 0,
+        "native_task_unavailable_hosts": 0,
+        "assignees": [],
+        "active_surface_intersections": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "139": {
+        "native_task_query_count": 2,
+        "native_task_matches": 0,
+        "native_task_unavailable_hosts": 0,
+        "assignees": [],
+        "active_surface_intersections": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "149": {
+        "native_task_query_count": 2,
+        "native_task_matches": 0,
+        "native_task_unavailable_hosts": 0,
+        "assignees": [],
+        "active_surface_intersections": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "150": {
+        "native_task_query_count": 2,
+        "native_task_matches": 0,
+        "native_task_unavailable_hosts": 0,
+        "assignees": [],
+        "active_surface_intersections": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      },
+      "111": {
+        "native_task_query_count": 2,
+        "native_task_matches": 0,
+        "native_task_unavailable_hosts": 0,
+        "assignees": [],
+        "active_surface_intersections": [],
+        "eligible": true,
+        "ineligible_reasons": []
+      }
+    },
+    "checkpoint_exact_body_guard": "exact-no-op",
+    "checkpoint_post_readback_exact": true
+  },
+  "artifact_hashes": {
+    "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd",
+    "docs/superpowers/reviews/wayfinder-checkpoint-update-v1.json": "ea2a2cf49ed42dc48bec23828c2ef73884bd05885fd7c848993b1073d5a8990e"
+  },
+  "sanitization": {
+    "native_task_ids_persisted": false,
+    "local_absolute_paths_persisted": false,
+    "worktree_identity_basis": "branch or detached revision, never filesystem path",
+    "changed_file_paths": "repository-relative"
+  }
+}

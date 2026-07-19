@@ -1174,6 +1174,514 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 200)
         self.assertIn(b"chatcmpl_transparent", b"".join(handler.wfile.writes))
 
+    def test_provider_scoped_transparent_chat_rewrites_developer_role_when_upstream_intolerant(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "kimi/k3",
+            "provider_alias": "kimi",
+            "upstream_name": "kimi",
+            "display_prefix": "Kimi",
+            "base_url": "https://api.kimi.example.test/coding",
+            "api_key": "kimi-test-token",
+            "upstream_model": "k3",
+            "upstream_format": "chat_completions",
+            "supports_developer_role": False,
+            "priority_base": 200,
+            "context_window": 1048576,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "k3",
+            "messages": [
+                {"role": "developer", "content": "You are a coding agent."},
+                {"role": "user", "content": "Hello"},
+            ],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_developer_rewrite",
+            "object": "chat.completion",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "kimi/k3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "kimi/k3": {"slug": "kimi/k3"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.kimi.example.test/coding/v1/chat/completions")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(
+            sent_payload["messages"],
+            [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "developer_role_rewrite_applied"
+        ]
+        self.assertEqual(len(marker_events), 1)
+        self.assertEqual(marker_events[0]["upstream"], "kimi")
+        self.assertEqual(marker_events[0]["messages_rewritten"], 1)
+
+    def test_provider_scoped_transparent_chat_preserves_developer_role_when_upstream_tolerant(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "kimi/k3",
+            "provider_alias": "kimi",
+            "upstream_name": "kimi",
+            "display_prefix": "Kimi",
+            "base_url": "https://api.kimi.example.test/coding",
+            "api_key": "kimi-test-token",
+            "upstream_model": "k3",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1048576,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "k3",
+            "messages": [
+                {"role": "developer", "content": "You are a coding agent."},
+                {"role": "user", "content": "Hello"},
+            ],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
+        upstream_body = json.dumps({
+            "id": "chatcmpl_developer_preserved",
+            "object": "chat.completion",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "kimi/k3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "kimi/k3": {"slug": "kimi/k3"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["messages"][0]["role"], "developer")
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "developer_role_rewrite_applied"
+        ]
+        self.assertEqual(marker_events, [])
+
+    def _kimi_transparent_external_model(self):
+        return {
+            "alias": "kimi/k3",
+            "provider_alias": "kimi",
+            "upstream_name": "kimi",
+            "display_prefix": "Kimi",
+            "base_url": "https://api.kimi.example.test/coding",
+            "api_key": "kimi-test-token",
+            "upstream_model": "k3",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1048576,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+
+    def _run_kimi_transparent_chat(self, body: bytes, response_id: str):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
+        upstream_body = json.dumps({
+            "id": response_id,
+            "object": "chat.completion",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "kimi/k3"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "kimi/k3": {"slug": "kimi/k3"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
+                ),
+            ),
+            patch(
+                "codex_proxy.resolve_external_model_alias",
+                return_value=self._kimi_transparent_external_model(),
+            ),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        return handler, mock_urlopen
+
+    def _tool_schema_marker_events(self):
+        return [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "tool_schema_boolean_normalized"
+        ]
+
+    def test_provider_scoped_transparent_chat_normalizes_boolean_tool_schemas(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "plan something"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "manage tasks",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task": {"type": "string"},
+                                        "outputSchema": True,
+                                        "blocked": False,
+                                        "mode": {
+                                            "type": "string",
+                                            "default": True,
+                                            "enum": ["fast", True],
+                                        },
+                                    },
+                                    "required": ["task"],
+                                },
+                            },
+                        },
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_normalized")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        item_properties = sent_payload["tools"][0]["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]
+        self.assertEqual(item_properties["outputSchema"], {})
+        self.assertEqual(item_properties["blocked"], {"not": {}})
+        # Value positions are not schemas and must stay untouched.
+        self.assertIs(item_properties["mode"]["default"], True)
+        self.assertEqual(item_properties["mode"]["enum"], ["fast", True])
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = self._tool_schema_marker_events()
+        self.assertEqual(len(marker_events), 1)
+        self.assertEqual(marker_events[0]["upstream"], "kimi")
+        self.assertEqual(marker_events[0]["schemas_rewritten"], 2)
+
+    def test_provider_scoped_transparent_chat_normalizes_nested_boolean_tool_schemas(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "deep"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "deep",
+                    "parameters": {
+                        "type": "object",
+                        "$defs": {"anything": True},
+                        "properties": {
+                            "combo": {
+                                "allOf": [True, {"type": "string"}],
+                                "anyOf": [{"type": "number"}],
+                            },
+                            "extra": {"additionalProperties": False},
+                        },
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_nested")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        params = sent_payload["tools"][0]["function"]["parameters"]
+        self.assertEqual(params["$defs"]["anything"], {})
+        self.assertEqual(params["properties"]["combo"]["allOf"][0], {})
+        self.assertEqual(params["properties"]["combo"]["allOf"][1], {"type": "string"})
+        self.assertEqual(params["properties"]["combo"]["anyOf"][0], {"type": "number"})
+        self.assertEqual(params["properties"]["extra"]["additionalProperties"], {"not": {}})
+        self.assertEqual(handler._fake.status, 200)
+        marker_events = self._tool_schema_marker_events()
+        self.assertEqual(len(marker_events), 1)
+        self.assertEqual(marker_events[0]["schemas_rewritten"], 3)
+
+    def test_provider_scoped_transparent_chat_preserves_object_only_tool_schemas(self):
+        tool_parameters = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "file path"},
+                "flag": {"type": "boolean", "default": True},
+            },
+            "required": ["path"],
+            "additionalProperties": {"type": "string"},
+        }
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "read a file"}],
+            "stream": False,
+            "tools": [{"type": "function", "function": {"name": "read", "parameters": tool_parameters}}],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_passthrough")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["tools"][0]["function"]["parameters"], tool_parameters)
+        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(self._tool_schema_marker_events(), [])
+
+    def test_normalize_tool_schema_booleans_ignores_non_tool_booleans(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "metadata": {"flag": True, "nested": {"off": False}},
+        }).encode("utf-8")
+
+        next_body, rewritten = codex_proxy._normalize_transparent_tool_schema_booleans(body)
+
+        self.assertEqual(rewritten, 0)
+        self.assertEqual(next_body, body)
+
+    def test_normalize_tool_schema_booleans_without_tools_is_byte_identical(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "hi"}],
+        }).encode("utf-8")
+
+        next_body, rewritten = codex_proxy._normalize_transparent_tool_schema_booleans(body)
+
+        self.assertEqual(rewritten, 0)
+        self.assertIs(next_body, body)
+
+    def _ollama_glm_external_model(self):
+        return {
+            "alias": "ollama-cloud/glm-5.2",
+            "provider_alias": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "display_prefix": "Ollama",
+            "base_url": "https://ollama.example.test/v1",
+            "api_key": "ollama-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "supported_reasoning_levels": ("low", "high", "xhigh", "max"),
+            "default_reasoning_level": "max",
+            "priority_base": 200,
+            "context_window": 131072,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+
+    def _run_ollama_chat_request(self, payload_fields):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = self._ollama_glm_external_model()
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+                **payload_fields,
+            }
+        ).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/ollama-cloud/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_reasoning",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi"}],
+            }],
+        }).encode("utf-8")
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "ollama-cloud/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "ollama-cloud/glm-5.2": {
+                        "slug": "ollama-cloud/glm-5.2",
+                        "input_modalities": ["text"],
+                        "supported_reasoning_levels": ["low", "high", "xhigh", "max"],
+                    },
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("ollama-cloud/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.ollama_cloud_alias_upstream_model", return_value=None),
+            patch("codex_proxy.ollama_cloud_runtime_upstream", return_value=None),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        return handler, mock_urlopen
+
+    def test_chat_template_reasoning_effort_reaches_ollama_upstream_as_responses_reasoning(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "max"},
+            "stream_options": {"include_usage": True},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["reasoning"], {"effort": "max"})
+        self.assertNotIn("chat_template_kwargs", sent_payload)
+        self.assertNotIn("stream_options", sent_payload)
+
+    def test_chat_template_reasoning_effort_high_stays_distinct_for_ollama(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "high"},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["reasoning"], {"effort": "high"})
+
+    def test_chat_template_reasoning_effort_xhigh_aliases_to_max_for_ollama(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "xhigh"},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["reasoning"], {"effort": "max"})
+
+    def test_unmappable_chat_template_kwargs_fails_closed_400(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"enable_thinking": True},
+        })
+        self.assertEqual(handler._fake.status, 400)
+        mock_urlopen.assert_not_called()
+        self.assertIn(b"chat_template_kwargs", b"".join(handler.wfile.writes))
+
+    def test_stream_options_with_extra_keys_fails_closed_400(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "max"},
+            "stream_options": {"include_usage": True, "chunk_delimiter": "\n"},
+        })
+        self.assertEqual(handler._fake.status, 400)
+        mock_urlopen.assert_not_called()
+
+    def test_ultra_reasoning_effort_via_chat_template_kwargs_rejected_400(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "ultra"},
+        })
+        self.assertEqual(handler._fake.status, 400)
+        mock_urlopen.assert_not_called()
+        self.assertIn(b"ultra", b"".join(handler.wfile.writes))
+
+    def test_reasoning_policy_marks_provider_default_when_control_omitted(self):
+        handler, mock_urlopen = self._run_ollama_chat_request({})
+        self.assertEqual(handler._fake.status, 200)
+        request_start = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["reasoning_policy"], "provider-default")
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertNotIn("reasoning", sent_payload)
+
+    def test_reasoning_policy_marks_explicit_when_control_present(self):
+        handler, _mock_urlopen = self._run_ollama_chat_request({
+            "chat_template_kwargs": {"reasoning_effort": "max"},
+        })
+        self.assertEqual(handler._fake.status, 200)
+        request_start = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_start"
+        )
+        self.assertEqual(request_start["reasoning_policy"], "explicit")
+
     def test_explicit_third_party_standard_chat_route_is_transparent_metered(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
@@ -1464,6 +1972,71 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
         self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+
+    def test_provider_scoped_chat_text_only_image_request_fails_closed_502(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "display_prefix": "Volc",
+            "base_url": "https://ark.example.test/v1",
+            "api_key": "volc-test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this chart."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,e2NoYXJ0fQ=="}},
+                ],
+            }],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "0"},
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "volc/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen") as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        mock_urlopen.assert_not_called()
+        self.assertEqual(handler._fake.status, 502)
+        written = b"".join(handler.wfile.writes)
+        self.assertIn(b"does not support image input", written)
 
     def test_provider_scoped_chat_text_only_image_guard_uses_global_image_proxy_switch(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)

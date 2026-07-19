@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.1.5"
+version = "0.1.6"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
@@ -18,7 +18,11 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order is enabled crate-wide deliberately (#176): client exports
+# (OpenCode/Pi/ZCode) must emit keys in configured/catalog order rather than
+# BTreeMap alphabetical. All export maps are built from Vec iteration or
+# json! literals, so insertion order is deterministic everywhere.
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 dirs = "5"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
@@ -27,3 +31,18 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 which = "6"
 log = "0.4"
+
+[dev-dependencies]
+serde_yaml = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }

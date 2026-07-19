@@ -2,13 +2,16 @@
 
 This module is intentionally free of Gateway HTTP handler, upstream I/O,
 telemetry, and retry dependencies. It owns data-shape normalization that makes
-third-party tool calls fit Codex expectations.
+third-party tool calls fit Codex expectations. ``effective_binding`` below is
+an exact, versioned CodexHub-internal adapter contract, not a guessed Host wire
+schema; Host shapes require an explicit normalization seam before validation.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 MULTI_AGENT_TOOL_NAMES = {
@@ -20,6 +23,128 @@ MULTI_AGENT_TOOL_NAMES = {
 }
 
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
+WORKER_AGENT_TYPE = "worker"
+BINDING_ACCEPTED = "accepted"
+BINDING_REJECTED = "rejected"
+SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+SUPPORTED_AGENT_TYPES = {"worker", "general"}
+WORKER_BINDING_CONTRACT_VERSION = "codexhub.worker-binding.v1"
+WORKER_BINDING_FIELDS = {
+    "contract_version",
+    "support",
+    "status",
+    "agent_type",
+    "model",
+    "reasoning",
+}
+
+
+@dataclass(frozen=True)
+class BindingValidation:
+    outcome: str
+    classification: str
+
+
+def strict_json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return dict(parsed) if isinstance(parsed, Mapping) else None
+
+
+def validate_worker_selector(value: Any) -> BindingValidation:
+    arguments = json_object_from_arguments(value)
+    if arguments is None or "agent_type" not in arguments:
+        return BindingValidation(BINDING_REJECTED, "missing_selector")
+    if arguments.get("agent_type") != WORKER_AGENT_TYPE:
+        return BindingValidation(BINDING_REJECTED, "unsupported_selector")
+    return BindingValidation(BINDING_ACCEPTED, "worker_preserved")
+
+
+def validate_requested_worker_binding(requested: Mapping[str, Any]) -> BindingValidation:
+    selector_validation = validate_worker_selector(requested)
+    if selector_validation.outcome != BINDING_ACCEPTED:
+        return selector_validation
+
+    requested_model = requested.get("model")
+    requested_reasoning = requested.get("reasoning")
+    if requested_model is None or requested_model == "":
+        return BindingValidation(BINDING_REJECTED, "missing_requested_model")
+    if not isinstance(requested_model, str) or requested_model.lower().startswith("gpt-"):
+        return BindingValidation(BINDING_REJECTED, "unsupported_requested_model")
+    if requested_reasoning is None or requested_reasoning == "":
+        return BindingValidation(BINDING_REJECTED, "missing_requested_reasoning")
+    if requested_reasoning not in SUPPORTED_REASONING_EFFORTS:
+        return BindingValidation(BINDING_REJECTED, "unsupported_requested_reasoning")
+    return BindingValidation(BINDING_ACCEPTED, "requested_binding_supported")
+
+
+def validate_effective_worker_binding(
+    requested: Mapping[str, Any],
+    readback: Any,
+) -> BindingValidation:
+    requested_validation = validate_requested_worker_binding(requested)
+    if requested_validation.outcome != BINDING_ACCEPTED:
+        return requested_validation
+
+    requested_model = requested["model"]
+    requested_reasoning = requested["reasoning"]
+
+    if not isinstance(readback, Mapping):
+        return BindingValidation(BINDING_REJECTED, "missing_readback")
+    effective = readback.get("effective_binding")
+    if not isinstance(effective, Mapping):
+        return BindingValidation(BINDING_REJECTED, "missing_readback")
+    if set(effective) != WORKER_BINDING_FIELDS:
+        return BindingValidation(BINDING_REJECTED, "unknown_readback")
+    if effective.get("contract_version") != WORKER_BINDING_CONTRACT_VERSION:
+        return BindingValidation(BINDING_REJECTED, "unknown_readback")
+
+    support = effective.get("support")
+    if support == "unsupported":
+        return BindingValidation(BINDING_REJECTED, "unsupported_readback")
+    if support != "supported":
+        return BindingValidation(BINDING_REJECTED, "unknown_readback")
+
+    status = effective.get("status")
+    if status == "rejected":
+        return BindingValidation(BINDING_REJECTED, "rejected_readback")
+    if status != "accepted":
+        return BindingValidation(BINDING_REJECTED, "unknown_readback")
+
+    effective_agent_type = effective.get("agent_type")
+    effective_model = effective.get("model")
+    effective_reasoning = effective.get("reasoning")
+    if effective_agent_type is None or effective_agent_type == "":
+        return BindingValidation(BINDING_REJECTED, "missing_effective_agent_type")
+    if not isinstance(effective_agent_type, str):
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_agent_type")
+    if effective_agent_type not in SUPPORTED_AGENT_TYPES:
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_agent_type")
+    if effective_agent_type != requested.get("agent_type"):
+        return BindingValidation(BINDING_REJECTED, "contradictory_agent_type")
+    if effective_model is None or effective_model == "":
+        return BindingValidation(BINDING_REJECTED, "missing_effective_model")
+    if not isinstance(effective_model, str):
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_model")
+    if effective_model.lower().startswith("gpt-"):
+        return BindingValidation(BINDING_REJECTED, "gpt_substitution")
+    if effective_model != requested_model:
+        return BindingValidation(BINDING_REJECTED, "contradictory_model")
+    if effective_reasoning is None or effective_reasoning == "":
+        return BindingValidation(BINDING_REJECTED, "missing_effective_reasoning")
+    if not isinstance(effective_reasoning, str):
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_reasoning")
+    if effective_reasoning not in SUPPORTED_REASONING_EFFORTS:
+        return BindingValidation(BINDING_REJECTED, "unknown_effective_reasoning")
+    if effective_reasoning != requested_reasoning:
+        return BindingValidation(BINDING_REJECTED, "contradictory_reasoning")
+    return BindingValidation(BINDING_ACCEPTED, "matched")
 
 
 def json_object_from_arguments(value: Any) -> dict[str, Any] | None:
@@ -182,9 +307,6 @@ def normalize_multi_agent_arguments(
                 arguments["nickname"] = name_value
                 changed = True
             arguments.pop("name", None)
-            changed = True
-        if "agent_type" in arguments:
-            arguments.pop("agent_type", None)
             changed = True
         if "fork_context" not in arguments:
             arguments["fork_context"] = False

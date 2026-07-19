@@ -101,6 +101,26 @@ pub struct GatewayModel {
     pub supports_chat_completions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_reasoning_levels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_level: Option<String>,
+}
+
+fn official_gateway_input_modalities() -> Vec<String> {
+    vec!["text".to_string(), "image".to_string()]
+}
+
+const OFFICIAL_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const OFFICIAL_DEFAULT_REASONING_LEVEL: &str = "medium";
+
+fn official_gateway_reasoning_levels() -> Vec<String> {
+    OFFICIAL_REASONING_LEVELS
+        .iter()
+        .map(|level| (*level).to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +139,7 @@ struct GatewayClientProviderGroup {
     endpoint_selection: GatewayClientEndpointSelection,
     responses_path: String,
     chat_completions_path: String,
+    supports_developer_role: bool,
     models: Vec<GatewayClientProviderModel>,
 }
 
@@ -177,6 +198,9 @@ struct GatewayClientProviderModel {
     id: String,
     display_name: String,
     context_window: Option<u32>,
+    input_modalities: Vec<String>,
+    supported_reasoning_levels: Vec<String>,
+    default_reasoning_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1798,6 +1822,9 @@ fn official_models_from_metadata(
                 supports_responses: true,
                 supports_chat_completions: true,
                 context_window,
+                input_modalities: Some(official_gateway_input_modalities()),
+                supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
+                default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
             });
         }
     }
@@ -1834,6 +1861,21 @@ fn official_gateway_model_from_metadata(
         supports_responses: true,
         supports_chat_completions: true,
         context_window: published_context_windows.get(&id).copied(),
+        input_modalities: model
+            .input_modalities
+            .clone()
+            .filter(|modalities| !modalities.is_empty())
+            .or_else(|| Some(official_gateway_input_modalities())),
+        supported_reasoning_levels: model
+            .supported_reasoning_levels
+            .clone()
+            .filter(|levels| !levels.is_empty())
+            .or_else(|| Some(official_gateway_reasoning_levels())),
+        default_reasoning_level: model
+            .default_reasoning_level
+            .clone()
+            .filter(|level| !level.is_empty())
+            .or_else(|| Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string())),
     })
 }
 
@@ -1852,6 +1894,9 @@ fn fallback_official_gateway_models(
             supports_responses: true,
             supports_chat_completions: true,
             context_window: published_context_windows.get(*id).copied(),
+            input_modalities: Some(official_gateway_input_modalities()),
+            supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
+            default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
         })
         .collect()
 }
@@ -1908,6 +1953,10 @@ fn gateway_models_from_sources(
             if !exported_ids.insert(model_id.to_ascii_lowercase()) {
                 continue;
             }
+            let reasoning_levels = model
+                .supported_reasoning_levels
+                .clone()
+                .filter(|levels| !levels.is_empty());
             output.push(GatewayModel {
                 id: model_id.clone(),
                 display_name: model
@@ -1925,6 +1974,19 @@ fn gateway_models_from_sources(
                     .unwrap_or(true),
                 supports_chat_completions: true,
                 context_window: model.context_window,
+                input_modalities: model
+                    .input_modalities
+                    .clone()
+                    .filter(|modalities| !modalities.is_empty()),
+                default_reasoning_level: if reasoning_levels.is_some() {
+                    model
+                        .default_reasoning_level
+                        .clone()
+                        .filter(|level| !level.is_empty())
+                } else {
+                    None
+                },
+                supported_reasoning_levels: reasoning_levels,
             });
         }
     }
@@ -2328,6 +2390,14 @@ fn gateway_client_provider_endpoint_selection(
     }
 }
 
+fn gateway_client_provider_supports_developer_role(provider_id: &str, providers: &[Provider]) -> bool {
+    providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .and_then(|provider| provider.supports_developer_role)
+        .unwrap_or(true)
+}
+
 fn gateway_client_provider_label(provider_id: &str, providers: &[Provider]) -> String {
     if provider_id == "openai" {
         return "OpenAI".to_string();
@@ -2397,6 +2467,10 @@ fn gateway_client_provider_groups_from_exported(
                 endpoint_selection,
                 responses_path: gateway_client_provider_responses_path(&provider_id),
                 chat_completions_path: gateway_client_provider_chat_path(&provider_id),
+                supports_developer_role: gateway_client_provider_supports_developer_role(
+                    &provider_id,
+                    providers,
+                ),
                 models: Vec::new(),
             });
             index
@@ -2409,6 +2483,11 @@ fn gateway_client_provider_groups_from_exported(
             id: short_id,
             display_name: model.display_name,
             context_window: model.context_window,
+            input_modalities: model
+                .input_modalities
+                .unwrap_or_else(|| vec!["text".to_string()]),
+            supported_reasoning_levels: model.supported_reasoning_levels.unwrap_or_default(),
+            default_reasoning_level: model.default_reasoning_level,
         });
     }
 
@@ -3668,6 +3747,36 @@ fn preview_pi_config_with_paths(
     })
 }
 
+fn gateway_exported_model_supports_image(
+    settings: &Settings,
+    providers: &[Provider],
+    resolved_model_id: &str,
+) -> bool {
+    gateway_models_from_config(settings, providers)
+        .iter()
+        .find(|model| model.id == resolved_model_id)
+        .and_then(|model| model.input_modalities.as_ref())
+        .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image"))
+}
+
+fn gateway_exported_model_default_reasoning_effort(
+    settings: &Settings,
+    providers: &[Provider],
+    resolved_model_id: &str,
+) -> Option<String> {
+    gateway_models_from_config(settings, providers)
+        .iter()
+        .find(|model| model.id == resolved_model_id)
+        .and_then(|model| {
+            let levels = model.supported_reasoning_levels.as_ref()?;
+            let default = model.default_reasoning_level.as_ref()?;
+            levels
+                .iter()
+                .any(|level| level == default)
+                .then(|| default.clone())
+        })
+}
+
 fn preview_omp_config_with_paths(
     config_path: &Path,
     models_path: &Path,
@@ -3680,8 +3789,26 @@ fn preview_omp_config_with_paths(
     let current_config = fs::read_to_string(config_path).ok();
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let next_config = omp_config_text(current_config.as_deref(), &selector);
+    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
+        Some(selector.as_str())
+    } else {
+        None
+    };
+    let default_reasoning_effort =
+        gateway_exported_model_default_reasoning_effort(settings, providers, &model);
+    let next_config = omp_config_text(
+        current_config.as_deref(),
+        &selector,
+        vision_selector,
+        default_reasoning_effort.as_deref(),
+    );
     let next_models = omp_models_yml_text(settings, providers, &model)?;
+    let mut message =
+        "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
+            .to_string();
+    if vision_selector.is_none() {
+        message.push_str(" OMP modelRoles.vision is omitted because the selected model is exported text-only.");
+    }
     Ok(GatewayClientConfigPreview {
         client_id: "omp".to_string(),
         can_apply: true,
@@ -3693,8 +3820,7 @@ fn preview_omp_config_with_paths(
             ("models.yml", &next_models),
         ])),
         backup_required: config_path.exists() || models_path.exists(),
-        message: "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
-            .to_string(),
+        message,
     })
 }
 
@@ -3838,16 +3964,32 @@ fn apply_omp_config_with_paths(
         is_omp_codexhub_config(&current_config, &current_models),
     )?;
     let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let next_config = omp_config_text(Some(&current_config), &selector);
+    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
+        Some(selector.as_str())
+    } else {
+        None
+    };
+    let default_reasoning_effort =
+        gateway_exported_model_default_reasoning_effort(settings, providers, &model);
+    let next_config = omp_config_text(
+        Some(&current_config),
+        &selector,
+        vision_selector,
+        default_reasoning_effort.as_deref(),
+    );
     let next_models = omp_models_yml_text(settings, providers, &model)?;
     write_text_replace(config_path, &next_config)?;
     write_text_replace(models_path, &next_models)?;
+    let mut message = "OMP now routes through CodexHub Gateway.".to_string();
+    if vision_selector.is_none() {
+        message.push_str(" OMP modelRoles.vision is omitted because the selected model is exported text-only.");
+    }
     Ok(GatewayClientApplyResult {
         client_id: "omp".to_string(),
         applied: true,
         config_path: Some(config_path.to_path_buf()),
         backup_path,
-        message: "OMP now routes through CodexHub Gateway.".to_string(),
+        message,
     })
 }
 
@@ -4279,6 +4421,15 @@ fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String>
     Ok(removed)
 }
 
+fn opencode_reasoning_variants(
+    supported_reasoning_levels: &[String],
+) -> Map<String, serde_json::Value> {
+    supported_reasoning_levels
+        .iter()
+        .map(|level| (level.clone(), json!({ "reasoningEffort": level.clone() })))
+        .collect::<Map<_, _>>()
+}
+
 fn opencode_config_text(
     settings: &Settings,
     providers: &[Provider],
@@ -4289,12 +4440,32 @@ fn opencode_config_text(
     for group in &groups.providers {
         let mut models = Map::new();
         for gateway_model in &group.models {
-            models.insert(
-                gateway_model.id.clone(),
-                json!({
-                    "name": gateway_model.display_name,
-                }),
-            );
+            let mut entry = json!({
+                "name": gateway_model.display_name,
+                "modalities": {
+                    "input": gateway_model.input_modalities,
+                },
+            });
+            if !gateway_model.supported_reasoning_levels.is_empty() {
+                let default_effort = gateway_model
+                    .default_reasoning_level
+                    .as_ref()
+                    .filter(|default| {
+                        gateway_model
+                            .supported_reasoning_levels
+                            .iter()
+                            .any(|level| level == *default)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| gateway_model.supported_reasoning_levels[0].clone());
+                let variants =
+                    opencode_reasoning_variants(&gateway_model.supported_reasoning_levels);
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("options".to_string(), json!({ "reasoningEffort": default_effort }));
+                    object.insert("variants".to_string(), Value::Object(variants));
+                }
+            }
+            models.insert(gateway_model.id.clone(), entry);
         }
         provider_map.insert(
             group.client_provider_id.clone(),
@@ -4392,7 +4563,7 @@ fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProvider
         "apiKey": settings.gateway_client_key,
         "authHeader": true,
         "compat": {
-            "supportsDeveloperRole": true,
+            "supportsDeveloperRole": group.supports_developer_role,
             "supportsReasoningEffort": true,
             "supportsUsageInStreaming": true,
         },
@@ -4404,8 +4575,8 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
-        "reasoning": true,
-        "input": ["text", "image"],
+        "reasoning": !model.supported_reasoning_levels.is_empty(),
+        "input": model.input_modalities.clone(),
         "headers": {
             "x-codex-client-id": "pi",
         },
@@ -4423,12 +4594,23 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     value
 }
 
-fn omp_config_text(current: Option<&str>, selector: &str) -> String {
-    let block = [
+fn omp_config_text(
+    current: Option<&str>,
+    selector: &str,
+    vision_selector: Option<&str>,
+    default_reasoning_effort: Option<&str>,
+) -> String {
+    let default_selector = match default_reasoning_effort {
+        Some(effort) if !effort.is_empty() => format!("{selector}:{effort}"),
+        _ => selector.to_string(),
+    };
+    let mut block = vec![
         "modelRoles:".to_string(),
-        format!("  default: {selector}"),
-        format!("  vision: {selector}"),
+        format!("  default: {default_selector}"),
     ];
+    if let Some(vision_selector) = vision_selector {
+        block.push(format!("  vision: {vision_selector}"));
+    }
     let mut output = Vec::new();
     let mut inserted = false;
     let lines = current.unwrap_or_default().lines().collect::<Vec<_>>();
@@ -4467,19 +4649,26 @@ fn omp_models_yml_text(
     for group in &groups.providers {
         let base_url = yaml_scalar(&group.base_url);
         let api = group.endpoint_selection.pi_api();
+        let supports_developer_role = group.supports_developer_role;
         output.push_str(&format!(
-            "  {}:\n    baseUrl: {base_url}\n    api: {api}\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: true\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
+            "  {}:\n    baseUrl: {base_url}\n    api: {api}\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: {supports_developer_role}\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
             group.client_provider_id
         ));
         for gateway_model in &group.models {
             let model_id = yaml_scalar(&gateway_model.id);
             let model_name = yaml_scalar(&gateway_model.display_name);
+            let reasoning = !gateway_model.supported_reasoning_levels.is_empty();
+            let input_list = gateway_model
+                .input_modalities
+                .iter()
+                .map(|modality| format!("          - {modality}\n"))
+                .collect::<String>();
             let context_window = gateway_model
                 .context_window
                 .map(|value| format!("        contextWindow: {value}\n"))
                 .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: true\n        input:\n          - text\n          - image\n        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
@@ -4587,6 +4776,27 @@ fn zcode_provider_endpoint(
     }
 }
 
+fn zcode_reasoning_value(model: &GatewayClientProviderModel) -> Option<Value> {
+    if model.supported_reasoning_levels.is_empty() {
+        return None;
+    }
+    let mut variants = model.supported_reasoning_levels.clone();
+    if !variants.iter().any(|variant| variant == "off") {
+        variants.push("off".to_string());
+    }
+    let default_variant = model
+        .default_reasoning_level
+        .as_ref()
+        .filter(|default| variants.iter().any(|variant| variant == *default))
+        .cloned()
+        .unwrap_or_else(|| variants[0].clone());
+    Some(json!({
+        "enabled": true,
+        "variants": variants,
+        "defaultVariant": default_variant,
+    }))
+}
+
 fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
     let mut value = json!({
         "id": model.id.clone(),
@@ -4594,13 +4804,16 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
         "kinds": [kind],
         "defaultKind": kind,
         "modalities": {
-            "input": ["text", "image"],
+            "input": model.input_modalities.clone(),
             "output": ["text"],
         },
         "maxOutputTokens": 32768,
     });
     if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
         object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    if let (Some(object), Some(reasoning)) = (value.as_object_mut(), zcode_reasoning_value(model)) {
+        object.insert("reasoning".to_string(), reasoning);
     }
     value
 }
@@ -4655,7 +4868,7 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
                         "output": 32768,
                     },
                     "modalities": {
-                        "input": ["text", "image"],
+                        "input": model.input_modalities.clone(),
                         "output": ["text"],
                     },
                     });
@@ -4664,6 +4877,11 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
                         model.context_window,
                     ) {
                         limit.insert("context".to_string(), json!(context_window));
+                    }
+                    if let (Some(object), Some(reasoning)) =
+                        (value.as_object_mut(), zcode_reasoning_value(model))
+                    {
+                        object.insert("reasoning".to_string(), reasoning);
                     }
                     value
                 },
@@ -5042,15 +5260,11 @@ fn gateway_base_without_v1(settings: &Settings) -> String {
 }
 
 fn yaml_scalar(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|char| char.is_ascii_alphanumeric() || "-_./:".contains(char))
-    {
-        value.to_string()
-    } else {
-        serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-    }
+    // Always emit a double-quoted scalar. YAML double-quoted strings accept
+    // JSON escaping, so every value round-trips as a string even when it
+    // resembles a number, boolean, null, timestamp, anchor, alias, or
+    // collection — a lexical allowlist cannot prove any of those.
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn is_top_level_yaml_key(line: &str, key: &str) -> bool {
@@ -5093,8 +5307,9 @@ fn has_nonempty_payload(bytes: &[u8]) -> bool {
 mod tests {
     use super::{
         apply_opencode_config_with_paths, gateway_client_provider_groups_from_exported,
-        gateway_models_from_config, gateway_models_from_sources, official_models_from_metadata,
-        omp_models_yml_text, opencode_config_text, pi_models_text, pi_settings_text,
+        gateway_models_from_config, gateway_models_from_sources, official_gateway_reasoning_levels,
+        official_models_from_metadata, omp_models_yml_text, opencode_config_text,
+        opencode_reasoning_variants, pi_models_text, pi_settings_text,
         read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, runtime_proxy_dir,
@@ -5153,6 +5368,7 @@ mod tests {
             tool_protocol: None,
             tool_surface_strategy: None,
             reports_cached_input_tokens: None,
+            supports_developer_role: None,
             display_prefix: Some("minimax/".to_string()),
             sort_order: None,
             enabled: true,
@@ -5352,6 +5568,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5374,6 +5591,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5396,6 +5614,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -5423,6 +5642,7 @@ mod tests {
             tool_protocol: None,
             tool_surface_strategy: None,
             reports_cached_input_tokens: None,
+            supports_developer_role: None,
             display_prefix: Some("MiniMax.cn".to_string()),
             sort_order: Some(1),
             enabled: true,
@@ -5788,6 +6008,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Ollama".to_string()),
                 sort_order: Some(1),
                 enabled: true,
@@ -5809,6 +6030,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("Volc".to_string()),
                 sort_order: Some(2),
                 enabled: true,
@@ -5830,6 +6052,7 @@ mod tests {
                 tool_protocol: None,
                 tool_surface_strategy: None,
                 reports_cached_input_tokens: None,
+                supports_developer_role: None,
                 display_prefix: Some("MiniMax.cn".to_string()),
                 sort_order: Some(3),
                 enabled: true,
@@ -6394,10 +6617,68 @@ mod tests {
         assert!(ollama_models.iter().any(|model| model["id"] == "glm-5.2"));
         assert!(volc_models.iter().any(|model| model["id"] == "glm-5.2"));
         assert!(omp_text.contains("codexhub-ollama-cloud:"));
-        assert!(omp_text.contains("baseUrl: http://127.0.0.1:9099/v1/providers/ollama-cloud"));
+        assert!(omp_text.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/ollama-cloud\""));
         assert!(omp_text.contains("codexhub-volc:"));
-        assert!(omp_text.contains("baseUrl: http://127.0.0.1:9099/v1/providers/volc"));
-        assert!(omp_text.contains("id: glm-5.2"));
+        assert!(omp_text.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/volc\""));
+        assert!(omp_text.contains("id: \"glm-5.2\""));
+    }
+
+    #[test]
+    fn pi_and_omp_configs_emit_provider_supports_developer_role() {
+        let root = unique_temp_dir("codexhub-developer-role-compat");
+        let models_path = root.join("models.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let mut providers = case_sensitive_client_export_test_providers();
+        providers.push(Provider {
+            id: "kimi".to_string(),
+            name: "Kimi".to_string(),
+            base_url: "https://api.kimi.example.test/coding/".to_string(),
+            api_key: None,
+            upstream_format: Some(UpstreamFormat::ChatCompletions),
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: Some(false),
+            display_prefix: Some("Kimi".to_string()),
+            sort_order: Some(4),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "k3".to_string(),
+                display_name: Some("Kimi K3".to_string()),
+                context_window: Some(1_048_576),
+                gateway_exported: true,
+                ..Model::default()
+            }],
+        });
+
+        let pi_models_text =
+            pi_models_text(&models_path, &settings, &providers, "kimi/k3").unwrap();
+        let omp_text = omp_models_yml_text(&settings, &providers, "kimi/k3").unwrap();
+        let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
+
+        assert_eq!(
+            pi_models_value.pointer("/providers/codexhub-kimi/compat/supportsDeveloperRole"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            pi_models_value.pointer("/providers/codexhub-volc/compat/supportsDeveloperRole"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let kimi_block = omp_text
+            .split("  codexhub-kimi:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  codexhub-").next())
+            .unwrap();
+        let volc_block = omp_text
+            .split("  codexhub-volc:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  codexhub-").next())
+            .unwrap();
+        assert!(kimi_block.contains("supportsDeveloperRole: false"));
+        assert!(volc_block.contains("supportsDeveloperRole: true"));
     }
 
     #[test]
@@ -6556,15 +6837,551 @@ mod tests {
 
         assert!(text.contains("codexhub-openai:"));
         assert!(text.contains("api: openai-responses"));
-        assert!(text.contains("id: gpt-5.5"));
+        assert!(text.contains("id: \"gpt-5.5\""));
         assert!(text.contains("x-codex-client-id: omp"));
-        assert!(text.contains("id: gpt-5.5-fast"));
-        assert!(text.contains("id: gpt-5.4-fast"));
+        assert!(text.contains("id: \"gpt-5.5-fast\""));
         assert!(text.contains("codexhub-minimax:"));
         assert!(text.contains("api: openai-completions"));
-        assert!(text.contains("id: minimax-m3"));
+        assert!(text.contains("id: \"minimax-m3\""));
         assert!(text.contains("name: \"MiniMax M3\""));
         assert!(!text.contains("minimax/minimax-m3-lite"));
+    }
+
+    fn yaml_string(value: &serde_yaml::Value) -> &str {
+        match value {
+            serde_yaml::Value::String(text) => text.as_str(),
+            other => panic!("expected YAML string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn omp_models_yaml_keeps_implicitly_typed_scalars_as_strings() {
+        let settings = Settings {
+            gateway_client_key: "2026-07-17".to_string(),
+            ..Settings::default()
+        };
+        let mut provider = client_export_test_providers().remove(0);
+        provider.models = vec![
+            Model {
+                id: "5.4".to_string(),
+                display_name: Some("5.4".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "true".to_string(),
+                display_name: Some("null".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "1e3".to_string(),
+                display_name: Some("~".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "0x10".to_string(),
+                display_name: Some("[a, b]".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "*alias".to_string(),
+                display_name: Some("&anchor".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+        ];
+        let providers = vec![provider];
+
+        let text = omp_models_yml_text(&settings, &providers, "minimax/5.4").unwrap();
+        let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+
+        let provider_doc = document
+            .get("providers")
+            .and_then(|providers| providers.get("codexhub-minimax"))
+            .expect("provider document");
+        assert_eq!(
+            yaml_string(provider_doc.get("baseUrl").expect("baseUrl")),
+            "http://127.0.0.1:9099/v1/providers/minimax"
+        );
+        assert_eq!(
+            yaml_string(provider_doc.get("apiKey").expect("apiKey")),
+            "2026-07-17"
+        );
+        let models = provider_doc
+            .get("models")
+            .and_then(|models| models.as_sequence())
+            .expect("models");
+        let expected = [
+            ("5.4", "5.4"),
+            ("true", "null"),
+            ("1e3", "~"),
+            ("0x10", "[a, b]"),
+            ("*alias", "&anchor"),
+        ];
+        assert_eq!(models.len(), expected.len());
+        for (model, (id, name)) in models.iter().zip(expected) {
+            assert_eq!(yaml_string(model.get("id").expect("model id")), id);
+            assert_eq!(yaml_string(model.get("name").expect("model name")), name);
+        }
+    }
+
+    #[test]
+    fn omp_models_yaml_official_numeric_display_names_parse_as_strings() {
+        let settings = Settings::default();
+        let providers = client_export_test_providers();
+
+        let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
+        let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+
+        let models = document
+            .get("providers")
+            .and_then(|providers| providers.get("codexhub-openai"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_sequence())
+            .expect("official models");
+        // The official source is environment-dependent (local subscription
+        // cache vs static fallback), so the hermetic invariant is that every
+        // emitted official id/name parses back as a YAML string, whatever the
+        // concrete catalog is. Deterministic numeric-name coverage lives in
+        // the custom-provider fixture test above.
+        assert!(!models.is_empty());
+        for model in models {
+            yaml_string(model.get("id").expect("model id"));
+            yaml_string(model.get("name").expect("model name"));
+        }
+    }
+
+    fn reasoning_contract_client_export_test_providers() -> Vec<Provider> {
+        vec![Provider {
+            id: "volc".to_string(),
+            name: "Volcengine".to_string(),
+            base_url: "https://ark.example.test/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("Volc".to_string()),
+            sort_order: Some(1),
+            enabled: true,
+            locked: false,
+            models: vec![
+                Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Volc GLM-5.2".to_string()),
+                    input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+                    supported_reasoning_levels: Some(vec![
+                        "low".to_string(),
+                        "high".to_string(),
+                        "xhigh".to_string(),
+                    ]),
+                    default_reasoning_level: Some("high".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "glm-5.2-flash".to_string(),
+                    display_name: Some("Volc GLM-5.2 Flash".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+            ],
+        }]
+    }
+
+    #[test]
+    fn opencode_variants_preserve_official_catalog_reasoning_order() {
+        let variants = opencode_reasoning_variants(&official_gateway_reasoning_levels());
+        let keys: Vec<&str> = variants.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["low", "medium", "high", "xhigh", "max"],
+            "official variants must follow catalog order, not alphabetical"
+        );
+    }
+
+    #[test]
+    fn opencode_config_preserves_configured_reasoning_variant_order() {
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+        let text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+
+        let variants_start = text.find("\"variants\"").expect("variants object");
+        let variants_text = &text[variants_start..];
+        let low = variants_text.find("\"low\"").expect("low variant");
+        let high = variants_text.find("\"high\"").expect("high variant");
+        let xhigh = variants_text.find("\"xhigh\"").expect("xhigh variant");
+        assert!(
+            low < high && high < xhigh,
+            "variants must follow the configured order (low, high, xhigh), got: {variants_text}"
+        );
+    }
+
+    #[test]
+    fn opencode_config_exports_configured_modalities_per_model() {
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+        let text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(
+            value.pointer("/provider/codexhub-volc/models/glm-5.2/modalities/input"),
+            Some(&serde_json::json!(["text", "image"]))
+        );
+        assert_eq!(
+            value.pointer("/provider/codexhub-volc/models/glm-5.2-flash/modalities/input"),
+            Some(&serde_json::json!(["text"]))
+        );
+        // The projection has no output-modality source; omit rather than fabricate.
+        assert!(
+            value
+                .pointer("/provider/codexhub-volc/models/glm-5.2/modalities/output")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn client_exports_map_configured_reasoning_contract() {
+        let root = unique_temp_dir("codexhub-reasoning-contract");
+        let models_path = root.join("models.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+
+        let expected_reasoning = serde_json::json!({
+            "enabled": true,
+            "variants": ["low", "high", "xhigh", "off"],
+            "defaultVariant": "high",
+        });
+
+        let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
+        let zcode_models = zcode_catalog_value
+            .pointer("/providers/0/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let zcode_entry = |model_id: &str| {
+            zcode_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing ZCode catalog entry for {model_id}"))
+        };
+        assert_eq!(zcode_entry("glm-5.2")["reasoning"], expected_reasoning);
+        assert!(zcode_entry("glm-5.2-flash").get("reasoning").is_none());
+
+        let zcode_v2 =
+            super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.2")
+                .unwrap();
+        let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2).unwrap();
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2/reasoning"),
+            Some(&expected_reasoning)
+        );
+        assert!(
+            zcode_v2_value
+                .pointer("/provider/codexhub-volc/models/glm-5.2-flash/reasoning")
+                .is_none()
+        );
+
+        let opencode_text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+        let opencode_entry = |model_id: &str| {
+            opencode_value
+                .pointer(&format!("/provider/codexhub-volc/models/{model_id}"))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing OpenCode entry for {model_id}"))
+        };
+        let capable = opencode_entry("glm-5.2");
+        assert_eq!(
+            capable.pointer("/options/reasoningEffort"),
+            Some(&serde_json::Value::String("high".to_string()))
+        );
+        assert_eq!(
+            capable.pointer("/variants/low/reasoningEffort"),
+            Some(&serde_json::Value::String("low".to_string()))
+        );
+        assert_eq!(
+            capable.pointer("/variants/xhigh/reasoningEffort"),
+            Some(&serde_json::Value::String("xhigh".to_string()))
+        );
+        let incapable = opencode_entry("glm-5.2-flash");
+        assert!(incapable.get("options").is_none());
+        assert!(incapable.get("variants").is_none());
+
+        let pi_text =
+            pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let pi_models = pi_value
+            .pointer("/providers/codexhub-volc/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let pi_reasoning = |model_id: &str| {
+            pi_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(|model| model.get("reasoning"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| panic!("missing Pi reasoning flag for {model_id}"))
+        };
+        assert!(pi_reasoning("glm-5.2"));
+        assert!(!pi_reasoning("glm-5.2-flash"));
+
+        let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let omp_block = |model_id: &str| {
+            omp_text
+                .split(&format!("      - id: \"{model_id}\"\n"))
+                .nth(1)
+                .and_then(|rest| rest.split("\n      - id: ").next())
+                .unwrap_or_else(|| panic!("missing OMP model block for {model_id}"))
+                .to_string()
+        };
+        assert!(omp_block("glm-5.2").contains("reasoning: true"));
+        assert!(omp_block("glm-5.2-flash").contains("reasoning: false"));
+    }
+
+    #[test]
+    fn omp_apply_writes_default_reasoning_effort_suffix_when_configured() {
+        let root = unique_temp_dir("codexhub-omp-reasoning-default");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, "modelRoles:\n  default: ollama/qwen\n").unwrap();
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2:high"));
+        assert!(config.contains("  vision: codexhub-volc/glm-5.2\n"));
+    }
+
+    #[test]
+    fn omp_apply_keeps_bare_default_selector_without_reasoning_contract() {
+        let root = unique_temp_dir("codexhub-omp-reasoning-bare");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, "modelRoles:\n  default: ollama/qwen\n").unwrap();
+        let settings = Settings::default();
+        let providers = reasoning_contract_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2-flash",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2-flash\n"));
+        assert!(!config.contains("glm-5.2-flash:"));
+    }
+
+    fn image_capability_client_export_test_providers() -> Vec<Provider> {
+        vec![Provider {
+            id: "volc".to_string(),
+            name: "Volcengine".to_string(),
+            base_url: "https://ark.example.test/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("Volc".to_string()),
+            sort_order: Some(1),
+            enabled: true,
+            locked: false,
+            models: vec![
+                Model {
+                    id: "glm-5.2".to_string(),
+                    display_name: Some("Volc GLM-5.2".to_string()),
+                    input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "glm-5.2-coder".to_string(),
+                    display_name: Some("Volc GLM-5.2 Coder".to_string()),
+                    input_modalities: Some(vec!["text".to_string()]),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "glm-5.2-air".to_string(),
+                    display_name: Some("Volc GLM-5.2 Air".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+            ],
+        }]
+    }
+
+    #[test]
+    fn client_exports_map_configured_image_capability_per_model() {
+        let root = unique_temp_dir("codexhub-image-capability");
+        let models_path = root.join("models.json");
+        let v2_config_path = root.join("v2").join("config.json");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let settings = Settings::default();
+        let providers = image_capability_client_export_test_providers();
+
+        let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_text =
+            pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+        let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
+        let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
+        let zcode_v2 =
+            super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.2")
+                .unwrap();
+        let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2).unwrap();
+
+        let omp_block = |model_id: &str| {
+            omp_text
+                .split(&format!("      - id: \"{model_id}\"\n"))
+                .nth(1)
+                .and_then(|rest| rest.split("\n      - id: ").next())
+                .unwrap_or_else(|| panic!("missing OMP model block for {model_id}"))
+                .to_string()
+        };
+        assert!(omp_block("glm-5.2").contains("input:\n          - text\n          - image\n"));
+        let coder_block = omp_block("glm-5.2-coder");
+        assert!(coder_block.contains("input:\n          - text\n"));
+        assert!(!coder_block.contains("- image"));
+        let air_block = omp_block("glm-5.2-air");
+        assert!(air_block.contains("input:\n          - text\n"));
+        assert!(!air_block.contains("- image"));
+
+        let pi_models = pi_value
+            .pointer("/providers/codexhub-volc/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let pi_inputs = |model_id: &str| {
+            pi_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(|model| model.pointer("/input"))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing Pi model entry for {model_id}"))
+        };
+        assert_eq!(pi_inputs("glm-5.2"), serde_json::json!(["text", "image"]));
+        assert_eq!(pi_inputs("glm-5.2-coder"), serde_json::json!(["text"]));
+        assert_eq!(pi_inputs("glm-5.2-air"), serde_json::json!(["text"]));
+
+        let zcode_models = zcode_catalog_value
+            .pointer("/providers/0/models")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let zcode_inputs = |model_id: &str| {
+            zcode_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(|model| model.pointer("/modalities/input"))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing ZCode catalog entry for {model_id}"))
+        };
+        assert_eq!(zcode_inputs("glm-5.2"), serde_json::json!(["text", "image"]));
+        assert_eq!(zcode_inputs("glm-5.2-coder"), serde_json::json!(["text"]));
+        assert_eq!(zcode_inputs("glm-5.2-air"), serde_json::json!(["text"]));
+
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2/modalities/input"),
+            Some(&serde_json::json!(["text", "image"]))
+        );
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2-coder/modalities/input"),
+            Some(&serde_json::json!(["text"]))
+        );
+        assert_eq!(
+            zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2-air/modalities/input"),
+            Some(&serde_json::json!(["text"]))
+        );
+    }
+
+    #[test]
+    fn omp_apply_omits_vision_role_and_reports_when_selected_model_is_text_only() {
+        let root = unique_temp_dir("codexhub-omp-text-only");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &config_path,
+            "modelRoles:\n  default: ollama/qwen\n  vision: ollama/qwen-vision\n",
+        )
+        .unwrap();
+        let settings = Settings::default();
+        let providers = image_capability_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2-coder",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2-coder"));
+        assert!(!config.contains("vision:"));
+        assert!(result.message.contains("vision"));
+        assert!(result.message.contains("text-only"));
+    }
+
+    #[test]
+    fn omp_apply_writes_vision_role_for_image_capable_selection() {
+        let root = unique_temp_dir("codexhub-omp-image-capable");
+        let config_path = root.join("config.yml");
+        let models_path = root.join("models.yml");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(&config_path, "modelRoles:\n  default: ollama/qwen\n").unwrap();
+        let settings = Settings::default();
+        let providers = image_capability_client_export_test_providers();
+
+        let result = super::apply_omp_config_with_paths(
+            &config_path,
+            &models_path,
+            &backup_root,
+            &settings,
+            &providers,
+            "volc/glm-5.2",
+        )
+        .unwrap();
+
+        assert!(result.applied);
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("  default: codexhub-volc/glm-5.2"));
+        assert!(config.contains("  vision: codexhub-volc/glm-5.2"));
+        assert!(!result.message.contains("text-only"));
     }
 
     #[test]
@@ -6583,6 +7400,7 @@ mod tests {
             tool_protocol: None,
             tool_surface_strategy: None,
             reports_cached_input_tokens: None,
+            supports_developer_role: None,
             display_prefix: Some("Ollama".to_string()),
             sort_order: None,
             enabled: true,
@@ -6599,7 +7417,7 @@ mod tests {
             omp_models_yml_text(&settings, &providers, "ollama-cloud/nemotron-3-nano:30b").unwrap();
 
         assert!(text.contains("codexhub-ollama-cloud:"));
-        assert!(text.contains("id: nemotron-3-nano:30b"));
+        assert!(text.contains("id: \"nemotron-3-nano:30b\""));
         assert!(!text.contains("contextWindow:"));
     }
 
@@ -6738,6 +7556,20 @@ mod tests {
         assert_eq!(summary.cache_hit_rate, Some(30.0));
         assert_eq!(summary.missing_usage_requests, 1);
         assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn usage_summary_counts_cache_for_kimi_but_not_unflagged_external_providers() {
+        let text = [
+            r#"{"event":"request_complete","upstream":"kimi","model":"kimi/k3","status":200,"usage_source":"upstream_async","usage_input_tokens":100,"usage_cached_input_tokens":80,"usage_output_tokens":5}"#,
+            r#"{"event":"request_complete","upstream":"external","model":"external/k3","status":200,"usage_source":"upstream_async","usage_input_tokens":100,"usage_cached_input_tokens":90,"usage_output_tokens":5}"#,
+        ]
+        .join("\n");
+
+        let summary = read_usage_summary_from_text(&text);
+
+        assert_eq!(summary.cached_input_tokens, Some(80));
+        assert_eq!(summary.cache_hit_rate, Some(80.0));
     }
 
     #[test]
@@ -7644,12 +8476,11 @@ mod tests {
         assert!(config.contains("  vision: codexhub-openai/gpt-5.5"));
         let models = fs::read_to_string(&models_path).unwrap();
         assert!(models.contains("providers:\n  codexhub-openai:"));
-        assert!(models.contains("baseUrl: http://127.0.0.1:9099/v1/providers/openai"));
+        assert!(models.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/openai\""));
         assert!(models.contains("api: openai-responses"));
-        assert!(models.contains("apiKey: codexhub-proxy"));
-        assert!(models.contains("id: gpt-5.5"));
-        assert!(models.contains("id: gpt-5.5-fast"));
-        assert!(models.contains("id: gpt-5.4-fast"));
+        assert!(models.contains("apiKey: \"codexhub-proxy\""));
+        assert!(models.contains("id: \"gpt-5.5\""));
+        assert!(models.contains("id: \"gpt-5.5-fast\""));
     }
 
     #[test]

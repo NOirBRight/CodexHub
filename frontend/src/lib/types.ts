@@ -58,6 +58,7 @@ export interface Provider {
   tool_protocol?: ToolProtocol | null;
   tool_surface_strategy?: ToolSurfaceStrategy | null;
   reports_cached_input_tokens?: boolean | null;
+  supports_developer_role?: boolean | null;
   display_prefix?: string | null;
   sort_order?: number | null;
   enabled: boolean;
@@ -96,6 +97,7 @@ export interface AppStatus {
   proxy_port: number;
   proxy_build?: string | null;
   message: string;
+  gateway_lifecycle: "unavailable" | "stopped" | "starting" | "running" | "stopping" | "restarting" | "failed";
   history_sync_status?: string | null;
   history_sync_message?: string | null;
 }
@@ -242,6 +244,9 @@ export interface GatewayModel {
   supports_responses: boolean;
   supports_chat_completions: boolean;
   context_window: number;
+  input_modalities?: string[] | null;
+  supported_reasoning_levels?: string[] | null;
+  default_reasoning_level?: string | null;
 }
 
 export interface GatewayUsageSummary {
@@ -507,6 +512,12 @@ export interface Settings {
   official_model_sort_order: string[];
   official_provider_sort_order: number;
   proxy_port: number;
+}
+
+export interface AutostartStatus {
+  enabled: boolean;
+  authoritative: boolean;
+  state: "enabled" | "missing" | "malformed-or-stale" | "unsupported-readback";
 }
 
 export interface CodexContextGuardStatus {

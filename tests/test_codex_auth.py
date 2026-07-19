@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import codex_auth
 from codex_auth import CodexAuthError
+from lock_fixtures import write_dead_legacy_lock
 
 
 def _make_jwt(payload: dict) -> str:
@@ -180,14 +181,14 @@ class RefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = _make_auth_json(Path(tmp), access_token=old_token, refresh_token="rt.orig")
             lock_path = path.with_name("auth.json.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
             auth_data = json.loads(path.read_text(encoding="utf-8"))
             fake = _FakeResponse({"access_token": new_token, "refresh_token": "rt.fresh"})
 
             with patch("codex_auth.urlopen", return_value=fake):
                 codex_auth.refresh(auth_data, path)
 
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tokens"]["access_token"], new_token)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)

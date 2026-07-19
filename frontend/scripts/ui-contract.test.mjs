@@ -319,6 +319,38 @@ test("runtime data uses app-level cached refreshes instead of page lifecycle rel
   assert.doesNotMatch(providersSource, /async function load\(\)/);
 });
 
+test("Gateway lifecycle transitions disable Start and failed actions clear stale Running state", async () => {
+  const [appSource, runtimeBarSource, typesSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(runtimeBarPath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+  const runtimeAction = appSource.match(/const runRuntimeAction = useCallback\(async \([\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+
+  assert.match(typesSource, /gateway_lifecycle: "unavailable" \| "stopped" \| "starting" \| "running" \| "stopping" \| "restarting" \| "failed"/);
+  assert.match(runtimeBarSource, /const lifecycleTransitionActive = \["unavailable", "starting", "stopping", "restarting"\]\.includes/);
+  assert.match(runtimeBarSource, /disabled=\{Boolean\(busy\) \|\| !status \|\| lifecycleTransitionActive\}/);
+  assert.match(appSource, /data: key === "status" \? null : cache\.data/);
+  assert.match(runtimeAction, /catch \(err\) \{[\s\S]*await refreshRuntimeStatus\(\{ force: true \}\)/);
+  assert.match(runtimeAction, /updateToast\(toastId, \{[\s\S]*tone: "error"/);
+});
+
+test("settings restart failures and tray lifecycle feedback preserve truthful runtime state", async () => {
+  const [appSource, mainSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+  ]);
+  const saveSettings = appSource.match(/const saveSettings = useCallback\(async \(next: Settings\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
+  const trayListener = appSource.match(/listen<TrayToastPayload>\("codexhub:toast",[\s\S]*?\n    \}\)/)?.[0] ?? "";
+
+  assert.match(saveSettings, /catch \(err\) \{[\s\S]*await refreshRuntimeStatus\(\{ force: true \}\)/);
+  assert.match(appSource, /type TrayToastPayload = \{[\s\S]*id: string;[\s\S]*tone: "loading" \| "success" \| "error"/);
+  assert.match(trayListener, /trayToastIds\.current\.get\(event\.payload\.id\)/);
+  assert.match(trayListener, /updateToast\(existingToastId,/);
+  assert.match(mainSource, /emit_tray_toast\([\s\S]*"loading"/);
+  assert.match(mainSource, /tauri::async_runtime::spawn_blocking/);
+});
+
 test("provider page state, editors, actions, and shared helpers stay in focused modules", async () => {
   const [pageSource, usageSource, navigationSource, editorSource, controlsSource, modelSource, catalogActionsSource, dateSource, labelsSource, updateSource, officialModelsSource, endpointSource, formSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
@@ -580,8 +612,10 @@ test("desktop startup opens the gateway backend and reuses the existing app inst
     "gateway startup should run after packaged resources are registered",
   );
   assert.match(mainSource, /fn start_gateway_on_launch\(\)/);
-  assert.match(mainSource, /tauri::async_runtime::spawn_blocking\(\|\|/);
-  assert.match(mainSource, /proxy::start\(\)/);
+  assert.match(mainSource, /std::thread::spawn\(move \|\|/);
+  assert.match(mainSource, /proxy::start_after\(\|\|/);
+  assert.match(mainSource, /launch_ready\.signal\(\)/);
+  assert.match(mainSource, /ready_rx\.recv\(\)/);
   assert.match(cargoSource, /tauri-plugin-single-instance\s*=\s*"2"/);
   assert.match(mainSource, /tauri_plugin_single_instance::init\(\|app,[\s\S]*show_main_window\(app\)/);
 });
@@ -880,6 +914,14 @@ test("usage summary and chart use the same global time window", async () => {
   assert.match(tauriSource, /endTs/);
 });
 
+test("usage cache-hit gating includes Kimi and configured capable providers only", async () => {
+  const usageSource = await readFile(stackedUsagePath, "utf8");
+
+  assert.match(usageSource, /\["official", "openai", "official_openai", "kimi"\]/);
+  assert.match(usageSource, /provider\.reports_cached_input_tokens !== true/);
+  assert.match(usageSource, /eventReportsCacheUsage\(event, cacheCapableProviders\)/);
+});
+
 test("stacked usage chart uses neutral separators instead of misleading series outlines", async () => {
   const usageSource = await readFile(stackedUsagePath, "utf8");
   const svgSection = usageSource.match(/<svg[\s\S]*?<\/svg>/)?.[0] ?? "";
@@ -958,14 +1000,17 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(webBridgeSource, /optional_bool_arg\(&request\.args, &\["forceRefresh", "force_refresh"\]\)/);
   assert.match(openAiUsageSource, /account\/usage\/read/);
   assert.match(openAiUsageSource, /codex app-server/);
-  assert.match(openAiUsageSource, /const CACHE_REFRESH_INTERVAL_SECONDS: u64 = 12 \* 60 \* 60;/);
-  assert.match(openAiUsageSource, /const USAGE_REFRESH_MAX_ATTEMPTS: usize = 3;/);
+  assert.match(openAiUsageSource, /const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 2 \* 3 \* 60;/);
+  assert.match(openAiUsageSource, /struct UsageRefreshCoordinator/);
+  assert.match(openAiUsageSource, /static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new\(current_unix_time\);/);
   assert.match(openAiUsageSource, /struct CodexAccountUsageCache/);
   assert.match(openAiUsageSource, /struct OpenAiUsageLimit/);
   assert.match(openAiUsageSource, /usageLimits/);
   assert.match(openAiUsageSource, /write_usage_cache/);
   assert.match(openAiUsageSource, /read_usage_cache/);
-  assert.match(openAiUsageSource, /read_codex_account_usage_with_retries/);
+  assert.match(openAiUsageSource, /last_completed_at/);
+  assert.match(openAiUsageSource, /struct AppServerChild/);
+  assert.doesNotMatch(openAiUsageSource, /USAGE_REFRESH_MAX_ATTEMPTS|read_codex_account_usage_with_retries/);
   assert.doesNotMatch(openAiUsageSource, /OPENAI_ADMIN_KEY|organization\/usage\/completions|OPENAI_USAGE_COMPLETIONS_URL/);
 
   const officialUsagePanel = providersSource.match(/function OfficialOpenAIUsagePanel[\s\S]*function OfficialOpenAIUsageTooltip/)?.[0] ?? "";
@@ -988,11 +1033,11 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(providersSource, /storeOfficialOpenAIUsageSnapshot\(snapshot\)/);
   assert.match(providersSource, /async function primeOfficialOpenAIUsage\(\)/);
   assert.match(providersSource, /await loadOfficialOpenAIUsage\(false, false, undefined, \{ showBusy: false \}\)/);
-  assert.match(providersSource, /void loadOfficialOpenAIUsage\(true\)/);
+  assert.match(providersSource, /void loadOfficialOpenAIUsage\(false\)/);
   assert.match(providersSource, /async function loadOfficialOpenAIUsage\([\s\S]*forceRefresh = true[\s\S]*notify = false[\s\S]*toastId\?: string[\s\S]*options\?: \{ showBusy\?: boolean \}/);
   assert.match(providersSource, /api\.openaiUsageCompletions\(\{[\s\S]*forceRefresh[\s\S]*\}\)/);
   assert.match(providersSource, /void primeOfficialOpenAIUsage\(\)/);
-  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(true\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
+  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(false\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
   assert.match(providersSource, /if \(officialUsageSnapshotRef\.current\) \{[\s\S]*setOfficialUsageError\(null\);[\s\S]*setOfficialUsageHidden\(false\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /selectedId === OFFICIAL_ID[\s\S]*loadOfficialOpenAIUsage/);
   assert.match(providersSource, /if \(selectedId !== OFFICIAL_ID \|\| codexAuthState !== "authorized"\) \{/);
@@ -1487,10 +1532,11 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
 });
 
 test("settings drawer separates software and gateway autostart controls", async () => {
-  const [drawerSource, settingsSource, typesSource, appSource, mainSource, zhSource, enSource] = await Promise.all([
+  const [drawerSource, settingsSource, typesSource, tauriSource, appSource, mainSource, zhSource, enSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
     readFile(settingsLibPath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
     readFile(appPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
     readFile(zhLocalePath, "utf8"),
@@ -1511,6 +1557,11 @@ test("settings drawer separates software and gateway autostart controls", async 
   assert.match(drawerSource, /auto_start_software: value/);
   assert.match(drawerSource, /auto_start_gateway: value/);
   assert.match(typesSource, /auto_start_software: boolean;/);
+  assert.match(typesSource, /interface AutostartStatus/);
+  assert.match(typesSource, /authoritative: boolean;/);
+  assert.match(tauriSource, /getAutostartStatus:\s*\(\)\s*=>\s*call<AutostartStatus>\("get_autostart_status"\)/);
+  assert.match(mainSource, /autostart::reconcile_settings\(config::get_settings\(\)\?\)/);
+  assert.match(mainSource, /get_autostart_status/);
   assert.match(typesSource, /auto_start_gateway: boolean;/);
   assert.doesNotMatch(typesSource, /auto_start_proxy: boolean;/);
   assert.match(settingsSource, /auto_start_software:\s*true/);

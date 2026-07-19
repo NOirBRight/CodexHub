@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-16T20:10:51.7868798Z",
+  "issue": 147,
+  "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
+  "historical_original": {
+    "source": "Task 8 execution report exact original published body",
+    "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Visible Worker gate and #159 is its ready local bounded-search child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+    "normalized_body_sha256": "0c09e6b7c4ba7abf432dc43b19860095094912a1b36b3d67c98e0c3870f40fb4"
+  },
+  "historical_provenance": {
+    "proof_kind": "tracked-transcript",
+    "prior_transcript": {
+      "schema_version": 1,
+      "captured_at": "2026-07-16T19:46:23.9035374Z",
+      "issue": 147,
+      "purpose_prefix": "## Reliability-gated Wayfinder migration readback",
+      "historical_original": {
+        "source": "Task 8 execution report exact original published body",
+        "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Visible Worker gate and #159 is its ready local bounded-search child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+        "normalized_body_sha256": "0c09e6b7c4ba7abf432dc43b19860095094912a1b36b3d67c98e0c3870f40fb4"
+      },
+      "pre_update": {
+        "public_comment_id": 4994927680,
+        "normalized_body_sha256": "7adca5e559b4757cb13ed0d95b94d890bb07c3bbf096a6185e7685649d311227",
+        "readback_at": "2026-07-16T19:46:23.9088831Z"
+      },
+      "desired": {
+        "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+        "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+        "frontier_artifact_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+        "frontier_artifact_sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd"
+      },
+      "operation_decision": "patch",
+      "post_readback": {
+        "public_comment_id": 4994927680,
+        "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+        "prefix_multiplicity": 1,
+        "exact_body_multiplicity": 1,
+        "readback_at": "2026-07-16T19:46:23.9091773Z"
+      },
+      "historical_provenance": {
+        "proof_kind": "task8-execution-report",
+        "prior_transcript": null
+      }
+    }
+  },
+  "pre_update": {
+    "public_comment_id": 4994927680,
+    "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+    "readback_at": "2026-07-16T20:10:50.9689816Z"
+  },
+  "desired": {
+    "normalized_body": "## Reliability-gated Wayfinder migration readback\n\nThe approved roadmap migration is complete and read back:\n\n- five active reliability milestones exist with exact membership;\n- the legacy cross-version reliability milestone is closed as superseded;\n- #156 is the ready-for-human Host/runtime-only Visible Worker gate, #159 is its ready bounded-search child, and #161 is its ready selector/effective-binding validation child;\n- #64 is blocked by #156 for the full post-fix collaboration matrix;\n- #28 is narrowed to client discovery performance and #160 owns uninstall cleanup behind #111;\n- every open Issue has exactly one canonical lifecycle label;\n- no ticket was assigned or dispatched by the migration.\n\nCurrent unclaimed 0.1.6 ready frontier:\n\n- #159 Bound repeated empty tool_search misses for external models\n- #161 Preserve Worker selector and effective binding validation for external delegation\n- #139 Serialize Gateway lifecycle operations and prevent duplicate startup processes\n- #149 Make Rust/Python atomic-file lock ownership and stale recovery safe\n- #150 Coalesce automatic OpenAI usage probes and avoid repeated Codex app-server cold starts\n- #111 Make Windows app autostart registration verifiable and reliable\n\nSanitized native Task/worktree/branch/PR/assignee/hotset preflight found no active ownership conflict at publication.\n\nDurable frontier audit: docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json (SHA-256: `bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd`).\n\nFrontier order remains subject to native dependencies and hotset ownership. Map publication is not a claim.",
+    "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+    "frontier_artifact_path": "docs/superpowers/reviews/wayfinder-frontier-ownership-audit-v1.json",
+    "frontier_artifact_sha256": "bd42794dedd218a960ee8a938712210f9f3b496b61ce69c28637e417eb1d57cd"
+  },
+  "operation_decision": "exact-no-op",
+  "post_readback": {
+    "public_comment_id": 4994927680,
+    "normalized_body_sha256": "cc02ae51ee981e810d367e6473d8480d9d5cd4cf7ddd7f1d60acf8e655a7b2bb",
+    "prefix_multiplicity": 1,
+    "exact_body_multiplicity": 1,
+    "readback_at": "2026-07-16T20:10:51.7469770Z"
+  }
+}

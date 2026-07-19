@@ -20,7 +20,7 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.1.5"
+    expected = "0.1.6"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))

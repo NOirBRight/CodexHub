@@ -35,3 +35,7 @@ src-tauri/resources/downloads/
 # OS
 Thumbs.db
 .DS_Store
+
+# Generated Tauri flavor configs
+.generated/
+output/

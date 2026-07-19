@@ -13,7 +13,7 @@
       "tool_surface_strategy": "eager",
       "namespace_tool_count": 0,
       "source_payload_sha256": "sha256:acb0bc4f028dcb8a6095496bb30e8b40e8972e23f887544efa928f85a578b6a2",
-      "prepared_surface_sha256": "sha256:43843603558dbbf16681c2960154235df0c59e5ddd887a884177c004881ab56d",
+      "prepared_surface_sha256": "sha256:5dc7c2fdc99cadc1dd8dcb2175e72ff41b83c0d209560ea589685ca74329b899",
       "direct_tool_count": 7,
       "namespace_flattened_count": 0,
       "tool_search_visible": false
@@ -23,7 +23,7 @@
       "tool_surface_strategy": "eager",
       "namespace_tool_count": 200,
       "source_payload_sha256": "sha256:8f5d9c18a8541c1c2ebeac166a91333a0fdf1fefb0dfc3617733f55ba8b70fd2",
-      "prepared_surface_sha256": "sha256:e8885a979d821fcc087af4d7d4075c508b78f53a937f979181ca2261c39e7c2e",
+      "prepared_surface_sha256": "sha256:18c4d4bf1571f0dc7c3ca33b1fac816303a815db45a7ce99d872a0546ef60f75",
       "direct_tool_count": 207,
       "namespace_flattened_count": 200,
       "tool_search_visible": false
@@ -33,7 +33,7 @@
       "tool_surface_strategy": "deferred_core",
       "namespace_tool_count": 200,
       "source_payload_sha256": "sha256:8f5d9c18a8541c1c2ebeac166a91333a0fdf1fefb0dfc3617733f55ba8b70fd2",
-      "prepared_surface_sha256": "sha256:871c5ef9f34c7315d79e9b95c39ea1ce2be8ec061e732ed15abe31265653fc7b",
+      "prepared_surface_sha256": "sha256:a5232e63e034bdca95f8f733c129cab51be155bf822ab6c5aea679483f37c108",
       "direct_tool_count": 8,
       "namespace_flattened_count": 0,
       "tool_search_visible": true

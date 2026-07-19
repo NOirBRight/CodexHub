@@ -1176,6 +1176,7 @@ fn cache_usage_capable_provider_aliases() -> HashSet<String> {
         cache_provider_key("official"),
         cache_provider_key("openai"),
         cache_provider_key("official_openai"),
+        cache_provider_key("kimi"),
     ]);
     if let Ok(providers) = config::get_providers() {
         for provider in providers {

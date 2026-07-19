@@ -1,0 +1,81 @@
+{
+  "fixture_kind": "synthetic_codexhub_internal_normalized_adapter_contract",
+  "requested": {
+    "agent_type": "worker",
+    "model": "synthetic-third-party-model",
+    "reasoning": "high"
+  },
+  "readbacks": {
+    "matching": {
+      "effective_binding": {
+        "contract_version": "codexhub.worker-binding.v1",
+        "support": "supported",
+        "status": "accepted",
+        "agent_type": "worker",
+        "model": "synthetic-third-party-model",
+        "reasoning": "high"
+      }
+    },
+    "missing": {},
+    "unknown": {
+      "effective_binding": {
+        "contract_version": "synthetic-unknown-version",
+        "support": "synthetic-unknown",
+        "status": "accepted",
+        "agent_type": "worker",
+        "model": "synthetic-third-party-model",
+        "reasoning": "high"
+      }
+    },
+    "contradictory": {
+      "effective_binding": {
+        "contract_version": "codexhub.worker-binding.v1",
+        "support": "supported",
+        "status": "accepted",
+        "agent_type": "worker",
+        "model": "synthetic-other-model",
+        "reasoning": "high"
+      }
+    },
+    "rejected": {
+      "effective_binding": {
+        "contract_version": "codexhub.worker-binding.v1",
+        "support": "supported",
+        "status": "rejected",
+        "agent_type": "worker",
+        "model": "synthetic-third-party-model",
+        "reasoning": "high"
+      }
+    },
+    "unsupported": {
+      "effective_binding": {
+        "contract_version": "codexhub.worker-binding.v1",
+        "support": "unsupported",
+        "status": "rejected",
+        "agent_type": "worker",
+        "model": "synthetic-third-party-model",
+        "reasoning": "high"
+      }
+    },
+    "gpt_substituted": {
+      "effective_binding": {
+        "contract_version": "codexhub.worker-binding.v1",
+        "support": "supported",
+        "status": "accepted",
+        "agent_type": "worker",
+        "model": "gpt-synthetic-substitute",
+        "reasoning": "high"
+      }
+    },
+    "aliased": {
+      "effective_binding": {
+        "contract_version": "codexhub.worker-binding.v1",
+        "support": "supported",
+        "status": "accepted",
+        "effective_agent_type": "worker",
+        "effective_model": "synthetic-third-party-model",
+        "effective_reasoning": "high"
+      }
+    }
+  }
+}

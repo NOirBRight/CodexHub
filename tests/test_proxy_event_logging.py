@@ -13,6 +13,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 import codex_proxy
+from lock_fixtures import write_dead_legacy_lock
 
 
 class ProxyEventLoggingTests(TestCase):
@@ -188,12 +189,12 @@ class ProxyEventLoggingTests(TestCase):
             secret_path = proxy_telemetry.telemetry_secret_path(codex_home)
             secret_path.parent.mkdir(parents=True)
             lock_path = secret_path.with_name("telemetry-secret.lock")
-            lock_path.write_text("pid=0\nacquired_at_millis=0\n", encoding="utf-8")
+            _dead_child = write_dead_legacy_lock(lock_path)
 
             digest = proxy_telemetry.telemetry_hmac(codex_home, b"test", b"payload")
 
             self.assertEqual(len(digest), 64)
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "codexhub-atomic-lock=1\n")
             self.assertTrue(secret_path.read_text(encoding="utf-8").strip())
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)

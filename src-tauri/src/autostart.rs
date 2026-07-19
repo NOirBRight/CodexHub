@@ -1,4 +1,5 @@
 use crate::config::{self, CommandOutcome, CommandRunner, ProcessCommandRunner};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,41 @@ pub fn remove_autostart() -> Result<String, String> {
     let runner = ProcessCommandRunner;
 
     remove_autostart_with_dependencies(OperatingSystem::current(), &paths, &filesystem, &runner)
+}
+
+/// Removes the Windows task during package uninstall only when its complete
+/// registration still belongs to the executable being uninstalled.
+pub fn remove_autostart_for_uninstall() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|_| {
+        "uninstall autostart cleanup could not resolve the installed executable".to_string()
+    })?;
+    remove_windows_autostart_for_uninstall(&exe, &ProcessCommandRunner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AutostartStatus {
+    pub enabled: bool,
+    pub authoritative: bool,
+    pub state: &'static str,
+}
+
+pub fn get_autostart_status() -> Result<AutostartStatus, String> {
+    let paths = RuntimePathProvider;
+    get_autostart_status_with_dependencies(
+        OperatingSystem::current(),
+        &paths,
+        &ProcessCommandRunner,
+    )
+}
+
+pub fn reconcile_settings(mut settings: crate::Settings) -> Result<crate::Settings, String> {
+    let status = get_autostart_status()?;
+    if status.authoritative && settings.auto_start_software != status.enabled {
+        settings.auto_start_software = status.enabled;
+        config::save_settings(settings)
+    } else {
+        Ok(settings)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,20 +193,15 @@ fn remove_autostart_with_dependencies(
 }
 
 fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<String, String> {
-    let program = Path::new("schtasks");
-    let args = vec![
-        "/Create".to_string(),
-        "/TN".to_string(),
-        windows_task_name().to_string(),
-        "/TR".to_string(),
-        windows_task_command(exe),
-        "/SC".to_string(),
-        "ONLOGON".to_string(),
-        "/RL".to_string(),
-        "LIMITED".to_string(),
-        "/F".to_string(),
-    ];
-    run_autostart_command("create Windows autostart task", program, &args, runner)?;
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_register_script(exe));
+    run_windows_command("create Windows autostart task", program, &args, runner)?;
+
+    let status = query_windows_autostart(exe, runner)?;
+    if !status.enabled {
+        let _ = delete_windows_task(runner);
+        return Err("Windows autostart registration failed readback verification".to_string());
+    }
 
     Ok(format!(
         "Autostart enabled via Windows Task Scheduler task {}",
@@ -179,28 +210,364 @@ fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<
 }
 
 fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String> {
-    let program = Path::new("schtasks");
-    let args = vec![
-        "/Delete".to_string(),
-        "/TN".to_string(),
-        windows_task_name().to_string(),
-        "/F".to_string(),
-    ];
-    let label = "delete Windows autostart task";
-    let outcome = runner
-        .run(program, &args)
-        .map_err(|error| format!("{label} failed to start: {error}"))?;
-
-    if outcome.code != Some(0) && !is_windows_task_missing(&outcome) {
-        return Err(config::format_command_failure(
-            label, program, &args, &outcome,
-        ));
+    delete_windows_task(runner)?;
+    let status = query_windows_task(runner)?;
+    if status.is_some() {
+        return Err("Windows autostart removal failed readback verification".to_string());
     }
 
     Ok(format!(
         "Autostart removed from Windows Task Scheduler task {}",
         windows_task_name()
     ))
+}
+
+fn remove_windows_autostart_for_uninstall(
+    expected_exe: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<String, String> {
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_uninstall_cleanup_script(expected_exe));
+    let outcome = runner.run(program, &args).map_err(|_| {
+        "Windows uninstall autostart cleanup failed to start; registration preserved".to_string()
+    })?;
+    match outcome.code {
+        Some(0) => Ok("Owned Windows autostart registration absent or removed".to_string()),
+        Some(WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE) => Err(
+            "Windows autostart registration was preserved because ownership verification failed"
+                .to_string(),
+        ),
+        Some(code) => Err(format!(
+            "Windows uninstall autostart cleanup failed with exit code {code}; registration may be preserved"
+        )),
+        None => Err(
+            "Windows uninstall autostart cleanup ended without a status; registration may be preserved"
+                .to_string(),
+        ),
+    }
+}
+
+const WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE: i32 = 3;
+
+fn windows_uninstall_cleanup_script(expected_exe: &Path) -> String {
+    windows_uninstall_cleanup_script_with_prelude(expected_exe, &windows_scheduler_prelude())
+}
+
+fn windows_uninstall_cleanup_script_with_prelude(
+    expected_exe: &Path,
+    scheduler_prelude: &str,
+) -> String {
+    let task = powershell_literal(windows_task_name());
+    let expected_exe = powershell_literal(&expected_exe.to_string_lossy());
+    let description = powershell_literal(WINDOWS_TASK_DESCRIPTION);
+    format!(
+        "{}function Resolve-Sid($value){{if([string]::IsNullOrWhiteSpace($value)){{return $null}};try{{return ([Security.Principal.SecurityIdentifier]::new($value)).Value}}catch{{try{{return ([Security.Principal.NTAccount]::new($value)).Translate([Security.Principal.SecurityIdentifier]).Value}}catch{{return $null}}}}}};function Get-TaskOrNull{{try{{return $folder.GetTask({task})}}catch{{if($_.Exception.HResult -eq -2147024894){{return $null}};throw}}}};function Test-Owned($task){{try{{[xml]$xml=$task.Xml;$principalContainer=$xml.Task.Principals;$triggerContainer=$xml.Task.Triggers;$actionContainer=$xml.Task.Actions;if($null -eq $principalContainer -or $null -eq $triggerContainer -or $null -eq $actionContainer){{return $false}};$principals=@($principalContainer.ChildNodes|Where-Object{{$_.NodeType -eq [Xml.XmlNodeType]::Element}});$triggers=@($triggerContainer.ChildNodes|Where-Object{{$_.NodeType -eq [Xml.XmlNodeType]::Element}});$actions=@($actionContainer.ChildNodes|Where-Object{{$_.NodeType -eq [Xml.XmlNodeType]::Element}});if($principals.Count -ne 1 -or $principals[0].LocalName -ne 'Principal' -or $triggers.Count -ne 1 -or $triggers[0].LocalName -ne 'LogonTrigger' -or $actions.Count -ne 1 -or $actions[0].LocalName -ne 'Exec'){{return $false}};$principal=$principals[0];$trigger=$triggers[0];$action=$actions[0];$principalSid=Resolve-Sid ([string]$principal.UserId);$triggerSid=Resolve-Sid ([string]$trigger.UserId);if($null -eq $principalSid -or $null -eq $triggerSid -or $principalSid -ne $triggerSid){{return $false}};$expected=[IO.Path]::GetFullPath({expected_exe});$command=[IO.Path]::GetFullPath([string]$action.Command);$working=[IO.Path]::GetFullPath([string]$action.WorkingDirectory);$arguments=[string]$action.Arguments;$runLevel=[string]$principal.RunLevel;$triggerEnabled=[string]$trigger.Enabled;$taskEnabled=[string]$xml.Task.Settings.Enabled;return $task.Path -eq ('\\'+{task}) -and [string]$xml.Task.RegistrationInfo.Description -eq {description} -and [StringComparer]::OrdinalIgnoreCase.Equals($command,$expected) -and [StringComparer]::OrdinalIgnoreCase.Equals($working,[IO.Path]::GetDirectoryName($expected)) -and [string]::IsNullOrWhiteSpace($arguments) -and [string]$principal.LogonType -eq 'InteractiveToken' -and ([string]::IsNullOrWhiteSpace($runLevel) -or $runLevel -eq 'LeastPrivilege') -and ([string]::IsNullOrWhiteSpace($triggerEnabled) -or $triggerEnabled -eq 'true') -and ([string]::IsNullOrWhiteSpace($taskEnabled) -or $taskEnabled -eq 'true')}}catch{{return $false}}}};$first=Get-TaskOrNull;if($null -eq $first){{exit 0}};if(-not (Test-Owned $first)){{exit 3}};$firstXml=$first.Xml;$second=Get-TaskOrNull;if($null -eq $second -or $second.Xml -cne $firstXml -or -not (Test-Owned $second)){{exit 3}};$folder.DeleteTask({task},0);if($null -ne (Get-TaskOrNull)){{exit 4}};exit 0",
+        scheduler_prelude,
+    )
+}
+
+#[cfg(test)]
+fn uninstall_owner_identity_matches(
+    principal: &str,
+    trigger: &str,
+    resolve_sid: impl Fn(&str) -> Option<String>,
+) -> bool {
+    let Some(principal_sid) = resolve_sid(principal) else {
+        return false;
+    };
+    let Some(trigger_sid) = resolve_sid(trigger) else {
+        return false;
+    };
+    windows_identity_equal(&principal_sid, &trigger_sid)
+}
+
+fn delete_windows_task(runner: &dyn CommandRunner) -> Result<(), String> {
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_delete_script());
+    let label = "delete Windows autostart task";
+    let outcome = runner
+        .run(program, &args)
+        .map_err(|error| format!("{label} failed to start: {error}"))?;
+
+    if outcome.code != Some(0) {
+        return Err(format!(
+            "{label} failed{}",
+            outcome
+                .code
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
+        ));
+    }
+
+    Ok(())
+}
+
+fn get_autostart_status_with_dependencies(
+    os: OperatingSystem,
+    paths: &dyn AutostartPathProvider,
+    runner: &dyn CommandRunner,
+) -> Result<AutostartStatus, String> {
+    if os != OperatingSystem::Windows {
+        return Ok(AutostartStatus {
+            enabled: false,
+            authoritative: false,
+            state: "unsupported-readback",
+        });
+    }
+    let exe = paths.current_exe()?;
+    query_windows_autostart(&exe, runner)
+}
+
+fn query_windows_autostart(
+    expected_exe: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AutostartStatus, String> {
+    let Some(readback) = query_windows_task(runner)? else {
+        return Ok(AutostartStatus {
+            enabled: false,
+            authoritative: true,
+            state: "missing",
+        });
+    };
+    let action = xml_element(&readback.xml, "Exec").unwrap_or_default();
+    let command = xml_element(&action, "Command");
+    let working_directory = xml_element(&action, "WorkingDirectory");
+    let arguments = xml_element(&action, "Arguments");
+    let enabled = xml_element(&readback.xml, "Enabled");
+    let principal = xml_element(&readback.xml, "Principal").unwrap_or_default();
+    let trigger = xml_element(&readback.xml, "LogonTrigger").unwrap_or_default();
+    let principal_user = xml_element(&principal, "UserId");
+    let trigger_user = xml_element(&trigger, "UserId");
+    let trigger_is_current_user = trigger_user.as_deref().is_some_and(|user| {
+        windows_identity_equal(user, &readback.current_sid)
+            || windows_identity_equal(user, &readback.current_name)
+    });
+    let has_one_principal = xml_opening_tag_count(&readback.xml, "Principal") == 1;
+    let has_one_logon_trigger = readback.xml.matches("<LogonTrigger").count() == 1;
+    let has_one_action = readback.xml.matches("<Exec").count() == 1;
+    let expected_working_directory = expected_exe.parent().unwrap_or_else(|| Path::new("."));
+    let matches = command
+        .as_deref()
+        .is_some_and(|value| windows_paths_equal(value, expected_exe))
+        && working_directory
+            .as_deref()
+            .is_some_and(|value| windows_paths_equal(value, expected_working_directory))
+        && arguments
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && enabled
+            .as_deref()
+            .is_none_or(|value| value.trim().eq_ignore_ascii_case("true"))
+        && has_one_logon_trigger
+        && has_one_action
+        && has_one_principal
+        && xml_element(&readback.xml, "Description").as_deref() == Some(WINDOWS_TASK_DESCRIPTION)
+        && xml_element(&principal, "LogonType").as_deref() == Some("InteractiveToken")
+        && xml_element(&principal, "RunLevel")
+            .as_deref()
+            .is_none_or(|run_level| run_level == "LeastPrivilege")
+        && principal_user.as_deref() == Some(readback.current_sid.as_str())
+        && trigger_is_current_user;
+    Ok(AutostartStatus {
+        enabled: matches,
+        authoritative: true,
+        state: if matches {
+            "enabled"
+        } else {
+            "malformed-or-stale"
+        },
+    })
+}
+
+struct WindowsTaskReadback {
+    current_sid: String,
+    current_name: String,
+    xml: String,
+}
+
+fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<WindowsTaskReadback>, String> {
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_query_script());
+    let outcome = runner
+        .run(program, &args)
+        .map_err(|error| format!("query Windows autostart task failed to start: {error}"))?;
+    if outcome.code != Some(0) {
+        return Err(format!(
+            "query Windows autostart task failed{}",
+            outcome
+                .code
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
+        ));
+    }
+    let stdout = outcome.stdout.trim_start_matches('\u{feff}').trim();
+    if stdout == WINDOWS_TASK_MISSING_MARKER {
+        return Ok(None);
+    }
+    let normalized = stdout.replace("\r\n", "\n");
+    let (sid_marker, remainder) = normalized
+        .split_once('\n')
+        .ok_or_else(|| "query Windows autostart task returned malformed readback".to_string())?;
+    let current_sid = sid_marker
+        .strip_prefix(WINDOWS_TASK_SID_PREFIX)
+        .filter(|sid| !sid.is_empty())
+        .ok_or_else(|| "query Windows autostart task returned malformed identity".to_string())?;
+    let (name_marker, xml) = remainder
+        .split_once('\n')
+        .ok_or_else(|| "query Windows autostart task returned malformed readback".to_string())?;
+    let current_name = name_marker
+        .strip_prefix(WINDOWS_TASK_NAME_PREFIX)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "query Windows autostart task returned malformed identity".to_string())?;
+    let xml = xml.trim_start_matches(['\r', '\n']);
+    if !xml.contains("<Task") {
+        return Err("query Windows autostart task returned malformed XML".to_string());
+    }
+    Ok(Some(WindowsTaskReadback {
+        current_sid: current_sid.to_string(),
+        current_name: current_name.to_string(),
+        xml: xml.to_string(),
+    }))
+}
+
+const WINDOWS_TASK_DESCRIPTION: &str = "CodexHub-owned per-user autostart";
+const WINDOWS_TASK_MISSING_MARKER: &str = "CODEXHUB_TASK_MISSING";
+const WINDOWS_TASK_SID_PREFIX: &str = "CODEXHUB_CURRENT_SID=";
+const WINDOWS_TASK_NAME_PREFIX: &str = "CODEXHUB_CURRENT_NAME=";
+
+fn windows_powershell_args(script: &str) -> Vec<String> {
+    vec![
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-Command".to_string(),
+        script.to_string(),
+    ]
+}
+
+fn powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn windows_scheduler_prelude() -> String {
+    "$ErrorActionPreference='Stop';$utf8=New-Object System.Text.UTF8Encoding($false);[Console]::OutputEncoding=$utf8;$OutputEncoding=$utf8;$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\\');".to_string()
+}
+
+fn windows_register_script(exe: &Path) -> String {
+    let task = powershell_literal(windows_task_name());
+    let working_directory = powershell_literal(
+        &exe.parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string()),
+    );
+    let exe = powershell_literal(&exe.to_string_lossy());
+    format!(
+        "{}$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$definition=$service.NewTask(0);$definition.RegistrationInfo.Description={};$definition.Principal.UserId=$sid;$definition.Principal.LogonType=3;$definition.Principal.RunLevel=0;$definition.Settings.Enabled=$true;$definition.Settings.StartWhenAvailable=$true;$definition.Settings.DisallowStartIfOnBatteries=$false;$definition.Settings.StopIfGoingOnBatteries=$false;$definition.Settings.MultipleInstances=2;$trigger=$definition.Triggers.Create(9);$trigger.Enabled=$true;$trigger.UserId=$sid;$action=$definition.Actions.Create(0);$action.Path={};$action.WorkingDirectory={};$folder.RegisterTaskDefinition({},$definition,6,$sid,$null,3,$null)|Out-Null",
+        windows_scheduler_prelude(),
+        powershell_literal(WINDOWS_TASK_DESCRIPTION),
+        exe,
+        working_directory,
+        task,
+    )
+}
+
+fn windows_query_script() -> String {
+    format!(
+        "{}$identity=[Security.Principal.WindowsIdentity]::GetCurrent();$sid=$identity.User.Value;$name=$identity.Name;try{{$task=$folder.GetTask({})}}catch{{if($_.Exception.HResult -eq -2147024894){{Write-Output {};exit 0}}throw}};Write-Output ({}+$sid);Write-Output ({}+$name);Write-Output $task.Xml",
+        windows_scheduler_prelude(),
+        powershell_literal(windows_task_name()),
+        powershell_literal(WINDOWS_TASK_MISSING_MARKER),
+        powershell_literal(WINDOWS_TASK_SID_PREFIX),
+        powershell_literal(WINDOWS_TASK_NAME_PREFIX),
+    )
+}
+
+fn windows_delete_script() -> String {
+    format!(
+        "{}try{{$folder.DeleteTask({},0)}}catch{{if($_.Exception.HResult -ne -2147024894){{throw}}}}",
+        windows_scheduler_prelude(),
+        powershell_literal(windows_task_name()),
+    )
+}
+
+fn run_windows_command(
+    label: &str,
+    program: &Path,
+    args: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<(), String> {
+    let outcome = runner
+        .run(program, args)
+        .map_err(|_| format!("{label} failed to start"))?;
+    if outcome.code == Some(0) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} failed{}",
+            outcome
+                .code
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
+        ))
+    }
+}
+
+fn xml_element(xml: &str, name: &str) -> Option<String> {
+    let start_prefix = format!("<{name}");
+    let end_tag = format!("</{name}>");
+    let mut search_from = 0;
+    let opening = loop {
+        let relative = xml[search_from..].find(&start_prefix)?;
+        let candidate = search_from + relative;
+        let boundary = xml[candidate + start_prefix.len()..].chars().next()?;
+        if boundary == '>' || boundary.is_ascii_whitespace() {
+            break candidate;
+        }
+        search_from = candidate + start_prefix.len();
+    };
+    let opening_end = xml[opening..].find('>')? + opening;
+    if xml[opening..opening_end].trim_end().ends_with('/') {
+        return None;
+    }
+    let start = opening_end + 1;
+    let end = xml[start..].find(&end_tag)? + start;
+    Some(
+        xml[start..end]
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
+}
+
+fn xml_opening_tag_count(xml: &str, name: &str) -> usize {
+    let start_prefix = format!("<{name}");
+    xml.match_indices(&start_prefix)
+        .filter(|(start, _)| {
+            xml[start + start_prefix.len()..]
+                .chars()
+                .next()
+                .is_some_and(|boundary| boundary == '>' || boundary.is_ascii_whitespace())
+        })
+        .count()
+}
+
+fn windows_paths_equal(actual: &str, expected: &Path) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim()
+            .trim_matches('"')
+            .trim_start_matches(r"\\?\")
+            .replace('/', "\\")
+            .to_lowercase()
+    };
+    normalize(actual) == normalize(&expected.to_string_lossy())
+}
+
+fn windows_identity_equal(actual: &str, expected: &str) -> bool {
+    actual.to_lowercase() == expected.to_lowercase()
 }
 
 fn register_macos_autostart(
@@ -394,10 +761,6 @@ fn linux_service_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, Stri
         .join(linux_service_file()))
 }
 
-fn windows_task_command(exe: &Path) -> String {
-    format!("\"{}\" start", exe.to_string_lossy())
-}
-
 fn macos_plist_content(exe: &Path) -> String {
     let exe = escape_xml(&exe.to_string_lossy());
     format!(
@@ -444,17 +807,6 @@ fn systemd_quote_exec_path(path: &Path) -> String {
     } else {
         escaped
     }
-}
-
-fn is_windows_task_missing(outcome: &CommandOutcome) -> bool {
-    command_output_contains(
-        outcome,
-        &[
-            "cannot find the file specified",
-            "task does not exist",
-            "the system cannot find",
-        ],
-    )
 }
 
 fn is_nonfatal_systemctl_start_failure(error: &str) -> bool {
@@ -517,8 +869,9 @@ fn escape_xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        remove_autostart_with_dependencies, set_autostart_with_dependencies, AutostartFileSystem,
-        AutostartPathProvider, OperatingSystem,
+        get_autostart_status_with_dependencies, remove_autostart_with_dependencies,
+        remove_windows_autostart_for_uninstall, set_autostart_with_dependencies,
+        AutostartFileSystem, AutostartPathProvider, OperatingSystem,
     };
     use crate::config::{CommandOutcome, CommandRunner};
     use std::cell::RefCell;
@@ -532,7 +885,14 @@ mod tests {
             PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
-        let runner = RecordingRunner::successful();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "created", "")),
+            Ok(command_outcome(
+                Some(0),
+                &windows_query_output(r"C:\Program Files\CodexHub\codexhub.exe"),
+                "",
+            )),
+        ]);
 
         let message = set_autostart_with_dependencies(
             true,
@@ -547,21 +907,10 @@ mod tests {
         assert_eq!(filesystem.writes.borrow().len(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("schtasks"),
-                args: vec![
-                    "/Create".to_string(),
-                    "/TN".to_string(),
-                    super::windows_task_name().to_string(),
-                    "/TR".to_string(),
-                    r#""C:\Program Files\CodexHub\codexhub.exe" start"#.to_string(),
-                    "/SC".to_string(),
-                    "ONLOGON".to_string(),
-                    "/RL".to_string(),
-                    "LIMITED".to_string(),
-                    "/F".to_string(),
-                ],
-            }]
+            &[
+                windows_register_command(Path::new(r"C:\Program Files\CodexHub\codexhub.exe")),
+                windows_query_command(),
+            ]
         );
     }
 
@@ -569,22 +918,21 @@ mod tests {
     fn windows_remove_autostart_deletes_logon_task() {
         let paths = FakePaths::default();
         let filesystem = MemoryFileSystem::default();
-        let runner = RecordingRunner::successful();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "deleted", "")),
+            Ok(command_outcome(
+                Some(0),
+                super::WINDOWS_TASK_MISSING_MARKER,
+                "",
+            )),
+        ]);
 
         remove_autostart_with_dependencies(OperatingSystem::Windows, &paths, &filesystem, &runner)
             .unwrap();
 
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("schtasks"),
-                args: vec![
-                    "/Delete".to_string(),
-                    "/TN".to_string(),
-                    super::windows_task_name().to_string(),
-                    "/F".to_string(),
-                ],
-            }]
+            &[windows_delete_command(), windows_query_command(),]
         );
     }
 
@@ -595,8 +943,14 @@ mod tests {
             PathBuf::from(r"C:\Users\codexhub"),
         );
         let filesystem = MemoryFileSystem::default();
-        let runner =
-            RecordingRunner::failed(1, "", "ERROR: The system cannot find the file specified.");
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "missing", "")),
+            Ok(command_outcome(
+                Some(0),
+                super::WINDOWS_TASK_MISSING_MARKER,
+                "",
+            )),
+        ]);
 
         set_autostart_with_dependencies(
             false,
@@ -610,16 +964,441 @@ mod tests {
         assert_eq!(*paths.current_exe_calls.borrow(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("schtasks"),
-                args: vec![
-                    "/Delete".to_string(),
-                    "/TN".to_string(),
-                    super::windows_task_name().to_string(),
-                    "/F".to_string(),
-                ],
-            }]
+            &[windows_delete_command(), windows_query_command(),]
         );
+    }
+
+    #[test]
+    fn windows_uninstall_removes_only_fully_owned_task() {
+        let exe = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(Some(0), "", ""))]);
+
+        remove_windows_autostart_for_uninstall(exe, &runner).unwrap();
+
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[windows_uninstall_cleanup_command(exe)]
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_missing_task_is_idempotent() {
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(Some(0), "", ""))]);
+        let exe = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
+
+        remove_windows_autostart_for_uninstall(exe, &runner).unwrap();
+
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[windows_uninstall_cleanup_command(exe)]
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_preserves_mismatched_and_replacement_path_tasks() {
+        let installed = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
+        for task_exe in [
+            r"D:\Control\unrelated.exe",
+            r"C:\Program Files\CodexHub.old\CodexHub.exe",
+        ] {
+            let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+                Some(super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE),
+                "",
+                "",
+            ))]);
+
+            let error = remove_windows_autostart_for_uninstall(installed, &runner).unwrap_err();
+
+            assert_eq!(
+                error,
+                "Windows autostart registration was preserved because ownership verification failed"
+            );
+            assert_eq!(
+                runner.commands.borrow().as_slice(),
+                &[windows_uninstall_cleanup_command(installed)]
+            );
+            assert!(!error.contains(task_exe));
+        }
+    }
+
+    #[test]
+    fn windows_uninstall_preserves_malformed_task_with_sanitized_diagnostic() {
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE),
+            "",
+            "",
+        ))]);
+        let exe = Path::new(r"C:\Private\Secret\CodexHub.exe");
+
+        let error = remove_windows_autostart_for_uninstall(exe, &runner).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Windows autostart registration was preserved because ownership verification failed"
+        );
+        assert!(!error.contains("Private"));
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[windows_uninstall_cleanup_command(exe)]
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_cleanup_is_one_session_with_revalidation_before_delete() {
+        let script = super::windows_uninstall_cleanup_script(Path::new(
+            r"C:\Program Files\CodexHub\CodexHub.exe",
+        ));
+        let first_query = script.find("$first=Get-TaskOrNull").unwrap();
+        let second_query = script.find("$second=Get-TaskOrNull").unwrap();
+        let replacement_guard = script.find("$second.Xml -cne $firstXml").unwrap();
+        let delete = script.find("$folder.DeleteTask").unwrap();
+        let absence = script.rfind("Get-TaskOrNull").unwrap();
+
+        assert!(first_query < second_query);
+        assert!(second_query < replacement_guard);
+        assert!(replacement_guard < delete);
+        assert!(delete < absence);
+        assert_eq!(script.matches("$folder.DeleteTask").count(), 1);
+        assert!(!script.contains("WindowsIdentity]::GetCurrent"));
+    }
+
+    #[test]
+    fn windows_uninstall_identity_binds_principal_to_trigger_not_cleanup_user() {
+        let resolve = |identity: &str| match identity {
+            "ORIGINAL\\owner" | "S-1-5-21-2000" => Some("S-1-5-21-2000".to_string()),
+            "SYSTEM" => Some("S-1-5-18".to_string()),
+            _ => None,
+        };
+
+        assert!(super::uninstall_owner_identity_matches(
+            "S-1-5-21-2000",
+            "ORIGINAL\\owner",
+            resolve
+        ));
+        assert!(!super::uninstall_owner_identity_matches(
+            "SYSTEM",
+            "ORIGINAL\\owner",
+            resolve
+        ));
+        assert!(!super::uninstall_owner_identity_matches(
+            "unresolvable",
+            "ORIGINAL\\owner",
+            resolve
+        ));
+    }
+
+    #[test]
+    fn windows_uninstall_script_preserves_replacement_and_accepts_different_user_owner() {
+        let exe = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
+        let owned = windows_task_xml(exe.to_str().unwrap())
+            .replace(
+                "<UserId>CODEXHUB-SMOKE\\smoke</UserId>",
+                "<UserId>S-1-5-21-2000</UserId>",
+            )
+            .replace("S-1-5-21-1000", "S-1-5-21-2000");
+        let replacement = owned.replace(super::WINDOWS_TASK_DESCRIPTION, "replacement");
+        let extra_action = owned.replace(
+            "</Actions>",
+            "<ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler></Actions>",
+        );
+        let extra_trigger = owned.replace(
+            "</Triggers>",
+            "<BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>",
+        );
+        let unknown_action = owned.replace("<Exec>", "<UnknownAction>").replace(
+            "</Exec>",
+            "</UnknownAction>",
+        );
+        let unknown_trigger = owned
+            .replace("<LogonTrigger>", "<UnknownTrigger>")
+            .replace("</LogonTrigger>", "</UnknownTrigger>");
+        let malformed = "<Task><Actions /></Task>";
+
+        assert_eq!(run_uninstall_script_fixture(exe, &[&owned, &owned]), (0, true));
+        assert_eq!(
+            run_uninstall_script_fixture(exe, &[&owned, &replacement]),
+            (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
+        );
+        for (name, xml) in [
+            ("missing containers", malformed),
+            ("Exec plus ComHandler", extra_action.as_str()),
+            ("LogonTrigger plus BootTrigger", extra_trigger.as_str()),
+            ("unknown action element", unknown_action.as_str()),
+            ("unknown trigger element", unknown_trigger.as_str()),
+        ] {
+            assert_eq!(
+                run_uninstall_script_fixture(exe, &[xml, xml]),
+                (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false),
+                "{name} must preserve without deletion"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_uninstall_launch_failure_is_sanitized_and_preserves_registration() {
+        let exe = Path::new(r"C:\Private\Owner\CodexHub.exe");
+        let runner = RecordingRunner::sequence(vec![Err(
+            "launch failed with secret credentials and C:\\Private\\Owner".to_string(),
+        )]);
+
+        let error = remove_windows_autostart_for_uninstall(exe, &runner).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Windows uninstall autostart cleanup failed to start; registration preserved"
+        );
+        assert!(!error.contains("Private"));
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[windows_uninstall_cleanup_command(exe)]
+        );
+    }
+
+    #[test]
+    fn nsis_cancellation_gate_and_launch_error_branch_precede_cleanup_success() {
+        let hook = include_str!("../windows/nsis-hooks.nsh");
+        let cancellation_gate = hook.find("!insertmacro CheckIfAppIsRunning").unwrap();
+        let clear_errors = hook.find("ClearErrors").unwrap();
+        let launch = hook.find("ExecWait").unwrap();
+        let launch_errors = hook.find("${If} ${Errors}").unwrap();
+        let success = hook.find("${ElseIf} $0 = 0").unwrap();
+
+        assert!(cancellation_gate < clear_errors);
+        assert!(clear_errors < launch);
+        assert!(launch < launch_errors);
+        assert!(launch_errors < success);
+    }
+
+    #[test]
+    fn windows_registration_uses_unelevated_current_user_interactive_token() {
+        let command =
+            windows_register_command(Path::new(r"C:\Users\测试 User\O'Brien\CodexHub.exe"));
+        let script = command.args.last().unwrap();
+
+        assert!(script.contains("New-Object -ComObject 'Schedule.Service'"));
+        assert!(script.contains("$definition.Principal.UserId=$sid"));
+        assert!(script.contains("$definition.Principal.LogonType=3"));
+        assert!(script.contains("$definition.Principal.RunLevel=0"));
+        assert!(script.contains("$definition.Triggers.Create(9)"));
+        assert!(script.contains("RegisterTaskDefinition"));
+        assert!(script.contains(",6,$sid,$null,3,$null)"));
+        assert!(script.contains(r"C:\Users\测试 User\O''Brien\CodexHub.exe"));
+        assert!(!script.contains("schtasks"));
+    }
+
+    #[test]
+    fn windows_readback_rejects_stale_and_accepts_spaced_non_ascii_path() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\应用 程序\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let stale = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            &windows_query_output(r"D:\Old\codexhub.exe"),
+            "",
+        ))]);
+        let status =
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &stale)
+                .unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.state, "malformed-or-stale");
+
+        let valid = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            &windows_query_output(r"C:\应用 程序\CodexHub\codexhub.exe"),
+            "",
+        ))]);
+        assert!(
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &valid,)
+                .unwrap()
+                .enabled
+        );
+
+        let sid_trigger = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            &windows_query_output(r"C:\应用 程序\CodexHub\codexhub.exe").replace(
+                "<UserId>CODEXHUB-SMOKE\\smoke</UserId>",
+                "<UserId>S-1-5-21-1000</UserId>",
+            ),
+            "",
+        ))]);
+        assert!(
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &sid_trigger,)
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn windows_readback_rejects_other_user_and_malformed_task_shapes() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let valid = windows_query_output(r"C:\CodexHub\codexhub.exe");
+        let invalid_readbacks = [
+            valid.replace(
+                "<UserId>S-1-5-21-1000</UserId>",
+                "<UserId>S-1-5-21-OTHER</UserId>",
+            ),
+            valid.replace(
+                "<LogonType>InteractiveToken</LogonType>",
+                "<LogonType>Password</LogonType>",
+            ),
+            valid.replace(
+                "<UserId>CODEXHUB-SMOKE\\smoke</UserId>",
+                "<UserId>OTHER-MACHINE\\other</UserId>",
+            ),
+            valid.replace(
+                "</LogonType>",
+                "</LogonType><RunLevel>HighestAvailable</RunLevel>",
+            ),
+            valid.replace(super::WINDOWS_TASK_DESCRIPTION, "Not a CodexHub-owned task"),
+            valid.replace("<WorkingDirectory>C:\\CodexHub</WorkingDirectory>", ""),
+            valid.replace(
+                "<WorkingDirectory>C:\\CodexHub</WorkingDirectory>",
+                "<WorkingDirectory>D:\\Wrong</WorkingDirectory>",
+            ),
+            valid
+                .replace(
+                    "<Principal id=\"Author\">",
+                    "<PrincipalSpoof id=\"Author\">",
+                )
+                .replace("</Principal>", "</PrincipalSpoof>"),
+            valid.replace("</Principals>", "<Principal id=\"Other\" /></Principals>"),
+            valid.replace("</Triggers>", "<LogonTrigger /></Triggers>"),
+            valid.replace("</Actions>", "<Exec /></Actions>"),
+        ];
+
+        for readback in invalid_readbacks {
+            let runner =
+                RecordingRunner::sequence(vec![Ok(command_outcome(Some(0), &readback, ""))]);
+            let status =
+                get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &runner)
+                    .unwrap();
+            assert!(!status.enabled, "invalid task was accepted: {readback}");
+            assert_eq!(status.state, "malformed-or-stale");
+        }
+    }
+
+    #[test]
+    fn windows_enable_rolls_back_registration_when_readback_is_malformed() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "created", "")),
+            Ok(command_outcome(
+                Some(0),
+                "CODEXHUB_CURRENT_SID=S-1-5-21-1000\nCODEXHUB_CURRENT_NAME=CODEXHUB-SMOKE\\smoke\n<Task><Actions /></Task>",
+                "",
+            )),
+            Ok(command_outcome(Some(0), "deleted", "")),
+        ]);
+
+        let error = set_autostart_with_dependencies(
+            true,
+            OperatingSystem::Windows,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("readback verification"));
+        assert_eq!(runner.commands.borrow().len(), 3);
+        assert_eq!(runner.commands.borrow()[2], windows_delete_command());
+    }
+
+    #[test]
+    fn windows_missing_registration_reads_back_disabled() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            super::WINDOWS_TASK_MISSING_MARKER,
+            "",
+        ))]);
+
+        let status =
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &runner)
+                .unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.state, "missing");
+    }
+
+    fn windows_task_xml(command: &str) -> String {
+        let working_directory = Path::new(command)
+            .parent()
+            .expect("Windows executable fixture has a parent")
+            .to_string_lossy();
+        format!(
+            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal id=\"Author\"><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Triggers><LogonTrigger><UserId>CODEXHUB-SMOKE\\smoke</UserId></LogonTrigger></Triggers><Settings /><Actions Context=\"Author\"><Exec><Command>{command}</Command><WorkingDirectory>{working_directory}</WorkingDirectory></Exec></Actions></Task>",
+            super::WINDOWS_TASK_DESCRIPTION,
+        )
+    }
+
+    fn windows_query_output(command: &str) -> String {
+        format!(
+            "{}S-1-5-21-1000\n{}codexhub-smoke\\SMOKE\n{}",
+            super::WINDOWS_TASK_SID_PREFIX,
+            super::WINDOWS_TASK_NAME_PREFIX,
+            windows_task_xml(command),
+        )
+    }
+
+    fn windows_register_command(exe: &Path) -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_register_script(exe)),
+        }
+    }
+
+    fn windows_delete_command() -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_delete_script()),
+        }
+    }
+
+    fn windows_uninstall_cleanup_command(exe: &Path) -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_uninstall_cleanup_script(exe)),
+        }
+    }
+
+    fn run_uninstall_script_fixture(exe: &Path, task_xml: &[&str]) -> (i32, bool) {
+        let mut prelude = "$ErrorActionPreference='Stop';$global:tasks=New-Object Collections.Queue;"
+            .to_string();
+        for xml in task_xml {
+            prelude.push_str(&format!(
+                "$global:tasks.Enqueue([pscustomobject]@{{Path={};Xml={}}});",
+                super::powershell_literal(&format!(r"\{}", super::windows_task_name())),
+                super::powershell_literal(xml),
+            ));
+        }
+        prelude.push_str("$folder=New-Object psobject;$folder|Add-Member ScriptMethod GetTask {if($global:tasks.Count -eq 0){return $null};return $global:tasks.Dequeue()};$folder|Add-Member ScriptMethod DeleteTask {Write-Output 'CODEXHUB_DELETE_CALLED'};");
+        let script = super::windows_uninstall_cleanup_script_with_prelude(exe, &prelude);
+        let outcome = std::process::Command::new("powershell.exe")
+            .args(super::windows_powershell_args(&script))
+            .output()
+            .expect("PowerShell fixture should start");
+        (
+            outcome.status.code().expect("PowerShell should return a code"),
+            String::from_utf8_lossy(&outcome.stdout).contains("CODEXHUB_DELETE_CALLED"),
+        )
+    }
+
+    fn windows_query_command() -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_query_script()),
+        }
     }
 
     #[test]
@@ -1006,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn command_runner_failure_includes_exit_code_stdout_and_stderr() {
+    fn windows_command_failure_is_sanitized() {
         let paths = FakePaths::new(
             PathBuf::from(r"C:\CodexHub\codexhub.exe"),
             PathBuf::from(r"C:\Users\codexhub"),
@@ -1024,9 +1803,9 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("exit code 42"));
-        assert!(error.contains("printed stdout"));
-        assert!(error.contains("printed stderr"));
-        assert!(error.contains("schtasks"));
+        assert!(!error.contains("printed stdout"));
+        assert!(!error.contains("printed stderr"));
+        assert!(!error.contains(r"C:\CodexHub"));
     }
 
     #[test]
