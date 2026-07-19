@@ -7559,6 +7559,20 @@ mod tests {
     }
 
     #[test]
+    fn usage_summary_counts_cache_for_kimi_but_not_unflagged_external_providers() {
+        let text = [
+            r#"{"event":"request_complete","upstream":"kimi","model":"kimi/k3","status":200,"usage_source":"upstream_async","usage_input_tokens":100,"usage_cached_input_tokens":80,"usage_output_tokens":5}"#,
+            r#"{"event":"request_complete","upstream":"external","model":"external/k3","status":200,"usage_source":"upstream_async","usage_input_tokens":100,"usage_cached_input_tokens":90,"usage_output_tokens":5}"#,
+        ]
+        .join("\n");
+
+        let summary = read_usage_summary_from_text(&text);
+
+        assert_eq!(summary.cached_input_tokens, Some(80));
+        assert_eq!(summary.cache_hit_rate, Some(80.0));
+    }
+
+    #[test]
     fn usage_summary_estimates_cost_from_priced_token_usage() {
         let text = [
             r#"{"event":"request_complete","model":"openai/example","status":200,"duration_ms":120,"usage_source":"upstream","usage_input_tokens":10,"usage_output_tokens":4,"usage_cached_input_tokens":3}"#,
