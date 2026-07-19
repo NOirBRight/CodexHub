@@ -35,11 +35,21 @@ if ($null -eq $xmlText) {
 [xml]$task = $xmlText
 $command = [System.IO.Path]::GetFullPath([string]$task.Task.Actions.Exec.Command)
 $arguments = [string]$task.Task.Actions.Exec.Arguments
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$principal = $task.Task.Principals.Principal
+$trigger = $task.Task.Triggers.LogonTrigger
 if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($command, $expected)) {
     throw "Autostart action is stale or points to a different executable."
 }
-if (-not [string]::IsNullOrWhiteSpace($arguments) -or $null -eq $task.Task.Triggers.LogonTrigger) {
+if (-not [string]::IsNullOrWhiteSpace($arguments) -or $null -eq $trigger) {
     throw "Autostart action or logon trigger is malformed."
+}
+if ([string]$task.Task.RegistrationInfo.Description -ne "CodexHub-owned per-user autostart" -or
+    [string]$principal.UserId -ne $currentSid -or
+    [string]$trigger.UserId -ne $currentSid -or
+    [string]$principal.LogonType -ne "InteractiveToken" -or
+    [string]$principal.RunLevel -ne "LeastPrivilege") {
+    throw "Autostart principal is not the current unelevated interactive user."
 }
 
 if ($InvokeTask) {

@@ -184,19 +184,8 @@ fn remove_autostart_with_dependencies(
 }
 
 fn register_windows_autostart(exe: &Path, runner: &dyn CommandRunner) -> Result<String, String> {
-    let program = Path::new("schtasks");
-    let args = vec![
-        "/Create".to_string(),
-        "/TN".to_string(),
-        windows_task_name().to_string(),
-        "/TR".to_string(),
-        windows_task_command(exe),
-        "/SC".to_string(),
-        "ONLOGON".to_string(),
-        "/RL".to_string(),
-        "LIMITED".to_string(),
-        "/F".to_string(),
-    ];
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_register_script(exe));
     run_windows_command("create Windows autostart task", program, &args, runner)?;
 
     let status = query_windows_autostart(exe, runner)?;
@@ -225,19 +214,14 @@ fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String
 }
 
 fn delete_windows_task(runner: &dyn CommandRunner) -> Result<(), String> {
-    let program = Path::new("schtasks");
-    let args = vec![
-        "/Delete".to_string(),
-        "/TN".to_string(),
-        windows_task_name().to_string(),
-        "/F".to_string(),
-    ];
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_delete_script());
     let label = "delete Windows autostart task";
     let outcome = runner
         .run(program, &args)
         .map_err(|error| format!("{label} failed to start: {error}"))?;
 
-    if outcome.code != Some(0) && !is_windows_task_missing(&outcome) {
+    if outcome.code != Some(0) {
         return Err(format!(
             "{label} failed{}",
             outcome
@@ -270,18 +254,22 @@ fn query_windows_autostart(
     expected_exe: &Path,
     runner: &dyn CommandRunner,
 ) -> Result<AutostartStatus, String> {
-    let Some(xml) = query_windows_task(runner)? else {
+    let Some(readback) = query_windows_task(runner)? else {
         return Ok(AutostartStatus {
             enabled: false,
             authoritative: true,
             state: "missing",
         });
     };
-    let command = xml_element(&xml, "Command");
-    let arguments = xml_element(&xml, "Arguments");
-    let enabled = xml_element(&xml, "Enabled");
-    let has_one_logon_trigger = xml.matches("<LogonTrigger>").count() == 1;
-    let has_one_action = xml.matches("<Exec>").count() == 1;
+    let command = xml_element(&readback.xml, "Command");
+    let arguments = xml_element(&readback.xml, "Arguments");
+    let enabled = xml_element(&readback.xml, "Enabled");
+    let principal = xml_element(&readback.xml, "Principal").unwrap_or_default();
+    let trigger = xml_element(&readback.xml, "LogonTrigger").unwrap_or_default();
+    let principal_user = xml_element(&principal, "UserId");
+    let trigger_user = xml_element(&trigger, "UserId");
+    let has_one_logon_trigger = readback.xml.matches("<LogonTrigger").count() == 1;
+    let has_one_action = readback.xml.matches("<Exec").count() == 1;
     let matches = command
         .as_deref()
         .is_some_and(|value| windows_paths_equal(value, expected_exe))
@@ -292,38 +280,122 @@ fn query_windows_autostart(
             .as_deref()
             .is_none_or(|value| value.trim().eq_ignore_ascii_case("true"))
         && has_one_logon_trigger
-        && has_one_action;
+        && has_one_action
+        && xml_element(&readback.xml, "Description").as_deref() == Some(WINDOWS_TASK_DESCRIPTION)
+        && xml_element(&principal, "LogonType").as_deref() == Some("InteractiveToken")
+        && xml_element(&principal, "RunLevel").as_deref() == Some("LeastPrivilege")
+        && principal_user.as_deref() == Some(readback.current_sid.as_str())
+        && trigger_user == principal_user;
     Ok(AutostartStatus {
         enabled: matches,
         authoritative: true,
-        state: if matches { "enabled" } else { "malformed-or-stale" },
+        state: if matches {
+            "enabled"
+        } else {
+            "malformed-or-stale"
+        },
     })
 }
 
-fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<String>, String> {
-    let program = Path::new("schtasks");
-    let args = vec![
-        "/Query".to_string(),
-        "/TN".to_string(),
-        windows_task_name().to_string(),
-        "/XML".to_string(),
-    ];
+struct WindowsTaskReadback {
+    current_sid: String,
+    xml: String,
+}
+
+fn query_windows_task(runner: &dyn CommandRunner) -> Result<Option<WindowsTaskReadback>, String> {
+    let program = Path::new("powershell.exe");
+    let args = windows_powershell_args(&windows_query_script());
     let outcome = runner
         .run(program, &args)
         .map_err(|error| format!("query Windows autostart task failed to start: {error}"))?;
-    if outcome.code == Some(0) {
-        Ok(Some(outcome.stdout))
-    } else if is_windows_task_missing(&outcome) {
-        Ok(None)
-    } else {
-        Err(format!(
+    if outcome.code != Some(0) {
+        return Err(format!(
             "query Windows autostart task failed{}",
             outcome
                 .code
                 .map(|code| format!(" with exit code {code}"))
                 .unwrap_or_default()
-        ))
+        ));
     }
+    let stdout = outcome.stdout.trim_start_matches('\u{feff}').trim();
+    if stdout == WINDOWS_TASK_MISSING_MARKER {
+        return Ok(None);
+    }
+    let normalized = stdout.replace("\r\n", "\n");
+    let (marker, xml) = normalized
+        .split_once('\n')
+        .ok_or_else(|| "query Windows autostart task returned malformed readback".to_string())?;
+    let current_sid = marker
+        .strip_prefix(WINDOWS_TASK_SID_PREFIX)
+        .filter(|sid| !sid.is_empty())
+        .ok_or_else(|| "query Windows autostart task returned malformed identity".to_string())?;
+    let xml = xml.trim_start_matches(['\r', '\n']);
+    if !xml.contains("<Task") {
+        return Err("query Windows autostart task returned malformed XML".to_string());
+    }
+    Ok(Some(WindowsTaskReadback {
+        current_sid: current_sid.to_string(),
+        xml: xml.to_string(),
+    }))
+}
+
+const WINDOWS_TASK_DESCRIPTION: &str = "CodexHub-owned per-user autostart";
+const WINDOWS_TASK_MISSING_MARKER: &str = "CODEXHUB_TASK_MISSING";
+const WINDOWS_TASK_SID_PREFIX: &str = "CODEXHUB_CURRENT_SID=";
+
+fn windows_powershell_args(script: &str) -> Vec<String> {
+    vec![
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-Command".to_string(),
+        script.to_string(),
+    ]
+}
+
+fn powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn windows_scheduler_prelude() -> String {
+    "$ErrorActionPreference='Stop';$utf8=New-Object System.Text.UTF8Encoding($false);[Console]::OutputEncoding=$utf8;$OutputEncoding=$utf8;$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\\');".to_string()
+}
+
+fn windows_register_script(exe: &Path) -> String {
+    let task = powershell_literal(windows_task_name());
+    let working_directory = powershell_literal(
+        &exe.parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string()),
+    );
+    let exe = powershell_literal(&exe.to_string_lossy());
+    format!(
+        "{}$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$definition=$service.NewTask(0);$definition.RegistrationInfo.Description={};$definition.Principal.UserId=$sid;$definition.Principal.LogonType=3;$definition.Principal.RunLevel=0;$definition.Settings.Enabled=$true;$definition.Settings.StartWhenAvailable=$true;$definition.Settings.DisallowStartIfOnBatteries=$false;$definition.Settings.StopIfGoingOnBatteries=$false;$definition.Settings.MultipleInstances=2;$trigger=$definition.Triggers.Create(9);$trigger.Enabled=$true;$trigger.UserId=$sid;$action=$definition.Actions.Create(0);$action.Path={};$action.WorkingDirectory={};$folder.RegisterTaskDefinition({},$definition,6,$sid,$null,3,$null)|Out-Null",
+        windows_scheduler_prelude(),
+        powershell_literal(WINDOWS_TASK_DESCRIPTION),
+        exe,
+        working_directory,
+        task,
+    )
+}
+
+fn windows_query_script() -> String {
+    format!(
+        "{}$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;try{{$task=$folder.GetTask({})}}catch{{if($_.Exception.HResult -eq -2147024894){{Write-Output {};exit 0}}throw}};Write-Output ({}+$sid);Write-Output $task.Xml",
+        windows_scheduler_prelude(),
+        powershell_literal(windows_task_name()),
+        powershell_literal(WINDOWS_TASK_MISSING_MARKER),
+        powershell_literal(WINDOWS_TASK_SID_PREFIX),
+    )
+}
+
+fn windows_delete_script() -> String {
+    format!(
+        "{}try{{$folder.DeleteTask({},0)}}catch{{if($_.Exception.HResult -ne -2147024894){{throw}}}}",
+        windows_scheduler_prelude(),
+        powershell_literal(windows_task_name()),
+    )
 }
 
 fn run_windows_command(
@@ -566,10 +638,6 @@ fn linux_service_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, Stri
         .join(linux_service_file()))
 }
 
-fn windows_task_command(exe: &Path) -> String {
-    format!("\"{}\"", exe.to_string_lossy())
-}
-
 fn macos_plist_content(exe: &Path) -> String {
     let exe = escape_xml(&exe.to_string_lossy());
     format!(
@@ -616,17 +684,6 @@ fn systemd_quote_exec_path(path: &Path) -> String {
     } else {
         escaped
     }
-}
-
-fn is_windows_task_missing(outcome: &CommandOutcome) -> bool {
-    command_output_contains(
-        outcome,
-        &[
-            "cannot find the file specified",
-            "task does not exist",
-            "the system cannot find",
-        ],
-    )
 }
 
 fn is_nonfatal_systemctl_start_failure(error: &str) -> bool {
@@ -709,7 +766,7 @@ mod tests {
             Ok(command_outcome(Some(0), "created", "")),
             Ok(command_outcome(
                 Some(0),
-                &windows_task_xml(r"C:\Program Files\CodexHub\codexhub.exe"),
+                &windows_query_output(r"C:\Program Files\CodexHub\codexhub.exe"),
                 "",
             )),
         ]);
@@ -728,21 +785,7 @@ mod tests {
         assert_eq!(
             runner.commands.borrow().as_slice(),
             &[
-                RecordedCommand {
-                    program: PathBuf::from("schtasks"),
-                    args: vec![
-                    "/Create".to_string(),
-                    "/TN".to_string(),
-                    super::windows_task_name().to_string(),
-                    "/TR".to_string(),
-                    r#""C:\Program Files\CodexHub\codexhub.exe""#.to_string(),
-                    "/SC".to_string(),
-                    "ONLOGON".to_string(),
-                    "/RL".to_string(),
-                    "LIMITED".to_string(),
-                    "/F".to_string(),
-                    ],
-                },
+                windows_register_command(Path::new(r"C:\Program Files\CodexHub\codexhub.exe")),
                 windows_query_command(),
             ]
         );
@@ -755,9 +798,9 @@ mod tests {
         let runner = RecordingRunner::sequence(vec![
             Ok(command_outcome(Some(0), "deleted", "")),
             Ok(command_outcome(
-                Some(1),
+                Some(0),
+                super::WINDOWS_TASK_MISSING_MARKER,
                 "",
-                "ERROR: The system cannot find the file specified.",
             )),
         ]);
 
@@ -766,18 +809,7 @@ mod tests {
 
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[
-                RecordedCommand {
-                    program: PathBuf::from("schtasks"),
-                    args: vec![
-                    "/Delete".to_string(),
-                    "/TN".to_string(),
-                    super::windows_task_name().to_string(),
-                    "/F".to_string(),
-                    ],
-                },
-                windows_query_command(),
-            ]
+            &[windows_delete_command(), windows_query_command(),]
         );
     }
 
@@ -789,15 +821,11 @@ mod tests {
         );
         let filesystem = MemoryFileSystem::default();
         let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(Some(0), "missing", "")),
             Ok(command_outcome(
-                Some(1),
+                Some(0),
+                super::WINDOWS_TASK_MISSING_MARKER,
                 "",
-                "ERROR: The system cannot find the file specified.",
-            )),
-            Ok(command_outcome(
-                Some(1),
-                "",
-                "ERROR: The system cannot find the file specified.",
             )),
         ]);
 
@@ -813,19 +841,25 @@ mod tests {
         assert_eq!(*paths.current_exe_calls.borrow(), 0);
         assert_eq!(
             runner.commands.borrow().as_slice(),
-            &[
-                RecordedCommand {
-                    program: PathBuf::from("schtasks"),
-                    args: vec![
-                    "/Delete".to_string(),
-                    "/TN".to_string(),
-                    super::windows_task_name().to_string(),
-                    "/F".to_string(),
-                    ],
-                },
-                windows_query_command(),
-            ]
+            &[windows_delete_command(), windows_query_command(),]
         );
+    }
+
+    #[test]
+    fn windows_registration_uses_unelevated_current_user_interactive_token() {
+        let command =
+            windows_register_command(Path::new(r"C:\Users\测试 User\O'Brien\CodexHub.exe"));
+        let script = command.args.last().unwrap();
+
+        assert!(script.contains("New-Object -ComObject 'Schedule.Service'"));
+        assert!(script.contains("$definition.Principal.UserId=$sid"));
+        assert!(script.contains("$definition.Principal.LogonType=3"));
+        assert!(script.contains("$definition.Principal.RunLevel=0"));
+        assert!(script.contains("$definition.Triggers.Create(9)"));
+        assert!(script.contains("RegisterTaskDefinition"));
+        assert!(script.contains(",6,$sid,$null,3,$null)"));
+        assert!(script.contains(r"C:\Users\测试 User\O''Brien\CodexHub.exe"));
+        assert!(!script.contains("schtasks"));
     }
 
     #[test]
@@ -836,30 +870,61 @@ mod tests {
         );
         let stale = RecordingRunner::sequence(vec![Ok(command_outcome(
             Some(0),
-            &windows_task_xml(r"D:\Old\codexhub.exe"),
+            &windows_query_output(r"D:\Old\codexhub.exe"),
             "",
         ))]);
-        let status = get_autostart_status_with_dependencies(
-            OperatingSystem::Windows,
-            &paths,
-            &stale,
-        )
-        .unwrap();
+        let status =
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &stale)
+                .unwrap();
         assert!(!status.enabled);
         assert_eq!(status.state, "malformed-or-stale");
 
         let valid = RecordingRunner::sequence(vec![Ok(command_outcome(
             Some(0),
-            &windows_task_xml(r"C:\应用 程序\CodexHub\codexhub.exe"),
+            &windows_query_output(r"C:\应用 程序\CodexHub\codexhub.exe"),
             "",
         ))]);
-        assert!(get_autostart_status_with_dependencies(
-            OperatingSystem::Windows,
-            &paths,
-            &valid,
-        )
-        .unwrap()
-        .enabled);
+        assert!(
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &valid,)
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn windows_readback_rejects_other_user_and_malformed_task_shapes() {
+        let paths = FakePaths::new(
+            PathBuf::from(r"C:\CodexHub\codexhub.exe"),
+            PathBuf::from(r"C:\Users\codexhub"),
+        );
+        let valid = windows_query_output(r"C:\CodexHub\codexhub.exe");
+        let invalid_readbacks = [
+            valid.replace(
+                "<UserId>S-1-5-21-1000</UserId>",
+                "<UserId>S-1-5-21-OTHER</UserId>",
+            ),
+            valid.replace(
+                "<LogonType>InteractiveToken</LogonType>",
+                "<LogonType>Password</LogonType>",
+            ),
+            valid.replace(
+                "<RunLevel>LeastPrivilege</RunLevel>",
+                "<RunLevel>HighestAvailable</RunLevel>",
+            ),
+            valid.replace(super::WINDOWS_TASK_DESCRIPTION, "Not a CodexHub-owned task"),
+            valid.replace("</Triggers>", "<LogonTrigger /></Triggers>"),
+            valid.replace("</Actions>", "<Exec /></Actions>"),
+        ];
+
+        for readback in invalid_readbacks {
+            let runner =
+                RecordingRunner::sequence(vec![Ok(command_outcome(Some(0), &readback, ""))]);
+            let status =
+                get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &runner)
+                    .unwrap();
+            assert!(!status.enabled, "invalid task was accepted: {readback}");
+            assert_eq!(status.state, "malformed-or-stale");
+        }
     }
 
     #[test]
@@ -871,7 +936,11 @@ mod tests {
         let filesystem = MemoryFileSystem::default();
         let runner = RecordingRunner::sequence(vec![
             Ok(command_outcome(Some(0), "created", "")),
-            Ok(command_outcome(Some(0), "<Task><Actions /></Task>", "")),
+            Ok(command_outcome(
+                Some(0),
+                "CODEXHUB_CURRENT_SID=S-1-5-21-1000\n<Task><Actions /></Task>",
+                "",
+            )),
             Ok(command_outcome(Some(0), "deleted", "")),
         ]);
 
@@ -886,7 +955,7 @@ mod tests {
 
         assert!(error.contains("readback verification"));
         assert_eq!(runner.commands.borrow().len(), 3);
-        assert_eq!(runner.commands.borrow()[2].args[0], "/Delete");
+        assert_eq!(runner.commands.borrow()[2], windows_delete_command());
     }
 
     #[test]
@@ -896,36 +965,51 @@ mod tests {
             PathBuf::from(r"C:\Users\codexhub"),
         );
         let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
-            Some(1),
+            Some(0),
+            super::WINDOWS_TASK_MISSING_MARKER,
             "",
-            "ERROR: The system cannot find the file specified.",
         ))]);
 
-        let status = get_autostart_status_with_dependencies(
-            OperatingSystem::Windows,
-            &paths,
-            &runner,
-        )
-        .unwrap();
+        let status =
+            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &runner)
+                .unwrap();
         assert!(!status.enabled);
         assert_eq!(status.state, "missing");
     }
 
     fn windows_task_xml(command: &str) -> String {
         format!(
-            "<Task><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings><Actions><Exec><Command>{command}</Command></Exec></Actions></Task>"
+            "<Task><RegistrationInfo><Description>{}</Description></RegistrationInfo><Principals><Principal><UserId>S-1-5-21-1000</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>S-1-5-21-1000</UserId></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings><Actions><Exec><Command>{command}</Command></Exec></Actions></Task>",
+            super::WINDOWS_TASK_DESCRIPTION,
         )
+    }
+
+    fn windows_query_output(command: &str) -> String {
+        format!(
+            "{}S-1-5-21-1000\n{}",
+            super::WINDOWS_TASK_SID_PREFIX,
+            windows_task_xml(command),
+        )
+    }
+
+    fn windows_register_command(exe: &Path) -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_register_script(exe)),
+        }
+    }
+
+    fn windows_delete_command() -> RecordedCommand {
+        RecordedCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_delete_script()),
+        }
     }
 
     fn windows_query_command() -> RecordedCommand {
         RecordedCommand {
-            program: PathBuf::from("schtasks"),
-            args: vec![
-                "/Query".to_string(),
-                "/TN".to_string(),
-                super::windows_task_name().to_string(),
-                "/XML".to_string(),
-            ],
+            program: PathBuf::from("powershell.exe"),
+            args: super::windows_powershell_args(&super::windows_query_script()),
         }
     }
 

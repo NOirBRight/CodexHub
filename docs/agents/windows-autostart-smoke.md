@@ -4,6 +4,10 @@ Run this strict manual check against both an installed package and the supported
 portable executable. The harness intentionally sanitizes executable paths from
 its output.
 
+Registration uses the Windows Task Scheduler COM API as the current user with
+`InteractiveToken` logon and `LeastPrivilege` run level. Run CodexHub normally;
+do not elevate it for this check.
+
 ```powershell
 scripts/Test-WindowsAutostart.ps1 -Executable <path> -Distribution installed -InvokeTask
 scripts/Test-WindowsAutostart.ps1 -Executable <path> -Distribution portable -InvokeTask
