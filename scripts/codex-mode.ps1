@@ -12,6 +12,11 @@ param(
 
     [switch]$SkipUiStateRepair,
 
+    [switch]$DryRun,
+
+    [Alias('Apply')]
+    [switch]$ApplyWorkspaceRoots,
+
     [Alias('h')]
     [switch]$Help
 )
@@ -28,7 +33,9 @@ Usage:
   codex-mode.cmd history-status
   codex-mode.cmd history-custom
   codex-mode.cmd history-openai
-  codex-mode.cmd consolidate-official
+  codex-mode.cmd consolidate-official [-DryRun]
+  codex-mode.cmd repair-main [-DryRun]
+  codex-mode.cmd import-workspace-roots [-Apply]
 
 Single-history Codex mode switcher. It no longer copies sessions/state between
 mode-buckets. Normal switching rewrites config.toml and normalizes history
@@ -38,14 +45,19 @@ Modes:
   official             Switch live config to provider openai.
   proxy                Switch live config to provider custom through http://127.0.0.1:9099/v1.
   refresh              Refresh proxy model catalog only.
-  history-status       Count openai/custom provider labels in JSONL and state_5.sqlite.
+  history-status       Count openai/custom provider labels and report saved workspace roots separately.
   history-custom       Repair command: normalize live history labels openai -> custom.
   history-openai       Repair command: normalize live history labels custom -> openai.
   consolidate-official Restore the old official bucket as main line, then merge active-only tail.
+                       Saved workspace roots are preserved; -DryRun previews without writing.
+  repair-main          Alias for consolidate-official with the same saved-root policy.
+  import-workspace-roots
+                       Preview exact canonical/deduplicated source-only roots. Add -Apply only
+                       after reviewing the preview; applying creates a pre-write backup.
   status               Show active config, history summary, and proxy health.
 
 Safety:
-  Close Codex App before official/proxy/history/consolidate commands.
+  Close Codex App before official/proxy/history/consolidate/import-workspace-roots commands.
   -ForceCloseCodex is accepted for compatibility but intentionally ignored.
   Legacy mode-buckets are kept as backups and are not written by normal switching.
 '@ | Write-Host
@@ -613,7 +625,7 @@ function Invoke-ConsolidateOfficial {
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $backupRoot = Join-Path $ScriptDir "consolidate-official-$stamp"
     $targetProvider = Get-CurrentHistoryProvider
-    Invoke-Checked -FilePath 'python' -Arguments @(
+    $arguments = @(
         (Join-Path $ProxyDir 'history_consolidate.py'),
         'official-main',
         '--codex-dir',
@@ -625,7 +637,49 @@ function Invoke-ConsolidateOfficial {
         '--target-provider',
         $targetProvider
     )
-    Write-Host "Official bucket consolidated into active history using provider $targetProvider. Backup: $backupRoot"
+    if ($DryRun) {
+        $arguments += '--dry-run'
+    }
+    Invoke-Checked -FilePath 'python' -Arguments $arguments
+    if ($DryRun) {
+        Write-Host "Dry-run only; no active history or saved workspace roots were written."
+    }
+    else {
+        Write-Host "Official bucket consolidated into active history using provider $targetProvider. Backup: $backupRoot"
+    }
+}
+
+function Invoke-SavedWorkspaceRootImport {
+    Assert-CodexClosed
+
+    $sourceDir = Join-Path $CodexDir 'mode-buckets\official'
+    if (-not (Test-Path -LiteralPath $sourceDir)) {
+        throw "Official bucket not found: $sourceDir"
+    }
+
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $backupRoot = Join-Path $ScriptDir "import-workspace-roots-$stamp"
+    $arguments = @(
+        (Join-Path $ProxyDir 'history_consolidate.py'),
+        'import-saved-workspace-roots',
+        '--codex-dir',
+        $CodexDir,
+        '--source-dir',
+        $sourceDir,
+        '--backup-root',
+        $backupRoot,
+        '--preview'
+    )
+    if ($ApplyWorkspaceRoots) {
+        $arguments += '--apply'
+    }
+    Invoke-Checked -FilePath 'python' -Arguments $arguments
+    if ($ApplyWorkspaceRoots) {
+        Write-Host "Saved workspace roots imported after preview. Backup: $backupRoot"
+    }
+    else {
+        Write-Host 'Preview only; rerun with -Apply to import the displayed roots.'
+    }
 }
 
 function Show-ConfigSummary {
@@ -763,6 +817,7 @@ switch ($Mode) {
     'history-openai' { Invoke-HistoryOverlay -TargetProvider 'openai' }
     'consolidate-official' { Invoke-ConsolidateOfficial }
     'repair-main' { Invoke-ConsolidateOfficial }
+    'import-workspace-roots' { Invoke-SavedWorkspaceRootImport }
     default {
         Show-Usage
         throw "Unknown mode: $Mode"
