@@ -41,6 +41,15 @@ pub fn remove_autostart() -> Result<String, String> {
     remove_autostart_with_dependencies(OperatingSystem::current(), &paths, &filesystem, &runner)
 }
 
+/// Removes the Windows task during package uninstall only when its complete
+/// registration still belongs to the executable being uninstalled.
+pub fn remove_autostart_for_uninstall() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|_| {
+        "uninstall autostart cleanup could not resolve the installed executable".to_string()
+    })?;
+    remove_windows_autostart_for_uninstall(&exe, &ProcessCommandRunner)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AutostartStatus {
     pub enabled: bool,
@@ -211,6 +220,29 @@ fn remove_windows_autostart(runner: &dyn CommandRunner) -> Result<String, String
         "Autostart removed from Windows Task Scheduler task {}",
         windows_task_name()
     ))
+}
+
+fn remove_windows_autostart_for_uninstall(
+    expected_exe: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<String, String> {
+    let status = query_windows_autostart(expected_exe, runner)?;
+    if status.state == "missing" {
+        return Ok("No owned Windows autostart registration was present".to_string());
+    }
+    if !status.enabled {
+        return Err(
+            "Windows autostart registration was preserved because ownership verification failed"
+                .to_string(),
+        );
+    }
+
+    delete_windows_task(runner)?;
+    if query_windows_task(runner)?.is_some() {
+        return Err("Windows autostart cleanup failed readback verification".to_string());
+    }
+
+    Ok("Owned Windows autostart registration removed".to_string())
 }
 
 fn delete_windows_task(runner: &dyn CommandRunner) -> Result<(), String> {
@@ -802,8 +834,8 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::{
         get_autostart_status_with_dependencies, remove_autostart_with_dependencies,
-        set_autostart_with_dependencies, AutostartFileSystem, AutostartPathProvider,
-        OperatingSystem,
+        remove_windows_autostart_for_uninstall, set_autostart_with_dependencies,
+        AutostartFileSystem, AutostartPathProvider, OperatingSystem,
     };
     use crate::config::{CommandOutcome, CommandRunner};
     use std::cell::RefCell;
@@ -897,6 +929,107 @@ mod tests {
         assert_eq!(
             runner.commands.borrow().as_slice(),
             &[windows_delete_command(), windows_query_command(),]
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_removes_only_fully_owned_task() {
+        let exe = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
+        let runner = RecordingRunner::sequence(vec![
+            Ok(command_outcome(
+                Some(0),
+                &windows_query_output(exe.to_str().unwrap()),
+                "",
+            )),
+            Ok(command_outcome(Some(0), "deleted", "")),
+            Ok(command_outcome(
+                Some(0),
+                super::WINDOWS_TASK_MISSING_MARKER,
+                "",
+            )),
+        ]);
+
+        remove_windows_autostart_for_uninstall(exe, &runner).unwrap();
+
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[
+                windows_query_command(),
+                windows_delete_command(),
+                windows_query_command(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_missing_task_is_idempotent() {
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            super::WINDOWS_TASK_MISSING_MARKER,
+            "",
+        ))]);
+
+        remove_windows_autostart_for_uninstall(
+            Path::new(r"C:\Program Files\CodexHub\CodexHub.exe"),
+            &runner,
+        )
+        .unwrap();
+
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[windows_query_command()]
+        );
+    }
+
+    #[test]
+    fn windows_uninstall_preserves_mismatched_and_replacement_path_tasks() {
+        let installed = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
+        for task_exe in [
+            r"D:\Control\unrelated.exe",
+            r"C:\Program Files\CodexHub.old\CodexHub.exe",
+        ] {
+            let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+                Some(0),
+                &windows_query_output(task_exe),
+                "",
+            ))]);
+
+            let error = remove_windows_autostart_for_uninstall(installed, &runner).unwrap_err();
+
+            assert_eq!(
+                error,
+                "Windows autostart registration was preserved because ownership verification failed"
+            );
+            assert_eq!(
+                runner.commands.borrow().as_slice(),
+                &[windows_query_command()]
+            );
+            assert!(!error.contains(task_exe));
+        }
+    }
+
+    #[test]
+    fn windows_uninstall_preserves_malformed_task_with_sanitized_diagnostic() {
+        let runner = RecordingRunner::sequence(vec![Ok(command_outcome(
+            Some(0),
+            "CODEXHUB_CURRENT_SID=S-1-5-21-1000\nCODEXHUB_CURRENT_NAME=PRIVATE\\user\n<Task><Actions /></Task>",
+            "",
+        ))]);
+
+        let error = remove_windows_autostart_for_uninstall(
+            Path::new(r"C:\Private\Secret\CodexHub.exe"),
+            &runner,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Windows autostart registration was preserved because ownership verification failed"
+        );
+        assert!(!error.contains("Private"));
+        assert_eq!(
+            runner.commands.borrow().as_slice(),
+            &[windows_query_command()]
         );
     }
 

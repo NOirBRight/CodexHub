@@ -25,6 +25,9 @@ pub fn run(args: &[String]) -> i32 {
             }
         },
         Some("remove-autostart") => print_result(autostart::remove_autostart()),
+        Some("cleanup-autostart-on-uninstall") => {
+            print_result(autostart::remove_autostart_for_uninstall())
+        }
         Some("app") | None => 0,
         Some("-h" | "--help" | "help") => {
             print_help();

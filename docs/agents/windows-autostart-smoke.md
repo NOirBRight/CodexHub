@@ -25,3 +25,18 @@ For the portable case, enable autostart, exit CodexHub, move the executable,
 and reopen it. The toggle must load as disabled until autostart is enabled again
 at the new location. A subsequent real sign-out/sign-in must again produce
 exactly one process.
+
+## Packaged uninstall cleanup
+
+Run the focused uninstall harness in the clean Windows smoke VM for each
+packaged flavor. It installs and enables autostart, verifies owned cleanup while
+preserving an unrelated control task, reinstalls and checks one valid
+registration, then proves that an overwritten same-name mismatch is preserved:
+
+```powershell
+scripts/Test-WindowsAutostartUninstall.ps1 -Installer <path> -Flavor normal
+scripts/Test-WindowsAutostartUninstall.ps1 -Installer <path> -Flavor debug
+```
+
+The harness and installer diagnostics deliberately report only task disposition;
+they do not print the executable path or user identity.
