@@ -1,74 +1,103 @@
 # Real-client E2E gate
 
 `scripts/Run-RealClientE2E.ps1` is the release-only Windows gate for proving
-that the candidate Debug build routes six pinned, real clients through both
-canonical routes. An HTTP request, configuration inspection, or client launch
-without the required terminal evidence is not an E2E pass.
+that one candidate Debug build routes six pinned real clients through both
+canonical routes. HTTP/configuration preflight alone is never an E2E pass.
 
-## Pinned VM
+## Pinned VM and clients
 
-Run only in snapshot `codexhub-real-client-e2e-v1`. The snapshot has a
-dedicated Windows account and these exact installed versions:
+Run only in snapshot `codexhub-real-client-e2e-v1`, using its dedicated local
+Windows account, dedicated Codex login, dedicated Volc credential, and no
+mounted host homes or client configuration. The runner probes these native
+installed versions before launching the candidate or a client:
 
-| Client | Version |
-|---|---|
-| Codex Desktop | `26.715.4045.0` |
-| Codex CLI | `0.144.5` |
-| ZCode | `3.3.6` |
-| OpenCode | `1.18.3` |
-| Pi | `0.80.6` |
-| OMP | `17.0.3` |
+| Client | Version | Version source |
+|---|---:|---|
+| Codex Desktop | `26.715.4045.0` | executable product version |
+| Codex CLI | `0.144.5` | `--version` |
+| ZCode | `3.3.6` | executable product version |
+| OpenCode | `1.18.3` | `--version` |
+| Pi | `0.80.6` | `--version` |
+| OMP | `17.0.3` | `--version` |
 
-Before taking the snapshot, verify each installed version in its native About
-screen or `--version` output. Do not upgrade a client in place. A version
-change requires a new named snapshot and a runner update reviewed in the same
-PR.
+Do not upgrade a client in place. In particular, OpenCode remains `1.18.3`;
+issue #191 owns the future stable release containing upstream fix #37770. A
+pin change requires a new named snapshot and runner review.
 
-The VM account is used only for this gate. It has a dedicated Codex account,
-dedicated Volc credentials, no personal client history, and no mounted host
-home/configuration directories. Never run the gate from a developer's normal
-Desktop, Codex, ZCode, OpenCode, Pi, or OMP session.
+The provisioned snapshot manifest is machine-bound without recording the
+machine name. It has exactly this shape:
 
-## Candidate and isolation
+```json
+{
+  "schema": "codexhub.real-client-vm-snapshot.v1",
+  "snapshot": "codexhub-real-client-e2e-v1",
+  "machine_name_sha256": "sha256:<hash of the VM COMPUTERNAME>"
+}
+```
 
-Use a new output directory for every candidate SHA. The runner requires this
-layout before it launches any process:
+## Candidate and isolated inputs
+
+Use a new output directory for every invocation. Before launch it contains:
 
 ```text
 <output>/
   isolated/
-    account/profile.json
-    credentials/volc.json
+    account/
+      profile.json
+      auth.json
+    credentials/
+      volc.json
     config/
-      client-versions.json
+      gateway.json
+      vm-snapshot.json
     work/
-  manual-evidence.json
 ```
 
-`profile.json` identifies the dedicated test account to the VM operator.
-`volc.json` contains only the dedicated Volc configuration expected by the
-candidate. Their contents are never copied into artifacts; only SHA-256 hashes
-appear in `summary.json`.
+`profile.json` contains only readiness assertions and no account identifier:
 
-After checking the native About/`--version` surfaces, write
-`client-versions.json` as one JSON object whose six keys and values exactly
-match the pinned-version table (`desktop`, `codex_cli`, `zcode`, `opencode`,
-`pi`, and `omp`). Extra, missing, or mismatched entries fail before launch.
+```json
+{
+  "schema": "codexhub.real-client-account.v1",
+  "dedicated_account": true,
+  "codex_login_ready": true,
+  "gui_ready": true
+}
+```
 
-Build the Debug executable from the exact candidate SHA and place a sidecar
-next to it named `<DebugBuild>.candidate-sha`. The sidecar contains only the
-lowercase 40-character candidate SHA. A changed candidate invalidates the
-Debug build and every automated and manual evidence file.
+`auth.json` is the dedicated VM Codex `auth.json`; it must use `chatgpt` mode
+and contain non-empty access and refresh tokens. `volc.json` has schema
+`codexhub.real-client-volc.v1` and one non-empty `api_key`. `gateway.json` has
+schema `codexhub.real-client-gateway.v1`, a loopback `listen_port`, and a
+dedicated `gateway_client_key`. These secret-bearing inputs remain under
+`isolated/` and are never uploaded.
 
-Every child gets a cleared environment with case-local `HOME`, `USERPROFILE`,
-`APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `TEMP`, and `TMP`.
-The runner passes only the candidate's isolated account, credential, config,
-and work paths to the Debug build. It never copies or reads host shared
-sessions.
+Build the Debug executable from the exact candidate SHA and create
+`<DebugBuild>.candidate-sha` containing only that lowercase SHA. Pass the
+machine-bound snapshot manifest with `-SnapshotManifest`. A new SHA invalidates
+the build sidecar, run binding, automated evidence, GUI evidence, review, and
+Actions result.
 
-## Matrix
+The runner materializes, rather than assumes, the actual consumed configs:
 
-The runner executes this fixed order:
+- candidate `CODEXHUB_RUNTIME_HOME/proxy/settings.json` and
+  `proxy/config/providers.toml`;
+- candidate `CODEXHUB_CODEX_TARGET_HOME/auth.json` and `config.toml`;
+- case-local Codex `config.toml`/`auth.json`;
+- OpenCode `XDG_CONFIG_HOME/opencode/opencode.json`;
+- Pi `.pi/agent/settings.json` and `models.json`;
+- OMP `.omp/agent/config.yml` and `models.yml`;
+- ZCode APPDATA catalog plus `.zcode/v2` config and cache.
+
+Every child receives a cleared environment with case-local `HOME`,
+`USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
+`TEMP`, and `TMP`. The candidate receives the production-consumed
+`CODEXHUB_RUNTIME_HOME`, `CODEXHUB_CODEX_TARGET_HOME`, Gateway key, and Volc
+environment values. The runner never discovers, copies, or modifies host
+shared sessions.
+
+## Matrix and measurement
+
+The fixed case order and selectors are:
 
 | Case | Client | Canonical model | Finalization |
 |---|---|---|---|
@@ -85,37 +114,58 @@ The runner executes this fixed order:
 | `omp-luna` | OMP | `codexhub-openai/gpt-5.6-luna` | automated |
 | `omp-volc` | OMP | `codexhub-volc/glm-5.2` | automated |
 
-For every case, the operator/client must read its disposable `sentinel.txt`
-exactly once with a read-only tool, stream the named sentinel exactly once,
-select the exact canonical model, and produce exactly one completed terminal
-and one `request_complete` with HTTP `200`. Any fallback, duplicate terminal,
-error event, or unclassified reconnect fails the case.
+Each case creates one disposable `sentinel.txt`. The client must use exactly
+one successful read-only read tool, emit the named sentinel once, and finish
+once. The pinned client parsers consume their real JSONL contracts:
 
-The automated clients must expose normalized JSON lines to the gate's capture
-adapter with `model_selected`, `tool_call`, `stream_delta`,
-`request_complete`, and `terminal` events. This is real client output plus
-candidate diagnostics, not an HTTP/configuration preflight. Raw stdout and
-stderr are kept only in bounded memory, reduced to SHA-256, and never written
-to disk.
+- Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
+  items, and `turn.completed`;
+- OpenCode `1.18.3`: `step_start`, completed `tool_use`, `text`, and
+  `step_finish`;
+- Pi `0.80.6` and OMP `17.0.3`: `tool_execution_end`, assistant
+  `message_end`, and `agent_end`.
 
-## Human GUI evidence
+Client output does not prove routing. For each attempt, the runner reads only
+new lines from the isolated Debug Gateway's
+`proxy/codex-proxy-events.jsonl`, filters them by client and canonical model,
+and correlates them with the parsed tool lifecycle. One read tool normally
+causes one tool-call request and one final continuation request. The summary
+therefore records `gateway_request_count = 2` but counts exactly one final
+`request_complete` with HTTP `200`. Any additional request start is an
+unclassified reconnect. `upstream_protocol_fallback`, a mismatched model,
+missing/duplicate Gateway terminal evidence, duplicate client terminal, error,
+or malformed output fails the case.
 
-Codex Desktop and ZCode require a logged-in human at the VM console. Remote
-automation may launch the isolated GUI, but may not claim the result. The human
-selects both models, performs the same read-only sentinel flow, checks the
-candidate diagnostics, and finalizes `manual-evidence.json`.
+Raw client output and diagnostics remain in bounded memory. Per-case files
+contain only capture hashes and approved fields.
 
-The file has this schema and exactly four unique cases:
+## Human GUI phase
+
+Completed GUI evidence must not exist when the runner starts. After all
+preflight checks, the runner emits `manual-evidence.template.json`, starts the
+isolated candidate, launches Codex Desktop and ZCode, and waits up to
+`-ManualEvidenceTimeoutSeconds` for a new `manual-evidence.json`. A native GUI
+that exits before finalization fails immediately.
+
+The template uses schema `codexhub.real-client-manual-evidence.v2` and contains
+the candidate SHA plus a random `run_binding_sha256`. At the VM console, the
+human confirms the dedicated login and GUI, performs both model cases in each
+launched GUI, verifies the same tool/sentinel/Gateway diagnostics, then copies
+the template to `manual-evidence.json` and changes only the observed fields:
 
 ```json
 {
-  "schema": "codexhub.real-client-manual-evidence.v1",
-  "candidate_sha": "<40-hex candidate>",
+  "schema": "codexhub.real-client-manual-evidence.v2",
+  "candidate_sha": "<candidate SHA>",
+  "run_binding_sha256": "<unchanged template hash>",
+  "login_confirmed": true,
+  "gui_confirmed": true,
   "cases": [
     {
       "case_id": "desktop-luna",
       "client": "desktop",
       "canonical_model": "gpt-5.6-luna",
+      "sentinel_relative_path": "isolated/work/gui-desktop/desktop-luna/sentinel.txt",
       "human_finalized": true,
       "outcome": "passed",
       "terminal_classification": "completed",
@@ -131,25 +181,19 @@ The file has this schema and exactly four unique cases:
 }
 ```
 
-Repeat the object for `desktop-volc`, `zcode-luna`, and `zcode-volc` using the
-matrix values above. Input order does not matter; the merge order is fixed by
-the matrix. Missing login, credentials, GUI access, a case, human finalization,
-or any contradictory metric fails closed. Duplicate cases, malformed JSON,
-and a stale candidate SHA also fail before client execution.
-
-Do not put a person's name, username, account identifier, request/session/task
-ID, prompt, model response, credential, or absolute path in manual evidence.
+The file must contain exactly the four Desktop/ZCode cases. Preexisting,
+missing, malformed, duplicate, contradictory, login-unconfirmed,
+GUI-unconfirmed, stale-SHA, or stale-run-binding evidence fails closed. Do not
+add a name, username, account identifier, prompt, model response, credential,
+absolute path, or request/session/task identifier.
 
 ## Operator workflow
 
-1. Restore `codexhub-real-client-e2e-v1` and verify the six pinned versions.
-2. Log in locally with the dedicated VM account and verify the dedicated Codex
-   login and Volc credential without opening a shared host session.
-3. Check out the candidate SHA, produce its Debug build, and create the exact
-   SHA sidecar.
-4. Create a new output layout, populate the isolated account/credential files,
-   and prepare the four-case manual evidence from the GUI observations.
-5. Run the gate from Windows PowerShell:
+1. Restore `codexhub-real-client-e2e-v1`; use only its dedicated local account.
+2. Verify the provisioned snapshot manifest and dedicated Codex/Volc inputs.
+3. Check out the candidate, build Debug, and write its SHA sidecar.
+4. Create the isolated input layout above. Do not create manual evidence yet.
+5. From the VM console, start the blocking runner:
 
 ```powershell
 powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
@@ -157,34 +201,34 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -DebugBuild <path> `
   -LunaModel codexhub-openai/gpt-5.6-luna `
   -VolcModel codexhub-volc/glm-5.2 `
-  -OutputDirectory <path>
+  -OutputDirectory <path> `
+  -SnapshotManifest <path-to-vm-snapshot.json>
 ```
 
-6. Confirm exit code `0`, `summary.json` outcome `passed`, all twelve case
-   outcomes `passed`, and the SHA matches the PR head. Upload only
-   `summary.json` and the files named by its `artifacts` array as the human VM
-   artifact for that SHA. Never upload `isolated/` or `manual-evidence.json`.
-7. If the PR head changes, discard the result and repeat from the Debug build.
+6. Wait for the template and both launched GUIs. Complete and finalize the four
+   GUI cases as described above while the runner is waiting.
+7. Confirm exit `0`, summary outcome `passed`, all twelve cases passed, and the
+   SHA/run binding match. Upload only `summary.json` and the relative files in
+   its `artifacts` list. Never upload `isolated/`, the template, or manual
+   evidence.
+8. Repeat the Debug build and entire run after any candidate SHA change.
 
-The runner attempts a case once. It permits exactly one retry only when the
-first attempt exits with a structured provider-capacity `429` or `503` before
-any output sentinel. Timeouts, process failures, malformed/error output,
-post-output capacity errors, fallback, duplicates, and reconnect ambiguity are
-never retried.
+The runner permits one retry only when the first attempt has a correlated
+Gateway `request_error` status `429` or `503`, the client exited nonzero, and no
+sentinel output occurred. Every other failure is ineligible.
 
-## Artifact contract
+## Sanitized artifact contract
 
-There is exactly one `summary.json` for a completed run. It contains only:
+Every invocation that reaches the runner body ends with exactly one
+`summary.json`, including preflight, candidate startup, GUI, manual, and
+unexpected automated failures. A thrown-path summary contains only a bounded
+`failure_classification`, zero case counts, and no artifacts. Scoped partial
+artifacts are removed before that summary is written. A complete matrix keeps
+one sanitized artifact per case and uses `failure_classification` `none` or
+`case_failure`.
 
-- candidate and artifact SHA-256 hashes;
-- pinned client versions and canonical model identifiers;
-- bounded durations and event/case counts;
-- terminal, reconnect, and retry classifications;
-- case/run outcomes;
-- relative artifact names.
-
-Per-case artifacts contain the candidate SHA, canonical model, outcome, and
-hashes of bounded captures. Neither summary nor per-case artifacts contain
-credentials, authorization headers, prompts, non-sentinel model output,
-usernames, account identifiers, absolute paths, or private
-request/session/task IDs.
+Summary/per-case content is limited to candidate and artifact hashes, verified
+pins, canonical model IDs, bounded timings and counts, classifications,
+outcomes, and relative artifact names. It never contains credentials,
+authorization headers, prompts, non-sentinel model output, usernames, account
+identifiers, absolute paths, or private request/session/task IDs.

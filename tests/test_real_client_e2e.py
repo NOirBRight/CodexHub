@@ -1,7 +1,10 @@
 import json
+import hashlib
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 import time
 
 import pytest
@@ -48,46 +51,113 @@ def _manual_case(case_id: str, client: str, model: str) -> dict:
     }
 
 
-def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     output = tmp_path / "output"
     isolation = output / "isolated"
     for relative in ("account", "credentials", "config", "work"):
         (isolation / relative).mkdir(parents=True, exist_ok=True)
-    (isolation / "account" / "profile.json").write_text("{}", encoding="utf-8")
-    (isolation / "credentials" / "volc.json").write_text(
-        '{"api_key":"fixture-secret"}', encoding="utf-8"
+    (isolation / "account" / "profile.json").write_text(
+        json.dumps(
+            {
+                "schema": "codexhub.real-client-account.v1",
+                "dedicated_account": True,
+                "codex_login_ready": True,
+                "gui_ready": True,
+            }
+        ),
+        encoding="utf-8",
     )
-    (isolation / "config" / "client-versions.json").write_text(
-        json.dumps(PINNED_VERSIONS), encoding="utf-8"
+    (isolation / "account" / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "fixture-codex-access-token",
+                    "refresh_token": "fixture-codex-refresh-token",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (isolation / "credentials" / "volc.json").write_text(
+        json.dumps(
+            {
+                "schema": "codexhub.real-client-volc.v1",
+                "api_key": "fixture-volc-private-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (isolation / "config" / "gateway.json").write_text(
+        json.dumps(
+            {
+                "schema": "codexhub.real-client-gateway.v1",
+                "listen_port": 19190,
+                "gateway_client_key": "fixture-gateway-private-key",
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot_manifest = isolation / "config" / "vm-snapshot.json"
+    machine_hash = "sha256:" + hashlib.sha256(os.environ["COMPUTERNAME"].encode()).hexdigest()
+    snapshot_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "codexhub.real-client-vm-snapshot.v1",
+                "snapshot": "codexhub-real-client-e2e-v1",
+                "machine_name_sha256": machine_hash,
+            }
+        ),
+        encoding="utf-8",
     )
 
     debug_build = tmp_path / "CodexHub-debug.cmd"
-    shutil.copyfile(FIXTURES / "fake-client-success.cmd", debug_build)
+    shutil.copyfile(FIXTURES / "fake-debug-build.cmd", debug_build)
     Path(f"{debug_build}.candidate-sha").write_text(CANDIDATE_SHA, encoding="ascii")
 
-    manual = {
-        "schema": "codexhub.real-client-manual-evidence.v1",
-        "candidate_sha": CANDIDATE_SHA,
-        "cases": [
-            _manual_case("desktop-luna", "desktop", "gpt-5.6-luna"),
-            _manual_case("desktop-volc", "desktop", "volc/glm-5.2"),
-            _manual_case("zcode-luna", "zcode", LUNA_MODEL),
-            _manual_case("zcode-volc", "zcode", VOLC_MODEL),
-        ],
-    }
-    (output / "manual-evidence.json").write_text(json.dumps(manual), encoding="utf-8")
-    return output, isolation, debug_build
+    return output, isolation, debug_build, snapshot_manifest
+
+
+def _finalize_manual_evidence(output: Path, mutation=None) -> None:
+    template_path = output / "manual-evidence.template.json"
+    work = output / "isolated" / "work"
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if (
+            template_path.is_file()
+            and (work / "gui-desktop.launched").is_file()
+            and (work / "gui-zcode.launched").is_file()
+        ):
+            evidence = json.loads(template_path.read_text(encoding="utf-8-sig"))
+            evidence["login_confirmed"] = True
+            evidence["gui_confirmed"] = True
+            for case in evidence["cases"]:
+                case.update(_manual_case(case["case_id"], case["client"], case["canonical_model"]))
+            if mutation is not None:
+                mutation(evidence)
+            target = output / "manual-evidence.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(evidence), encoding="utf-8")
+            temporary.replace(target)
+            return
+        time.sleep(0.05)
 
 
 def _run(
     tmp_path: Path,
-    fake: str = "fake-client-success.cmd",
+    fake: str = "fake-client-real-contract.cmd",
     *,
     client_fakes: dict[str, str] | None = None,
+    debug_fake: str | None = None,
     mutate=None,
+    manual_mutation=None,
+    finalize_manual: bool = True,
     timeout_seconds: int = 3,
+    manual_timeout_seconds: int = 10,
 ) -> subprocess.CompletedProcess[str]:
-    output, isolation, debug_build = _prepare_run(tmp_path)
+    output, isolation, debug_build, snapshot_manifest = _prepare_run(tmp_path)
+    if debug_fake is not None:
+        shutil.copyfile(FIXTURES / debug_fake, debug_build)
     if mutate is not None:
         mutate(output, isolation, debug_build)
     fake_path = FIXTURES / fake
@@ -119,17 +189,31 @@ def _run(
         VOLC_MODEL,
         "-OutputDirectory",
         str(output),
+        "-SnapshotManifest",
+        str(snapshot_manifest),
     ]
     for name, executable in executable_arguments.items():
         command.extend((f"-{name}", str(executable)))
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
-    return subprocess.run(
+    command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
+    finalizer = None
+    if finalize_manual:
+        finalizer = threading.Thread(
+            target=_finalize_manual_evidence,
+            args=(output, manual_mutation),
+            daemon=True,
+        )
+        finalizer.start()
+    result = subprocess.run(
         command,
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=90,
     )
+    if finalizer is not None:
+        finalizer.join(timeout=1)
+    return result
 
 
 def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
@@ -166,6 +250,11 @@ def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
     assert all(case["outcome"] == "passed" for case in summary["cases"])
     assert len(summary["artifacts"]) == 12
     assert all((tmp_path / "output" / artifact).is_file() for artifact in summary["artifacts"])
+    template = json.loads(
+        (tmp_path / "output" / "manual-evidence.template.json").read_text(encoding="utf-8-sig")
+    )
+    assert template["run_binding_sha256"] == summary["run_binding_sha256"]
+    assert not list((tmp_path / "output" / "isolated" / "work").rglob("sentinel.txt"))
     serialized = json.dumps(summary, sort_keys=True)
     assert "fixture-secret" not in serialized
     assert str(tmp_path) not in serialized
@@ -175,6 +264,111 @@ def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
     result = _run(tmp_path, fake="fake-client-isolation.cmd")
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tmp_path):
+    result = _run(tmp_path, fake="fake-client-real-contract.cmd")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    automated = [case for case in summary["cases"] if not case["case_id"].startswith(("desktop", "zcode"))]
+    assert all(case["request_complete_count"] == 1 for case in automated)
+    assert all(case["http_status"] == 200 for case in automated)
+    assert all(case["terminal_classification"] == "completed" for case in automated)
+    assert all(case["gateway_request_count"] == 2 for case in automated)
+    assert all(case["gateway_complete_count"] == 2 for case in automated)
+
+
+def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
+    def invalidate_identity(_output, isolation, _debug):
+        (isolation / "account" / "profile.json").write_text("{}", encoding="utf-8")
+        (isolation / "credentials" / "volc.json").write_text(
+            '{"api_key":"arbitrary"}', encoding="utf-8"
+        )
+
+    result = _run(tmp_path, fake="fake-client-real-contract.cmd", mutate=invalidate_identity)
+
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failure_classification"),
+    [
+        (
+            lambda _output, isolation, _debug: (isolation / "config" / "vm-snapshot.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "codexhub.real-client-vm-snapshot.v1",
+                        "snapshot": "codexhub-real-client-e2e-v1",
+                        "machine_name_sha256": "sha256:" + "0" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            ),
+            "preflight_snapshot_identity_mismatch",
+        ),
+        (
+            lambda _output, isolation, _debug: (isolation / "account" / "auth.json").write_text(
+                json.dumps({"auth_mode": "chatgpt", "tokens": {}}), encoding="utf-8"
+            ),
+            "preflight_codex_login_missing",
+        ),
+        (
+            lambda _output, isolation, _debug: (isolation / "config" / "gateway.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "codexhub.real-client-gateway.v1",
+                        "listen_port": 19190,
+                        "gateway_client_key": "short",
+                    }
+                ),
+                encoding="utf-8",
+            ),
+            "preflight_gateway_config_invalid",
+        ),
+    ],
+    ids=["snapshot", "codex-login", "gateway-config"],
+)
+def test_vm_login_and_gateway_inputs_are_fail_closed(tmp_path, mutation, failure_classification):
+    result = _run(tmp_path, mutate=mutation, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == failure_classification
+
+
+def test_manual_evidence_cannot_predate_template_and_gui_launch(tmp_path):
+    def precreate_evidence(output, _isolation, _debug):
+        (output / "manual-evidence.json").write_text("{}", encoding="utf-8")
+
+    result = _run(
+        tmp_path,
+        fake="fake-client-real-contract.cmd",
+        mutate=precreate_evidence,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    assert (tmp_path / "output" / "manual-evidence.template.json").is_file()
+
+
+def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
+    def remove_credentials(_output, isolation, _debug):
+        (isolation / "credentials" / "volc.json").unlink()
+
+    result = _run(tmp_path, mutate=remove_credentials, finalize_manual=False)
+
+    assert result.returncode != 0
+    summaries = list(tmp_path.rglob("summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["outcome"] == "failed"
+    assert summary["failure_classification"] == "preflight_required_file_missing"
+    assert summary["cases"] == []
+    assert summary["artifacts"] == []
+    serialized = json.dumps(summary, sort_keys=True)
+    assert "fixture-volc-private-token" not in serialized
+    assert str(tmp_path) not in serialized
 
 
 def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
@@ -191,7 +385,7 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
     )
 
     assert result.returncode != 0
-    assert time.monotonic() - started < 20
+    assert time.monotonic() - started < 60
     summary_path = tmp_path / "output" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
     codex_cases = [case for case in summary["cases"] if case["case_id"].startswith("codex-cli")]
@@ -216,40 +410,46 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
     assert len(sanitized) < 100_000
 
 
-def _mutate_manual(output: Path, mutation) -> None:
-    path = output / "manual-evidence.json"
-    evidence = json.loads(path.read_text(encoding="utf-8"))
-    mutation(evidence)
-    path.write_text(json.dumps(evidence), encoding="utf-8")
-
-
 @pytest.mark.parametrize(
-    "mutation",
+    ("mutation", "failure_classification"),
     [
-        lambda evidence: evidence["cases"].pop(),
-        lambda evidence: evidence["cases"].append(dict(evidence["cases"][0])),
-        lambda evidence: evidence["cases"][0].update({"fallback_count": 1}),
-        lambda evidence: evidence.update({"candidate_sha": "b" * 40}),
+        (lambda evidence: evidence["cases"].pop(), "manual_evidence_case_count_invalid"),
+        (lambda evidence: evidence["cases"].__setitem__(1, dict(evidence["cases"][0])), "manual_evidence_case_missing_or_duplicate"),
+        (lambda evidence: evidence["cases"][0].update({"fallback_count": 1}), "manual_evidence_contradictory"),
+        (lambda evidence: evidence.update({"candidate_sha": "b" * 40}), "manual_evidence_candidate_sha_stale"),
+        (lambda evidence: evidence.update({"run_binding_sha256": "sha256:" + "0" * 64}), "manual_evidence_run_binding_stale"),
+        (lambda evidence: evidence.update({"login_confirmed": False}), "manual_evidence_login_missing"),
+        (lambda evidence: evidence.update({"gui_confirmed": False}), "manual_evidence_gui_missing"),
     ],
-    ids=["missing", "duplicate", "contradictory", "stale-sha"],
+    ids=[
+        "missing",
+        "duplicate",
+        "contradictory",
+        "stale-sha",
+        "stale-run",
+        "missing-login",
+        "missing-gui",
+    ],
 )
-def test_manual_evidence_rejects_invalid_merges_before_client_launch(tmp_path, mutation):
+def test_manual_evidence_rejects_invalid_post_launch_merges(
+    tmp_path, mutation, failure_classification
+):
     result = _run(
         tmp_path,
-        mutate=lambda output, _isolation, _debug: _mutate_manual(output, mutation),
+        manual_mutation=mutation,
     )
 
     assert result.returncode != 0
-    assert not (tmp_path / "output" / "summary.json").exists()
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == failure_classification
+    assert summary["artifacts"] == []
     assert "fixture-private-token" not in result.stdout + result.stderr
 
 
 def test_manual_evidence_merge_is_deterministic_for_reordered_input(tmp_path):
     result = _run(
         tmp_path,
-        mutate=lambda output, _isolation, _debug: _mutate_manual(
-            output, lambda evidence: evidence["cases"].reverse()
-        ),
+        manual_mutation=lambda evidence: evidence["cases"].reverse(),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -262,25 +462,68 @@ def test_manual_evidence_merge_is_deterministic_for_reordered_input(tmp_path):
     assert manual_ids == ["desktop-luna", "desktop-volc", "zcode-luna", "zcode-volc"]
 
 
-def test_missing_credentials_fail_before_any_summary_or_launch(tmp_path):
+def test_missing_manual_evidence_and_early_gui_exit_are_classified(tmp_path):
+    missing = _run(
+        tmp_path / "missing",
+        finalize_manual=False,
+        manual_timeout_seconds=1,
+    )
+    exited = _run(
+        tmp_path / "exited",
+        client_fakes={"CodexDesktopPath": "fake-gui-exit.cmd"},
+        finalize_manual=False,
+        manual_timeout_seconds=5,
+    )
+
+    missing_summary = json.loads(
+        (tmp_path / "missing" / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    exited_summary = json.loads(
+        (tmp_path / "exited" / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert missing_summary["failure_classification"] == "manual_evidence_timeout"
+    assert exited_summary["failure_classification"] == "manual_gui_exited_before_finalization"
+
+
+def test_candidate_startup_failure_emits_one_summary_without_partial_artifacts(tmp_path):
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-exit.cmd",
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == "candidate_debug_build_exited_during_startup"
+    assert summary["artifacts"] == []
+    assert not (tmp_path / "output" / "artifacts").exists()
+
+
+def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):
     def remove_credentials(_output, isolation, _debug):
         (isolation / "credentials" / "volc.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials)
 
     assert result.returncode != 0
-    assert not (tmp_path / "output" / "summary.json").exists()
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == "preflight_required_file_missing"
 
 
-def test_version_manifest_and_debug_build_sidecar_are_sha_bound_preflight_gates(tmp_path):
-    def invalidate_versions(_output, isolation, debug_build):
-        versions_path = isolation / "config" / "client-versions.json"
-        versions = json.loads(versions_path.read_text(encoding="utf-8"))
-        versions["codex_cli"] = "0.144.6"
-        versions_path.write_text(json.dumps(versions), encoding="utf-8")
+def test_native_version_and_debug_build_sidecar_are_sha_bound_preflight_gates(tmp_path):
+    def invalidate_sha(_output, _isolation, debug_build):
         Path(f"{debug_build}.candidate-sha").write_text("b" * 40, encoding="ascii")
 
-    result = _run(tmp_path, mutate=invalidate_versions)
+    wrong_version = _run(
+        tmp_path / "version",
+        client_fakes={"CodexCliPath": "fake-client-wrong-version.cmd"},
+        finalize_manual=False,
+    )
+    stale_sha = _run(tmp_path / "sha", mutate=invalidate_sha, finalize_manual=False)
 
-    assert result.returncode != 0
-    assert not (tmp_path / "output" / "summary.json").exists()
+    assert wrong_version.returncode != 0
+    assert stale_sha.returncode != 0
+    wrong_summary = json.loads((tmp_path / "version" / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    stale_summary = json.loads((tmp_path / "sha" / "output" / "summary.json").read_text(encoding="utf-8-sig"))
+    assert wrong_summary["failure_classification"] == "preflight_codex_cli_version_mismatch"
+    assert stale_summary["failure_classification"] == "preflight_debug_build_sha_mismatch"
