@@ -405,12 +405,23 @@ function Read-CorrelatedGatewayEvents {
             try { [void]$parsedDiagnostics.Add(($line | ConvertFrom-Json -ErrorAction Stop)) }
             catch { $malformedDiagnosticCount++ }
         }
+        $caseStarts = @($parsedDiagnostics | Where-Object {
+            if ([string](Get-JsonProperty $_ 'event' '') -cne 'request_start') {
+                return $false
+            }
+            $diagnosticClient = [string](Get-JsonProperty $_ 'client_id' '')
+            return $diagnosticClient -ceq $Case.client -or
+                ($Case.client -ceq 'codex-cli' -and $diagnosticClient -ceq 'unknown')
+        })
+        $requestIds = @($caseStarts | ForEach-Object {
+            [string](Get-JsonProperty $_ 'request_id' '')
+        } | Where-Object { $_ } | Select-Object -Unique)
         $nativeEvents = @($parsedDiagnostics | Where-Object {
             $diagnosticClient = [string](Get-JsonProperty $_ 'client_id' '')
             $clientMatches = $diagnosticClient -ceq $Case.client -or
                 ($Case.client -ceq 'codex-cli' -and $diagnosticClient -ceq 'unknown')
-            $model = [string](Get-JsonProperty $_ 'model_canonical' (Get-JsonProperty $_ 'model' ''))
-            $clientMatches -and (Test-CanonicalModelMatch -Actual $model -Expected $Case.canonical_model)
+            $requestId = [string](Get-JsonProperty $_ 'request_id' '')
+            return $clientMatches -or ($requestId -and $requestIds -contains $requestId)
         })
         $completeCount = @($nativeEvents | Where-Object { [string](Get-JsonProperty $_ 'event' '') -eq 'request_complete' }).Count
         $errorCount = @($nativeEvents | Where-Object { [string](Get-JsonProperty $_ 'event' '') -eq 'request_error' }).Count
@@ -421,6 +432,17 @@ function Read-CorrelatedGatewayEvents {
     }
     $events = [System.Collections.Generic.List[object]]::new()
     if ($malformedDiagnosticCount -gt 0) {
+        [void]$events.Add([pscustomobject]@{ event = 'error' })
+    }
+    $modelContradictionCount = @($nativeEvents | Where-Object {
+        $eventName = [string](Get-JsonProperty $_ 'event' '')
+        if ($eventName -notin @('request_start', 'request_complete', 'request_error', 'upstream_protocol_fallback')) {
+            return $false
+        }
+        $actualModel = [string](Get-JsonProperty $_ 'model_canonical' (Get-JsonProperty $_ 'model' ''))
+        return -not (Test-CanonicalModelMatch -Actual $actualModel -Expected $Case.canonical_model)
+    }).Count
+    if ($modelContradictionCount -gt 0) {
         [void]$events.Add([pscustomobject]@{ event = 'error' })
     }
     $starts = @($nativeEvents | Where-Object { [string](Get-JsonProperty $_ 'event' '') -eq 'request_start' })
@@ -436,7 +458,8 @@ function Read-CorrelatedGatewayEvents {
     }
     if ($completes.Count -gt 0) {
         $native = $completes[-1]
-        [void]$events.Add([pscustomobject]@{ event = 'model_selected'; model = $Case.canonical_model })
+        $actualModel = [string](Get-JsonProperty $native 'model_canonical' (Get-JsonProperty $native 'model' ''))
+        [void]$events.Add([pscustomobject]@{ event = 'model_selected'; model = $actualModel })
         [void]$events.Add([pscustomobject]@{ event = 'request_complete'; status = [int](Get-JsonProperty $native 'status' 0) })
         $terminalCount = [int](Get-JsonProperty $native 'terminal_count' 0)
         if ($terminalCount -eq 0 -and [bool](Get-JsonProperty $native 'sse_terminal_event_seen' $false)) {
@@ -822,7 +845,7 @@ function Get-ClientProviderMap {
 
 function Initialize-ClientConfiguration {
     param([string]$Client, [string]$CaseRoot, [string]$Model)
-    foreach ($relative in @('.codex', '.config\opencode', '.pi\agent', '.omp\agent', '.zcode\v2', 'appdata\ZCode\model-providers')) {
+    foreach ($relative in @('.codex', '.config\opencode', '.pi\agent', '.omp\agent', '.zcode\v2', 'appdata\roaming\ZCode\model-providers')) {
         [void](New-Item -ItemType Directory -Force -Path (Join-Path $CaseRoot $relative))
     }
     Copy-Item -LiteralPath $script:AccountAuthPath -Destination (Join-Path $CaseRoot '.codex\auth.json') -Force
@@ -894,7 +917,7 @@ providers:
         }
     })
     $zcodeCatalog = [ordered]@{ schemaVersion = 'zcode.model-providers.v2'; providers = $zcodeProviders }
-    Write-JsonFile -Path (Join-Path $CaseRoot 'appdata\ZCode\model-providers\codexhub.json') -Value $zcodeCatalog
+    Write-JsonFile -Path (Join-Path $CaseRoot 'appdata\roaming\ZCode\model-providers\codexhub.json') -Value $zcodeCatalog
     Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\bots-model-cache.v2.json') -Value $zcodeCatalog
     $zcodeProviderObject = [ordered]@{}
     foreach ($provider in $zcodeProviders) { $zcodeProviderObject[$provider.id] = $provider }

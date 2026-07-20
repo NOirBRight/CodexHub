@@ -86,7 +86,10 @@ The runner materializes, rather than assumes, the actual consumed configs:
 - OpenCode `XDG_CONFIG_HOME/opencode/opencode.json`;
 - Pi `.pi/agent/settings.json` and `models.json`;
 - OMP `.omp/agent/config.yml` and `models.yml`;
-- ZCode APPDATA catalog plus `.zcode/v2` config and cache.
+- ZCode catalog at the launched process's consumed
+  `APPDATA/ZCode/model-providers/codexhub.json` path (isolated as
+  `appdata/roaming/ZCode/model-providers/codexhub.json`) plus `.zcode/v2`
+  config and cache.
 
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
@@ -131,14 +134,17 @@ subcommand, and `--format` is not a supported launch flag.
 
 Client output does not prove routing. For each attempt, the runner reads only
 new lines from the isolated Debug Gateway's
-`proxy/codex-proxy-events.jsonl`, filters them by client and canonical model,
-and correlates them with the parsed tool lifecycle. One read tool normally
-causes one tool-call request and one final continuation request. The summary
-therefore records `gateway_request_count = 2` but counts exactly one final
+`proxy/codex-proxy-events.jsonl`, correlates all new client events and their
+request-ID-linked metadata, and validates every observed model. Events are
+never discarded for disagreeing with the expected model, and the selected
+model comes from the actual final completion. One read tool normally causes
+one tool-call request and one final continuation request. The summary therefore
+records `gateway_request_count = 2` but counts exactly one final
 `request_complete` with HTTP `200`. Any additional request start is an
-unclassified reconnect. `upstream_protocol_fallback`, a mismatched model,
-missing/duplicate Gateway terminal evidence, duplicate client terminal, error,
-or malformed output fails the case.
+unclassified reconnect. `upstream_protocol_fallback`, a missing or mismatched
+model, missing/duplicate Gateway terminal evidence, duplicate client terminal,
+error, or malformed output fails the case. Actual contradictory models and
+private request IDs are not copied into uploadable artifacts.
 
 Raw client output and diagnostics remain in bounded memory. Per-case files
 contain only capture hashes and approved fields.

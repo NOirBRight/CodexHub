@@ -379,6 +379,33 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all(case["gateway_complete_count"] == 2 for case in automated)
 
 
+def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"ZCodePath": "fake-client-zcode-appdata.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_wrong_model_fallback_cannot_be_filtered_into_a_false_pass(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-wrong-model.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary_path = tmp_path / "output" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+    pi_cases = [case for case in summary["cases"] if case["case_id"].startswith("pi-")]
+    assert [case["outcome"] for case in pi_cases] == ["failed", "failed"]
+    assert [case["fallback_count"] for case in pi_cases] == [1, 1]
+    assert all(case["error_event_count"] >= 1 for case in pi_cases)
+    serialized = summary_path.read_text(encoding="utf-8-sig")
+    assert "codexhub-openai/wrong-route" not in serialized
+    assert "pi-luna-attempt-1-request-1" not in serialized
+
+
 def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
     def invalidate_identity(_output, isolation, _debug):
         (isolation / "account" / "profile.json").write_text("{}", encoding="utf-8")

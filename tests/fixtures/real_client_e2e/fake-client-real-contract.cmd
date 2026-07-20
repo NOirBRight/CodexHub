@@ -39,7 +39,7 @@ if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
   exit /b 14
 )
 
-echo {"event":"request_start","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_complete","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%","status":200,"terminal_count":1}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_start","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_complete","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%","status":200,"terminal_count":1}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%","status":200,"terminal_count":1}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%","status":200,"terminal_count":1}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
