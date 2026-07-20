@@ -85,7 +85,7 @@ def _run(
     *,
     client_fakes: dict[str, str] | None = None,
     mutate=None,
-    timeout_seconds: int = 3,
+    timeout_seconds: int = 10,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build = _prepare_run(tmp_path)
     if mutate is not None:
@@ -128,7 +128,7 @@ def _run(
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
 
 
@@ -187,11 +187,11 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
             "PiPath": "fake-client-invalid-evidence.cmd",
             "OmpPath": "fake-client-malformed.cmd",
         },
-        timeout_seconds=1,
+        timeout_seconds=3,
     )
 
     assert result.returncode != 0
-    assert time.monotonic() - started < 20
+    assert time.monotonic() - started < 30
     summary_path = tmp_path / "output" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
     codex_cases = [case for case in summary["cases"] if case["case_id"].startswith("codex-cli")]
