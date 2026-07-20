@@ -16,7 +16,7 @@ launching the candidate or a client:
 |---|---:|---|
 | Codex Desktop | `26.715.4045.0` | `OpenAI.Codex` AppX package identity and install location |
 | Codex CLI | `0.144.5` | `--version` |
-| ZCode | `3.3.6` | Windows uninstall `DisplayVersion` and install location |
+| ZCode | `3.3.6` | Authoritative Windows uninstall identity and install root |
 | OpenCode | `1.18.3` | `--version` |
 | Pi | `0.80.6` | `--version` |
 | OMP | `17.0.3` | `--version` |
@@ -32,9 +32,18 @@ pin change requires a runner and host-environment review.
 
 Desktop's passed executable must reside beneath the matching `OpenAI.Codex`
 AppX `InstallLocation`. Its Chromium `ProductVersion` is not the Desktop
-version authority. ZCode's passed executable must reside beneath the matching
-authoritative `InstallLocation`; its executable build suffix, including
-`3.3.6.3198`, is accepted only when `DisplayVersion` remains exactly `3.3.6`.
+version authority. ZCode requires an authoritative HKLM uninstall entry whose
+publisher is exactly `ZCode`, whose `DisplayVersion` is exactly `3.3.6`, and
+whose display name is either `ZCode` or `ZCode 3.3.6`. A version suffix must
+agree exactly with `DisplayVersion`. The runner prefers a valid absolute
+`InstallLocation`. When it is absent, the runner derives the install root from
+the authoritative absolute `DisplayIcon` and quoted `UninstallString` paths.
+Every available source must resolve to the same existing root, and the passed
+ZCode executable must reside beneath it. Relative, missing, ambiguous,
+conflicting, or unbound metadata fails closed. The executable build suffix,
+including `3.3.6.3198`, is accepted only when `DisplayVersion` remains exactly
+`3.3.6`. Real E2E reads the installed metadata directly; operators must not
+mutate the registry or supply the test-only metadata fixture.
 
 The host-environment manifest is bound to the Windows MachineGuid without
 recording the MachineGuid, machine name, username, account, or credential. It

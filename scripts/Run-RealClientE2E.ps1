@@ -926,6 +926,76 @@ function Test-ExecutableBoundToInstallLocation {
     return $executablePath.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-AbsoluteWindowsPath {
+    param([string]$Path)
+    return $Path -match '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)'
+}
+
+function Get-CanonicalZCodeRootFromFilePath {
+    param([string]$Path)
+    if (-not (Test-AbsoluteWindowsPath -Path $Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'preflight_zcode_install_metadata_invalid'
+    }
+    $parent = Split-Path -Parent $Path
+    if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw 'preflight_zcode_install_metadata_invalid'
+    }
+    return (Resolve-Path -LiteralPath $parent).Path.TrimEnd('\')
+}
+
+function Resolve-ZCodeInstallRoot {
+    param([object]$Metadata, [string]$ExpectedVersion, [string]$Executable)
+    $displayName = ([string]$Metadata.display_name).Trim()
+    $displayVersion = ([string]$Metadata.display_version).Trim()
+    $publisher = ([string]$Metadata.publisher).Trim()
+    if ($displayVersion -cne $ExpectedVersion -or $publisher -cne 'ZCode' -or
+        ($displayName -cne 'ZCode' -and $displayName -cne "ZCode $displayVersion")) {
+        throw 'preflight_zcode_version_mismatch'
+    }
+
+    $roots = [System.Collections.Generic.List[string]]::new()
+    $installLocation = ([string]$Metadata.install_location).Trim()
+    if ($installLocation) {
+        if (-not (Test-AbsoluteWindowsPath -Path $installLocation) -or
+            -not (Test-Path -LiteralPath $installLocation -PathType Container)) {
+            throw 'preflight_zcode_install_metadata_invalid'
+        }
+        [void]$roots.Add((Resolve-Path -LiteralPath $installLocation).Path.TrimEnd('\'))
+    }
+
+    $displayIcon = ([string]$Metadata.display_icon).Trim()
+    if ($displayIcon) {
+        $iconMatch = [regex]::Match($displayIcon, '^(?:"([^"]+)"|([^,]+?))(?:,\s*-?\d+)?$')
+        if (-not $iconMatch.Success) {
+            throw 'preflight_zcode_install_metadata_invalid'
+        }
+        $iconPath = if ($iconMatch.Groups[1].Success) { $iconMatch.Groups[1].Value } else { $iconMatch.Groups[2].Value.Trim() }
+        [void]$roots.Add((Get-CanonicalZCodeRootFromFilePath -Path $iconPath))
+    }
+
+    $uninstallString = ([string]$Metadata.uninstall_string).Trim()
+    if ($uninstallString) {
+        $uninstallMatch = [regex]::Match($uninstallString, '^"([^"]+)"(?:\s+.*)?$')
+        if (-not $uninstallMatch.Success) {
+            throw 'preflight_zcode_install_metadata_invalid'
+        }
+        [void]$roots.Add((Get-CanonicalZCodeRootFromFilePath -Path $uninstallMatch.Groups[1].Value))
+    }
+
+    if ($roots.Count -eq 0) {
+        throw 'preflight_zcode_install_metadata_invalid'
+    }
+    $distinctRoots = @($roots | Select-Object -Unique)
+    if ($distinctRoots.Count -ne 1) {
+        throw 'preflight_zcode_install_metadata_conflict'
+    }
+    $root = $distinctRoots[0]
+    if (-not (Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation $root)) {
+        throw 'preflight_zcode_executable_unbound'
+    }
+    return $root
+}
+
 function Get-DesktopInstallationMetadata {
     param([string]$Executable)
     if ($script:WindowsInstallMetadata) {
@@ -954,8 +1024,7 @@ function Get-ZCodeInstallationMetadata {
     $entries = [System.Collections.Generic.List[object]]::new()
     foreach ($root in @(
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
-        'Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
     )) {
         if (-not (Test-Path -LiteralPath $root)) {
             continue
@@ -963,7 +1032,7 @@ function Get-ZCodeInstallationMetadata {
         foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
             try {
                 $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
-                if ([string]$entry.DisplayName -ceq 'ZCode') {
+                if ([string]$entry.DisplayName -cmatch '^ZCode(?:\s|$)') {
                     [void]$entries.Add($entry)
                 }
             }
@@ -972,17 +1041,20 @@ function Get-ZCodeInstallationMetadata {
             }
         }
     }
-    $bound = @($entries | Where-Object {
-        Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$_.InstallLocation)
-    })
-    if ($bound.Count -ne 1) {
-        throw 'preflight_zcode_executable_unbound'
+    if ($entries.Count -eq 0) {
+        throw 'preflight_zcode_install_metadata_invalid'
     }
-    $entry = $bound[0]
+    if ($entries.Count -ne 1) {
+        throw 'preflight_zcode_install_metadata_ambiguous'
+    }
+    $entry = $entries[0]
     return [pscustomobject]@{
         display_name = [string]$entry.DisplayName
         display_version = [string]$entry.DisplayVersion
+        publisher = [string]$entry.Publisher
         install_location = [string]$entry.InstallLocation
+        display_icon = [string]$entry.DisplayIcon
+        uninstall_string = [string]$entry.UninstallString
         executable_product_version = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($Executable).ProductVersion
     }
 }
@@ -1004,14 +1076,10 @@ function Get-NativeClientVersion {
     if ($Client -ceq 'zcode') {
         $metadata = Get-ZCodeInstallationMetadata -Executable $Executable
         $productVersion = ([string]$metadata.executable_product_version).Trim()
-        if ([string]$metadata.display_name -cne 'ZCode' -or
-            [string]$metadata.display_version -cne $Expected -or
-            $productVersion -notmatch ('^' + [regex]::Escape($Expected) + '(?:\.\d+)?$')) {
+        if ($productVersion -notmatch ('^' + [regex]::Escape($Expected) + '(?:\.\d+)?$')) {
             throw 'preflight_zcode_version_mismatch'
         }
-        if (-not (Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$metadata.install_location))) {
-            throw 'preflight_zcode_executable_unbound'
-        }
+        [void](Resolve-ZCodeInstallRoot -Metadata $metadata -ExpectedVersion $Expected -Executable $Executable)
         return $Expected
     }
     [void](New-Item -ItemType Directory -Force -Path $ProbeRoot)
@@ -1385,7 +1453,7 @@ if ($TestWindowsInstallMetadataFixture) {
     $script:WindowsInstallMetadata = Read-JsonObject -Path $TestWindowsInstallMetadataFixture -Failure 'preflight_windows_install_metadata_invalid'
     Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata -Names @('schema', 'desktop', 'zcode') -Failure 'preflight_windows_install_metadata_invalid'
     Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.desktop -Names @('package_name', 'package_version', 'install_location', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
-    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.zcode -Names @('display_name', 'display_version', 'install_location', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
+    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.zcode -Names @('display_name', 'display_version', 'publisher', 'install_location', 'display_icon', 'uninstall_string', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
     if ([string]$script:WindowsInstallMetadata.schema -cne 'codexhub.real-client-windows-install-metadata.v1') {
         throw 'preflight_windows_install_metadata_invalid'
     }

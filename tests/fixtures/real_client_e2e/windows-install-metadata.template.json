@@ -7,9 +7,12 @@
     "executable_product_version": "1.2026.1704.0"
   },
   "zcode": {
-    "display_name": "ZCode",
+    "display_name": "ZCode 3.3.6",
     "display_version": "3.3.6",
-    "install_location": "__FIXTURE_INSTALL_LOCATION__",
+    "publisher": "ZCode",
+    "install_location": "",
+    "display_icon": "__ZCODE_DISPLAY_ICON__",
+    "uninstall_string": "\"__ZCODE_UNINSTALLER__\" /allusers",
     "executable_product_version": "3.3.6.3198"
   }
 }

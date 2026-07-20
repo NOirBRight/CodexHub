@@ -161,8 +161,13 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     install_metadata = json.loads(
         (FIXTURES / "windows-install-metadata.template.json").read_text()
     )
-    for client in ("desktop", "zcode"):
-        install_metadata[client]["install_location"] = str(FIXTURES.resolve())
+    install_metadata["desktop"]["install_location"] = str(FIXTURES.resolve())
+    install_metadata["zcode"]["display_icon"] = str(
+        (FIXTURES / "fake-client-zcode-appdata.cmd").resolve()
+    )
+    install_metadata["zcode"]["uninstall_string"] = (
+        f'"{(FIXTURES / "fake-client-real-contract.cmd").resolve()}" /allusers'
+    )
     (isolation / "config" / "windows-install-metadata.json").write_text(
         json.dumps(install_metadata), encoding="utf-8"
     )
@@ -700,6 +705,31 @@ def test_appx_and_zcode_installed_metadata_versions_are_normalized(tmp_path):
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
     assert summary["pinned_versions"]["desktop"] == "26.715.4045.0"
     assert summary["pinned_versions"]["zcode"] == "3.3.6"
+    metadata = json.loads(
+        (
+            tmp_path
+            / "output"
+            / "isolated"
+            / "config"
+            / "windows-install-metadata.json"
+        ).read_text()
+    )["zcode"]
+    assert metadata["display_name"] == "ZCode 3.3.6"
+    assert metadata["display_version"] == "3.3.6"
+    assert metadata["publisher"] == "ZCode"
+    assert metadata["install_location"] == ""
+
+
+def test_zcode_valid_install_location_agrees_with_authoritative_fallbacks(tmp_path):
+    def add_install_location(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["zcode"]["install_location"] = str(FIXTURES.resolve())
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=add_install_location)
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -753,6 +783,114 @@ def test_windows_install_metadata_mismatch_fails_closed(
     assert result.returncode != 0
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
     assert summary["failure_classification"] == failure
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("display_name", "ZCode 3.3.7"),
+        ("display_name", "ZCode Enterprise 3.3.6"),
+        ("publisher", "Not ZCode"),
+    ],
+)
+def test_zcode_authoritative_identity_rejects_spoofed_name_or_publisher(
+    tmp_path, field, value
+):
+    def spoof_identity(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["zcode"][field] = value
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=spoof_identity, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_zcode_version_mismatch"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_zcode_authoritative_roots_must_not_conflict(tmp_path):
+    conflicting_root = tmp_path / "conflicting-zcode-install"
+    conflicting_root.mkdir()
+    conflicting_uninstaller = conflicting_root / "Uninstall ZCode.exe"
+    conflicting_uninstaller.write_bytes(b"fixture")
+
+    def conflict_roots(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["zcode"]["uninstall_string"] = (
+            f'"{conflicting_uninstaller.resolve()}" /allusers'
+        )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=conflict_roots, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_zcode_install_metadata_conflict"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("display_icon", r"relative\uninstallerIcon.ico"),
+        ("uninstall_string", r'"relative\Uninstall ZCode.exe" /allusers'),
+    ],
+)
+def test_zcode_authoritative_paths_must_be_absolute(tmp_path, field, value):
+    def use_relative_path(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["zcode"][field] = value
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=use_relative_path, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_zcode_install_metadata_invalid"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_zcode_install_root_metadata_is_required(tmp_path):
+    def remove_roots(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        for field in ("install_location", "display_icon", "uninstall_string"):
+            metadata["zcode"][field] = ""
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=remove_roots, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_zcode_install_metadata_invalid"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_zcode_authoritative_root_must_bind_passed_executable(tmp_path):
+    unrelated_root = tmp_path / "unrelated-zcode-install"
+    unrelated_root.mkdir()
+    icon = unrelated_root / "uninstallerIcon.ico"
+    uninstaller = unrelated_root / "Uninstall ZCode.exe"
+    icon.write_bytes(b"fixture")
+    uninstaller.write_bytes(b"fixture")
+
+    def unbind_executable(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["zcode"]["display_icon"] = str(icon.resolve())
+        metadata["zcode"]["uninstall_string"] = f'"{uninstaller.resolve()}" /allusers'
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=unbind_executable, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_zcode_executable_unbound"
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
