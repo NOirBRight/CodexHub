@@ -20,6 +20,8 @@ set "INBOUND_FORMAT=responses"
 if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "PROVIDER_ID=volc"
 if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "UPSTREAM_FORMAT=chat_completions"
 if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "INBOUND_FORMAT=chat_completions"
+set "IS_STREAM=true"
+if defined CODEXHUB_E2E_FORCE_NONSTREAM set "IS_STREAM=false"
 if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" set "CLIENT_CONFIG=%CD%\.codex\config.toml"
 if "%CODEXHUB_E2E_CLIENT%"=="opencode" set "CLIENT_CONFIG=%CD%\.config\opencode\opencode.json"
 if "%CODEXHUB_E2E_CLIENT%"=="pi" set "CLIENT_CONFIG=%CD%\.pi\agent\models.json"
@@ -29,7 +31,13 @@ findstr /c:"127.0.0.1:19190" "%CLIENT_CONFIG%" >nul || exit /b 16
 
 if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
   echo {"type":"thread.started"}
-  echo {"type":"item.completed","item":{"type":"command_execution","command":"read sentinel.txt","status":"completed"}}
+  if "%CODEXHUB_E2E_CODEX_TOOL_RESULT%"=="missing" (
+    echo {"type":"item.completed","item":{"type":"command_execution","command":"read sentinel.txt"}}
+  ) else if "%CODEXHUB_E2E_CODEX_TOOL_RESULT%"=="failed" (
+    echo {"type":"item.completed","item":{"type":"command_execution","command":"read sentinel.txt","status":"completed","exit_code":7}}
+  ) else (
+    echo {"type":"item.completed","item":{"type":"command_execution","command":"read sentinel.txt","status":"completed","exit_code":0}}
+  )
   echo {"type":"item.completed","item":{"type":"agent_message","text":"%CODEXHUB_E2E_SENTINEL%"}}
   echo {"type":"turn.completed"}
 ) else if "%CODEXHUB_E2E_CLIENT%"=="opencode" (
@@ -51,6 +59,6 @@ if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
 )
 
 echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%GATEWAY_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","method":"POST","model":"%GATEWAY_MODEL%","model_requested":"%CODEXHUB_E2E_MODEL%","model_canonical":"%GATEWAY_MODEL%","upstream":"%PROVIDER_ID%","provider_id":"%PROVIDER_ID%","provider_hint":"%PROVIDER_ID%","upstream_format":"%UPSTREAM_FORMAT%","behavior_profile":"third_party_app_transparent_metered","inbound_format":"%INBOUND_FORMAT%","route_reason":"provider_path","route_mode":"codexhub","is_stream":true,"status":200,"duration_ms":1,"client_id":"%CODEXHUB_E2E_CLIENT%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","method":"POST","model":"%GATEWAY_MODEL%","model_requested":"%CODEXHUB_E2E_MODEL%","model_canonical":"%GATEWAY_MODEL%","upstream":"%PROVIDER_ID%","provider_id":"%PROVIDER_ID%","provider_hint":"%PROVIDER_ID%","upstream_format":"%UPSTREAM_FORMAT%","behavior_profile":"third_party_app_transparent_metered","inbound_format":"%INBOUND_FORMAT%","route_reason":"provider_path","route_mode":"codexhub","is_stream":%IS_STREAM%,"status":200,"duration_ms":1,"client_id":"%CODEXHUB_E2E_CLIENT%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
 echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%GATEWAY_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","method":"POST","model":"%GATEWAY_MODEL%","model_requested":"%CODEXHUB_E2E_MODEL%","model_canonical":"%GATEWAY_MODEL%","upstream":"%PROVIDER_ID%","provider_id":"%PROVIDER_ID%","provider_hint":"%PROVIDER_ID%","upstream_format":"%UPSTREAM_FORMAT%","behavior_profile":"third_party_app_transparent_metered","inbound_format":"%INBOUND_FORMAT%","route_reason":"provider_path","route_mode":"codexhub","is_stream":true,"status":200,"duration_ms":1,"client_id":"%CODEXHUB_E2E_CLIENT%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","method":"POST","model":"%GATEWAY_MODEL%","model_requested":"%CODEXHUB_E2E_MODEL%","model_canonical":"%GATEWAY_MODEL%","upstream":"%PROVIDER_ID%","provider_id":"%PROVIDER_ID%","provider_hint":"%PROVIDER_ID%","upstream_format":"%UPSTREAM_FORMAT%","behavior_profile":"third_party_app_transparent_metered","inbound_format":"%INBOUND_FORMAT%","route_reason":"provider_path","route_mode":"codexhub","is_stream":%IS_STREAM%,"status":200,"duration_ms":1,"client_id":"%CODEXHUB_E2E_CLIENT%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"

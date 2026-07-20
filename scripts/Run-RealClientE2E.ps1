@@ -128,6 +128,26 @@ function Assert-IsolatedRegularFile {
     }
 }
 
+function Assert-CanonicalNonReparseDirectory {
+    param([string]$Path, [string]$Failure)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw $Failure
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
+    if (-not $fullPath.Equals($resolvedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw $Failure
+    }
+    $directory = Get-Item -LiteralPath $resolvedPath -Force
+    while ($directory) {
+        $linkType = if ($directory.PSObject.Properties['LinkType']) { [string]$directory.LinkType } else { '' }
+        if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $linkType) {
+            throw $Failure
+        }
+        $directory = $directory.Parent
+    }
+}
+
 function Write-JsonFile {
     param([string]$Path, [object]$Value)
     $json = $Value | ConvertTo-Json -Depth 20
@@ -359,13 +379,15 @@ function ConvertFrom-ClientEvents {
                         $itemType = [string](Get-JsonProperty $item 'type' '')
                         if ($itemType -eq 'command_execution') {
                             $command = [string](Get-JsonProperty $item 'command' '')
+                            $exitCode = Get-JsonProperty $item 'exit_code' $null
                             if ($command -match '(?i)(read|type|get-content|cat).+sentinel\.txt' -and
-                                [string](Get-JsonProperty $item 'status' 'completed') -eq 'completed') {
+                                [string](Get-JsonProperty $item 'status' '') -ceq 'completed' -and
+                                ($exitCode -is [int] -or $exitCode -is [long]) -and [int64]$exitCode -eq 0) {
                                 [void]$events.Add([pscustomobject]@{ event = 'tool_call'; tool = 'read_file'; read_only = $true })
                             }
                         }
                         elseif ($itemType -eq 'agent_message') {
-                            [void]$events.Add([pscustomobject]@{ event = 'stream_delta'; text = [string](Get-JsonProperty $item 'text' '') })
+                            [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = [string](Get-JsonProperty $item 'text' '') })
                         }
                     }
                     elseif ($type -eq 'turn.completed') {
@@ -382,7 +404,7 @@ function ConvertFrom-ClientEvents {
                         [void]$events.Add([pscustomobject]@{ event = 'tool_call'; tool = 'read_file'; read_only = $true })
                     }
                     elseif ($type -eq 'text') {
-                        [void]$events.Add([pscustomobject]@{ event = 'stream_delta'; text = [string](Get-JsonProperty $part 'text' '') })
+                        [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = [string](Get-JsonProperty $part 'text' '') })
                     }
                     elseif ($type -eq 'step_finish' -and [string](Get-JsonProperty $part 'reason' '') -ceq 'stop') {
                         [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = 'completed' })
@@ -408,7 +430,7 @@ function ConvertFrom-ClientEvents {
                             }
                             foreach ($content in @(Get-JsonProperty $message 'content' @())) {
                                 if ([string](Get-JsonProperty $content 'type' '') -eq 'text') {
-                                    [void]$events.Add([pscustomobject]@{ event = 'stream_delta'; text = [string](Get-JsonProperty $content 'text' '') })
+                                    [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = [string](Get-JsonProperty $content 'text' '') })
                                 }
                             }
                         }
@@ -536,12 +558,23 @@ function Read-CorrelatedGatewayEvents {
     $completes = @($nativeEvents | Where-Object { [string](Get-JsonProperty $_ 'event' '') -eq 'request_complete' })
     foreach ($complete in $completes) {
         [void]$events.Add([pscustomobject]@{ event = 'gateway_complete' })
+        $isStream = Get-JsonProperty $complete 'is_stream' $null
+        if ($isStream -is [bool] -and $isStream -eq $true) {
+            [void]$events.Add([pscustomobject]@{ event = 'gateway_streaming_complete' })
+        }
+        else {
+            [void]$events.Add([pscustomobject]@{ event = 'error' })
+        }
     }
     if ($completes.Count -gt 0) {
         $native = $completes[-1]
         $actualModel = [string](Get-JsonProperty $native 'model_canonical' (Get-JsonProperty $native 'model' ''))
         [void]$events.Add([pscustomobject]@{ event = 'model_selected'; model = $actualModel })
-        [void]$events.Add([pscustomobject]@{ event = 'request_complete'; status = [int](Get-JsonProperty $native 'status' 0) })
+        [void]$events.Add([pscustomobject]@{
+            event = 'request_complete'
+            status = [int](Get-JsonProperty $native 'status' 0)
+            is_stream = Get-JsonProperty $native 'is_stream' $null
+        })
     }
     for ($nativeIndex = 0; $nativeIndex -lt $nativeEvents.Count; $nativeIndex++) {
         $native = $nativeEvents[$nativeIndex]
@@ -607,12 +640,13 @@ function Measure-AutomatedAttempt {
     $allToolEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'tool_call' })
     $toolEvents = @($allToolEvents | Where-Object { (Get-JsonProperty $_ 'read_only' $false) -eq $true -and (Get-JsonProperty $_ 'tool') -ceq 'read_file' })
     $sentinel = "SENTINEL:codexhub-real-client-e2e:$($Case.case_id)"
-    $streamEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'stream_delta' })
-    $sentinelEvents = @($streamEvents | Where-Object { (Get-JsonProperty $_ 'text') -ceq $sentinel })
+    $outputEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'assistant_output' })
+    $sentinelEvents = @($outputEvents | Where-Object { (Get-JsonProperty $_ 'text') -ceq $sentinel })
     $requestEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'request_complete' })
     $terminalEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'terminal' })
     $gatewayRequestEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_request' })
     $gatewayCompleteEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_complete' })
+    $gatewayStreamingCompleteEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_streaming_complete' })
     $fallbackEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'fallback' })
     $reconnectEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'reconnect' })
     $capacityEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'provider_capacity' })
@@ -644,7 +678,7 @@ function Measure-AutomatedAttempt {
         [bool](Get-JsonProperty $capacityEvents[0] 'output_seen' $true) -or
             $Attempt.malformed_count -gt 0 -or
             $allToolEvents.Count -gt 0 -or
-            $streamEvents.Count -gt 0 -or
+            $outputEvents.Count -gt 0 -or
             $terminalEvents.Count -gt 0 -or
             $gatewayCompleteEvents.Count -gt 0 -or
             $requestEvents.Count -gt 0
@@ -666,9 +700,11 @@ function Measure-AutomatedAttempt {
         $allToolEvents.Count -eq 1 -and $toolEvents.Count -eq 1 -and
         $gatewayRequestEvents.Count -eq ($allToolEvents.Count + 1) -and
         $gatewayCompleteEvents.Count -eq ($allToolEvents.Count + 1) -and
-        $streamEvents.Count -eq 1 -and $sentinelEvents.Count -eq 1 -and
+        $outputEvents.Count -eq 1 -and $sentinelEvents.Count -eq 1 -and
         $requestEvents.Count -eq 1 -and
         $httpStatus -eq 200 -and
+        (Get-JsonProperty $requestEvents[0] 'is_stream' $false) -eq $true -and
+        $gatewayStreamingCompleteEvents.Count -eq $gatewayCompleteEvents.Count -and
         $terminalEvents.Count -eq 1 -and
         $terminalClassification -ceq 'completed' -and
         $errorEvents.Count -eq 0 -and
@@ -684,6 +720,7 @@ function Measure-AutomatedAttempt {
         http_status = $httpStatus
         read_only_tool_call_count = $toolEvents.Count
         sentinel_chunk_count = $sentinelEvents.Count
+        streaming_request_count = $gatewayStreamingCompleteEvents.Count
         fallback_count = $fallbackEvents.Count
         error_event_count = $errorEvents.Count
         duplicate_terminal_count = [Math]::Max(0, $terminalEvents.Count - 1)
@@ -730,6 +767,7 @@ function Invoke-AutomatedCase {
         http_status = $measurement.http_status
         read_only_tool_call_count = $measurement.read_only_tool_call_count
         sentinel_chunk_count = $measurement.sentinel_chunk_count
+        streaming_request_count = $measurement.streaming_request_count
         fallback_count = $measurement.fallback_count
         error_event_count = $measurement.error_event_count
         duplicate_terminal_count = $measurement.duplicate_terminal_count
@@ -785,6 +823,7 @@ function Get-ManualResults {
             'fallback_count', 'http_status', 'human_finalized', 'outcome',
             'read_only_tool_call_count', 'reconnect_classification',
             'request_complete_count', 'sentinel_chunk_count', 'sentinel_relative_path',
+            'streaming_request_count',
             'terminal_classification'
         ) | Sort-Object
         $itemNames = @($item.PSObject.Properties.Name | Sort-Object)
@@ -802,6 +841,7 @@ function Get-ManualResults {
             [int](Get-JsonProperty $item 'http_status' 0) -eq 200 -and
             [int](Get-JsonProperty $item 'read_only_tool_call_count' 0) -eq 1 -and
             [int](Get-JsonProperty $item 'sentinel_chunk_count' 0) -eq 1 -and
+            [int](Get-JsonProperty $item 'streaming_request_count' 0) -eq 2 -and
             [int](Get-JsonProperty $item 'fallback_count' 1) -eq 0 -and
             [int](Get-JsonProperty $item 'duplicate_terminal_count' 1) -eq 0
         if (-not $valid) {
@@ -825,6 +865,7 @@ function Get-ManualResults {
             http_status = 200
             read_only_tool_call_count = 1
             sentinel_chunk_count = 1
+            streaming_request_count = 2
             fallback_count = 0
             error_event_count = 0
             duplicate_terminal_count = 0
@@ -860,6 +901,7 @@ function Write-ManualEvidenceTemplate {
             http_status = 0
             read_only_tool_call_count = 0
             sentinel_chunk_count = 0
+            streaming_request_count = 0
             fallback_count = 0
             duplicate_terminal_count = 0
         }
@@ -979,10 +1021,18 @@ function Get-NativeClientVersion {
         CODEXHUB_E2E_CLIENT = $Client
     } -StandardInput '' -ProcessTimeoutSeconds 15
     $text = ($result.stdout + "`n" + $result.stderr).Trim()
-    if ($result.timed_out -or $result.exit_code -ne 0 -or $text -notmatch ('(?<![0-9.])' + [regex]::Escape($Expected) + '(?![0-9.])')) {
+    $versionMatches = @([regex]::Matches(
+        $text,
+        '(?<![0-9A-Za-z.])v?([0-9]+\.[0-9]+\.[0-9]+)(?![0-9A-Za-z.+-])'
+    ))
+    $normalizedVersion = if ($versionMatches.Count -eq 1) {
+        [string]$versionMatches[0].Groups[1].Value
+    }
+    else { '' }
+    if ($result.timed_out -or $result.exit_code -ne 0 -or $normalizedVersion -cne $Expected) {
         throw "preflight_${failureClient}_version_mismatch"
     }
-    return $Expected
+    return $normalizedVersion
 }
 
 function Get-GatewayBaseUrl {
@@ -1288,10 +1338,25 @@ $manualTemplatePath = Join-Path $OutputDirectory 'manual-evidence.template.json'
 $summaryPath = Join-Path $OutputDirectory 'summary.json'
 $artifactRoot = Join-Path $OutputDirectory 'artifacts'
 
-foreach ($directory in @($isolationRoot, $configRoot, $workRoot)) {
+foreach ($directory in @($isolationRoot, $configRoot)) {
     if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
         throw 'preflight_isolated_directory_missing'
     }
+}
+Assert-CanonicalNonReparseDirectory -Path $OutputDirectory -Failure 'preflight_work_root_reparse'
+Assert-CanonicalNonReparseDirectory -Path $isolationRoot -Failure 'preflight_work_root_reparse'
+if (Test-Path -LiteralPath $workRoot) {
+    $existingWorkRoot = Get-Item -LiteralPath $workRoot -Force
+    $existingLinkType = if ($existingWorkRoot.PSObject.Properties['LinkType']) { [string]$existingWorkRoot.LinkType } else { '' }
+    if (($existingWorkRoot.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $existingLinkType) {
+        throw 'preflight_work_root_reparse'
+    }
+    throw 'preflight_work_root_not_fresh'
+}
+[void](New-Item -ItemType Directory -Path $workRoot -ErrorAction Stop)
+Assert-CanonicalNonReparseDirectory -Path $workRoot -Failure 'preflight_work_root_reparse'
+if (@(Get-ChildItem -LiteralPath $workRoot -Force).Count -ne 0) {
+    throw 'preflight_work_root_not_fresh'
 }
 foreach ($file in @($DebugBuild, $HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {

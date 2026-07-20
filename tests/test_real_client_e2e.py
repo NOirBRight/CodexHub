@@ -54,6 +54,7 @@ CASE_KEYS = {
     "http_status",
     "read_only_tool_call_count",
     "sentinel_chunk_count",
+    "streaming_request_count",
     "fallback_count",
     "error_event_count",
     "duplicate_terminal_count",
@@ -88,6 +89,7 @@ def _manual_case(case_id: str, client: str, model: str) -> dict:
         "http_status": 200,
         "read_only_tool_call_count": 1,
         "sentinel_chunk_count": 1,
+        "streaming_request_count": 2,
         "fallback_count": 0,
         "duplicate_terminal_count": 0,
     }
@@ -96,7 +98,7 @@ def _manual_case(case_id: str, client: str, model: str) -> dict:
 def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     output = tmp_path / "output"
     isolation = output / "isolated"
-    for relative in ("account", "credentials", "config", "work"):
+    for relative in ("account", "credentials", "config"):
         (isolation / relative).mkdir(parents=True, exist_ok=True)
     (isolation / "account" / "profile.json").write_text(
         json.dumps(
@@ -390,6 +392,7 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all(case["terminal_classification"] == "completed" for case in automated)
     assert all(case["gateway_request_count"] == 2 for case in automated)
     assert all(case["gateway_complete_count"] == 2 for case in automated)
+    assert all(case["streaming_request_count"] == 2 for case in automated)
     assert all(case["fallback_count"] == 0 for case in automated)
     assert all(case["duplicate_terminal_count"] == 0 for case in automated)
     assert all(case["reconnect_classification"] == "none" for case in automated)
@@ -433,6 +436,37 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all(set(event) == production_fields for event in completes)
     assert all("terminal_count" not in event for event in completes)
     assert all("sse_terminal_event_seen" not in event for event in completes)
+
+
+def test_codex_cli_read_tool_requires_explicit_completed_zero_exit(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexCliPath": "fake-client-codex-tool-invalid.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    codex_cases = [
+        case for case in summary["cases"] if case["case_id"].startswith("codex-cli-")
+    ]
+    assert [case["outcome"] for case in codex_cases] == ["failed", "failed"]
+    assert [case["read_only_tool_call_count"] for case in codex_cases] == [0, 0]
+    assert not list((tmp_path / "output" / "isolated" / "work").rglob("sentinel.txt"))
+
+
+def test_final_client_message_with_nonstream_gateway_completions_fails(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-nonstreaming.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    pi_cases = [case for case in summary["cases"] if case["case_id"].startswith("pi-")]
+    assert [case["outcome"] for case in pi_cases] == ["failed", "failed"]
+    assert [case["sentinel_chunk_count"] for case in pi_cases] == [1, 1]
+    assert [case["streaming_request_count"] for case in pi_cases] == [0, 0]
+    assert all(case["error_event_count"] >= 1 for case in pi_cases)
 
 
 def test_isolated_client_configs_follow_production_provider_endpoint_selection(tmp_path):
@@ -669,6 +703,30 @@ def test_appx_and_zcode_installed_metadata_versions_are_normalized(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("argument", "fixture", "failure"),
+    [
+        ("CodexCliPath", "fake-client-version-suffix.cmd", "preflight_codex_cli_version_mismatch"),
+        ("OpenCodePath", "fake-client-version-multiple.cmd", "preflight_opencode_version_mismatch"),
+        ("PiPath", "fake-client-version-suffix.cmd", "preflight_pi_version_mismatch"),
+        ("OmpPath", "fake-client-version-multiple.cmd", "preflight_omp_version_mismatch"),
+    ],
+)
+def test_non_zcode_client_versions_reject_suffixes_and_multiple_versions(
+    tmp_path, argument, fixture, failure
+):
+    result = _run(
+        tmp_path,
+        client_fakes={argument: fixture},
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == failure
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+@pytest.mark.parametrize(
     ("client", "field", "value", "failure"),
     [
         ("desktop", "package_version", "1.2026.1704.0", "preflight_desktop_version_mismatch"),
@@ -726,6 +784,71 @@ def test_ambient_host_session_environment_never_reaches_candidate_or_clients(
     result = _run(tmp_path, fake="fake-client-isolation.cmd")
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_prepopulated_invocation_work_root_is_rejected_before_launch(tmp_path):
+    def add_stale_client_state(_output, isolation, _debug):
+        work = isolation / "work"
+        work.mkdir()
+        (work / "stale-session.json").write_text("stale-host-session", encoding="utf-8")
+
+    result = _run(tmp_path, mutate=add_stale_client_state, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_work_root_not_fresh"
+    assert (tmp_path / "output" / "isolated" / "work" / "stale-session.json").is_file()
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_junction_invocation_work_root_is_rejected_before_launch(tmp_path):
+    redirected = tmp_path / "host-session-state"
+    redirected.mkdir()
+
+    def junction_work_root(_output, isolation, _debug):
+        result = subprocess.run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                str(isolation / "work"),
+                str(redirected),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    result = _run(tmp_path, mutate=junction_work_root, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_work_root_reparse"
+    assert list(redirected.iterdir()) == []
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_junction_isolation_ancestor_is_rejected_before_work_root_creation(tmp_path):
+    redirected = tmp_path / "redirected-isolation"
+
+    def junction_isolation_ancestor(_output, isolation, _debug):
+        isolation.rename(redirected)
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(isolation), str(redirected)],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    result = _run(tmp_path, mutate=junction_isolation_ancestor, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_work_root_reparse"
+    assert not (redirected / "work").exists()
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
 def test_manual_evidence_cannot_predate_template_and_gui_launch(tmp_path):

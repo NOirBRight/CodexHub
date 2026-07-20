@@ -21,6 +21,11 @@ launching the candidate or a client:
 | Pi | `0.80.6` | `--version` |
 | OMP | `17.0.3` | `--version` |
 
+Codex CLI, OpenCode, Pi, and OMP must each emit exactly one normalized
+three-part version token equal to the pin. Suffixes, four-part forms, and
+mixed or repeated version output fail. Only ZCode permits the documented
+executable build suffix.
+
 Do not upgrade a client in place. In particular, OpenCode remains `1.18.3`;
 issue #191 owns the future stable release containing upstream fix #37770. A
 pin change requires a runner and host-environment review.
@@ -58,8 +63,12 @@ Use a new output directory for every invocation. Before launch it contains:
     config/
       gateway.json
       host-environment.json
-    work/
 ```
+
+`isolated/work` must not exist before invocation. The runner verifies the
+output/isolation ancestors are canonical and non-reparse, rejects any stale or
+linked work root, creates the directory once without `-Force`, and verifies it
+is empty before any executable probe or launch.
 
 `profile.json` contains only readiness assertions and no account identifier:
 
@@ -144,7 +153,8 @@ one successful read-only read tool, emit the named sentinel once, and finish
 once. The pinned client parsers consume their real JSONL contracts:
 
 - Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
-  items, and `turn.completed`;
+  items, and `turn.completed`; the read command must explicitly report
+  `status = completed` and integer `exit_code = 0`;
 - OpenCode `1.18.3`: `step_start`, completed `tool_use`, `text`, and
   the final `step_finish` whose reason is `stop`; the intermediate
   `tool-calls` finish is not a terminal;
@@ -157,6 +167,12 @@ once. The pinned client parsers consume their real JSONL contracts:
 OMP `17.0.3` is launched through its one-shot JSON interface as
 `omp --print --mode json --model <selector> <prompt>`. It has no `run`
 subcommand, and `--format` is not a supported launch flag.
+
+Completed/final assistant messages prove the exact sentinel content but are
+not relabeled as stream deltas. Streaming is proven separately from correlated
+production Gateway `request_complete.is_stream = true` evidence for both the
+tool request and final continuation; the sanitized case records
+`streaming_request_count = 2`.
 
 Client output does not prove routing. For each attempt, the runner reads only
 new lines from the isolated Debug Gateway's
@@ -210,6 +226,7 @@ the template to `manual-evidence.json` and changes only the observed fields:
       "http_status": 200,
       "read_only_tool_call_count": 1,
       "sentinel_chunk_count": 1,
+      "streaming_request_count": 2,
       "fallback_count": 0,
       "duplicate_terminal_count": 0
     }
@@ -230,7 +247,7 @@ absolute path, or request/session/task identifier.
    OpenCode, Pi, OMP, or provider session/configuration.
 2. Create a fresh output root and directly materialize its machine-bound host
    manifest and dedicated Codex/Volc inputs. Do not use links or copy an
-   existing host session.
+   existing host session, and do not create `isolated/work`.
 3. Check out the candidate, build Debug, and write its SHA sidecar.
 4. Create the isolated input layout above. Do not create manual evidence yet.
 5. From the host console, start the blocking runner:
