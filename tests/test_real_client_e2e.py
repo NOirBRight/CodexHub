@@ -161,11 +161,13 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return output, isolation, debug_build, snapshot_manifest
 
 
-def _finalize_manual_evidence(output: Path, mutation=None) -> None:
+def _finalize_manual_evidence(
+    output: Path, mutation=None, stop_event: threading.Event | None = None
+) -> None:
     template_path = output / "manual-evidence.template.json"
     work = output / "isolated" / "work"
     deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and not (stop_event and stop_event.is_set()):
         if (
             template_path.is_file()
             and (work / "gui-desktop.launched").is_file()
@@ -183,7 +185,10 @@ def _finalize_manual_evidence(output: Path, mutation=None) -> None:
             temporary.write_text(json.dumps(evidence), encoding="utf-8")
             temporary.replace(target)
             return
-        time.sleep(0.05)
+        if stop_event:
+            stop_event.wait(0.05)
+        else:
+            time.sleep(0.05)
 
 
 def _run(
@@ -240,22 +245,27 @@ def _run(
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
     command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
     finalizer = None
+    finalizer_stop = None
     if finalize_manual:
+        finalizer_stop = threading.Event()
         finalizer = threading.Thread(
             target=_finalize_manual_evidence,
-            args=(output, manual_mutation),
+            args=(output, manual_mutation, finalizer_stop),
             daemon=True,
         )
         finalizer.start()
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=90,
-    )
-    if finalizer is not None:
-        finalizer.join(timeout=1)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+    finally:
+        if finalizer is not None and finalizer_stop is not None:
+            finalizer_stop.set()
+            finalizer.join(timeout=1)
     return result
 
 
@@ -379,6 +389,20 @@ def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
     result = _run(tmp_path, fake="fake-client-real-contract.cmd", mutate=invalidate_identity)
 
     assert result.returncode != 0
+
+
+def test_preflight_return_does_not_leave_a_manual_finalizer_thread(tmp_path):
+    existing_threads = set(threading.enumerate())
+
+    result = _run(
+        tmp_path,
+        mutate=lambda _output, isolation, _debug: (
+            isolation / "credentials" / "volc.json"
+        ).unlink(),
+    )
+
+    assert result.returncode != 0
+    assert set(threading.enumerate()) <= existing_threads
 
 
 @pytest.mark.parametrize(
