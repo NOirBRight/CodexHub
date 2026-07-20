@@ -85,7 +85,7 @@ def _run(
     *,
     client_fakes: dict[str, str] | None = None,
     mutate=None,
-    timeout_seconds: int = 10,
+    timeout_seconds: int = 3,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build = _prepare_run(tmp_path)
     if mutate is not None:
@@ -128,7 +128,7 @@ def _run(
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=60,
+        timeout=30,
     )
 
 
@@ -172,7 +172,7 @@ def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
 
 
 def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
-    result = _run(tmp_path, fake="fake-client-isolation.ps1")
+    result = _run(tmp_path, fake="fake-client-isolation.cmd")
 
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -182,16 +182,16 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
     result = _run(
         tmp_path,
         client_fakes={
-            "CodexCliPath": "fake-client-timeout.ps1",
+            "CodexCliPath": "fake-client-timeout.cmd",
             "OpenCodePath": "fake-client-capacity.cmd",
             "PiPath": "fake-client-invalid-evidence.cmd",
             "OmpPath": "fake-client-malformed.cmd",
         },
-        timeout_seconds=3,
+        timeout_seconds=1,
     )
 
     assert result.returncode != 0
-    assert time.monotonic() - started < 30
+    assert time.monotonic() - started < 20
     summary_path = tmp_path / "output" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
     codex_cases = [case for case in summary["cases"] if case["case_id"].startswith("codex-cli")]
@@ -205,22 +205,9 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
     omp_cases = [case for case in summary["cases"] if case["case_id"].startswith("omp")]
     assert all(case["outcome"] == "failed" for case in omp_cases)
     assert all(case["error_event_count"] == 1 for case in omp_cases)
-    child_pid_paths = list((tmp_path / "output").rglob("*.child-pid"))
-    assert len(child_pid_paths) == 1
-    for child_pid_path in child_pid_paths:
-        child_pid = child_pid_path.read_text(encoding="ascii")
-        probe = subprocess.run(
-            [
-                _powershell(),
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                f"if (Get-Process -Id {child_pid} -ErrorAction SilentlyContinue) {{ exit 1 }}",
-            ],
-            capture_output=True,
-            timeout=10,
-        )
-        assert probe.returncode == 0
+    assert len(list((tmp_path / "output").rglob("child-started"))) == 1
+    time.sleep(6)
+    assert not list((tmp_path / "output").rglob("child-survived"))
     sanitized = result.stdout + result.stderr
     for path in (summary_path, *(tmp_path / "output" / "artifacts").rglob("*.json")):
         sanitized += path.read_text(encoding="utf-8-sig")
