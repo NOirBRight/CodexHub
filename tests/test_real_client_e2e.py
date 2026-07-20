@@ -162,10 +162,10 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         (FIXTURES / "windows-install-metadata.template.json").read_text()
     )
     install_metadata["desktop"]["install_location"] = str(FIXTURES.resolve())
-    install_metadata["zcode"]["display_icon"] = str(
+    install_metadata["zcode"]["DisplayIcon"] = str(
         (FIXTURES / "fake-client-zcode-appdata.cmd").resolve()
     )
-    install_metadata["zcode"]["uninstall_string"] = (
+    install_metadata["zcode"]["UninstallString"] = (
         f'"{(FIXTURES / "fake-client-real-contract.cmd").resolve()}" /allusers'
     )
     (isolation / "config" / "windows-install-metadata.json").write_text(
@@ -698,7 +698,7 @@ def test_hard_linked_host_auth_input_is_rejected_before_launch(tmp_path):
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
-def test_appx_and_zcode_installed_metadata_versions_are_normalized(tmp_path):
+def test_sparse_hklm_zcode_metadata_is_normalized_under_strict_mode(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -714,17 +714,17 @@ def test_appx_and_zcode_installed_metadata_versions_are_normalized(tmp_path):
             / "windows-install-metadata.json"
         ).read_text()
     )["zcode"]
-    assert metadata["display_name"] == "ZCode 3.3.6"
-    assert metadata["display_version"] == "3.3.6"
-    assert metadata["publisher"] == "ZCode"
-    assert metadata["install_location"] == ""
+    assert metadata["DisplayName"] == "ZCode 3.3.6"
+    assert metadata["DisplayVersion"] == "3.3.6"
+    assert metadata["Publisher"] == "ZCode"
+    assert "InstallLocation" not in metadata
 
 
 def test_zcode_valid_install_location_agrees_with_authoritative_fallbacks(tmp_path):
     def add_install_location(_output, isolation, _debug):
         path = isolation / "config" / "windows-install-metadata.json"
         metadata = json.loads(path.read_text())
-        metadata["zcode"]["install_location"] = str(FIXTURES.resolve())
+        metadata["zcode"]["InstallLocation"] = str(FIXTURES.resolve())
         path.write_text(json.dumps(metadata), encoding="utf-8")
 
     result = _run(tmp_path, mutate=add_install_location)
@@ -760,10 +760,10 @@ def test_non_zcode_client_versions_reject_suffixes_and_multiple_versions(
     ("client", "field", "value", "failure"),
     [
         ("desktop", "package_version", "1.2026.1704.0", "preflight_desktop_version_mismatch"),
-        ("zcode", "display_version", "3.3.7", "preflight_zcode_version_mismatch"),
+        ("zcode", "DisplayVersion", "3.3.7", "preflight_zcode_version_mismatch"),
         (
             "zcode",
-            "executable_product_version",
+            "ExecutableProductVersion",
             "3.3.7.1",
             "preflight_zcode_version_mismatch",
         ),
@@ -789,9 +789,9 @@ def test_windows_install_metadata_mismatch_fails_closed(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("display_name", "ZCode 3.3.7"),
-        ("display_name", "ZCode Enterprise 3.3.6"),
-        ("publisher", "Not ZCode"),
+        ("DisplayName", "ZCode 3.3.7"),
+        ("DisplayName", "ZCode Enterprise 3.3.6"),
+        ("Publisher", "Not ZCode"),
     ],
 )
 def test_zcode_authoritative_identity_rejects_spoofed_name_or_publisher(
@@ -820,7 +820,7 @@ def test_zcode_authoritative_roots_must_not_conflict(tmp_path):
     def conflict_roots(_output, isolation, _debug):
         path = isolation / "config" / "windows-install-metadata.json"
         metadata = json.loads(path.read_text())
-        metadata["zcode"]["uninstall_string"] = (
+        metadata["zcode"]["UninstallString"] = (
             f'"{conflicting_uninstaller.resolve()}" /allusers'
         )
         path.write_text(json.dumps(metadata), encoding="utf-8")
@@ -836,8 +836,8 @@ def test_zcode_authoritative_roots_must_not_conflict(tmp_path):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("display_icon", r"relative\uninstallerIcon.ico"),
-        ("uninstall_string", r'"relative\Uninstall ZCode.exe" /allusers'),
+        ("DisplayIcon", r"relative\uninstallerIcon.ico"),
+        ("UninstallString", r'"relative\Uninstall ZCode.exe" /allusers'),
     ],
 )
 def test_zcode_authoritative_paths_must_be_absolute(tmp_path, field, value):
@@ -859,8 +859,9 @@ def test_zcode_install_root_metadata_is_required(tmp_path):
     def remove_roots(_output, isolation, _debug):
         path = isolation / "config" / "windows-install-metadata.json"
         metadata = json.loads(path.read_text())
-        for field in ("install_location", "display_icon", "uninstall_string"):
-            metadata["zcode"][field] = ""
+        metadata["zcode"]["DisplayIcon"] = ""
+        metadata["zcode"]["UninstallString"] = ""
+        metadata["zcode"].pop("InstallLocation", None)
         path.write_text(json.dumps(metadata), encoding="utf-8")
 
     result = _run(tmp_path, mutate=remove_roots, finalize_manual=False)
@@ -882,8 +883,8 @@ def test_zcode_authoritative_root_must_bind_passed_executable(tmp_path):
     def unbind_executable(_output, isolation, _debug):
         path = isolation / "config" / "windows-install-metadata.json"
         metadata = json.loads(path.read_text())
-        metadata["zcode"]["display_icon"] = str(icon.resolve())
-        metadata["zcode"]["uninstall_string"] = f'"{uninstaller.resolve()}" /allusers'
+        metadata["zcode"]["DisplayIcon"] = str(icon.resolve())
+        metadata["zcode"]["UninstallString"] = f'"{uninstaller.resolve()}" /allusers'
         path.write_text(json.dumps(metadata), encoding="utf-8")
 
     result = _run(tmp_path, mutate=unbind_executable, finalize_manual=False)
@@ -902,7 +903,7 @@ def test_passed_executables_must_be_bound_to_authoritative_install_locations(tmp
         path = isolation / "config" / "windows-install-metadata.json"
         metadata = json.loads(path.read_text())
         metadata["desktop"]["install_location"] = str(unrelated_install)
-        metadata["zcode"]["install_location"] = str(unrelated_install)
+        metadata["zcode"]["InstallLocation"] = str(unrelated_install)
         path.write_text(json.dumps(metadata), encoding="utf-8")
 
     result = _run(tmp_path, mutate=unbind_executables, finalize_manual=False)

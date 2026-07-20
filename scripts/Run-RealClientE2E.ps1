@@ -1019,43 +1019,49 @@ function Get-DesktopInstallationMetadata {
 function Get-ZCodeInstallationMetadata {
     param([string]$Executable)
     if ($script:WindowsInstallMetadata) {
-        return $script:WindowsInstallMetadata.zcode
+        $entry = $script:WindowsInstallMetadata.zcode
     }
-    $entries = [System.Collections.Generic.List[object]]::new()
-    foreach ($root in @(
-        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
-    )) {
-        if (-not (Test-Path -LiteralPath $root)) {
-            continue
-        }
-        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
-            try {
-                $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
-                if ([string]$entry.DisplayName -cmatch '^ZCode(?:\s|$)') {
-                    [void]$entries.Add($entry)
+    else {
+        $entries = [System.Collections.Generic.List[object]]::new()
+        foreach ($root in @(
+            'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        )) {
+            if (-not (Test-Path -LiteralPath $root)) {
+                continue
+            }
+            foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+                try {
+                    $candidate = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+                    if ([string]$candidate.DisplayName -cmatch '^ZCode(?:\s|$)') {
+                        [void]$entries.Add($candidate)
+                    }
+                }
+                catch {
+                    # Unreadable uninstall entries are not authoritative matches.
                 }
             }
-            catch {
-                # Unreadable uninstall entries are not authoritative matches.
-            }
         }
+        if ($entries.Count -eq 0) {
+            throw 'preflight_zcode_install_metadata_invalid'
+        }
+        if ($entries.Count -ne 1) {
+            throw 'preflight_zcode_install_metadata_ambiguous'
+        }
+        $entry = $entries[0]
     }
-    if ($entries.Count -eq 0) {
-        throw 'preflight_zcode_install_metadata_invalid'
-    }
-    if ($entries.Count -ne 1) {
-        throw 'preflight_zcode_install_metadata_ambiguous'
-    }
-    $entry = $entries[0]
     return [pscustomobject]@{
-        display_name = [string]$entry.DisplayName
-        display_version = [string]$entry.DisplayVersion
-        publisher = [string]$entry.Publisher
-        install_location = [string]$entry.InstallLocation
-        display_icon = [string]$entry.DisplayIcon
-        uninstall_string = [string]$entry.UninstallString
-        executable_product_version = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($Executable).ProductVersion
+        display_name = [string](Get-JsonProperty -Value $entry -Name 'DisplayName' -Default '')
+        display_version = [string](Get-JsonProperty -Value $entry -Name 'DisplayVersion' -Default '')
+        publisher = [string](Get-JsonProperty -Value $entry -Name 'Publisher' -Default '')
+        install_location = [string](Get-JsonProperty -Value $entry -Name 'InstallLocation' -Default '')
+        display_icon = [string](Get-JsonProperty -Value $entry -Name 'DisplayIcon' -Default '')
+        uninstall_string = [string](Get-JsonProperty -Value $entry -Name 'UninstallString' -Default '')
+        executable_product_version = if ($script:WindowsInstallMetadata) {
+            [string](Get-JsonProperty -Value $entry -Name 'ExecutableProductVersion' -Default '')
+        } else {
+            [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($Executable).ProductVersion
+        }
     }
 }
 
@@ -1453,7 +1459,11 @@ if ($TestWindowsInstallMetadataFixture) {
     $script:WindowsInstallMetadata = Read-JsonObject -Path $TestWindowsInstallMetadataFixture -Failure 'preflight_windows_install_metadata_invalid'
     Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata -Names @('schema', 'desktop', 'zcode') -Failure 'preflight_windows_install_metadata_invalid'
     Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.desktop -Names @('package_name', 'package_version', 'install_location', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
-    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.zcode -Names @('display_name', 'display_version', 'publisher', 'install_location', 'display_icon', 'uninstall_string', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
+    $zcodeFixtureProperties = @('DisplayName', 'DisplayVersion', 'Publisher', 'DisplayIcon', 'UninstallString', 'ExecutableProductVersion')
+    if ($null -ne $script:WindowsInstallMetadata.zcode.PSObject.Properties['InstallLocation']) {
+        $zcodeFixtureProperties += 'InstallLocation'
+    }
+    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.zcode -Names $zcodeFixtureProperties -Failure 'preflight_windows_install_metadata_invalid'
     if ([string]$script:WindowsInstallMetadata.schema -cne 'codexhub.real-client-windows-install-metadata.v1') {
         throw 'preflight_windows_install_metadata_invalid'
     }
