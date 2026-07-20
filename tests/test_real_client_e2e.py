@@ -24,6 +24,49 @@ PINNED_VERSIONS = {
     "pi": "0.80.6",
     "omp": "17.0.3",
 }
+SUMMARY_KEYS = {
+    "schema",
+    "candidate_sha",
+    "run_binding_sha256",
+    "outcome",
+    "failure_classification",
+    "hashes",
+    "pinned_versions",
+    "canonical_models",
+    "counts",
+    "cases",
+    "artifacts",
+}
+FAILURE_SUMMARY_KEYS = SUMMARY_KEYS - {"run_binding_sha256", "hashes"}
+COUNT_KEYS = {
+    "case_count",
+    "passed_count",
+    "failed_count",
+    "manual_case_count",
+    "automated_case_count",
+}
+CASE_KEYS = {
+    "case_id",
+    "canonical_model",
+    "outcome",
+    "duration_ms",
+    "request_complete_count",
+    "http_status",
+    "read_only_tool_call_count",
+    "sentinel_chunk_count",
+    "fallback_count",
+    "error_event_count",
+    "duplicate_terminal_count",
+    "terminal_classification",
+    "reconnect_classification",
+    "retry_classification",
+    "artifact",
+}
+AUTOMATED_CASE_KEYS = CASE_KEYS | {
+    "gateway_terminal_count",
+    "gateway_request_count",
+    "gateway_complete_count",
+}
 
 
 def _powershell() -> str:
@@ -216,6 +259,21 @@ def _run(
     return result
 
 
+def _assert_exact_summary_schema(summary: dict) -> None:
+    assert set(summary) == (SUMMARY_KEYS if summary["cases"] else FAILURE_SUMMARY_KEYS)
+    assert set(summary["pinned_versions"]) == set(PINNED_VERSIONS)
+    assert set(summary["counts"]) == COUNT_KEYS
+    if summary["cases"]:
+        assert set(summary["hashes"]) == {"debug_build"}
+        for case in summary["cases"]:
+            expected = (
+                AUTOMATED_CASE_KEYS
+                if case["case_id"].startswith(("codex-cli", "opencode", "pi", "omp"))
+                else CASE_KEYS
+            )
+            assert set(case) == expected
+
+
 def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
     result = _run(tmp_path)
 
@@ -223,6 +281,7 @@ def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
     summaries = list(tmp_path.rglob("summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    _assert_exact_summary_schema(summary)
     assert summary["schema"] == "codexhub.real-client-e2e-summary.v1"
     assert summary["candidate_sha"] == CANDIDATE_SHA
     assert summary["pinned_versions"] == PINNED_VERSIONS
@@ -256,8 +315,39 @@ def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
     assert template["run_binding_sha256"] == summary["run_binding_sha256"]
     assert not list((tmp_path / "output" / "isolated" / "work").rglob("sentinel.txt"))
     serialized = json.dumps(summary, sort_keys=True)
-    assert "fixture-secret" not in serialized
+    for secret in (
+        "fixture-codex-access-token",
+        "fixture-codex-refresh-token",
+        "fixture-volc-private-token",
+        "fixture-gateway-private-key",
+    ):
+        assert secret not in serialized
+    for relative in (
+        "isolated/account/profile.json",
+        "isolated/account/auth.json",
+        "isolated/credentials/volc.json",
+        "isolated/config/gateway.json",
+        "isolated/config/vm-snapshot.json",
+        "manual-evidence.json",
+    ):
+        payload = (tmp_path / "output" / relative).read_bytes()
+        fingerprint = "sha256:" + hashlib.sha256(payload).hexdigest()
+        assert fingerprint not in serialized
     assert str(tmp_path) not in serialized
+
+
+def test_omp_17_0_3_uses_print_json_one_shot_arguments(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"OmpPath": "fake-client-omp-argv.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    omp_cases = [case for case in summary["cases"] if case["case_id"].startswith("omp-")]
+    assert [case["outcome"] for case in omp_cases] == ["passed", "passed"]
 
 
 def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
@@ -362,6 +452,7 @@ def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     summaries = list(tmp_path.rglob("summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    _assert_exact_summary_schema(summary)
     assert summary["outcome"] == "failed"
     assert summary["failure_classification"] == "preflight_required_file_missing"
     assert summary["cases"] == []

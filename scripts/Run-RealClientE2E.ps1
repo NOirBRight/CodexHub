@@ -288,7 +288,7 @@ function Get-ClientArguments {
         'codex-cli' { return @('exec', '--ephemeral', '--json', '-C', $WorkRoot, '-m', $Model, '-s', 'read-only', '-a', 'never', $Prompt) }
         'opencode' { return @('run', '--format', 'json', '--model', $Model, $Prompt) }
         'pi' { return @('--print', '--mode', 'json', '--model', $Model, '--no-session', $Prompt) }
-        'omp' { return @('run', '--format', 'json', '--model', $Model, $Prompt) }
+        'omp' { return @('--print', '--mode', 'json', '--model', $Model, $Prompt) }
         default { return @() }
     }
 }
@@ -1170,12 +1170,6 @@ try {
         failure_classification = if ($passedCount -eq 12) { 'none' } else { 'case_failure' }
         hashes = [ordered]@{
             debug_build = Get-Sha256 -Path $DebugBuild
-            account_profile = Get-Sha256 -Path $accountPath
-            volc_credentials = Get-Sha256 -Path $credentialPath
-            manual_evidence = Get-Sha256 -Path $manualEvidencePath
-            snapshot_manifest = Get-Sha256 -Path $SnapshotManifest
-            account_auth = Get-Sha256 -Path $accountAuthPath
-            gateway_config = Get-Sha256 -Path $gatewayConfigPath
         }
         pinned_versions = $actualVersions
         canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', $LunaModel, $VolcModel)

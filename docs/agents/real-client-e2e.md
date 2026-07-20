@@ -125,6 +125,10 @@ once. The pinned client parsers consume their real JSONL contracts:
 - Pi `0.80.6` and OMP `17.0.3`: `tool_execution_end`, assistant
   `message_end`, and `agent_end`.
 
+OMP `17.0.3` is launched through its one-shot JSON interface as
+`omp --print --mode json --model <selector> <prompt>`. It has no `run`
+subcommand, and `--format` is not a supported launch flag.
+
 Client output does not prove routing. For each attempt, the runner reads only
 new lines from the isolated Debug Gateway's
 `proxy/codex-proxy-events.jsonl`, filters them by client and canonical model,
@@ -227,8 +231,14 @@ artifacts are removed before that summary is written. A complete matrix keeps
 one sanitized artifact per case and uses `failure_classification` `none` or
 `case_failure`.
 
-Summary/per-case content is limited to candidate and artifact hashes, verified
-pins, canonical model IDs, bounded timings and counts, classifications,
-outcomes, and relative artifact names. It never contains credentials,
+The success-summary top-level schema is exactly `schema`, `candidate_sha`,
+`run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
+`pinned_versions`, `canonical_models`, `counts`, `cases`, and `artifacts`.
+Its `hashes` object contains exactly `debug_build`; fingerprints of the VM
+snapshot, account profile/auth, Volc credential, Gateway configuration, and
+manual evidence are forbidden. Failure summaries omit `run_binding_sha256`
+and `hashes`. Summary/per-case content is otherwise limited to verified pins,
+canonical model IDs, bounded timings and counts, classifications, outcomes,
+and relative artifact names. It never contains credentials,
 authorization headers, prompts, non-sentinel model output, usernames, account
 identifiers, absolute paths, or private request/session/task IDs.
