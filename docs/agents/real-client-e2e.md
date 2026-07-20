@@ -88,8 +88,11 @@ The runner materializes, rather than assumes, the actual consumed configs:
 - OMP `.omp/agent/config.yml` and `models.yml`;
 - ZCode catalog at the launched process's consumed
   `APPDATA/ZCode/model-providers/codexhub.json` path (isolated as
-  `appdata/roaming/ZCode/model-providers/codexhub.json`) plus `.zcode/v2`
-  config and cache.
+  `appdata/roaming/ZCode/model-providers/codexhub.json`), plus
+  `.zcode/v2/bots-model-cache.v2.json` and `.zcode/v2/config.json`. The
+  catalog and cache use production provider arrays, array-shaped models,
+  `defaultKind`, and `source`; their endpoint roots differ. The v2 config uses
+  its separate `provider.<id>.options` shape and object-shaped models.
 
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
@@ -225,7 +228,9 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
 
 The runner permits one retry only when the first attempt has a correlated
 Gateway `request_error` status `429` or `503`, the client exited nonzero, and no
-sentinel output occurred. Every other failure is ineligible.
+output of any kind occurred. Tool emission/execution, stream or terminal
+events, malformed client output, or any prior completed Gateway request makes
+the attempt ineligible. Every other failure is also ineligible.
 
 ## Sanitized artifact contract
 

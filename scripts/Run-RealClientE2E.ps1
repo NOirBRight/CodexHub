@@ -469,13 +469,24 @@ function Read-CorrelatedGatewayEvents {
             [void]$events.Add([pscustomobject]@{ event = 'gateway_terminal' })
         }
     }
-    foreach ($native in $nativeEvents) {
+    for ($nativeIndex = 0; $nativeIndex -lt $nativeEvents.Count; $nativeIndex++) {
+        $native = $nativeEvents[$nativeIndex]
         $event = [string](Get-JsonProperty $native 'event' '')
         if ($event -eq 'request_error') {
             $status = [int](Get-JsonProperty $native 'status' 0)
             [void]$events.Add([pscustomobject]@{ event = 'error' })
             if ($status -in @(429, 503)) {
-                [void]$events.Add([pscustomobject]@{ event = 'provider_capacity'; status = $status; output_seen = $false })
+                $priorCompleteCount = if ($nativeIndex -gt 0) {
+                    @($nativeEvents[0..($nativeIndex - 1)] | Where-Object {
+                        [string](Get-JsonProperty $_ 'event' '') -eq 'request_complete'
+                    }).Count
+                }
+                else { 0 }
+                [void]$events.Add([pscustomobject]@{
+                    event = 'provider_capacity'
+                    status = $status
+                    output_seen = $priorCompleteCount -gt 0
+                })
             }
         }
         elseif ($event -eq 'upstream_protocol_fallback') {
@@ -555,8 +566,25 @@ function Measure-AutomatedAttempt {
         'unclassified'
     }
     $capacityStatus = if ($capacityEvents.Count -eq 1) { [int](Get-JsonProperty $capacityEvents[0] 'status' 0) } else { 0 }
-    $capacityOutputSeen = if ($capacityEvents.Count -eq 1) { [bool](Get-JsonProperty $capacityEvents[0] 'output_seen' $true) } else { $true }
-    $retryableCapacity = $Attempt.process.exit_code -ne 0 -and -not $Attempt.process.timed_out -and $capacityEvents.Count -eq 1 -and $capacityStatus -in @(429, 503) -and -not $capacityOutputSeen -and $streamEvents.Count -eq 0
+    $capacityOutputSeen = if ($capacityEvents.Count -eq 1) {
+        [bool](Get-JsonProperty $capacityEvents[0] 'output_seen' $true) -or
+            $Attempt.malformed_count -gt 0 -or
+            $allToolEvents.Count -gt 0 -or
+            $streamEvents.Count -gt 0 -or
+            $terminalEvents.Count -gt 0 -or
+            $gatewayCompleteEvents.Count -gt 0 -or
+            $gatewayTerminalEvents.Count -gt 0 -or
+            $requestEvents.Count -gt 0
+    }
+    else { $true }
+    $retryableCapacity = $Attempt.process.exit_code -ne 0 -and
+        -not $Attempt.process.timed_out -and
+        $capacityEvents.Count -eq 1 -and
+        $capacityStatus -in @(429, 503) -and
+        -not $capacityOutputSeen -and
+        $errorEvents.Count -eq 1 -and
+        $fallbackEvents.Count -eq 0 -and
+        $reconnectEvents.Count -eq 0
     $passed = -not $Attempt.process.timed_out -and
         $Attempt.process.exit_code -eq 0 -and
         $Attempt.malformed_count -eq 0 -and
@@ -904,24 +932,97 @@ providers:
 "@
     [System.IO.File]::WriteAllText((Join-Path $CaseRoot '.omp\agent\config.yml'), "modelRoles:`n  default: $selector`n", $script:Utf8NoBom)
     [System.IO.File]::WriteAllText((Join-Path $CaseRoot '.omp\agent\models.yml'), $ompText, $script:Utf8NoBom)
-    $zcodeProviders = @($providerMap.GetEnumerator() | ForEach-Object {
-        [ordered]@{
-            id = $_.Key
-            name = $_.Value.name
-            kind = 'openai'
-            apiFormat = 'openai-responses'
-            endpoints = [ordered]@{ baseURL = $_.Value.options.baseURL; paths = [ordered]@{ openai = '/responses' } }
-            apiKey = $_.Value.options.apiKey
-            headers = @{ 'x-codex-client-id' = 'zcode' }
-            models = $_.Value.models
+    $zcodeCatalogProviders = [System.Collections.Generic.List[object]]::new()
+    $zcodeCacheProviders = [System.Collections.Generic.List[object]]::new()
+    $zcodeConfigProviders = [ordered]@{}
+    $zcodeGatewayRoot = "http://127.0.0.1:$([int]$script:GatewayConfig.listen_port)"
+    $zcodeTimestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    foreach ($entry in $providerMap.GetEnumerator()) {
+        $route = [string]$entry.Key -replace '^codexhub-', ''
+        $providerUrl = [string]$entry.Value.options.baseURL
+        $catalogModels = @($entry.Value.models.GetEnumerator() | ForEach-Object {
+            [ordered]@{
+                id = $_.Key
+                name = $_.Value.name
+                kinds = @('openai')
+                defaultKind = 'openai'
+                modalities = [ordered]@{ input = @('text'); output = @('text') }
+                maxOutputTokens = 32768
+            }
+        })
+        $configModels = [ordered]@{}
+        foreach ($modelEntry in $entry.Value.models.GetEnumerator()) {
+            $configModels[$modelEntry.Key] = [ordered]@{
+                name = $modelEntry.Value.name
+                limit = [ordered]@{ output = 32768 }
+                modalities = [ordered]@{ input = @('text'); output = @('text') }
+            }
         }
+        $catalogProvider = [ordered]@{
+            id = $entry.Key
+            name = $entry.Value.name
+            enabled = $true
+            source = 'custom'
+            apiFormat = 'openai-responses'
+            endpoints = [ordered]@{
+                baseURL = $zcodeGatewayRoot
+                paths = [ordered]@{ openai = "/v1/providers/$route/responses" }
+            }
+            apiKeyRequired = $true
+            apiKey = $entry.Value.options.apiKey
+            defaultKind = 'openai'
+            models = $catalogModels
+            createdAt = $zcodeTimestamp
+            updatedAt = $zcodeTimestamp
+        }
+        [void]$zcodeCatalogProviders.Add($catalogProvider)
+        $cacheProvider = [ordered]@{
+            id = $entry.Key
+            name = $entry.Value.name
+            enabled = $true
+            source = 'custom'
+            apiFormat = 'openai-responses'
+            endpoints = [ordered]@{
+                baseURL = $providerUrl
+                paths = [ordered]@{ openai = '/responses' }
+            }
+            apiKeyRequired = $true
+            apiKey = $entry.Value.options.apiKey
+            defaultKind = 'openai'
+            models = $catalogModels
+            createdAt = $zcodeTimestamp
+            updatedAt = $zcodeTimestamp
+        }
+        [void]$zcodeCacheProviders.Add($cacheProvider)
+        $zcodeConfigProviders[$entry.Key] = [ordered]@{
+            name = $entry.Value.name
+            kind = 'openai'
+            enabled = $true
+            source = 'custom'
+            apiFormat = 'openai-responses'
+            endpoints = [ordered]@{
+                baseURL = $providerUrl
+                paths = [ordered]@{ openai = '/responses' }
+            }
+            options = [ordered]@{
+                baseURL = $providerUrl
+                apiKey = $entry.Value.options.apiKey
+                apiKeyRequired = $true
+            }
+            models = $configModels
+        }
+    }
+    Write-JsonFile -Path (Join-Path $CaseRoot 'appdata\roaming\ZCode\model-providers\codexhub.json') -Value ([ordered]@{
+        schemaVersion = 'zcode.model-providers.v2'
+        providers = @($zcodeCatalogProviders)
     })
-    $zcodeCatalog = [ordered]@{ schemaVersion = 'zcode.model-providers.v2'; providers = $zcodeProviders }
-    Write-JsonFile -Path (Join-Path $CaseRoot 'appdata\roaming\ZCode\model-providers\codexhub.json') -Value $zcodeCatalog
-    Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\bots-model-cache.v2.json') -Value $zcodeCatalog
-    $zcodeProviderObject = [ordered]@{}
-    foreach ($provider in $zcodeProviders) { $zcodeProviderObject[$provider.id] = $provider }
-    Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\config.json') -Value ([ordered]@{ provider = $zcodeProviderObject; model = $selector })
+    Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\bots-model-cache.v2.json') -Value ([ordered]@{
+        schemaVersion = 'zcode.model-providers.v2'
+        providers = @($zcodeCacheProviders)
+    })
+    Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\config.json') -Value ([ordered]@{
+        provider = $zcodeConfigProviders
+    })
 }
 
 function Initialize-CandidateRuntime {
