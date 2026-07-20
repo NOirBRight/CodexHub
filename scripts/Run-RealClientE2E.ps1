@@ -481,7 +481,7 @@ function Read-CorrelatedGatewayEvents {
             return $false
         }
         $actualModel = [string](Get-JsonProperty $_ 'model_canonical' (Get-JsonProperty $_ 'model' ''))
-        return -not (Test-CanonicalModelMatch -Actual $actualModel -Expected $Case.canonical_model)
+        return -not (Test-CanonicalModelMatch -Actual $actualModel -Expected $Case.gateway_model)
     }).Count
     if ($modelContradictionCount -gt 0) {
         [void]$events.Add([pscustomobject]@{ event = 'error' })
@@ -502,13 +502,6 @@ function Read-CorrelatedGatewayEvents {
         $actualModel = [string](Get-JsonProperty $native 'model_canonical' (Get-JsonProperty $native 'model' ''))
         [void]$events.Add([pscustomobject]@{ event = 'model_selected'; model = $actualModel })
         [void]$events.Add([pscustomobject]@{ event = 'request_complete'; status = [int](Get-JsonProperty $native 'status' 0) })
-        $terminalCount = [int](Get-JsonProperty $native 'terminal_count' 0)
-        if ($terminalCount -eq 0 -and [bool](Get-JsonProperty $native 'sse_terminal_event_seen' $false)) {
-            $terminalCount = 1
-        }
-        for ($index = 0; $index -lt $terminalCount; $index++) {
-            [void]$events.Add([pscustomobject]@{ event = 'gateway_terminal' })
-        }
     }
     for ($nativeIndex = 0; $nativeIndex -lt $nativeEvents.Count; $nativeIndex++) {
         $native = $nativeEvents[$nativeIndex]
@@ -548,6 +541,7 @@ function Invoke-ClientAttempt {
         CODEXHUB_E2E_CASE = $Case.case_id
         CODEXHUB_E2E_CLIENT = $Case.client
         CODEXHUB_E2E_MODEL = $Case.canonical_model
+        CODEXHUB_E2E_GATEWAY_MODEL = $Case.gateway_model
         CODEXHUB_E2E_SENTINEL = $sentinel
         CODEXHUB_E2E_SENTINEL_PATH = $sentinelPath
         CODEXHUB_E2E_ATTEMPT = [string]$Attempt
@@ -577,7 +571,6 @@ function Measure-AutomatedAttempt {
     $sentinelEvents = @($streamEvents | Where-Object { (Get-JsonProperty $_ 'text') -ceq $sentinel })
     $requestEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'request_complete' })
     $terminalEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'terminal' })
-    $gatewayTerminalEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_terminal' })
     $gatewayRequestEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_request' })
     $gatewayCompleteEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_complete' })
     $fallbackEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'fallback' })
@@ -614,7 +607,6 @@ function Measure-AutomatedAttempt {
             $streamEvents.Count -gt 0 -or
             $terminalEvents.Count -gt 0 -or
             $gatewayCompleteEvents.Count -gt 0 -or
-            $gatewayTerminalEvents.Count -gt 0 -or
             $requestEvents.Count -gt 0
     }
     else { $true }
@@ -630,7 +622,7 @@ function Measure-AutomatedAttempt {
         $Attempt.process.exit_code -eq 0 -and
         $Attempt.malformed_count -eq 0 -and
         $modelEvents.Count -eq 1 -and
-        (Get-JsonProperty $modelEvents[0] 'model') -ceq $Case.canonical_model -and
+        (Get-JsonProperty $modelEvents[0] 'model') -ceq $Case.gateway_model -and
         $allToolEvents.Count -eq 1 -and $toolEvents.Count -eq 1 -and
         $gatewayRequestEvents.Count -eq ($allToolEvents.Count + 1) -and
         $gatewayCompleteEvents.Count -eq ($allToolEvents.Count + 1) -and
@@ -638,7 +630,6 @@ function Measure-AutomatedAttempt {
         $requestEvents.Count -eq 1 -and
         $httpStatus -eq 200 -and
         $terminalEvents.Count -eq 1 -and
-        $gatewayTerminalEvents.Count -eq 1 -and
         $terminalClassification -ceq 'completed' -and
         $errorEvents.Count -eq 0 -and
         $fallbackEvents.Count -eq 0 -and
@@ -655,8 +646,7 @@ function Measure-AutomatedAttempt {
         sentinel_chunk_count = $sentinelEvents.Count
         fallback_count = $fallbackEvents.Count
         error_event_count = $errorEvents.Count
-        duplicate_terminal_count = [Math]::Max([Math]::Max(0, $terminalEvents.Count - 1), [Math]::Max(0, $gatewayTerminalEvents.Count - 1))
-        gateway_terminal_count = $gatewayTerminalEvents.Count
+        duplicate_terminal_count = [Math]::Max(0, $terminalEvents.Count - 1)
         gateway_request_count = $gatewayRequestEvents.Count
         gateway_complete_count = $gatewayCompleteEvents.Count
     }
@@ -703,7 +693,6 @@ function Invoke-AutomatedCase {
         fallback_count = $measurement.fallback_count
         error_event_count = $measurement.error_event_count
         duplicate_terminal_count = $measurement.duplicate_terminal_count
-        gateway_terminal_count = $measurement.gateway_terminal_count
         gateway_request_count = $measurement.gateway_request_count
         gateway_complete_count = $measurement.gateway_complete_count
         terminal_classification = $measurement.terminal_classification
@@ -905,11 +894,34 @@ function Get-ClientProviderMap {
         }
         'codexhub-volc' = [ordered]@{
             name = 'CodexHub Volcengine'
-            npm = '@ai-sdk/openai'
+            npm = '@ai-sdk/openai-compatible'
             options = [ordered]@{ baseURL = "$baseUrl/providers/volc"; apiKey = $key; headers = $header }
             models = [ordered]@{ 'glm-5.2' = [ordered]@{ name = 'Volc GLM-5.2' } }
         }
     }
+}
+
+function Get-ProviderEndpointContract {
+    param([string]$ProviderId)
+    if ($ProviderId -ceq 'codexhub-openai') {
+        return [pscustomobject]@{
+            api = 'openai-responses'
+            api_format = 'openai-responses'
+            kind = 'openai'
+            relative_path = '/responses'
+            catalog_path = '/v1/providers/openai/responses'
+        }
+    }
+    if ($ProviderId -ceq 'codexhub-volc') {
+        return [pscustomobject]@{
+            api = 'openai-completions'
+            api_format = 'openai-chat-completions'
+            kind = 'openai-compatible'
+            relative_path = '/chat/completions'
+            catalog_path = '/v1/providers/volc/chat/completions'
+        }
+    }
+    throw 'unsupported_client_provider'
 }
 
 function Initialize-ClientConfiguration {
@@ -934,9 +946,10 @@ function Initialize-ClientConfiguration {
     })
     $piProviders = [ordered]@{}
     foreach ($entry in $providerMap.GetEnumerator()) {
+        $endpoint = Get-ProviderEndpointContract -ProviderId $entry.Key
         $piProviders[$entry.Key] = [ordered]@{
             baseUrl = $entry.Value.options.baseURL
-            api = 'openai-responses'
+            api = $endpoint.api
             apiKey = $entry.Value.options.apiKey
             authHeader = $true
             headers = @{ 'x-codex-client-id' = 'pi' }
@@ -962,7 +975,7 @@ providers:
           x-codex-client-id: omp
   codexhub-volc:
     baseUrl: $baseUrl/providers/volc
-    api: openai-responses
+    api: openai-completions
     apiKey: $key
     authHeader: true
     models:
@@ -979,14 +992,14 @@ providers:
     $zcodeGatewayRoot = "http://127.0.0.1:$([int]$script:GatewayConfig.listen_port)"
     $zcodeTimestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     foreach ($entry in $providerMap.GetEnumerator()) {
-        $route = [string]$entry.Key -replace '^codexhub-', ''
         $providerUrl = [string]$entry.Value.options.baseURL
+        $endpoint = Get-ProviderEndpointContract -ProviderId $entry.Key
         $catalogModels = @($entry.Value.models.GetEnumerator() | ForEach-Object {
             [ordered]@{
                 id = $_.Key
                 name = $_.Value.name
-                kinds = @('openai')
-                defaultKind = 'openai'
+                kinds = @($endpoint.kind)
+                defaultKind = $endpoint.kind
                 modalities = [ordered]@{ input = @('text'); output = @('text') }
                 maxOutputTokens = 32768
             }
@@ -1004,14 +1017,14 @@ providers:
             name = $entry.Value.name
             enabled = $true
             source = 'custom'
-            apiFormat = 'openai-responses'
+            apiFormat = $endpoint.api_format
             endpoints = [ordered]@{
                 baseURL = $zcodeGatewayRoot
-                paths = [ordered]@{ openai = "/v1/providers/$route/responses" }
+                paths = [ordered]@{ $endpoint.kind = $endpoint.catalog_path }
             }
             apiKeyRequired = $true
             apiKey = $entry.Value.options.apiKey
-            defaultKind = 'openai'
+            defaultKind = $endpoint.kind
             models = $catalogModels
             createdAt = $zcodeTimestamp
             updatedAt = $zcodeTimestamp
@@ -1022,14 +1035,14 @@ providers:
             name = $entry.Value.name
             enabled = $true
             source = 'custom'
-            apiFormat = 'openai-responses'
+            apiFormat = $endpoint.api_format
             endpoints = [ordered]@{
                 baseURL = $providerUrl
-                paths = [ordered]@{ openai = '/responses' }
+                paths = [ordered]@{ $endpoint.kind = $endpoint.relative_path }
             }
             apiKeyRequired = $true
             apiKey = $entry.Value.options.apiKey
-            defaultKind = 'openai'
+            defaultKind = $endpoint.kind
             models = $catalogModels
             createdAt = $zcodeTimestamp
             updatedAt = $zcodeTimestamp
@@ -1037,13 +1050,13 @@ providers:
         [void]$zcodeCacheProviders.Add($cacheProvider)
         $zcodeConfigProviders[$entry.Key] = [ordered]@{
             name = $entry.Value.name
-            kind = 'openai'
+            kind = $endpoint.kind
             enabled = $true
             source = 'custom'
-            apiFormat = 'openai-responses'
+            apiFormat = $endpoint.api_format
             endpoints = [ordered]@{
                 baseURL = $providerUrl
-                paths = [ordered]@{ openai = '/responses' }
+                paths = [ordered]@{ $endpoint.kind = $endpoint.relative_path }
             }
             options = [ordered]@{
                 baseURL = $providerUrl
@@ -1233,14 +1246,14 @@ $manualCases = @(
     [pscustomobject]@{ case_id = 'zcode-volc'; client = 'zcode'; canonical_model = $VolcModel }
 )
 $automatedCases = @(
-    [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; canonical_model = 'gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'codex-cli-volc'; client = 'codex-cli'; canonical_model = 'volc/glm-5.2' },
-    [pscustomobject]@{ case_id = 'opencode-luna'; client = 'opencode'; canonical_model = $LunaModel },
-    [pscustomobject]@{ case_id = 'opencode-volc'; client = 'opencode'; canonical_model = $VolcModel },
-    [pscustomobject]@{ case_id = 'pi-luna'; client = 'pi'; canonical_model = $LunaModel },
-    [pscustomobject]@{ case_id = 'pi-volc'; client = 'pi'; canonical_model = $VolcModel },
-    [pscustomobject]@{ case_id = 'omp-luna'; client = 'omp'; canonical_model = $LunaModel },
-    [pscustomobject]@{ case_id = 'omp-volc'; client = 'omp'; canonical_model = $VolcModel }
+    [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna' },
+    [pscustomobject]@{ case_id = 'codex-cli-volc'; client = 'codex-cli'; canonical_model = 'volc/glm-5.2'; gateway_model = 'volc/glm-5.2' },
+    [pscustomobject]@{ case_id = 'opencode-luna'; client = 'opencode'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
+    [pscustomobject]@{ case_id = 'opencode-volc'; client = 'opencode'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' },
+    [pscustomobject]@{ case_id = 'pi-luna'; client = 'pi'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
+    [pscustomobject]@{ case_id = 'pi-volc'; client = 'pi'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' },
+    [pscustomobject]@{ case_id = 'omp-luna'; client = 'omp'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
+    [pscustomobject]@{ case_id = 'omp-volc'; client = 'omp'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' }
 )
 
 $runBinding = New-RunBinding

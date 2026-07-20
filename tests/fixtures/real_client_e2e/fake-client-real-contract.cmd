@@ -10,6 +10,16 @@ if defined CODEXHUB_E2E_GUI_CLIENT (
 if not defined CODEXHUB_E2E_CASE exit /b 0
 if not defined CODEXHUB_E2E_CLIENT exit /b 12
 if not defined CODEXHUB_E2E_DIAGNOSTICS_PATH exit /b 13
+set "GATEWAY_MODEL=%CODEXHUB_E2E_MODEL%"
+if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-openai/gpt-5.6-luna" set "GATEWAY_MODEL=openai/gpt-5.6-luna"
+if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-volc/glm-5.2" set "GATEWAY_MODEL=volc/glm-5.2"
+if /I not "%GATEWAY_MODEL%"=="%CODEXHUB_E2E_GATEWAY_MODEL%" exit /b 17
+set "PROVIDER_ID=openai"
+set "UPSTREAM_FORMAT=responses"
+set "INBOUND_FORMAT=responses"
+if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "PROVIDER_ID=volc"
+if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "UPSTREAM_FORMAT=chat_completions"
+if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "INBOUND_FORMAT=chat_completions"
 if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" set "CLIENT_CONFIG=%CD%\.codex\config.toml"
 if "%CODEXHUB_E2E_CLIENT%"=="opencode" set "CLIENT_CONFIG=%CD%\.config\opencode\opencode.json"
 if "%CODEXHUB_E2E_CLIENT%"=="pi" set "CLIENT_CONFIG=%CD%\.pi\agent\models.json"
@@ -40,7 +50,7 @@ if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
   exit /b 14
 )
 
-echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%","status":200,"terminal_count":1}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
-echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%CODEXHUB_E2E_MODEL%","status":200,"terminal_count":1}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%GATEWAY_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-1","method":"POST","model":"%GATEWAY_MODEL%","model_requested":"%CODEXHUB_E2E_MODEL%","model_canonical":"%GATEWAY_MODEL%","upstream":"%PROVIDER_ID%","provider_id":"%PROVIDER_ID%","provider_hint":"%PROVIDER_ID%","upstream_format":"%UPSTREAM_FORMAT%","behavior_profile":"third_party_app_transparent_metered","inbound_format":"%INBOUND_FORMAT%","route_reason":"provider_path","route_mode":"codexhub","is_stream":true,"status":200,"duration_ms":1,"client_id":"%CODEXHUB_E2E_CLIENT%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_start","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","client_id":"%CODEXHUB_E2E_CLIENT%","model_canonical":"%GATEWAY_MODEL%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"
+echo {"event":"request_complete","request_id":"%CODEXHUB_E2E_CASE%-attempt-%CODEXHUB_E2E_ATTEMPT%-request-2","method":"POST","model":"%GATEWAY_MODEL%","model_requested":"%CODEXHUB_E2E_MODEL%","model_canonical":"%GATEWAY_MODEL%","upstream":"%PROVIDER_ID%","provider_id":"%PROVIDER_ID%","provider_hint":"%PROVIDER_ID%","upstream_format":"%UPSTREAM_FORMAT%","behavior_profile":"third_party_app_transparent_metered","inbound_format":"%INBOUND_FORMAT%","route_reason":"provider_path","route_mode":"codexhub","is_stream":true,"status":200,"duration_ms":1,"client_id":"%CODEXHUB_E2E_CLIENT%"}>>"%CODEXHUB_E2E_DIAGNOSTICS_PATH%"

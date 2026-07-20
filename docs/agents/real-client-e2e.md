@@ -94,6 +94,13 @@ The runner materializes, rather than assumes, the actual consumed configs:
   `defaultKind`, and `source`; their endpoint roots differ. The v2 config uses
   its separate `provider.<id>.options` shape and object-shaped models.
 
+Provider protocol selection mirrors the production Gateway exports. Luna uses
+the Responses endpoint (`@ai-sdk/openai`, `openai-responses`, and
+`/responses`). The current Volc provider has no explicit or available upstream
+format declaration, so it uses Chat Completions (`@ai-sdk/openai-compatible`,
+`openai-completions`, ZCode `openai-chat-completions`, and
+`/chat/completions`).
+
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
 `TEMP`, and `TMP`. The candidate receives the production-consumed
@@ -105,20 +112,20 @@ shared sessions.
 
 The fixed case order and selectors are:
 
-| Case | Client | Canonical model | Finalization |
-|---|---|---|---|
-| `desktop-luna` | Codex Desktop | `gpt-5.6-luna` | human GUI |
-| `desktop-volc` | Codex Desktop | `volc/glm-5.2` | human GUI |
-| `codex-cli-luna` | Codex CLI | `gpt-5.6-luna` | automated |
-| `codex-cli-volc` | Codex CLI | `volc/glm-5.2` | automated |
-| `opencode-luna` | OpenCode | `codexhub-openai/gpt-5.6-luna` | automated |
-| `opencode-volc` | OpenCode | `codexhub-volc/glm-5.2` | automated |
-| `zcode-luna` | ZCode | `codexhub-openai/gpt-5.6-luna` | human GUI |
-| `zcode-volc` | ZCode | `codexhub-volc/glm-5.2` | human GUI |
-| `pi-luna` | Pi | `codexhub-openai/gpt-5.6-luna` | automated |
-| `pi-volc` | Pi | `codexhub-volc/glm-5.2` | automated |
-| `omp-luna` | OMP | `codexhub-openai/gpt-5.6-luna` | automated |
-| `omp-volc` | OMP | `codexhub-volc/glm-5.2` | automated |
+| Case | Client | Client selector | Gateway canonical route | Finalization |
+|---|---|---|---|---|
+| `desktop-luna` | Codex Desktop | `gpt-5.6-luna` | `gpt-5.6-luna` | human GUI |
+| `desktop-volc` | Codex Desktop | `volc/glm-5.2` | `volc/glm-5.2` | human GUI |
+| `codex-cli-luna` | Codex CLI | `gpt-5.6-luna` | `gpt-5.6-luna` | automated |
+| `codex-cli-volc` | Codex CLI | `volc/glm-5.2` | `volc/glm-5.2` | automated |
+| `opencode-luna` | OpenCode | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | automated |
+| `opencode-volc` | OpenCode | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | automated |
+| `zcode-luna` | ZCode | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | human GUI |
+| `zcode-volc` | ZCode | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | human GUI |
+| `pi-luna` | Pi | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | automated |
+| `pi-volc` | Pi | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | automated |
+| `omp-luna` | OMP | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | automated |
+| `omp-volc` | OMP | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | automated |
 
 Each case creates one disposable `sentinel.txt`. The client must use exactly
 one successful read-only read tool, emit the named sentinel once, and finish
@@ -149,7 +156,7 @@ one tool-call request and one final continuation request. The summary therefore
 records `gateway_request_count = 2` but counts exactly one final
 `request_complete` with HTTP `200`. Any additional request start is an
 unclassified reconnect. `upstream_protocol_fallback`, a missing or mismatched
-model, missing/duplicate Gateway terminal evidence, duplicate client terminal,
+model, missing/duplicate Gateway request completion, duplicate client terminal,
 error, or malformed output fails the case. Actual contradictory models and
 private request IDs are not copied into uploadable artifacts.
 

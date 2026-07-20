@@ -31,8 +31,13 @@ def main(case_root: Path) -> None:
         {"codexhub-openai", "codexhub-volc"},
     )
     expected = {
-        "codexhub-openai": ("openai", "gpt-5.6-luna"),
-        "codexhub-volc": ("volc", "glm-5.2"),
+        "codexhub-openai": (
+            "openai", "gpt-5.6-luna", "openai", "openai-responses", "responses"
+        ),
+        "codexhub-volc": (
+            "volc", "glm-5.2", "openai-compatible", "openai-chat-completions",
+            "chat/completions"
+        ),
     }
     provider_keys = {
         "id",
@@ -66,7 +71,7 @@ def main(case_root: Path) -> None:
         "options",
         "models",
     }
-    for provider_id, (route, model_id) in expected.items():
+    for provider_id, (route, model_id, kind, api_format, path) in expected.items():
         catalog_matches = [item for item in catalog["providers"] if item.get("id") == provider_id]
         cache_matches = [item for item in cache["providers"] if item.get("id") == provider_id]
         assert len(catalog_matches) == len(cache_matches) == 1
@@ -74,39 +79,39 @@ def main(case_root: Path) -> None:
             exact(provider, provider_keys)
             assert provider["enabled"] is True
             assert provider["source"] == "custom"
-            assert provider["apiFormat"] == "openai-responses"
+            assert provider["apiFormat"] == api_format
             assert provider["apiKeyRequired"] is True
             assert isinstance(provider["apiKey"], str) and provider["apiKey"]
-            assert provider["defaultKind"] == "openai"
+            assert provider["defaultKind"] == kind
             assert isinstance(provider["models"], list) and len(provider["models"]) == 1
             model = provider["models"][0]
             exact(model, catalog_model_keys)
             exact(model["modalities"], {"input", "output"})
             assert model["id"] == model_id
-            assert model["kinds"] == ["openai"]
-            assert model["defaultKind"] == "openai"
+            assert model["kinds"] == [kind]
+            assert model["defaultKind"] == kind
             assert isinstance(model["modalities"]["input"], list)
             assert isinstance(model["modalities"]["output"], list)
             assert model["maxOutputTokens"] == 32768
         assert catalog_matches[0]["endpoints"] == {
             "baseURL": root_url,
-            "paths": {"openai": f"/v1/providers/{route}/responses"},
+            "paths": {kind: f"/v1/providers/{route}/{path}"},
         }
         provider_url = f"{root_url}/v1/providers/{route}"
         assert cache_matches[0]["endpoints"] == {
             "baseURL": provider_url,
-            "paths": {"openai": "/responses"},
+            "paths": {kind: f"/{path}"},
         }
         config_provider = config["provider"][provider_id]
         exact(config_provider, config_provider_keys)
         exact(config_provider["options"], {"baseURL", "apiKey", "apiKeyRequired"})
-        assert config_provider["kind"] == "openai"
+        assert config_provider["kind"] == kind
         assert config_provider["enabled"] is True
         assert config_provider["source"] == "custom"
-        assert config_provider["apiFormat"] == "openai-responses"
+        assert config_provider["apiFormat"] == api_format
         assert config_provider["endpoints"] == {
             "baseURL": provider_url,
-            "paths": {"openai": "/responses"},
+            "paths": {kind: f"/{path}"},
         }
         assert config_provider["options"]["baseURL"] == provider_url
         assert config_provider["options"]["apiKeyRequired"] is True

@@ -63,7 +63,6 @@ CASE_KEYS = {
     "artifact",
 }
 AUTOMATED_CASE_KEYS = CASE_KEYS | {
-    "gateway_terminal_count",
     "gateway_request_count",
     "gateway_complete_count",
 }
@@ -377,8 +376,55 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all(case["terminal_classification"] == "completed" for case in automated)
     assert all(case["gateway_request_count"] == 2 for case in automated)
     assert all(case["gateway_complete_count"] == 2 for case in automated)
+    assert all(case["fallback_count"] == 0 for case in automated)
+    assert all(case["duplicate_terminal_count"] == 0 for case in automated)
+    assert all(case["reconnect_classification"] == "none" for case in automated)
+    assert {
+        case["canonical_model"]
+        for case in automated
+        if case["case_id"].startswith(("opencode", "pi", "omp"))
+    } == {LUNA_MODEL, VOLC_MODEL}
     opencode = [case for case in automated if case["case_id"].startswith("opencode-")]
     assert [case["duplicate_terminal_count"] for case in opencode] == [0, 0]
+    diagnostics = list((tmp_path / "output").rglob("codex-proxy-events.jsonl"))
+    assert len(diagnostics) == 1
+    native = [json.loads(line) for line in diagnostics[0].read_text().splitlines()]
+    completes = [event for event in native if event["event"] == "request_complete"]
+    assert len(completes) == 16
+    assert {event["model_canonical"] for event in completes} == {
+        "gpt-5.6-luna",
+        "volc/glm-5.2",
+        "openai/gpt-5.6-luna",
+    }
+    production_fields = {
+        "event",
+        "request_id",
+        "method",
+        "model",
+        "model_requested",
+        "model_canonical",
+        "upstream",
+        "provider_id",
+        "provider_hint",
+        "upstream_format",
+        "behavior_profile",
+        "inbound_format",
+        "route_reason",
+        "route_mode",
+        "is_stream",
+        "status",
+        "duration_ms",
+        "client_id",
+    }
+    assert all(set(event) == production_fields for event in completes)
+    assert all("terminal_count" not in event for event in completes)
+    assert all("sse_terminal_event_seen" not in event for event in completes)
+
+
+def test_isolated_client_configs_follow_production_provider_endpoint_selection(tmp_path):
+    result = _run(tmp_path, fake="fake-client-routing-config.cmd")
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
