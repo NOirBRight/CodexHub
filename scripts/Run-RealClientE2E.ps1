@@ -297,10 +297,18 @@ function ConvertFrom-ClientEvents {
     param([string]$Client, [string]$Text)
     $events = [System.Collections.Generic.List[object]]::new()
     $malformedCount = 0
+    $lineIndex = 0
+    $assistantMessageCount = 0
+    $lastAssistantLine = -1
+    $lastAssistantStopReason = ''
+    $assistantErrorSeen = $false
+    $agentEndCount = 0
+    $lastAgentEndLine = -1
     foreach ($line in ($Text -split "`r?`n")) {
         if (-not $line.Trim()) {
             continue
         }
+        $lineIndex++
         try {
             $native = $line | ConvertFrom-Json -ErrorAction Stop
             $type = [string](Get-JsonProperty $native 'type' '')
@@ -336,7 +344,7 @@ function ConvertFrom-ClientEvents {
                     elseif ($type -eq 'text') {
                         [void]$events.Add([pscustomobject]@{ event = 'stream_delta'; text = [string](Get-JsonProperty $part 'text' '') })
                     }
-                    elseif ($type -eq 'step_finish' -and [string](Get-JsonProperty $part 'reason' '') -ne 'unknown') {
+                    elseif ($type -eq 'step_finish' -and [string](Get-JsonProperty $part 'reason' '') -ceq 'stop') {
                         [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = 'completed' })
                     }
                     elseif ($type -eq 'error') {
@@ -351,6 +359,13 @@ function ConvertFrom-ClientEvents {
                     elseif ($type -eq 'message_end') {
                         $message = Get-JsonProperty $native 'message'
                         if ([string](Get-JsonProperty $message 'role' '') -eq 'assistant') {
+                            $assistantMessageCount++
+                            $lastAssistantLine = $lineIndex
+                            $lastAssistantStopReason = [string](Get-JsonProperty $message 'stopReason' (Get-JsonProperty $native 'stopReason' ''))
+                            $errorMessage = [string](Get-JsonProperty $message 'errorMessage' (Get-JsonProperty $native 'errorMessage' ''))
+                            if ($errorMessage) {
+                                $assistantErrorSeen = $true
+                            }
                             foreach ($content in @(Get-JsonProperty $message 'content' @())) {
                                 if ([string](Get-JsonProperty $content 'type' '') -eq 'text') {
                                     [void]$events.Add([pscustomobject]@{ event = 'stream_delta'; text = [string](Get-JsonProperty $content 'text' '') })
@@ -359,13 +374,39 @@ function ConvertFrom-ClientEvents {
                         }
                     }
                     elseif ($type -eq 'agent_end') {
-                        [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = 'completed' })
+                        $agentEndCount++
+                        $lastAgentEndLine = $lineIndex
                     }
                 }
             }
         }
         catch {
             $malformedCount++
+        }
+    }
+    if ($Client -in @('pi', 'omp')) {
+        $terminalClassification = if ($assistantErrorSeen) {
+            'error'
+        }
+        elseif ($lastAssistantStopReason -ceq 'stop') {
+            'completed'
+        }
+        elseif ($lastAssistantStopReason -in @('error', 'aborted', 'length')) {
+            $lastAssistantStopReason
+        }
+        else {
+            'unclassified'
+        }
+        for ($index = 0; $index -lt $agentEndCount; $index++) {
+            [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = $terminalClassification })
+        }
+        $validTerminal = $assistantMessageCount -gt 0 -and
+            $agentEndCount -eq 1 -and
+            $lastAgentEndLine -gt $lastAssistantLine -and
+            $lastAssistantStopReason -ceq 'stop' -and
+            -not $assistantErrorSeen
+        if (-not $validTerminal) {
+            [void]$events.Add([pscustomobject]@{ event = 'error' })
         }
     }
     return [pscustomobject]@{ events = @($events); malformed_count = $malformedCount }

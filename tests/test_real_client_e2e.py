@@ -377,6 +377,8 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all(case["terminal_classification"] == "completed" for case in automated)
     assert all(case["gateway_request_count"] == 2 for case in automated)
     assert all(case["gateway_complete_count"] == 2 for case in automated)
+    opencode = [case for case in automated if case["case_id"].startswith("opencode-")]
+    assert [case["duplicate_terminal_count"] for case in opencode] == [0, 0]
 
 
 def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
@@ -424,6 +426,49 @@ def test_post_tool_capacity_response_is_not_eligible_for_retry(tmp_path):
     ]
     assert [case["read_only_tool_call_count"] for case in pi_cases] == [1, 1]
     assert [case["gateway_complete_count"] for case in pi_cases] == [1, 1]
+
+
+def test_pi_and_omp_reject_non_stop_or_missing_final_assistant_states(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={
+            "PiPath": "fake-client-terminal-states.cmd",
+            "OmpPath": "fake-client-terminal-states.cmd",
+        },
+    )
+
+    assert result.returncode != 0
+    summary_path = tmp_path / "output" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+    cases = [
+        case
+        for case in summary["cases"]
+        if case["case_id"].startswith(("pi-", "omp-"))
+    ]
+    assert [case["outcome"] for case in cases] == ["failed"] * 4
+    assert [case["terminal_classification"] for case in cases] == [
+        "error",
+        "aborted",
+        "length",
+        "unclassified",
+    ]
+    assert all(case["error_event_count"] >= 1 for case in cases)
+    assert "fixture-terminal-error" not in summary_path.read_text(encoding="utf-8-sig")
+
+
+def test_pi_rejects_stop_with_contradictory_error_message(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-terminal-contradiction.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary_path = tmp_path / "output" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+    pi_cases = [case for case in summary["cases"] if case["case_id"].startswith("pi-")]
+    assert [case["terminal_classification"] for case in pi_cases] == ["error", "error"]
+    assert all(case["error_event_count"] >= 1 for case in pi_cases)
+    assert "fixture-contradictory-error" not in summary_path.read_text(encoding="utf-8-sig")
 
 
 def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
@@ -560,7 +605,7 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
     assert all(case["reconnect_classification"] == "unclassified" for case in pi_cases)
     omp_cases = [case for case in summary["cases"] if case["case_id"].startswith("omp")]
     assert all(case["outcome"] == "failed" for case in omp_cases)
-    assert all(case["error_event_count"] == 1 for case in omp_cases)
+    assert [case["error_event_count"] for case in omp_cases] == [2, 2]
     assert len(list((tmp_path / "output").rglob("child-started"))) == 1
     time.sleep(6)
     assert not list((tmp_path / "output").rglob("child-survived"))

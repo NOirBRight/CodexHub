@@ -25,15 +25,16 @@ if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
 ) else if "%CODEXHUB_E2E_CLIENT%"=="opencode" (
   echo {"type":"step_start","part":{"type":"step-start"}}
   echo {"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"completed"}}}
+  echo {"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls"}}
   echo {"type":"text","part":{"type":"text","text":"%CODEXHUB_E2E_SENTINEL%"}}
   echo {"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}
 ) else if "%CODEXHUB_E2E_CLIENT%"=="pi" (
   echo {"type":"tool_execution_end","toolName":"read","isError":false}
-  echo {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%CODEXHUB_E2E_SENTINEL%"}]}}
+  echo {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%CODEXHUB_E2E_SENTINEL%"}],"stopReason":"stop"}}
   echo {"type":"agent_end"}
 ) else if "%CODEXHUB_E2E_CLIENT%"=="omp" (
   echo {"type":"tool_execution_end","toolName":"read","isError":false}
-  echo {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%CODEXHUB_E2E_SENTINEL%"}]}}
+  echo {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%CODEXHUB_E2E_SENTINEL%"}],"stopReason":"stop"}}
   echo {"type":"agent_end"}
 ) else (
   exit /b 14

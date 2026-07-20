@@ -127,9 +127,13 @@ once. The pinned client parsers consume their real JSONL contracts:
 - Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
   items, and `turn.completed`;
 - OpenCode `1.18.3`: `step_start`, completed `tool_use`, `text`, and
-  `step_finish`;
+  the final `step_finish` whose reason is `stop`; the intermediate
+  `tool-calls` finish is not a terminal;
 - Pi `0.80.6` and OMP `17.0.3`: `tool_execution_end`, assistant
-  `message_end`, and `agent_end`.
+  `message_end`, and `agent_end`. The final assistant message must have
+  `stopReason = stop`, no `errorMessage`, and exactly one later `agent_end`.
+  `error`, `aborted`, `length`, missing/unknown reasons, error messages,
+  contradictory ordering, and duplicate/missing agent ends fail closed.
 
 OMP `17.0.3` is launched through its one-shot JSON interface as
 `omp --print --mode json --model <selector> <prompt>`. It has no `run`
