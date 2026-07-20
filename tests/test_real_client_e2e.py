@@ -105,6 +105,7 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                 "dedicated_account": True,
                 "codex_login_ready": True,
                 "gui_ready": True,
+                "host_session_reused": False,
             }
         ),
         encoding="utf-8",
@@ -140,24 +141,35 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         ),
         encoding="utf-8",
     )
-    snapshot_manifest = isolation / "config" / "vm-snapshot.json"
-    machine_hash = "sha256:" + hashlib.sha256(os.environ["COMPUTERNAME"].encode()).hexdigest()
-    snapshot_manifest.write_text(
-        json.dumps(
-            {
-                "schema": "codexhub.real-client-vm-snapshot.v1",
-                "snapshot": "codexhub-real-client-e2e-v1",
-                "machine_name_sha256": machine_hash,
-            }
-        ),
-        encoding="utf-8",
+    import winreg
+
+    with winreg.OpenKey(
+        winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography"
+    ) as key:
+        machine_guid = str(winreg.QueryValueEx(key, "MachineGuid")[0]).lower()
+    machine_hash = "sha256:" + hashlib.sha256(
+        f"windows-machine-guid-v1:{machine_guid}".encode()
+    ).hexdigest()
+    host_manifest = isolation / "config" / "host-environment.json"
+    host_manifest_template = json.loads(
+        (FIXTURES / "host-environment.template.json").read_text()
+    )
+    host_manifest_template["machine_binding_sha256"] = machine_hash
+    host_manifest.write_text(json.dumps(host_manifest_template), encoding="utf-8")
+    install_metadata = json.loads(
+        (FIXTURES / "windows-install-metadata.template.json").read_text()
+    )
+    for client in ("desktop", "zcode"):
+        install_metadata[client]["install_location"] = str(FIXTURES.resolve())
+    (isolation / "config" / "windows-install-metadata.json").write_text(
+        json.dumps(install_metadata), encoding="utf-8"
     )
 
     debug_build = tmp_path / "CodexHub-debug.cmd"
     shutil.copyfile(FIXTURES / "fake-debug-build.cmd", debug_build)
     Path(f"{debug_build}.candidate-sha").write_text(CANDIDATE_SHA, encoding="ascii")
 
-    return output, isolation, debug_build, snapshot_manifest
+    return output, isolation, debug_build, host_manifest
 
 
 def _finalize_manual_evidence(
@@ -202,7 +214,7 @@ def _run(
     timeout_seconds: int = 3,
     manual_timeout_seconds: int = 10,
 ) -> subprocess.CompletedProcess[str]:
-    output, isolation, debug_build, snapshot_manifest = _prepare_run(tmp_path)
+    output, isolation, debug_build, host_manifest = _prepare_run(tmp_path)
     if debug_fake is not None:
         shutil.copyfile(FIXTURES / debug_fake, debug_build)
     if mutate is not None:
@@ -236,8 +248,10 @@ def _run(
         VOLC_MODEL,
         "-OutputDirectory",
         str(output),
-        "-SnapshotManifest",
-        str(snapshot_manifest),
+        "-HostEnvironmentManifest",
+        str(host_manifest),
+        "-TestWindowsInstallMetadataFixture",
+        str(isolation / "config" / "windows-install-metadata.json"),
     ]
     for name, executable in executable_arguments.items():
         command.extend((f"-{name}", str(executable)))
@@ -336,7 +350,7 @@ def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
         "isolated/account/auth.json",
         "isolated/credentials/volc.json",
         "isolated/config/gateway.json",
-        "isolated/config/vm-snapshot.json",
+        "isolated/config/host-environment.json",
         "manual-evidence.json",
     ):
         payload = (tmp_path / "output" / relative).read_bytes()
@@ -547,17 +561,17 @@ def test_preflight_return_does_not_leave_a_manual_finalizer_thread(tmp_path):
     ("mutation", "failure_classification"),
     [
         (
-            lambda _output, isolation, _debug: (isolation / "config" / "vm-snapshot.json").write_text(
+            lambda _output, isolation, _debug: (isolation / "config" / "host-environment.json").write_text(
                 json.dumps(
                     {
-                        "schema": "codexhub.real-client-vm-snapshot.v1",
-                        "snapshot": "codexhub-real-client-e2e-v1",
-                        "machine_name_sha256": "sha256:" + "0" * 64,
+                        "schema": "codexhub.real-client-host-environment.v1",
+                        "environment": "codexhub-real-client-e2e",
+                        "machine_binding_sha256": "sha256:" + "0" * 64,
                     }
                 ),
                 encoding="utf-8",
             ),
-            "preflight_snapshot_identity_mismatch",
+            "preflight_host_environment_identity_mismatch",
         ),
         (
             lambda _output, isolation, _debug: (isolation / "account" / "auth.json").write_text(
@@ -579,14 +593,139 @@ def test_preflight_return_does_not_leave_a_manual_finalizer_thread(tmp_path):
             "preflight_gateway_config_invalid",
         ),
     ],
-    ids=["snapshot", "codex-login", "gateway-config"],
+    ids=["host-environment", "codex-login", "gateway-config"],
 )
-def test_vm_login_and_gateway_inputs_are_fail_closed(tmp_path, mutation, failure_classification):
+def test_host_login_and_gateway_inputs_are_fail_closed(tmp_path, mutation, failure_classification):
     result = _run(tmp_path, mutate=mutation, finalize_manual=False)
 
     assert result.returncode != 0
     summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
     assert summary["failure_classification"] == failure_classification
+
+
+def test_host_environment_manifest_is_machine_bound_and_credential_free(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = json.loads(
+        (tmp_path / "output" / "isolated" / "config" / "host-environment.json").read_text()
+    )
+    assert set(manifest) == {"schema", "environment", "machine_binding_sha256"}
+    assert manifest["schema"] == "codexhub.real-client-host-environment.v1"
+    assert manifest["environment"] == "codexhub-real-client-e2e"
+    assert manifest["machine_binding_sha256"].startswith("sha256:")
+    serialized = json.dumps(manifest).lower()
+    assert not any(name in serialized for name in ("username", "credential", "token", "auth"))
+
+
+def test_malformed_host_environment_manifest_fails_before_launch(tmp_path):
+    def add_host_identity(_output, isolation, _debug):
+        path = isolation / "config" / "host-environment.json"
+        manifest = json.loads(path.read_text())
+        manifest["username"] = "must-not-be-recorded"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=add_host_identity, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_host_environment_manifest_invalid"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+    assert "must-not-be-recorded" not in json.dumps(summary)
+
+
+def test_hard_linked_host_auth_input_is_rejected_before_launch(tmp_path):
+    host_auth = tmp_path / "host-auth.json"
+    host_auth.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "host-access", "refresh_token": "host-refresh"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def reuse_host_auth(_output, isolation, _debug):
+        isolated_auth = isolation / "account" / "auth.json"
+        isolated_auth.unlink()
+        os.link(host_auth, isolated_auth)
+
+    result = _run(tmp_path, mutate=reuse_host_auth, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_host_session_reuse_detected"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_appx_and_zcode_installed_metadata_versions_are_normalized(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["pinned_versions"]["desktop"] == "26.715.4045.0"
+    assert summary["pinned_versions"]["zcode"] == "3.3.6"
+
+
+@pytest.mark.parametrize(
+    ("client", "field", "value", "failure"),
+    [
+        ("desktop", "package_version", "1.2026.1704.0", "preflight_desktop_version_mismatch"),
+        ("zcode", "display_version", "3.3.7", "preflight_zcode_version_mismatch"),
+        (
+            "zcode",
+            "executable_product_version",
+            "3.3.7.1",
+            "preflight_zcode_version_mismatch",
+        ),
+    ],
+)
+def test_windows_install_metadata_mismatch_fails_closed(
+    tmp_path, client, field, value, failure
+):
+    def invalidate_metadata(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata[client][field] = value
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=invalidate_metadata, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == failure
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_passed_executables_must_be_bound_to_authoritative_install_locations(tmp_path):
+    unrelated_install = tmp_path / "unrelated-install"
+    unrelated_install.mkdir()
+
+    def unbind_executables(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["desktop"]["install_location"] = str(unrelated_install)
+        metadata["zcode"]["install_location"] = str(unrelated_install)
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=unbind_executables, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_desktop_executable_unbound"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_ambient_host_session_environment_never_reaches_candidate_or_clients(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CODEXHUB_HOST_SESSION", "host-session-must-not-reach-child")
+    monkeypatch.setenv("OPENAI_API_KEY", "host-openai-key-must-not-reach-child")
+
+    result = _run(tmp_path, fake="fake-client-isolation.cmd")
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_manual_evidence_cannot_predate_template_and_gui_launch(tmp_path):

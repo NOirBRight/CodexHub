@@ -1,0 +1,15 @@
+{
+  "schema": "codexhub.real-client-windows-install-metadata.v1",
+  "desktop": {
+    "package_name": "OpenAI.Codex",
+    "package_version": "26.715.4045.0",
+    "install_location": "__FIXTURE_INSTALL_LOCATION__",
+    "executable_product_version": "1.2026.1704.0"
+  },
+  "zcode": {
+    "display_name": "ZCode",
+    "display_version": "3.3.6",
+    "install_location": "__FIXTURE_INSTALL_LOCATION__",
+    "executable_product_version": "3.3.6.3198"
+  }
+}

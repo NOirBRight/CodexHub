@@ -16,7 +16,9 @@ param(
     [string]$OutputDirectory,
 
     [Parameter(Mandatory = $true)]
-    [string]$SnapshotManifest,
+    [string]$HostEnvironmentManifest,
+
+    [string]$TestWindowsInstallMetadataFixture,
 
     [string]$CodexDesktopPath = 'Codex.exe',
     [string]$CodexCliPath = 'codex.exe',
@@ -86,6 +88,44 @@ function Get-TextSha256 {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
     $digest = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
     return 'sha256:' + ([System.BitConverter]::ToString($digest).Replace('-', '').ToLowerInvariant())
+}
+
+function Get-HostMachineBindingSha256 {
+    try {
+        $machineGuid = [string](Get-ItemPropertyValue -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography' -Name 'MachineGuid' -ErrorAction Stop)
+    }
+    catch {
+        throw 'preflight_host_environment_identity_unavailable'
+    }
+    if ($machineGuid -notmatch '^[0-9a-fA-F-]{32,36}$') {
+        throw 'preflight_host_environment_identity_unavailable'
+    }
+    return Get-TextSha256 -Text ("windows-machine-guid-v1:" + $machineGuid.ToLowerInvariant())
+}
+
+function Assert-IsolatedRegularFile {
+    param([string]$Path, [string]$IsolationRoot)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $rootPrefix = [System.IO.Path]::GetFullPath($IsolationRoot).TrimEnd('\') + '\'
+    if (-not $fullPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'preflight_host_session_reuse_detected'
+    }
+    $item = Get-Item -LiteralPath $fullPath -Force
+    $linkType = if ($item.PSObject.Properties['LinkType']) { [string]$item.LinkType } else { '' }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $linkType) {
+        throw 'preflight_host_session_reuse_detected'
+    }
+    $directory = $item.Directory
+    while ($directory -and $directory.FullName.StartsWith($rootPrefix.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        $directoryLinkType = if ($directory.PSObject.Properties['LinkType']) { [string]$directory.LinkType } else { '' }
+        if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $directoryLinkType) {
+            throw 'preflight_host_session_reuse_detected'
+        }
+        if ($directory.FullName.TrimEnd('\') -ieq $rootPrefix.TrimEnd('\')) {
+            break
+        }
+        $directory = $directory.Parent
+    }
 }
 
 function Write-JsonFile {
@@ -834,16 +874,103 @@ function Write-ManualEvidenceTemplate {
     })
 }
 
+function Test-ExecutableBoundToInstallLocation {
+    param([string]$Executable, [string]$InstallLocation)
+    if (-not $InstallLocation -or -not (Test-Path -LiteralPath $InstallLocation -PathType Container)) {
+        return $false
+    }
+    $executablePath = [System.IO.Path]::GetFullPath($Executable)
+    $installPrefix = [System.IO.Path]::GetFullPath($InstallLocation).TrimEnd('\') + '\'
+    return $executablePath.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-DesktopInstallationMetadata {
+    param([string]$Executable)
+    if ($script:WindowsInstallMetadata) {
+        return $script:WindowsInstallMetadata.desktop
+    }
+    $packages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue)
+    $bound = @($packages | Where-Object {
+        Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$_.InstallLocation)
+    })
+    if ($bound.Count -ne 1) {
+        throw 'preflight_desktop_executable_unbound'
+    }
+    $package = $bound[0]
+    return [pscustomobject]@{
+        package_name = [string]$package.Name
+        package_version = [string]$package.Version
+        install_location = [string]$package.InstallLocation
+    }
+}
+
+function Get-ZCodeInstallationMetadata {
+    param([string]$Executable)
+    if ($script:WindowsInstallMetadata) {
+        return $script:WindowsInstallMetadata.zcode
+    }
+    $entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($root in @(
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    )) {
+        if (-not (Test-Path -LiteralPath $root)) {
+            continue
+        }
+        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+            try {
+                $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+                if ([string]$entry.DisplayName -ceq 'ZCode') {
+                    [void]$entries.Add($entry)
+                }
+            }
+            catch {
+                # Unreadable uninstall entries are not authoritative matches.
+            }
+        }
+    }
+    $bound = @($entries | Where-Object {
+        Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$_.InstallLocation)
+    })
+    if ($bound.Count -ne 1) {
+        throw 'preflight_zcode_executable_unbound'
+    }
+    $entry = $bound[0]
+    return [pscustomobject]@{
+        display_name = [string]$entry.DisplayName
+        display_version = [string]$entry.DisplayVersion
+        install_location = [string]$entry.InstallLocation
+        executable_product_version = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($Executable).ProductVersion
+    }
+}
+
 function Get-NativeClientVersion {
     param([string]$Client, [string]$Executable, [string]$Expected, [string]$ProbeRoot)
     $failureClient = $Client.Replace('-', '_')
-    $extension = [System.IO.Path]::GetExtension($Executable)
-    if ($extension -ieq '.exe' -and $Client -in @('desktop', 'zcode')) {
-        $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Executable).ProductVersion
-        if ($version -and $version.Trim() -ceq $Expected) {
-            return $Expected
+    if ($Client -ceq 'desktop') {
+        $metadata = Get-DesktopInstallationMetadata -Executable $Executable
+        if ([string]$metadata.package_name -cne 'OpenAI.Codex' -or
+            [string]$metadata.package_version -cne $Expected) {
+            throw 'preflight_desktop_version_mismatch'
         }
-        throw "preflight_${failureClient}_version_mismatch"
+        if (-not (Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$metadata.install_location))) {
+            throw 'preflight_desktop_executable_unbound'
+        }
+        return $Expected
+    }
+    if ($Client -ceq 'zcode') {
+        $metadata = Get-ZCodeInstallationMetadata -Executable $Executable
+        $productVersion = ([string]$metadata.executable_product_version).Trim()
+        if ([string]$metadata.display_name -cne 'ZCode' -or
+            [string]$metadata.display_version -cne $Expected -or
+            $productVersion -notmatch ('^' + [regex]::Escape($Expected) + '(?:\.\d+)?$')) {
+            throw 'preflight_zcode_version_mismatch'
+        }
+        if (-not (Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$metadata.install_location))) {
+            throw 'preflight_zcode_executable_unbound'
+        }
+        return $Expected
     }
     [void](New-Item -ItemType Directory -Force -Path $ProbeRoot)
     $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('--version') -CaseRoot $ProbeRoot -Environment @{
@@ -1166,13 +1293,13 @@ foreach ($directory in @($isolationRoot, $configRoot, $workRoot)) {
         throw 'preflight_isolated_directory_missing'
     }
 }
-foreach ($file in @($DebugBuild, $SnapshotManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
+foreach ($file in @($DebugBuild, $HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw 'preflight_required_file_missing'
     }
 }
 $DebugBuild = (Resolve-Path -LiteralPath $DebugBuild).Path
-$SnapshotManifest = (Resolve-Path -LiteralPath $SnapshotManifest).Path
+$HostEnvironmentManifest = (Resolve-Path -LiteralPath $HostEnvironmentManifest).Path
 $shaSidecar = "$DebugBuild.candidate-sha"
 if (-not (Test-Path -LiteralPath $shaSidecar -PathType Leaf)) {
     throw 'preflight_debug_build_sha_sidecar_missing'
@@ -1180,17 +1307,36 @@ if (-not (Test-Path -LiteralPath $shaSidecar -PathType Leaf)) {
 if ((Get-Content -LiteralPath $shaSidecar -Raw).Trim() -cne $CandidateSha) {
     throw 'preflight_debug_build_sha_mismatch'
 }
-$snapshot = Read-JsonObject -Path $SnapshotManifest -Failure 'preflight_snapshot_manifest_invalid'
-Assert-ExactJsonProperties -Value $snapshot -Names @('schema', 'snapshot', 'machine_name_sha256') -Failure 'preflight_snapshot_manifest_invalid'
-if ([string]$snapshot.schema -cne 'codexhub.real-client-vm-snapshot.v1' -or
-    [string]$snapshot.snapshot -cne 'codexhub-real-client-e2e-v1' -or
-    [string]$snapshot.machine_name_sha256 -cne (Get-TextSha256 -Text ([string]$env:COMPUTERNAME))) {
-    throw 'preflight_snapshot_identity_mismatch'
+foreach ($isolatedInput in @($HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
+    Assert-IsolatedRegularFile -Path $isolatedInput -IsolationRoot $isolationRoot
+}
+$script:WindowsInstallMetadata = $null
+if ($TestWindowsInstallMetadataFixture) {
+    if (-not (Test-Path -LiteralPath $TestWindowsInstallMetadataFixture -PathType Leaf)) {
+        throw 'preflight_windows_install_metadata_invalid'
+    }
+    $TestWindowsInstallMetadataFixture = (Resolve-Path -LiteralPath $TestWindowsInstallMetadataFixture).Path
+    Assert-IsolatedRegularFile -Path $TestWindowsInstallMetadataFixture -IsolationRoot $isolationRoot
+    $script:WindowsInstallMetadata = Read-JsonObject -Path $TestWindowsInstallMetadataFixture -Failure 'preflight_windows_install_metadata_invalid'
+    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata -Names @('schema', 'desktop', 'zcode') -Failure 'preflight_windows_install_metadata_invalid'
+    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.desktop -Names @('package_name', 'package_version', 'install_location', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
+    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.zcode -Names @('display_name', 'display_version', 'install_location', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
+    if ([string]$script:WindowsInstallMetadata.schema -cne 'codexhub.real-client-windows-install-metadata.v1') {
+        throw 'preflight_windows_install_metadata_invalid'
+    }
+}
+$hostEnvironment = Read-JsonObject -Path $HostEnvironmentManifest -Failure 'preflight_host_environment_manifest_invalid'
+Assert-ExactJsonProperties -Value $hostEnvironment -Names @('schema', 'environment', 'machine_binding_sha256') -Failure 'preflight_host_environment_manifest_invalid'
+if ([string]$hostEnvironment.schema -cne 'codexhub.real-client-host-environment.v1' -or
+    [string]$hostEnvironment.environment -cne 'codexhub-real-client-e2e' -or
+    [string]$hostEnvironment.machine_binding_sha256 -cne (Get-HostMachineBindingSha256)) {
+    throw 'preflight_host_environment_identity_mismatch'
 }
 $profile = Read-JsonObject -Path $accountPath -Failure 'preflight_account_profile_invalid'
-Assert-ExactJsonProperties -Value $profile -Names @('schema', 'dedicated_account', 'codex_login_ready', 'gui_ready') -Failure 'preflight_account_profile_invalid'
+Assert-ExactJsonProperties -Value $profile -Names @('schema', 'dedicated_account', 'codex_login_ready', 'gui_ready', 'host_session_reused') -Failure 'preflight_account_profile_invalid'
 if ([string]$profile.schema -cne 'codexhub.real-client-account.v1' -or
-    [bool]$profile.dedicated_account -ne $true -or [bool]$profile.codex_login_ready -ne $true -or [bool]$profile.gui_ready -ne $true) {
+    [bool]$profile.dedicated_account -ne $true -or [bool]$profile.codex_login_ready -ne $true -or [bool]$profile.gui_ready -ne $true -or
+    [bool]$profile.host_session_reused -ne $false) {
     throw 'preflight_account_not_ready'
 }
 $accountAuth = Read-JsonObject -Path $accountAuthPath -Failure 'preflight_codex_auth_invalid'
@@ -1224,6 +1370,14 @@ $executables = @{
     opencode = Resolve-CommandPath -Path $OpenCodePath -Name 'opencode'
     pi = Resolve-CommandPath -Path $PiPath -Name 'pi'
     omp = Resolve-CommandPath -Path $OmpPath -Name 'omp'
+}
+if ($script:WindowsInstallMetadata) {
+    $nonFixtureExecutables = @($executables.Values | Where-Object {
+        [System.IO.Path]::GetExtension([string]$_) -inotmatch '^\.(cmd|bat)$'
+    })
+    if ($nonFixtureExecutables.Count -gt 0 -or [System.IO.Path]::GetExtension($DebugBuild) -inotmatch '^\.(cmd|bat)$') {
+        throw 'preflight_windows_install_metadata_fixture_forbidden'
+    }
 }
 $actualVersions = [ordered]@{}
 foreach ($versionTarget in @(

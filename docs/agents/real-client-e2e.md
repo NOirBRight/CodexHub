@@ -4,34 +4,42 @@
 that one candidate Debug build routes six pinned real clients through both
 canonical routes. HTTP/configuration preflight alone is never an E2E pass.
 
-## Pinned VM and clients
+## Pinned host environment and clients
 
-Run only in snapshot `codexhub-real-client-e2e-v1`, using its dedicated local
-Windows account, dedicated Codex login, dedicated Volc credential, and no
-mounted host homes or client configuration. The runner probes these native
-installed versions before launching the candidate or a client:
+Run on the dedicated Windows host environment `codexhub-real-client-e2e` with
+a new output root, dedicated Codex login input, dedicated Volc credential, and
+no reused host user session or client configuration. A VM or named snapshot is
+not required. The runner verifies these native installed versions before
+launching the candidate or a client:
 
 | Client | Version | Version source |
 |---|---:|---|
-| Codex Desktop | `26.715.4045.0` | executable product version |
+| Codex Desktop | `26.715.4045.0` | `OpenAI.Codex` AppX package identity and install location |
 | Codex CLI | `0.144.5` | `--version` |
-| ZCode | `3.3.6` | executable product version |
+| ZCode | `3.3.6` | Windows uninstall `DisplayVersion` and install location |
 | OpenCode | `1.18.3` | `--version` |
 | Pi | `0.80.6` | `--version` |
 | OMP | `17.0.3` | `--version` |
 
 Do not upgrade a client in place. In particular, OpenCode remains `1.18.3`;
 issue #191 owns the future stable release containing upstream fix #37770. A
-pin change requires a new named snapshot and runner review.
+pin change requires a runner and host-environment review.
 
-The provisioned snapshot manifest is machine-bound without recording the
-machine name. It has exactly this shape:
+Desktop's passed executable must reside beneath the matching `OpenAI.Codex`
+AppX `InstallLocation`. Its Chromium `ProductVersion` is not the Desktop
+version authority. ZCode's passed executable must reside beneath the matching
+authoritative `InstallLocation`; its executable build suffix, including
+`3.3.6.3198`, is accepted only when `DisplayVersion` remains exactly `3.3.6`.
+
+The host-environment manifest is bound to the Windows MachineGuid without
+recording the MachineGuid, machine name, username, account, or credential. It
+has exactly this shape:
 
 ```json
 {
-  "schema": "codexhub.real-client-vm-snapshot.v1",
-  "snapshot": "codexhub-real-client-e2e-v1",
-  "machine_name_sha256": "sha256:<hash of the VM COMPUTERNAME>"
+  "schema": "codexhub.real-client-host-environment.v1",
+  "environment": "codexhub-real-client-e2e",
+  "machine_binding_sha256": "sha256:<hash of windows-machine-guid-v1:<lowercase MachineGuid>>"
 }
 ```
 
@@ -49,7 +57,7 @@ Use a new output directory for every invocation. Before launch it contains:
       volc.json
     config/
       gateway.json
-      vm-snapshot.json
+      host-environment.json
     work/
 ```
 
@@ -60,12 +68,15 @@ Use a new output directory for every invocation. Before launch it contains:
   "schema": "codexhub.real-client-account.v1",
   "dedicated_account": true,
   "codex_login_ready": true,
-  "gui_ready": true
+  "gui_ready": true,
+  "host_session_reused": false
 }
 ```
 
-`auth.json` is the dedicated VM Codex `auth.json`; it must use `chatgpt` mode
-and contain non-empty access and refresh tokens. `volc.json` has schema
+`auth.json` is freshly materialized directly in this invocation's isolated
+root; it is never discovered or copied from the current user's Codex home. It
+must use `chatgpt` mode and contain non-empty access and refresh tokens.
+`volc.json` has schema
 `codexhub.real-client-volc.v1` and one non-empty `api_key`. `gateway.json` has
 schema `codexhub.real-client-gateway.v1`, a loopback `listen_port`, and a
 dedicated `gateway_client_key`. These secret-bearing inputs remain under
@@ -73,7 +84,7 @@ dedicated `gateway_client_key`. These secret-bearing inputs remain under
 
 Build the Debug executable from the exact candidate SHA and create
 `<DebugBuild>.candidate-sha` containing only that lowercase SHA. Pass the
-machine-bound snapshot manifest with `-SnapshotManifest`. A new SHA invalidates
+machine-bound host manifest with `-HostEnvironmentManifest`. A new SHA invalidates
 the build sidecar, run binding, automated evidence, GUI evidence, review, and
 Actions result.
 
@@ -106,7 +117,8 @@ Every child receives a cleared environment with case-local `HOME`,
 `TEMP`, and `TMP`. The candidate receives the production-consumed
 `CODEXHUB_RUNTIME_HOME`, `CODEXHUB_CODEX_TARGET_HOME`, Gateway key, and Volc
 environment values. The runner never discovers, copies, or modifies host
-shared sessions.
+shared sessions. Isolated inputs must be regular files under the invocation's
+`isolated/` root; reparse points and hard links fail as host-session reuse.
 
 ## Matrix and measurement
 
@@ -172,7 +184,7 @@ isolated candidate, launches Codex Desktop and ZCode, and waits up to
 that exits before finalization fails immediately.
 
 The template uses schema `codexhub.real-client-manual-evidence.v2` and contains
-the candidate SHA plus a random `run_binding_sha256`. At the VM console, the
+the candidate SHA plus a random `run_binding_sha256`. At the host console, the
 human confirms the dedicated login and GUI, performs both model cases in each
 launched GUI, verifies the same tool/sentinel/Gateway diagnostics, then copies
 the template to `manual-evidence.json` and changes only the observed fields:
@@ -213,11 +225,15 @@ absolute path, or request/session/task identifier.
 
 ## Operator workflow
 
-1. Restore `codexhub-real-client-e2e-v1`; use only its dedicated local account.
-2. Verify the provisioned snapshot manifest and dedicated Codex/Volc inputs.
+1. Use the dedicated `codexhub-real-client-e2e` Windows host environment. Do
+   not open, inspect, copy, or modify any current user's Codex, ZCode,
+   OpenCode, Pi, OMP, or provider session/configuration.
+2. Create a fresh output root and directly materialize its machine-bound host
+   manifest and dedicated Codex/Volc inputs. Do not use links or copy an
+   existing host session.
 3. Check out the candidate, build Debug, and write its SHA sidecar.
 4. Create the isolated input layout above. Do not create manual evidence yet.
-5. From the VM console, start the blocking runner:
+5. From the host console, start the blocking runner:
 
 ```powershell
 powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
@@ -226,7 +242,7 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -LunaModel codexhub-openai/gpt-5.6-luna `
   -VolcModel codexhub-volc/glm-5.2 `
   -OutputDirectory <path> `
-  -SnapshotManifest <path-to-vm-snapshot.json>
+  -HostEnvironmentManifest <path-to-host-environment.json>
 ```
 
 6. Wait for the template and both launched GUIs. Complete and finalize the four
@@ -256,8 +272,8 @@ one sanitized artifact per case and uses `failure_classification` `none` or
 The success-summary top-level schema is exactly `schema`, `candidate_sha`,
 `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
 `pinned_versions`, `canonical_models`, `counts`, `cases`, and `artifacts`.
-Its `hashes` object contains exactly `debug_build`; fingerprints of the VM
-snapshot, account profile/auth, Volc credential, Gateway configuration, and
+Its `hashes` object contains exactly `debug_build`; fingerprints of the host
+manifest, account profile/auth, Volc credential, Gateway configuration, and
 manual evidence are forbidden. Failure summaries omit `run_binding_sha256`
 and `hashes`. Summary/per-case content is otherwise limited to verified pins,
 canonical model IDs, bounded timings and counts, classifications, outcomes,
