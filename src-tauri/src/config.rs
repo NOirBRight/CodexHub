@@ -1133,6 +1133,47 @@ pub(crate) fn find_python() -> PathBuf {
     runtime_paths::find_python(resource_root.as_deref())
 }
 
+/// Populate the isolated `repo` directory of `paths` with the production
+/// Codex overlay resources so `apply_codex_config_isolated` can invoke the
+/// real `config_overlay.py` (and its `src-python` siblings) without host
+/// discovery. Only the files the overlay actually imports are copied:
+/// `src-python/*.py` and the bundled `config/providers.toml` referenced by
+/// `providers_config.DEFAULT_PROVIDERS_PATH`. This mirrors the existing
+/// `copy_python_sources_to_temp_repo` test helper but is production-safe and
+/// confined to the isolated root.
+pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<(), String> {
+    let production_root = runtime_paths::resource_root()?;
+    let isolated_repo = &paths.repo_root;
+    let src_python_target = isolated_repo.join("src-python");
+    fs::create_dir_all(&src_python_target)
+        .map_err(|error| format!("failed to create isolated src-python: {error}"))?;
+    let src_python_source = production_root.join("src-python");
+    if src_python_source.is_dir() {
+        for entry in fs::read_dir(&src_python_source).map_err(|error| {
+            format!("failed to read production src-python: {error}")
+        })? {
+            let entry = entry.map_err(|error| format!("failed to read src-python entry: {error}"))?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("py") {
+                let name = path.file_name().ok_or_else(|| "src-python entry has no file name".to_string())?;
+                fs::copy(&path, src_python_target.join(name)).map_err(|error| {
+                    format!("failed to copy production src-python module {}: {error}", path.display())
+                })?;
+            }
+        }
+    }
+    let config_target = isolated_repo.join("config");
+    fs::create_dir_all(&config_target)
+        .map_err(|error| format!("failed to create isolated config dir: {error}"))?;
+    let bundled_providers_source = production_root.join("config").join("providers.toml");
+    if bundled_providers_source.is_file() {
+        fs::copy(&bundled_providers_source, paths.bundled_providers_path()).map_err(|error| {
+            format!("failed to copy production providers.toml: {error}")
+        })?;
+    }
+    Ok(())
+}
+
 /// Load settings from a caller-supplied isolated `ConfigPaths`. Used by the
 /// headless managed-client CLI to avoid any current-user discovery.
 pub(crate) fn get_settings_from_paths(paths: &ConfigPaths) -> Result<Settings, String> {
@@ -1156,6 +1197,7 @@ pub struct IsolatedCodexPreview {
     pub client_id: String,
     pub selector: String,
     pub model: String,
+    pub route_protocol: String,
     pub target_names: Vec<String>,
     pub overlay_args_relative: Vec<String>,
 }
@@ -1166,7 +1208,16 @@ pub struct IsolatedCodexReadback {
     pub ok: bool,
     pub selector: String,
     pub model: String,
+    pub route_protocol: String,
 }
+
+/// The Codex overlay (`config_overlay.py`) always binds the proxy provider
+/// to `model_provider = "custom"` with `wire_api = "responses"`, routing
+/// through the CodexHub Gateway. This is the real, production-anchored route
+/// protocol for Codex — it is not derived from the caller-supplied
+/// `--model` and it is not a placeholder.
+const CODEX_OVERLAY_ROUTE_PROTOCOL: &str = "responses";
+const CODEX_OVERLAY_PROVIDER_ID: &str = "custom";
 
 pub(crate) fn preview_codex_config_isolated(
     paths: &ConfigPaths,
@@ -1187,8 +1238,9 @@ pub(crate) fn preview_codex_config_isolated(
     let overlay_args_relative = build_codex_overlay_args_relative(paths, mode, model);
     Ok(IsolatedCodexPreview {
         client_id: "codex".to_string(),
-        selector: format!("codex/{model}"),
+        selector: format!("{CODEX_OVERLAY_PROVIDER_ID}/{model}"),
         model: model.to_string(),
+        route_protocol: CODEX_OVERLAY_ROUTE_PROTOCOL.to_string(),
         target_names,
         overlay_args_relative,
     })
@@ -1241,12 +1293,93 @@ pub(crate) fn readback_codex_config_isolated(
             current_owner, owner
         ));
     }
+    // F4: verify the real provider/route binding the overlay writes. The
+    // overlay always binds `model_provider = "custom"` with
+    // `wire_api = "responses"`; an absent or mismatched provider means the
+    // config was not produced by this app's overlay (e.g. a hand-edited or
+    // stale file), so fail closed instead of reporting a fabricated route.
+    let provider = top_level_toml_value(&text, "model_provider");
+    if provider.as_deref() != Some(CODEX_OVERLAY_PROVIDER_ID) {
+        return Err(format!(
+            "readback failed: Codex config model_provider is {:?}; expected {:?}",
+            provider,
+            CODEX_OVERLAY_PROVIDER_ID
+        ));
+    }
+    let wire_api = section_toml_value(&text, &format!("model_providers.{CODEX_OVERLAY_PROVIDER_ID}"), "wire_api");
+    if wire_api.as_deref() != Some(CODEX_OVERLAY_ROUTE_PROTOCOL) {
+        return Err(format!(
+            "readback failed: Codex config custom wire_api is {:?}; expected {:?}",
+            wire_api,
+            CODEX_OVERLAY_ROUTE_PROTOCOL
+        ));
+    }
     Ok(IsolatedCodexReadback {
         client_id: "codex".to_string(),
         ok: true,
-        selector: format!("codex/{model}"),
+        selector: format!("{CODEX_OVERLAY_PROVIDER_ID}/{model}"),
         model: model.to_string(),
+        route_protocol: CODEX_OVERLAY_ROUTE_PROTOCOL.to_string(),
     })
+}
+
+/// Read a top-level `key = "value"` (TOML basic or literal string) from a
+/// config text. Used by the Codex readback verifier to confirm the overlay's
+/// `model_provider` binding without pulling in a full TOML parser dependency.
+fn top_level_toml_value(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        return parse_toml_string_value(rest.trim());
+    }
+    None
+}
+
+/// Read a `[section]` `key = "value"` from a config text. Scans only after the
+/// last `[section]` header that matches, so later re-declarations win like TOML.
+fn section_toml_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let header = format!("[{section}]");
+    let mut in_section = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed == header;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        return parse_toml_string_value(rest.trim());
+    }
+    None
+}
+
+fn parse_toml_string_value(value: &str) -> Option<String> {
+    let value = value.split('#').next().unwrap_or(value).trim();
+    if let Some(rest) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        Some(rest.replace("\\\"", "\"").replace("\\\\", "\\"))
+    } else {
+        value
+            .strip_prefix('\'')
+            .and_then(|v| v.strip_suffix('\''))
+            .map(|rest| rest.replace("''", "'"))
+    }
 }
 
 fn build_codex_overlay_args_relative(paths: &ConfigPaths, mode: &str, _model: &str) -> Vec<String> {
@@ -2762,8 +2895,8 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
 
     mod isolated_codex_managed_config {
         use super::super::{
-            apply_codex_config_isolated, preview_codex_config_isolated,
-            readback_codex_config_isolated,
+            apply_codex_config_isolated, populate_isolated_repo_resources,
+            preview_codex_config_isolated, readback_codex_config_isolated,
         };
         use super::{
             assert_arg_literal, assert_arg_value, assert_contains_sequence, save_settings_with_paths,
@@ -2806,6 +2939,24 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             )
         }
 
+        /// A config.toml that mirrors the production overlay output: the
+        /// `# owner = release|beta` marker, `model_provider = "custom"`, and
+        /// `[model_providers.custom]` with `wire_api = "responses"`. Used by
+        /// readback tests that need a fully-bound, overlay-produced file.
+        fn overlay_managed_config(owner: &str, model: &str) -> String {
+            format!(
+                "# owner = {owner}\n\
+                 model = \"{model}\"\n\
+                 model_provider = \"custom\"\n\
+                 openai_base_url = \"http://127.0.0.1:9099/v1\"\n\
+                 [model_providers.custom]\n\
+                 name = \"Codex Proxy\"\n\
+                 requires_openai_auth = true\n\
+                 supports_websockets = true\n\
+                 wire_api = \"responses\"\n",
+            )
+        }
+
         #[test]
         fn codex_preview_under_isolated_root_reports_relative_target_and_no_secret() {
             let root = temp_root("codex-preview-isolated");
@@ -2813,6 +2964,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             let preview = preview_codex_config_isolated(&paths, "custom", "gpt-5.6-luna").unwrap();
 
             assert_eq!(preview.client_id, "codex");
+            // F4: the Codex preview now reports the real overlay provider/route
+            // binding (model_provider = "custom", wire_api = "responses").
+            assert_eq!(preview.selector, "custom/gpt-5.6-luna");
+            assert_eq!(preview.model, "gpt-5.6-luna");
+            assert_eq!(preview.route_protocol, "responses");
             assert!(preview.target_names.iter().all(|name| {
                 !name.contains(':') && !name.starts_with('/') && !name.starts_with('\\')
             }));
@@ -2859,6 +3015,47 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             assert!(paths.generated_catalog_path().starts_with(&root));
         }
 
+        // F3: the isolated Codex apply path must populate the isolated repo
+        // with the real production overlay resources (src-python modules and
+        // the bundled providers.toml) so `config_overlay.py` and its sibling
+        // imports resolve without host discovery. The apply step invokes the
+        // production Python overlay by absolute script path; without this
+        // population the script and its imports would not exist under the
+        // isolated root.
+        #[test]
+        fn populate_isolated_repo_resources_copies_production_overlay_modules() {
+            let root = temp_root("codex-populate-repo");
+            let paths = isolated_paths(&root);
+            populate_isolated_repo_resources(&paths).unwrap();
+
+            // The overlay script itself must exist under the isolated repo.
+            let overlay = paths.config_overlay_script();
+            assert!(
+                overlay.is_file(),
+                "config_overlay.py must be copied to isolated repo: {}",
+                overlay.display()
+            );
+            // The sibling modules the overlay imports must also be present.
+            for module in ["atomic_io.py", "model_limits.py"] {
+                let module_path = paths.repo_root.join("src-python").join(module);
+                assert!(
+                    module_path.is_file(),
+                    "overlay sibling module {module} must be copied: {}",
+                    module_path.display()
+                );
+            }
+            // The bundled providers.toml referenced by providers_config must
+            // exist beneath the isolated repo so no host config/ discovery
+            // leaks into the isolated apply path.
+            assert!(
+                paths.bundled_providers_path().is_file(),
+                "bundled providers.toml must be copied to isolated repo"
+            );
+            // Everything copied stays beneath the isolated root.
+            assert!(overlay.starts_with(&root));
+            assert!(paths.bundled_providers_path().starts_with(&root));
+        }
+
         #[test]
         fn codex_readback_under_isolated_root_verifies_overlay_owner_marker() {
             let root = temp_root("codex-readback-isolated");
@@ -2871,15 +3068,23 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
                 "unexpected error: {error}"
             );
 
-            // Write a config.toml with the release owner marker matching the current app owner.
+            // Write a fully-bound overlay-produced config.toml; readback must
+            // confirm owner, model_provider, and wire_api all match.
+            let owner_marker = match crate::app_flavor::current().routing_owner() {
+                crate::app_flavor::RoutingOwner::Beta => "beta",
+                _ => "release",
+            };
             fs::write(
                 paths.codex_config_path(),
-                "# owner = release\nmodel = \"gpt-5.6-luna\"\n",
+                overlay_managed_config(owner_marker, "gpt-5.6-luna"),
             )
             .unwrap();
             let readback = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap();
             assert_eq!(readback.client_id, "codex");
             assert!(readback.ok);
+            // F4: readback surfaces the real overlay route binding.
+            assert_eq!(readback.selector, "custom/gpt-5.6-luna");
+            assert_eq!(readback.route_protocol, "responses");
         }
 
         #[test]
@@ -2889,10 +3094,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
             // The current app flavor is Stable (RoutingOwner::Release); a beta
             // owner marker is a stale, cross-channel owner that readback must
-            // reject without mutating the file.
+            // reject without mutating the file. The provider binding is
+            // production-shaped so the failure is owner-only, not provider.
             fs::write(
                 paths.codex_config_path(),
-                "# owner = beta\nmodel = \"gpt-5.6-luna\"\n",
+                overlay_managed_config("beta", "gpt-5.6-luna"),
             )
             .unwrap();
             let error = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap_err();
@@ -2903,7 +3109,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             // Readback must fail closed without altering the file.
             assert_eq!(
                 fs::read_to_string(paths.codex_config_path()).unwrap(),
-                "# owner = beta\nmodel = \"gpt-5.6-luna\"\n",
+                overlay_managed_config("beta", "gpt-5.6-luna"),
             );
         }
 
@@ -2913,7 +3119,9 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             let paths = isolated_paths(&root);
             fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
             // A config.toml with no `# owner = ...` marker was not produced
-            // by this app's overlay; readback must fail closed.
+            // by this app's overlay; readback must fail closed. (The provider
+            // here is intentionally "openai", not "custom", so a future
+            // relaxation of the owner check would still fail on provider.)
             fs::write(
                 paths.codex_config_path(),
                 "model = \"gpt-5.6-luna\"\nmodel_provider = \"openai\"\n",
@@ -2927,6 +3135,60 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             assert_eq!(
                 fs::read_to_string(paths.codex_config_path()).unwrap(),
                 "model = \"gpt-5.6-luna\"\nmodel_provider = \"openai\"\n",
+            );
+        }
+
+        #[test]
+        fn codex_readback_fails_closed_when_provider_binding_is_absent() {
+            let root = temp_root("codex-readback-no-provider");
+            let paths = isolated_paths(&root);
+            fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+            // Owner marker is valid but model_provider is missing — this was
+            // not produced by the overlay; readback must fail closed.
+            let owner_marker = match crate::app_flavor::current().routing_owner() {
+                crate::app_flavor::RoutingOwner::Beta => "beta",
+                _ => "release",
+            };
+            fs::write(
+                paths.codex_config_path(),
+                format!("# owner = {owner_marker}\nmodel = \"gpt-5.6-luna\"\n"),
+            )
+            .unwrap();
+            let error = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap_err();
+            assert!(
+                error.contains("model_provider") || error.contains("provider"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn codex_readback_fails_closed_when_wire_api_is_not_responses() {
+            let root = temp_root("codex-readback-wrong-wire-api");
+            let paths = isolated_paths(&root);
+            fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+            // Owner + provider are valid but wire_api is "chat_completions"
+            // — the overlay always writes "responses", so this is a stale or
+            // hand-edited config; readback must fail closed.
+            let owner_marker = match crate::app_flavor::current().routing_owner() {
+                crate::app_flavor::RoutingOwner::Beta => "beta",
+                _ => "release",
+            };
+            fs::write(
+                paths.codex_config_path(),
+                format!(
+                    "# owner = {owner_marker}\n\
+                     model = \"gpt-5.6-luna\"\n\
+                     model_provider = \"custom\"\n\
+                     [model_providers.custom]\n\
+                     name = \"Codex Proxy\"\n\
+                     wire_api = \"chat_completions\"\n",
+                ),
+            )
+            .unwrap();
+            let error = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap_err();
+            assert!(
+                error.contains("wire_api") || error.contains("responses"),
+                "unexpected error: {error}"
             );
         }
     }

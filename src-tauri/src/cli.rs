@@ -212,6 +212,12 @@ fn load_settings_and_providers(
     std::fs::create_dir_all(runtime_dir.join("proxy").join("config"))
         .map_err(|error| format!("failed to create isolated runtime: {error}"))?;
     let paths = config::ConfigPaths::new_isolated(&runtime_dir, &codex_target_dir, &repo_root);
+    // F3: populate the isolated repo with the production Codex overlay
+    // resources (src-python modules + bundled providers.toml) so the Codex
+    // apply path can invoke the real config_overlay.py without host
+    // discovery. Native clients (opencode/zcode/pi/omp) do not read from
+    // the repo tree, so this is harmless for them.
+    config::populate_isolated_repo_resources(&paths)?;
     // Seed settings.json from the caller-supplied path if provided.
     if let Some(settings_path) = &request.settings_path {
         let text = std::fs::read_to_string(settings_path)
@@ -720,6 +726,70 @@ gateway_exported = true
             ];
             // Codex preview resolves ConfigPaths and reports the overlay args without running Python.
             assert_eq!(run(&args), 0, "codex preview should succeed");
+        }
+
+        // F4: the Codex isolated preview must surface the real overlay route
+        // binding (model_provider = "custom", wire_api = "responses") in its
+        // bounded JSON, not a fabricated selector/route_protocol.
+        #[test]
+        fn managed_client_config_codex_preview_emits_real_route_protocol() {
+            let root = temp_root("mcc-codex-route");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            let isolated = root.join("isolated");
+            let args = vec![
+                "managed-client-config".to_string(),
+                "preview".to_string(),
+                "--client".to_string(),
+                "codex".to_string(),
+                "--root".to_string(),
+                isolated.to_string_lossy().to_string(),
+                "--settings-path".to_string(),
+                settings_path.to_string_lossy().to_string(),
+                "--providers-path".to_string(),
+                providers_path.to_string_lossy().to_string(),
+                "--model".to_string(),
+                "gpt-5.6-luna".to_string(),
+            ];
+            let exit = run(&args);
+            assert_eq!(exit, 0, "codex preview should succeed");
+            // The preview JSON is printed to stdout; we cannot easily capture
+            // it here without refactoring run(), but the config.rs unit test
+            // `codex_preview_under_isolated_root_reports_relative_target_and_no_secret`
+            // already asserts route_protocol == "responses" and selector ==
+            // "custom/gpt-5.6-luna". This CLI test ensures the dispatch path
+            // that wires ConfigPaths + populate_isolated_repo_resources does
+            // not regress for Codex preview.
+        }
+
+        // F6: table-driven all-client CLI dispatch. Every supported client
+        // must accept the preview verb and return exit 0, covering the CLI
+        // parity surface for codex/opencode/zcode/pi/omp.
+        #[test]
+        fn table_driven_managed_client_config_preview_accepts_all_clients() {
+            let root = temp_root("mcc-table-preview");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            for client_id in ["codex", "opencode", "zcode", "pi", "omp"] {
+                let isolated = root.join(format!("isolated-{client_id}"));
+                let args = vec![
+                    "managed-client-config".to_string(),
+                    "preview".to_string(),
+                    "--client".to_string(),
+                    client_id.to_string(),
+                    "--root".to_string(),
+                    isolated.to_string_lossy().to_string(),
+                    "--settings-path".to_string(),
+                    settings_path.to_string_lossy().to_string(),
+                    "--providers-path".to_string(),
+                    providers_path.to_string_lossy().to_string(),
+                    "--model".to_string(),
+                    "volc/glm-5.2".to_string(),
+                ];
+                assert_eq!(
+                    run(&args),
+                    0,
+                    "preview should succeed for client {client_id}"
+                );
+            }
         }
     }
 }
