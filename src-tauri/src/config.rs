@@ -158,12 +158,19 @@ impl ConfigPaths {
         self.repo_root.join("config").join("providers.toml")
     }
 
-    fn settings_path(&self) -> PathBuf {
-        self.proxy_dir().join("settings.json")
-    }
-
     pub(crate) fn codex_config_path(&self) -> PathBuf {
         self.codex_target_dir.join("config.toml")
+    }
+
+    /// CLI accessor for the isolated runtime providers path. Used by the
+    /// headless managed-client CLI to seed caller-supplied providers beneath
+    /// the isolated root without host discovery.
+    pub(crate) fn runtime_providers_path_for_cli(&self) -> PathBuf {
+        self.runtime_providers_path()
+    }
+
+    pub(crate) fn settings_path(&self) -> PathBuf {
+        self.proxy_dir().join("settings.json")
     }
 
     pub(crate) fn config_backup_path(&self) -> PathBuf {
@@ -1124,6 +1131,156 @@ fn quote_command_part(part: OsString) -> String {
 pub(crate) fn find_python() -> PathBuf {
     let resource_root = runtime_paths::resource_root().ok();
     runtime_paths::find_python(resource_root.as_deref())
+}
+
+/// Load settings from a caller-supplied isolated `ConfigPaths`. Used by the
+/// headless managed-client CLI to avoid any current-user discovery.
+pub(crate) fn get_settings_from_paths(paths: &ConfigPaths) -> Result<Settings, String> {
+    get_settings_with_paths(paths)
+}
+
+/// Load providers from a caller-supplied isolated `ConfigPaths`.
+pub(crate) fn get_providers_from_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
+    get_providers_with_paths(paths)
+}
+
+// ----- Isolated Codex managed-client seam -----
+//
+// The CLI's Codex preview/apply/readback path constructs an isolated `ConfigPaths`
+// and delegates to the existing production `switch_mode_with_paths_takeover_as_owner`
+// + Python `config_overlay.py` serializer. This never ports the Codex TOML
+// generator into Rust; it only wires an isolated root into the existing path.
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IsolatedCodexPreview {
+    pub client_id: String,
+    pub selector: String,
+    pub model: String,
+    pub target_names: Vec<String>,
+    pub overlay_args_relative: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IsolatedCodexReadback {
+    pub client_id: String,
+    pub ok: bool,
+    pub selector: String,
+    pub model: String,
+}
+
+pub(crate) fn preview_codex_config_isolated(
+    paths: &ConfigPaths,
+    mode: &str,
+    model: &str,
+) -> Result<IsolatedCodexPreview, String> {
+    if mode != "custom" && mode != "official" {
+        return Err(format!("unsupported Codex mode: {mode}"));
+    }
+    let target = paths.codex_config_path();
+    let target_names = vec![target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml")
+        .to_string()];
+    // Build the overlay args that apply would invoke, expressed as relative
+    // tokens so the structured output never leaks absolute paths.
+    let overlay_args_relative = build_codex_overlay_args_relative(paths, mode, model);
+    Ok(IsolatedCodexPreview {
+        client_id: "codex".to_string(),
+        selector: format!("codex/{model}"),
+        model: model.to_string(),
+        target_names,
+        overlay_args_relative,
+    })
+}
+
+pub(crate) fn apply_codex_config_isolated(
+    paths: &ConfigPaths,
+    mode: &str,
+    force_takeover: bool,
+    model: &str,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<crate::AppStatus, String> {
+    let _ = model; // The overlay derives the selected model from config.toml.
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    switch_mode_with_paths_takeover_as_owner(
+        current_app_owner,
+        mode,
+        force_takeover,
+        paths,
+        python,
+        runner,
+    )
+}
+
+pub(crate) fn readback_codex_config_isolated(
+    paths: &ConfigPaths,
+    model: &str,
+) -> Result<IsolatedCodexReadback, String> {
+    let config_path = paths.codex_config_path();
+    if !config_path.exists() {
+        return Err(format!(
+            "readback failed: missing Codex config {}",
+            config_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("config.toml")
+        ));
+    }
+    let text = fs::read_to_string(&config_path)
+        .map_err(|error| format!("readback failed: cannot read Codex config: {error}"))?;
+    // Fail closed on stale or absent owner marker — the overlay always writes
+    // a `# owner = release|beta` marker. An unknown/missing owner means the
+    // config was not produced by this app's overlay.
+    let owner = codex_overlay_owner(&text);
+    let current_owner = crate::app_flavor::current().routing_owner();
+    if owner != Some(current_owner) {
+        return Err(format!(
+            "readback failed: Codex config owner is stale or absent (expected {:?}, got {:?})",
+            current_owner, owner
+        ));
+    }
+    Ok(IsolatedCodexReadback {
+        client_id: "codex".to_string(),
+        ok: true,
+        selector: format!("codex/{model}"),
+        model: model.to_string(),
+    })
+}
+
+fn build_codex_overlay_args_relative(paths: &ConfigPaths, mode: &str, _model: &str) -> Vec<String> {
+    // The structured preview reports the overlay *shape* using relative tokens
+    // so absolute paths never leak. The actual apply path resolves them
+    // through `switch_mode_with_paths_takeover_as_owner`.
+    let config_name = paths
+        .codex_config_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml")
+        .to_string();
+    let backup_name = paths
+        .config_backup_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml.release.backup")
+        .to_string();
+    let catalog_name = paths
+        .generated_catalog_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("codexhub-model-catalog.json")
+        .to_string();
+    let command = if mode == "official" { "restore" } else { "apply" };
+    vec![
+        command.to_string(),
+        "--config".to_string(),
+        config_name,
+        "--backup".to_string(),
+        backup_name,
+        "--catalog".to_string(),
+        catalog_name,
+    ]
 }
 
 #[cfg(test)]
@@ -2601,5 +2758,128 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             .unwrap_or_else(|| panic!("missing argument {name:?} in {args:?}"));
         args.get(index + 1)
             .unwrap_or_else(|| panic!("missing value for {name:?} in {args:?}"))
+    }
+
+    mod isolated_codex_managed_config {
+        use super::super::{
+            apply_codex_config_isolated, preview_codex_config_isolated,
+            readback_codex_config_isolated,
+        };
+        use super::{
+            assert_arg_literal, assert_arg_value, assert_contains_sequence, save_settings_with_paths,
+            temp_root, CommandOutcome, CommandRunner, ConfigPaths, RecordedCommand, Settings,
+        };
+        use std::cell::RefCell;
+        use std::fs;
+        use std::path::Path;
+
+        struct RecordingRunner {
+            commands: RefCell<Vec<RecordedCommand>>,
+        }
+
+        impl RecordingRunner {
+            fn successful() -> Self {
+                Self {
+                    commands: RefCell::new(Vec::new()),
+                }
+            }
+        }
+
+        impl CommandRunner for RecordingRunner {
+            fn run(&self, _program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
+                self.commands.borrow_mut().push(RecordedCommand {
+                    args: args.to_vec(),
+                });
+                Ok(CommandOutcome {
+                    code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        fn isolated_paths(root: &Path) -> ConfigPaths {
+            ConfigPaths::new_isolated(
+                root.join("runtime"),
+                root.join("codex-target"),
+                root.join("repo"),
+            )
+        }
+
+        #[test]
+        fn codex_preview_under_isolated_root_reports_relative_target_and_no_secret() {
+            let root = temp_root("codex-preview-isolated");
+            let paths = isolated_paths(&root);
+            let preview = preview_codex_config_isolated(&paths, "custom", "gpt-5.6-luna").unwrap();
+
+            assert_eq!(preview.client_id, "codex");
+            assert!(preview.target_names.iter().all(|name| {
+                !name.contains(':') && !name.starts_with('/') && !name.starts_with('\\')
+            }));
+            let json = serde_json::to_string(&preview).unwrap();
+            assert!(
+                !json.contains(&root.to_string_lossy().to_string()),
+                "absolute path leaked: {json}"
+            );
+        }
+
+        #[test]
+        fn codex_apply_under_isolated_root_invokes_overlay_with_isolated_paths() {
+            let root = temp_root("codex-apply-isolated");
+            let paths = isolated_paths(&root);
+            fs::create_dir_all(paths.proxy_dir()).unwrap();
+            // Settings required by switch_mode to build base-url and gateway-key.
+            save_settings_with_paths(
+                Settings {
+                    proxy_port: 9099,
+                    gateway_client_key: "isolated-key".to_string(),
+                    ..Settings::default()
+                },
+                &paths,
+            )
+            .unwrap();
+            let runner = RecordingRunner::successful();
+
+            let result =
+                apply_codex_config_isolated(&paths, "custom", false, "gpt-5.6-luna", Path::new("python-test"), &runner)
+                    .unwrap();
+            assert_eq!(result.mode, "custom");
+
+            let commands = runner.commands.borrow();
+            assert_eq!(commands.len(), 1);
+            assert_contains_sequence(&commands[0].args, &["apply"]);
+            assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
+            assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
+            assert_arg_value(&commands[0].args, "--catalog", &paths.generated_catalog_path());
+            assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:9099");
+            assert_arg_literal(&commands[0].args, "--gateway-key", "isolated-key");
+            // All config/backup/catalog paths stay beneath the isolated root.
+            assert!(paths.codex_config_path().starts_with(&root));
+            assert!(paths.config_backup_path().starts_with(&root));
+            assert!(paths.generated_catalog_path().starts_with(&root));
+        }
+
+        #[test]
+        fn codex_readback_under_isolated_root_verifies_overlay_owner_marker() {
+            let root = temp_root("codex-readback-isolated");
+            let paths = isolated_paths(&root);
+            fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+            // No config.toml present -> readback fails closed (missing).
+            let error = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap_err();
+            assert!(
+                error.contains("missing") || error.contains("absent"),
+                "unexpected error: {error}"
+            );
+
+            // Write a config.toml with the release owner marker matching the current app owner.
+            fs::write(
+                paths.codex_config_path(),
+                "# owner = release\nmodel = \"gpt-5.6-luna\"\n",
+            )
+            .unwrap();
+            let readback = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap();
+            assert_eq!(readback.client_id, "codex");
+            assert!(readback.ok);
+        }
     }
 }

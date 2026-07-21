@@ -909,45 +909,83 @@ fn apply_gateway_client_config_locked(
         "opencode" => {
             let path = detect_opencode_config_path()
                 .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-            apply_opencode_config_with_paths(
+            let result = apply_opencode_config_with_paths(
                 &path,
                 &client_backup_root("opencode"),
                 &settings,
                 &providers,
                 &model,
-            )
+            )?;
+            if result.applied {
+                verify_apply_readback("opencode", std::slice::from_ref(&path), &settings, &providers, &model)?;
+            }
+            Ok(result)
         }
         "pi" => {
             let paths = detect_pi_config_paths();
-            apply_pi_config_with_paths(
+            let result = apply_pi_config_with_paths(
                 &paths.settings_path,
                 &paths.models_path,
                 &client_backup_root("pi"),
                 &settings,
                 &providers,
                 &model,
-            )
+            )?;
+            if result.applied {
+                verify_apply_readback(
+                    "pi",
+                    &[paths.settings_path.clone(), paths.models_path.clone()],
+                    &settings,
+                    &providers,
+                    &model,
+                )?;
+            }
+            Ok(result)
         }
         "omp" => {
             let paths = detect_omp_config_paths();
-            apply_omp_config_with_paths(
+            let result = apply_omp_config_with_paths(
                 &paths.config_path,
                 &paths.models_path,
                 &client_backup_root("omp"),
                 &settings,
                 &providers,
                 &model,
-            )
+            )?;
+            if result.applied {
+                verify_apply_readback(
+                    "omp",
+                    &[paths.config_path.clone(), paths.models_path.clone()],
+                    &settings,
+                    &providers,
+                    &model,
+                )?;
+            }
+            Ok(result)
         }
         "zcode" => {
             let targets = detect_zcode_config_targets();
-            apply_zcode_config_with_targets(
+            let result = apply_zcode_config_with_targets(
                 &targets,
                 &client_backup_root("zcode"),
                 &settings,
                 &providers,
                 &model,
-            )
+            )?;
+            if result.applied {
+                verify_apply_readback(
+                    "zcode",
+                    &[
+                        targets.catalog_path.clone(),
+                        targets.v2_config_path.clone(),
+                        targets.v2_cache_path.clone(),
+                    ],
+                    &settings,
+                    &providers,
+                    &model,
+                )?;
+            }
+            Ok(result)
         }
         _ => Ok(GatewayClientApplyResult {
             client_id,
@@ -1030,6 +1068,126 @@ fn restore_gateway_client_config_locked(
 
 fn gateway_client_config_write_lock() -> &'static Mutex<()> {
     GATEWAY_CLIENT_CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Post-apply readback verifier shared by the production GUI/Web Bridge apply
+/// entrypoints and the headless CLI. Reopens the produced files, rejects
+/// missing/partial/malformed/linked output, and asserts round-trip parity
+/// against the production serializer for the same settings/providers/model.
+///
+/// `target_paths` are the absolute host paths the apply step wrote; this
+/// verifier does not confine them to an isolated root (that confinement is the
+/// caller's responsibility — the isolated CLI path validates the root up
+/// front).
+pub fn verify_apply_readback(
+    client_id: &str,
+    target_paths: &[PathBuf],
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<(), String> {
+    for path in target_paths {
+        if !path.exists() {
+            return Err(format!(
+                "readback failed: missing output file {}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+            ));
+        }
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("readback failed: cannot stat {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "readback failed: {} is a symlink",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+            ));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(format!(
+                    "readback failed: {} is a reparse point",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+                ));
+            }
+        }
+    }
+    match client_id {
+        "opencode" => {
+            let written = fs::read_to_string(&target_paths[0])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let expected = opencode_config_text(settings, providers, model)?;
+            if written != expected {
+                return Err(
+                    "readback failed: opencode output does not round-trip production preview"
+                        .to_string(),
+                );
+            }
+        }
+        "pi" => {
+            let written_settings = fs::read_to_string(&target_paths[0])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let written_models = fs::read_to_string(&target_paths[1])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let expected_settings = pi_settings_text(&target_paths[0], settings, providers, model)?;
+            let expected_models = pi_models_text(&target_paths[1], settings, providers, model)?;
+            if written_settings != expected_settings || written_models != expected_models {
+                return Err("readback failed: pi output does not round-trip production preview".to_string());
+            }
+        }
+        "omp" => {
+            let written_config = fs::read_to_string(&target_paths[0])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let written_models = fs::read_to_string(&target_paths[1])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let selector = gateway_client_model_selector(settings, providers, model)?;
+            let vision = if gateway_exported_model_supports_image(settings, providers, model) {
+                Some(selector.as_str())
+            } else {
+                None
+            };
+            let reasoning = gateway_exported_model_default_reasoning_effort(settings, providers, model);
+            let expected_config = omp_config_text(Some(&written_config), &selector, vision, reasoning.as_deref());
+            let expected_models = omp_models_yml_text(settings, providers, model)?;
+            if written_config != expected_config || written_models != expected_models {
+                return Err("readback failed: omp output does not round-trip production preview".to_string());
+            }
+        }
+        "zcode" => {
+            let written_catalog = fs::read_to_string(&target_paths[0])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let written_config = fs::read_to_string(&target_paths[1])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let written_cache = fs::read_to_string(&target_paths[2])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            for (label, text) in [
+                ("codexhub.json", &written_catalog),
+                ("config.json", &written_config),
+                ("bots-model-cache.v2.json", &written_cache),
+            ] {
+                serde_json::from_str::<Value>(text).map_err(|error| {
+                    format!("readback failed: {label} is malformed: {error}")
+                })?;
+            }
+            let expected_catalog = zcode_catalog_text(settings, providers, model)?;
+            let expected_cache = zcode_v2_cache_text(settings, providers, model)?;
+            let expected_config = zcode_v2_config_text(&target_paths[1], settings, providers, model)?;
+            if written_catalog != expected_catalog
+                || written_config != expected_config
+                || written_cache != expected_cache
+            {
+                return Err("readback failed: zcode output does not round-trip production preview".to_string());
+            }
+        }
+        "codex" => {
+            // Codex readback is owned by config::readback_codex_config_isolated;
+            // the host apply path is the Python overlay, whose owner marker is
+            // verified there.
+        }
+        other => return Err(format!("unsupported managed client for readback: {other}")),
+    }
+    Ok(())
 }
 
 pub fn switch_gateway_client_route(
@@ -5303,6 +5461,503 @@ fn has_nonempty_payload(bytes: &[u8]) -> bool {
     })
 }
 
+// ----- Isolated managed-client configuration seam -----
+//
+// Headless, caller-supplied-root preview/apply/readback for the five managed
+// clients (codex, opencode, zcode, pi, omp). The four native clients reuse the
+// existing Rust serializers/apply functions above without duplicating them.
+// Codex is owned by `config.rs` and the Python overlay serializer; this module
+// only builds an isolated `ConfigPaths` and delegates to it.
+//
+// Guarantees:
+// - Every read and write stays beneath a fresh caller-supplied isolated root.
+// - No host discovery: settings, providers, catalog, and backups come only from
+//   caller-owned inputs beneath the root.
+// - Post-apply readback reopens the produced files, validates ownership and
+//   round-trip parity against production preview, and fails closed.
+// - Bounded JSON output: client id, selector, canonical model, route/protocol,
+//   relative target names, apply/readback status, and approved hashes only.
+
+const ISOLATED_CLIENTS: &[&str] = &["codex", "opencode", "zcode", "pi", "omp"];
+
+#[derive(Debug, Clone)]
+pub struct IsolatedClientRoot {
+    root: PathBuf,
+}
+
+impl IsolatedClientRoot {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+pub fn isolated_managed_client_ids() -> Vec<String> {
+    ISOLATED_CLIENTS.iter().map(|id| (*id).to_string()).collect()
+}
+
+pub fn validate_isolated_root(root: &Path) -> Result<IsolatedClientRoot, String> {
+    validate_isolated_root_inner(root, RequireFresh::Yes)
+}
+
+/// Validate an isolated root that already contains produced output (used by
+/// the readback verb). The root must exist, be a regular directory beneath
+/// its parent, and contain no reparse/symlink targets, but it need not be
+/// empty.
+pub fn validate_existing_isolated_root(root: &Path) -> Result<IsolatedClientRoot, String> {
+    validate_isolated_root_inner(root, RequireFresh::No)
+}
+
+#[derive(Clone, Copy)]
+enum RequireFresh {
+    Yes,
+    No,
+}
+
+fn validate_isolated_root_inner(root: &Path, fresh: RequireFresh) -> Result<IsolatedClientRoot, String> {
+    if root.as_os_str().is_empty() {
+        return Err("isolated root path is empty".to_string());
+    }
+    let canonical_parent = root
+        .parent()
+        .ok_or_else(|| "isolated root has no parent directory".to_string())?;
+    if !canonical_parent.exists() {
+        return Err(format!(
+            "isolated root parent does not exist: {}",
+            canonical_parent.display()
+        ));
+    }
+    // Reject any path component that escapes (.., absolute, or drive-relative).
+    for component in root.components() {
+        use std::path::Component;
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                return Err("isolated root must not contain relative parent-dir (..) components".to_string());
+            }
+            Component::Normal(_) => {}
+        }
+    }
+    if root.exists() {
+        let is_empty = fs::read_dir(root)
+            .map_err(|error| format!("failed to read isolated root {}: {error}", root.display()))?
+            .next()
+            .is_none();
+        if matches!(fresh, RequireFresh::Yes) && !is_empty {
+            return Err(format!(
+                "isolated root is not fresh; refusing to reuse {}: remove it first",
+                root.display()
+            ));
+        }
+        // Reject reparse points / symlinks / junctions on the existing root.
+        reject_reparse_or_link(root)?;
+    } else {
+        fs::create_dir_all(root)
+            .map_err(|error| format!("failed to create isolated root {}: {error}", root.display()))?;
+    }
+    Ok(IsolatedClientRoot {
+        root: root.to_path_buf(),
+    })
+}
+
+fn reject_reparse_or_link(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "isolated root {} is a symlink; refusing to use it",
+            path.display()
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "isolated root {} is a reparse point/junction; refusing to use it",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_path_beneath_root(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    // Canonicalize the root for an accurate prefix comparison when it exists.
+    let root_canonical = fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf());
+    let parent = candidate.parent().unwrap_or(Path::new(""));
+    let canonical_parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let resolved = canonical_parent.join(candidate.file_name().unwrap_or_default());
+    if !resolved.starts_with(&root_canonical) {
+        return Err(format!(
+            "path {} escapes isolated root {}",
+            candidate.display(),
+            root.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+#[derive(Debug, Clone)]
+pub struct IsolatedClientApplyInput {
+    pub client_id: String,
+    pub model: Option<String>,
+    pub settings: Settings,
+    pub providers: Vec<Provider>,
+    pub catalog_path: Option<PathBuf>,
+    pub backup_subdir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolatedClientPreview {
+    pub client_id: String,
+    pub selector: String,
+    pub model: String,
+    pub route_protocol: String,
+    pub target_names: Vec<String>,
+    pub next_redacted: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolatedClientApplyResult {
+    pub client_id: String,
+    pub applied: bool,
+    pub selector: String,
+    pub model: String,
+    pub route_protocol: String,
+    pub target_names: Vec<String>,
+    pub backup_dir_relative: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolatedClientReadback {
+    pub client_id: String,
+    pub ok: bool,
+    pub selector: String,
+    pub model: String,
+    pub route_protocol: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IsolatedClientApplyTargets {
+    writable_paths: Vec<PathBuf>,
+    backup_path: PathBuf,
+}
+
+impl IsolatedClientApplyTargets {
+    pub fn writable_paths(&self) -> &[PathBuf] {
+        &self.writable_paths
+    }
+    pub fn backup_path(&self) -> &Path {
+        &self.backup_path
+    }
+}
+
+pub fn isolated_client_apply_targets(
+    isolated: &IsolatedClientRoot,
+    client_id: &str,
+) -> Result<IsolatedClientApplyTargets, String> {
+    let root = isolated.root();
+    let backup_path = root.join("backups");
+    match client_id {
+        "opencode" | "pi" | "omp" | "zcode" | "codex" => {}
+        other => return Err(format!("unknown managed client id: {other}")),
+    }
+    let writable_paths = match client_id {
+        "opencode" => vec![root.join("opencode").join("opencode.json")],
+        "pi" => vec![
+            root.join("pi").join("settings.json"),
+            root.join("pi").join("models.json"),
+        ],
+        "omp" => vec![
+            root.join("omp").join("config.yml"),
+            root.join("omp").join("models.yml"),
+        ],
+        "zcode" => vec![
+            root.join("zcode").join("codexhub.json"),
+            root.join("zcode").join("config.json"),
+            root.join("zcode").join("bots-model-cache.v2.json"),
+        ],
+        "codex" => vec![root.join("codex-target").join("config.toml")],
+        _ => unreachable!(),
+    };
+    Ok(IsolatedClientApplyTargets {
+        writable_paths,
+        backup_path,
+    })
+}
+
+fn normalized_client_id(client_id: &str) -> String {
+    normalize_client_id(client_id)
+}
+
+pub fn route_protocol_for_selection(
+    provider_id: &str,
+    providers: &[Provider],
+) -> String {
+    match gateway_client_provider_endpoint_selection(provider_id, providers) {
+        GatewayClientEndpointSelection::Responses => "responses".to_string(),
+        GatewayClientEndpointSelection::ChatCompletions => "chat_completions".to_string(),
+        GatewayClientEndpointSelection::AnthropicMessages => "chat_completions".to_string(),
+    }
+}
+
+fn selector_and_route(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<(String, String, String), String> {
+    let groups = gateway_client_provider_groups(settings, providers, model)?;
+    let resolved = resolve_gateway_client_model_id(settings, providers, model)?;
+    let (provider_id, _) = split_gateway_model_id(&resolved);
+    let protocol = route_protocol_for_selection(&provider_id, providers);
+    Ok((groups.default_selector, resolved, protocol))
+}
+
+fn target_relative_names(targets: &IsolatedClientApplyTargets, root: &Path) -> Vec<String> {
+    targets
+        .writable_paths()
+        .iter()
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect()
+}
+
+pub fn isolated_client_preview(
+    isolated: &IsolatedClientRoot,
+    input: &IsolatedClientApplyInput,
+) -> Result<IsolatedClientPreview, String> {
+    let client_id = normalized_client_id(&input.client_id);
+    let root = isolated.root();
+    if let Some(catalog_path) = &input.catalog_path {
+        ensure_path_beneath_root(root, catalog_path)?;
+    }
+    let targets = isolated_client_apply_targets(isolated, &client_id)?;
+    let model = input
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let (selector, resolved_model, protocol) =
+        selector_and_route(&input.settings, &input.providers, &model)?;
+    let next_redacted = match client_id.as_str() {
+        "opencode" => {
+            sanitize_text(&opencode_config_text(&input.settings, &input.providers, &model)?)
+        }
+        "pi" => {
+            let s = pi_settings_text(&targets.writable_paths[0], &input.settings, &input.providers, &model)?;
+            let m = pi_models_text(&targets.writable_paths[1], &input.settings, &input.providers, &model)?;
+            sanitize_text(&combined_named_text(&[("settings.json", &s), ("models.json", &m)]))
+        }
+        "omp" => {
+            let selector = gateway_client_model_selector(&input.settings, &input.providers, &model)?;
+            let vision = if gateway_exported_model_supports_image(&input.settings, &input.providers, &model) {
+                Some(selector.as_str())
+            } else {
+                None
+            };
+            let reasoning =
+                gateway_exported_model_default_reasoning_effort(&input.settings, &input.providers, &model);
+            let cfg = omp_config_text(None, &selector, vision, reasoning.as_deref());
+            let models = omp_models_yml_text(&input.settings, &input.providers, &model)?;
+            sanitize_text(&combined_named_text(&[("config.yml", &cfg), ("models.yml", &models)]))
+        }
+        "zcode" => {
+            let catalog = zcode_catalog_text(&input.settings, &input.providers, &model)?;
+            let cache = zcode_v2_cache_text(&input.settings, &input.providers, &model)?;
+            let config =
+                zcode_v2_config_text(&targets.writable_paths[1], &input.settings, &input.providers, &model)?;
+            sanitize_text(&combined_named_text(&[
+                ("codexhub.json", &catalog),
+                ("config.json", &config),
+                ("bots-model-cache.v2.json", &cache),
+            ]))
+        }
+        "codex" => String::new(),
+        other => return Err(format!("unsupported managed client for preview: {other}")),
+    };
+    Ok(IsolatedClientPreview {
+        client_id,
+        selector,
+        model: resolved_model,
+        route_protocol: protocol,
+        target_names: target_relative_names(&targets, root),
+        next_redacted,
+    })
+}
+
+pub fn apply_gateway_client_config_isolated(
+    isolated: &IsolatedClientRoot,
+    input: &IsolatedClientApplyInput,
+) -> Result<IsolatedClientApplyResult, String> {
+    let client_id = normalized_client_id(&input.client_id);
+    let root = isolated.root();
+    if let Some(catalog_path) = &input.catalog_path {
+        ensure_path_beneath_root(root, catalog_path)?;
+    }
+    let targets = isolated_client_apply_targets(isolated, &client_id)?;
+    let model = input
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let (selector, resolved_model, protocol) =
+        selector_and_route(&input.settings, &input.providers, &model)?;
+    let backup_root = match &input.backup_subdir {
+        Some(subdir) => {
+            ensure_path_beneath_root(root, subdir)?;
+            root.join(subdir)
+        }
+        None => targets.backup_path().to_path_buf(),
+    };
+    fs::create_dir_all(&backup_root).map_err(|error| {
+        format!(
+            "failed to create isolated backup root {}: {error}",
+            backup_root.display()
+        )
+    })?;
+    let applied = match client_id.as_str() {
+        "opencode" => {
+            let path = &targets.writable_paths[0];
+            fs::create_dir_all(path.parent().unwrap()).map_err(|error| {
+                format!("failed to create opencode dir: {error}")
+            })?;
+            // Write a non-managed baseline so the apply path creates a backup.
+            if !path.exists() {
+                fs::write(path, r#"{"model":"anthropic/claude-sonnet-4"}"#)
+                    .map_err(|error| format!("failed to seed opencode config: {error}"))?;
+            }
+            apply_opencode_config_with_paths(
+                path,
+                &backup_root,
+                &input.settings,
+                &input.providers,
+                &model,
+            )?
+        }
+        "pi" => apply_pi_config_with_paths(
+            &targets.writable_paths[0],
+            &targets.writable_paths[1],
+            &backup_root,
+            &input.settings,
+            &input.providers,
+            &model,
+        )?,
+        "omp" => apply_omp_config_with_paths(
+            &targets.writable_paths[0],
+            &targets.writable_paths[1],
+            &backup_root,
+            &input.settings,
+            &input.providers,
+            &model,
+        )?,
+        "zcode" => {
+            let zcode_targets = zcode_targets_from_writable(&targets)?;
+            apply_zcode_config_with_targets(
+                &zcode_targets,
+                &backup_root,
+                &input.settings,
+                &input.providers,
+                &model,
+            )?
+        }
+        "codex" => {
+            return Err(
+                "codex apply must be invoked through config::apply_codex_config_isolated"
+                    .to_string(),
+            );
+        }
+        other => return Err(format!("unsupported managed client for apply: {other}")),
+    };
+    let backup_dir_relative = applied
+        .backup_path
+        .as_ref()
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"));
+    Ok(IsolatedClientApplyResult {
+        client_id,
+        applied: applied.applied,
+        selector,
+        model: resolved_model,
+        route_protocol: protocol,
+        target_names: target_relative_names(&targets, root),
+        backup_dir_relative,
+    })
+}
+
+fn zcode_targets_from_writable(targets: &IsolatedClientApplyTargets) -> Result<ZcodeConfigTargets, String> {
+    let writable = targets.writable_paths();
+    if writable.len() < 3 {
+        return Err("zcode isolated targets are missing files".to_string());
+    }
+    Ok(ZcodeConfigTargets {
+        catalog_path: writable[0].clone(),
+        v2_config_path: writable[1].clone(),
+        v2_cache_path: writable[2].clone(),
+    })
+}
+
+pub fn readback_gateway_client_config_isolated(
+    isolated: &IsolatedClientRoot,
+    input: &IsolatedClientApplyInput,
+) -> Result<IsolatedClientReadback, String> {
+    let client_id = normalized_client_id(&input.client_id);
+    let root = isolated.root();
+    if let Some(catalog_path) = &input.catalog_path {
+        ensure_path_beneath_root(root, catalog_path)?;
+    }
+    let targets = isolated_client_apply_targets(isolated, &client_id)?;
+    let model = input
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let (selector, resolved_model, protocol) =
+        selector_and_route(&input.settings, &input.providers, &model)?;
+
+    // Every expected target must exist and be a regular file beneath the root.
+    for path in targets.writable_paths() {
+        ensure_path_beneath_root(root, path)?;
+    }
+
+    match client_id.as_str() {
+        "opencode" | "pi" | "omp" | "zcode" => {
+            verify_apply_readback(
+                &client_id,
+                targets.writable_paths(),
+                &input.settings,
+                &input.providers,
+                &model,
+            )?;
+        }
+        "codex" => {
+            return Err(
+                "codex readback must be invoked through config::readback_codex_config_isolated"
+                    .to_string(),
+            );
+        }
+        other => return Err(format!("unsupported managed client for readback: {other}")),
+    }
+
+    Ok(IsolatedClientReadback {
+        client_id,
+        ok: true,
+        selector,
+        model: resolved_model,
+        route_protocol: protocol,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -9379,6 +10034,366 @@ mod tests {
         match value {
             Some(value) => std::env::set_var(name, value),
             None => std::env::remove_var(name),
+        }
+    }
+
+    mod isolated_managed_client_config {
+        use super::super::{
+            apply_gateway_client_config_isolated, isolated_client_apply_targets,
+            isolated_client_preview, isolated_managed_client_ids,
+            readback_gateway_client_config_isolated, route_protocol_for_selection,
+            validate_isolated_root, IsolatedClientApplyInput,
+        };
+        use super::{case_sensitive_client_export_test_providers, unique_temp_dir};
+        use crate::{Provider, Settings, UpstreamFormat};
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn fresh_root(label: &str) -> PathBuf {
+            unique_temp_dir(&format!("isolated-mcc-{label}"))
+        }
+
+        fn settings_with_port(port: u16) -> Settings {
+            Settings {
+                proxy_port: port,
+                gateway_client_key: "isolated-key".to_string(),
+                include_official_models: true,
+                ..Settings::default()
+            }
+        }
+
+        fn volc_provider(upstream: UpstreamFormat) -> Vec<Provider> {
+            let mut providers = case_sensitive_client_export_test_providers();
+            for provider in &mut providers {
+                if provider.id == "volc" {
+                    provider.upstream_format = Some(upstream.clone());
+                }
+            }
+            providers
+        }
+
+        fn input(client_id: &str, model: &str, settings: Settings, providers: Vec<Provider>) -> IsolatedClientApplyInput {
+            IsolatedClientApplyInput {
+                client_id: client_id.to_string(),
+                model: Some(model.to_string()),
+                settings,
+                providers,
+                catalog_path: None,
+                backup_subdir: None,
+            }
+        }
+
+        fn managed_client_ids_sorted() -> Vec<String> {
+            let mut ids = isolated_managed_client_ids();
+            ids.sort();
+            ids
+        }
+
+        #[test]
+        fn managed_client_ids_cover_all_five_supported_clients() {
+            assert_eq!(
+                managed_client_ids_sorted(),
+                vec![
+                    "codex".to_string(),
+                    "omp".to_string(),
+                    "opencode".to_string(),
+                    "pi".to_string(),
+                    "zcode".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn validate_isolated_root_rejects_non_fresh_existing_directory() {
+            let root = fresh_root("stale");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("leftover.txt"), "stale").unwrap();
+
+            let error = validate_isolated_root(&root).unwrap_err();
+            assert!(
+                error.contains("fresh") || error.contains("empty"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn validate_isolated_root_rejects_missing_parent() {
+            let root = fresh_root("missing-parent").join("nested").join("deep");
+            let error = validate_isolated_root(&root).unwrap_err();
+            assert!(error.contains("parent"), "unexpected error: {error}");
+        }
+
+        #[test]
+        fn validate_isolated_root_accepts_empty_directory_and_creates_missing() {
+            let root = fresh_root("empty");
+            assert!(!root.exists());
+
+            let isolated = validate_isolated_root(&root).unwrap();
+            assert!(root.exists());
+            assert!(root.is_dir());
+            assert_eq!(isolated.root(), root);
+        }
+
+        #[test]
+        fn validate_isolated_root_rejects_relative_path_components() {
+            let root = fresh_root("relative");
+            fs::create_dir_all(&root).unwrap();
+            let escaped = root.join("..").join("sibling");
+
+            let error = validate_isolated_root(&escaped).unwrap_err();
+            assert!(
+                error.contains("relative") || error.contains("escape"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn isolated_client_apply_targets_stay_beneath_root_for_all_four_native_clients() {
+            let root = fresh_root("targets");
+            let isolated = validate_isolated_root(&root).unwrap();
+            for client_id in ["opencode", "pi", "omp", "zcode"] {
+                let targets = isolated_client_apply_targets(&isolated, client_id).unwrap();
+                for target in targets.writable_paths() {
+                    assert!(
+                        target.starts_with(root.as_path()),
+                        "{client_id} target {target:?} escapes root {root:?}"
+                    );
+                }
+                assert!(targets.backup_path().starts_with(root.as_path()));
+            }
+        }
+
+        #[test]
+        fn isolated_client_apply_targets_reject_unknown_client() {
+            let root = fresh_root("unknown");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let error = isolated_client_apply_targets(&isolated, "generic")
+                .err()
+                .unwrap();
+            assert!(error.contains("generic") || error.contains("unknown"));
+        }
+
+        #[test]
+        fn isolated_preview_opencode_reports_volc_selector_and_relative_targets() {
+            let root = fresh_root("parity-opencode");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+            let inp = input("opencode", "volc/glm-5.2", settings, providers);
+
+            let preview = isolated_client_preview(&isolated, &inp).unwrap();
+            assert_eq!(preview.client_id, "opencode");
+            assert_eq!(preview.selector, "codexhub-volc/glm-5.2");
+            assert_eq!(preview.model, "volc/glm-5.2");
+            assert_eq!(preview.route_protocol, "responses");
+            assert!(!preview.next_redacted.contains("isolated-key"));
+            for target in &preview.target_names {
+                assert!(
+                    !target.contains(':') && !target.starts_with('/') && !target.starts_with('\\'),
+                    "absolute path leaked: {target}"
+                );
+            }
+        }
+
+        #[test]
+        fn isolated_apply_then_readback_round_trips_for_omp() {
+            let root = fresh_root("apply-omp");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::ChatCompletions);
+            let inp = input("omp", "volc/glm-5.2", settings, providers);
+
+            let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+            assert!(apply.applied);
+            assert!(!serde_json::to_string(&apply).unwrap().contains("isolated-key"));
+
+            let readback = readback_gateway_client_config_isolated(&isolated, &inp).unwrap();
+            assert!(readback.ok);
+            assert_eq!(readback.client_id, "omp");
+        }
+
+        #[test]
+        fn readback_fails_closed_when_written_file_is_missing() {
+            let root = fresh_root("readback-missing");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::ChatCompletions);
+            let inp = input("pi", "volc/glm-5.2", settings, providers);
+
+            let error = readback_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+            assert!(
+                error.contains("missing") || error.contains("absent"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn readback_fails_closed_on_partial_written_output() {
+            let root = fresh_root("readback-partial");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::ChatCompletions);
+            let inp = input("pi", "volc/glm-5.2", settings, providers);
+
+            apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+            let targets = isolated_client_apply_targets(&isolated, "pi").unwrap();
+            let models_path = targets
+                .writable_paths()
+                .iter()
+                .find(|p| p.ends_with("models.json"))
+                .unwrap();
+            fs::remove_file(models_path).unwrap();
+
+            let error = readback_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+            assert!(
+                error.contains("missing") || error.contains("partial"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn readback_fails_closed_on_non_round_tripping_output() {
+            let root = fresh_root("readback-nonroundtrip");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+            let inp = input("opencode", "volc/glm-5.2", settings, providers);
+
+            apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+            let targets = isolated_client_apply_targets(&isolated, "opencode").unwrap();
+            let config_path = targets.writable_paths()[0].clone();
+            fs::write(&config_path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+
+            let error = readback_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+            assert!(
+                error.contains("round-trip") || error.contains("contradict"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn readback_fails_closed_on_malformed_output() {
+            let root = fresh_root("readback-malformed");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+            let inp = input("zcode", "volc/glm-5.2", settings, providers);
+
+            apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+            let targets = isolated_client_apply_targets(&isolated, "zcode").unwrap();
+            let config_path = targets
+                .writable_paths()
+                .iter()
+                .find(|p| p.ends_with("codexhub.json"))
+                .unwrap();
+            fs::write(config_path, "not-json{}{").unwrap();
+
+            let error = readback_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+            assert!(
+                error.contains("malformed") || error.contains("parse"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn volc_route_format_is_selected_by_production_config_not_hardcoded() {
+            let root = fresh_root("volc-route");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+
+            let preview_responses = isolated_client_preview(
+                &isolated,
+                &input("opencode", "volc/glm-5.2", settings.clone(), volc_provider(UpstreamFormat::Responses)),
+            )
+            .unwrap();
+            assert_eq!(preview_responses.route_protocol, "responses");
+
+            let preview_chat = isolated_client_preview(
+                &isolated,
+                &input("opencode", "volc/glm-5.2", settings, volc_provider(UpstreamFormat::ChatCompletions)),
+            )
+            .unwrap();
+            assert_eq!(preview_chat.route_protocol, "chat_completions");
+        }
+
+        #[test]
+        fn official_luna_selector_uses_responses_route() {
+            let root = fresh_root("luna");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = case_sensitive_client_export_test_providers();
+            let preview = isolated_client_preview(
+                &isolated,
+                &input("opencode", "gpt-5.6-luna", settings, providers),
+            )
+            .unwrap();
+            assert_eq!(preview.route_protocol, "responses");
+            assert!(preview.selector.starts_with("codexhub-openai/"));
+        }
+
+        #[test]
+        fn structured_apply_output_never_emits_secrets_or_absolute_paths() {
+            let root = fresh_root("secrets");
+            let isolated = validate_isolated_root(&root).unwrap();
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+            let inp = input("zcode", "volc/glm-5.2", settings, providers);
+
+            let result = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+            let json = serde_json::to_string(&result).unwrap();
+            assert!(!json.contains("isolated-key"), "secret leaked: {json}");
+            assert!(
+                !json.contains(&root.to_string_lossy().to_string()),
+                "absolute path leaked: {json}"
+            );
+            assert!(json.contains("zcode"));
+        }
+
+        #[test]
+        fn route_protocol_for_selection_reports_responses_or_chat_by_provider_config() {
+            let providers_chat = volc_provider(UpstreamFormat::ChatCompletions);
+            assert_eq!(
+                route_protocol_for_selection("volc", &providers_chat),
+                "chat_completions"
+            );
+
+            let providers_responses = volc_provider(UpstreamFormat::Responses);
+            assert_eq!(
+                route_protocol_for_selection("volc", &providers_responses),
+                "responses"
+            );
+
+            let providers_openai = case_sensitive_client_export_test_providers();
+            assert_eq!(
+                route_protocol_for_selection("openai", &providers_openai),
+                "responses"
+            );
+        }
+
+        #[test]
+        fn verify_apply_readback_fails_closed_for_each_failure_class() {
+            use super::super::verify_apply_readback;
+            let root = fresh_root("verify-readback");
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+
+            // Missing file.
+            let missing = root.join("opencode").join("opencode.json");
+            let err = verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2")
+                .unwrap_err();
+            assert!(err.contains("missing"), "{err}");
+
+            // Malformed + non-round-tripping: write a non-managed config.
+            fs::create_dir_all(missing.parent().unwrap()).unwrap();
+            fs::write(&missing, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+            let err = verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2")
+                .unwrap_err();
+            assert!(err.contains("round-trip"), "{err}");
+
+            // Correct production output round-trips.
+            let expected = super::super::opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+            fs::write(&missing, &expected).unwrap();
+            verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2").unwrap();
         }
     }
 }
