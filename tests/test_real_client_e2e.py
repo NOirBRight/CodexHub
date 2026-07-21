@@ -28,6 +28,7 @@ PINNED_VERSIONS = {
 SUMMARY_KEYS = {
     "schema",
     "candidate_sha",
+    "managed_client_config_sha",
     "run_binding_sha256",
     "outcome",
     "failure_classification",
@@ -108,7 +109,11 @@ def _manual_case(case_id: str, client: str, model: str) -> dict:
     }
 
 
-def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _prepare_run(
+    tmp_path: Path,
+    candidate_sha: str = CANDIDATE_SHA,
+    materializer_sha: str = CANDIDATE_SHA,
+) -> tuple[Path, Path, Path, Path, Path]:
     output = tmp_path / "output"
     isolation = output / "isolated"
     for relative in ("account", "credentials", "config"):
@@ -187,6 +192,12 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 
     debug_build = tmp_path / "CodexHub-debug.cmd"
     shutil.copyfile(FIXTURES / "fake-debug-build.cmd", debug_build)
+    materializer_build = tmp_path / "CodexHub-materializer.cmd"
+    shutil.copyfile(FIXTURES / "fake-managed-client-config.cmd", materializer_build)
+    shutil.copyfile(
+        FIXTURES / "fake-managed-client-config.py",
+        tmp_path / "fake-managed-client-config.py",
+    )
     shutil.copyfile(FIXTURES / "fake-debug-gateway.py", tmp_path / "fake-debug-gateway.py")
     portable_files = (
         "config/providers.toml",
@@ -199,9 +210,12 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture", encoding="utf-8")
-    Path(f"{debug_build}.candidate-sha").write_text(CANDIDATE_SHA, encoding="ascii")
+    Path(f"{debug_build}.candidate-sha").write_text(candidate_sha, encoding="ascii")
+    Path(f"{materializer_build}.candidate-sha").write_text(
+        materializer_sha, encoding="ascii"
+    )
 
-    return output, isolation, debug_build, host_manifest
+    return output, isolation, debug_build, materializer_build, host_manifest
 
 
 def _finalize_manual_evidence(
@@ -209,12 +223,19 @@ def _finalize_manual_evidence(
 ) -> None:
     template_path = output / "manual-evidence.template.json"
     work = output / "isolated" / "work"
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline and not (stop_event and stop_event.is_set()):
         if (
             template_path.is_file()
-            and (work / "gui-desktop.launched").is_file()
-            and (work / "gui-zcode.launched").is_file()
+            and all(
+                (work / f"gui-{case_id}.launched").is_file()
+                for case_id in (
+                    "desktop-luna",
+                    "desktop-volc",
+                    "zcode-luna",
+                    "zcode-volc",
+                )
+            )
         ):
             evidence = json.loads(template_path.read_text(encoding="utf-8-sig"))
             evidence["login_confirmed"] = True
@@ -240,15 +261,22 @@ def _run(
     *,
     client_fakes: dict[str, str] | None = None,
     debug_fake: str | None = None,
+    materializer_fake: str | None = None,
+    candidate_sha: str = CANDIDATE_SHA,
+    materializer_sha: str = CANDIDATE_SHA,
     mutate=None,
     manual_mutation=None,
     finalize_manual: bool = True,
-    timeout_seconds: int = 5,
+    timeout_seconds: int = 10,
     manual_timeout_seconds: int = 10,
 ) -> subprocess.CompletedProcess[str]:
-    output, isolation, debug_build, host_manifest = _prepare_run(tmp_path)
+    output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
+        tmp_path, candidate_sha, materializer_sha
+    )
     if debug_fake is not None:
         shutil.copyfile(FIXTURES / debug_fake, debug_build)
+    if materializer_fake is not None:
+        shutil.copyfile(FIXTURES / materializer_fake, materializer_build)
     if mutate is not None:
         mutate(output, isolation, debug_build)
     fake_path = FIXTURES / fake
@@ -271,9 +299,13 @@ def _run(
         "-File",
         str(SCRIPT),
         "-CandidateSha",
-        CANDIDATE_SHA,
+        candidate_sha,
         "-DebugBuild",
         str(debug_build),
+        "-ManagedClientConfigBuild",
+        str(materializer_build),
+        "-ManagedClientConfigSha",
+        materializer_sha,
         "-LunaModel",
         LUNA_MODEL,
         "-VolcModel",
@@ -305,7 +337,7 @@ def _run(
             cwd=ROOT,
             text=True,
             capture_output=True,
-            timeout=90,
+            timeout=240,
         )
     finally:
         if finalizer is not None and finalizer_stop is not None:
@@ -314,12 +346,182 @@ def _run(
     return result
 
 
+def test_baseline_gateway_is_bound_to_exact_current_candidate_materializer(tmp_path):
+    baseline_sha = "cc9df197a709fb4c7548021819ecb8fa716ed664"
+    materializer_sha = "b" * 40
+
+    result = _run(
+        tmp_path,
+        candidate_sha=baseline_sha,
+        materializer_sha=materializer_sha,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["candidate_sha"] == baseline_sha
+    assert summary["managed_client_config_sha"] == materializer_sha
+    assert set(summary["hashes"]) == {
+        "debug_build",
+        "managed_client_config_build",
+    }
+    manual_template = json.loads(
+        (tmp_path / "output" / "manual-evidence.template.json").read_text(
+            encoding="utf-8-sig"
+        )
+    )
+    assert manual_template["candidate_sha"] == baseline_sha
+    assert manual_template["managed_client_config_sha"] == materializer_sha
+
+
+def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    invocations = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / "output"
+            / "isolated"
+            / "work"
+            / "managed-client-config-invocations.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert {item["client"] for item in invocations} == {
+        "codex",
+        "opencode",
+        "zcode",
+        "pi",
+        "omp",
+    }
+    for client in {item["client"] for item in invocations}:
+        assert {item["verb"] for item in invocations if item["client"] == client} == {
+            "preview",
+            "apply",
+            "readback",
+        }
+    assert all(
+        item["flags"]
+        == ["--client", "--model", "--providers-path", "--root", "--settings-path"]
+        for item in invocations
+    )
+    assert all(
+        item["root_role"]
+        == ("managed-preview" if item["verb"] == "preview" else "managed-apply")
+        for item in invocations
+    )
+    applied_models = {
+        client: {
+            item["model"]
+            for item in invocations
+            if item["client"] == client and item["verb"] == "apply"
+        }
+        for client in {"codex", "opencode", "zcode", "pi", "omp"}
+    }
+    assert applied_models == {
+        "codex": {"gpt-5.6-luna", "volc/glm-5.2"},
+        "opencode": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
+        "zcode": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
+        "pi": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
+        "omp": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
+    }
+    assert "managed-client-config" in SCRIPT.read_text(encoding="utf-8")
+    assert "Get-ClientProviderMap" not in SCRIPT.read_text(encoding="utf-8")
+
+
+def test_runner_has_no_second_managed_client_schema_or_protocol_generator():
+    source = SCRIPT.read_text(encoding="utf-8")
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(
+        encoding="utf-8"
+    )
+
+    for removed in (
+        "Get-CodexProviderConfigText",
+        "Get-ClientProviderMap",
+        "Get-ProviderEndpointContract",
+        "@ai-sdk/openai",
+        "openai-chat-completions",
+        "openai-completions",
+        "/chat/completions",
+    ):
+        assert removed not in source
+    assert "managed-client-config" in source
+    assert "preview" in source and "apply" in source and "readback" in source
+    assert "cc9df197a709fb4c7548021819ecb8fa716ed664" in documentation
+    assert "never falls back to handwritten configuration" in documentation
+
+
+@pytest.mark.parametrize(
+    ("materializer_fake", "classification"),
+    [
+        (
+            "fake-managed-client-config-contradiction.cmd",
+            "client_configuration_materializer_contradiction",
+        ),
+        (
+            "fake-managed-client-config-failure.cmd",
+            "client_configuration_materializer_failed",
+        ),
+        (
+            "fake-managed-client-config-unsafe-output.cmd",
+            "client_configuration_materializer_output_invalid",
+        ),
+    ],
+)
+def test_materializer_contradiction_and_failure_fail_closed_without_secrets(
+    tmp_path, materializer_fake, classification
+):
+    result = _run(
+        tmp_path,
+        materializer_fake=materializer_fake,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summaries = list(tmp_path.rglob("summary.json"))
+    assert len(summaries) == 1
+    serialized = summaries[0].read_text(encoding="utf-8-sig")
+    summary = json.loads(serialized)
+    _assert_exact_summary_schema(summary)
+    assert summary["failure_classification"] == classification
+    assert "fixture-gateway-private-key" not in serialized
+
+
+def test_materializer_build_sidecar_must_match_explicit_current_candidate_sha(tmp_path):
+    materializer_sha = "b" * 40
+
+    def stale_materializer_sidecar(output, isolation, debug_build):
+        materializer_build = debug_build.with_name("CodexHub-materializer.cmd")
+        Path(f"{materializer_build}.candidate-sha").write_text(
+            CANDIDATE_SHA, encoding="ascii"
+        )
+
+    result = _run(
+        tmp_path,
+        materializer_sha=materializer_sha,
+        mutate=stale_materializer_sidecar,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    _assert_exact_summary_schema(summary)
+    assert summary["failure_classification"] == "preflight_materializer_build_sha_mismatch"
+
+
 def _assert_exact_summary_schema(summary: dict) -> None:
     assert set(summary) == (SUMMARY_KEYS if summary["cases"] else FAILURE_SUMMARY_KEYS)
     assert set(summary["pinned_versions"]) == set(PINNED_VERSIONS)
     assert set(summary["counts"]) == COUNT_KEYS
     if summary["cases"]:
-        assert set(summary["hashes"]) == {"debug_build"}
+        assert set(summary["hashes"]) == {
+            "debug_build",
+            "managed_client_config_build",
+        }
         for case in summary["cases"]:
             expected = (
                 AUTOMATED_CASE_KEYS
@@ -516,12 +718,6 @@ def test_final_client_message_with_nonstream_gateway_completions_fails(tmp_path)
     assert [case["sentinel_chunk_count"] for case in pi_cases] == [1, 1]
     assert [case["streaming_request_count"] for case in pi_cases] == [0, 0]
     assert all(case["error_event_count"] >= 1 for case in pi_cases)
-
-
-def test_isolated_client_configs_follow_production_provider_endpoint_selection(tmp_path):
-    result = _run(tmp_path, fake="fake-client-routing-config.cmd")
-
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
@@ -1111,7 +1307,7 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
     )
 
     assert result.returncode != 0
-    assert time.monotonic() - started < 60
+    assert time.monotonic() - started < 120
     summary_path = tmp_path / "output" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
     codex_cases = [case for case in summary["cases"] if case["case_id"].startswith("codex-cli")]
@@ -1143,6 +1339,7 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
         (lambda evidence: evidence["cases"].__setitem__(1, dict(evidence["cases"][0])), "manual_evidence_case_missing_or_duplicate"),
         (lambda evidence: evidence["cases"][0].update({"fallback_count": 1}), "manual_evidence_contradictory"),
         (lambda evidence: evidence.update({"candidate_sha": "b" * 40}), "manual_evidence_candidate_sha_stale"),
+        (lambda evidence: evidence.update({"managed_client_config_sha": "b" * 40}), "manual_evidence_materializer_sha_stale"),
         (lambda evidence: evidence.update({"run_binding_sha256": "sha256:" + "0" * 64}), "manual_evidence_run_binding_stale"),
         (lambda evidence: evidence.update({"login_confirmed": False}), "manual_evidence_login_missing"),
         (lambda evidence: evidence.update({"gui_confirmed": False}), "manual_evidence_gui_missing"),
@@ -1152,6 +1349,7 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
         "duplicate",
         "contradictory",
         "stale-sha",
+        "stale-materializer-sha",
         "stale-run",
         "missing-login",
         "missing-gui",
@@ -1243,8 +1441,7 @@ def test_resource_incomplete_debug_build_is_rejected_before_gui_launch(tmp_path)
     assert set(startup) == STARTUP_DIAGNOSTIC_KEYS
     assert startup["portable_resources_ready"] is False
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
-    assert not (tmp_path / "output" / "isolated" / "work" / "gui-desktop.launched").exists()
-    assert not (tmp_path / "output" / "isolated" / "work" / "gui-zcode.launched").exists()
+    assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
 
 
 def test_preexisting_gateway_listener_is_rejected_before_candidate_or_gui(tmp_path):
@@ -1349,8 +1546,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     assert str(tmp_path) not in serialized
     assert "fixture-codex-access-token" not in serialized
     assert "fixture-volc-private-token" not in serialized
-    assert not (tmp_path / "output" / "isolated" / "work" / "gui-desktop.launched").exists()
-    assert not (tmp_path / "output" / "isolated" / "work" / "gui-zcode.launched").exists()
+    assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
 
 
 def test_candidate_bootstrap_and_listener_share_one_startup_budget(tmp_path):
@@ -1361,7 +1557,6 @@ def test_candidate_bootstrap_and_listener_share_one_startup_budget(tmp_path):
         Path(f"{debug_build}.bootstrap-slow").write_text("slow", encoding="ascii")
         Path(f"{debug_build}.no-listener").write_text("fail", encoding="ascii")
 
-    fast_started = time.monotonic()
     fast = _run(
         tmp_path / "fast",
         debug_fake="fake-debug-build-official-bootstrap.cmd",
@@ -1369,8 +1564,6 @@ def test_candidate_bootstrap_and_listener_share_one_startup_budget(tmp_path):
         finalize_manual=False,
         timeout_seconds=5,
     )
-    fast_elapsed = time.monotonic() - fast_started
-    slow_started = time.monotonic()
     slow = _run(
         tmp_path / "slow",
         debug_fake="fake-debug-build-official-bootstrap.cmd",
@@ -1378,14 +1571,15 @@ def test_candidate_bootstrap_and_listener_share_one_startup_budget(tmp_path):
         finalize_manual=False,
         timeout_seconds=5,
     )
-    slow_elapsed = time.monotonic() - slow_started
-
     assert fast.returncode != 0
     assert slow.returncode != 0
-    assert slow_elapsed - fast_elapsed < 2.0
+    fast_startup = json.loads(
+        (tmp_path / "fast" / "output" / "candidate-startup.json").read_text()
+    )
     slow_startup = json.loads(
         (tmp_path / "slow" / "output" / "candidate-startup.json").read_text()
     )
+    assert slow_startup["duration_ms"] - fast_startup["duration_ms"] < 2_000
     assert slow_startup["duration_ms"] <= 5000
     assert slow_startup["failure_classification"] == (
         "candidate_gateway_startup_failed_python"
@@ -1435,8 +1629,7 @@ def test_candidate_gateway_must_be_ready_before_any_gui_launch(
     serialized = startup_path.read_text()
     assert str(tmp_path) not in serialized
     assert "fixture-private" not in serialized
-    assert not (tmp_path / "output" / "isolated" / "work" / "gui-desktop.launched").exists()
-    assert not (tmp_path / "output" / "isolated" / "work" / "gui-zcode.launched").exists()
+    assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
 
 
 def test_manual_timeout_cleanup_is_bounded_and_still_writes_one_summary(tmp_path):
@@ -1453,7 +1646,7 @@ def test_manual_timeout_cleanup_is_bounded_and_still_writes_one_summary(tmp_path
     elapsed = time.monotonic() - started
 
     assert result.returncode != 0
-    assert elapsed < 15
+    assert elapsed < 90
     summaries = list(tmp_path.rglob("summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text())

@@ -124,22 +124,37 @@ development-only build before GUI launch. Pass the machine-bound host manifest
 with `-HostEnvironmentManifest`. A new SHA invalidates the build sidecar, run
 binding, automated evidence, GUI evidence, review, and Actions result.
 
-The runner materializes, rather than assumes, the actual consumed configs:
+Client configuration requires a second explicit executable parameter,
+`-ManagedClientConfigBuild`, with an adjacent candidate-SHA sidecar matching
+`-ManagedClientConfigSha`. This build must contain the merged Issue #194
+`managed-client-config` CLI. For every fresh case root, the runner invokes all
+three production verbs in order: `preview` in a fresh preview root, then
+`apply` and `readback` in a separate fresh apply root. It accepts only the
+bounded client ID, production selector, canonical model, route protocol,
+relative target names, and successful apply/readback state. A malformed,
+secret-bearing, absolute-path-bearing, contradictory, or non-zero response
+fails closed before that client launches.
 
-- candidate `CODEXHUB_RUNTIME_HOME/proxy/settings.json` and
-  `proxy/config/providers.toml`;
-- candidate `CODEXHUB_CODEX_TARGET_HOME/auth.json` and `config.toml`;
-- case-local Codex `config.toml`/`auth.json`;
-- OpenCode `XDG_CONFIG_HOME/opencode/opencode.json`;
-- Pi `.pi/agent/settings.json` and `models.json`;
-- OMP `.omp/agent/config.yml` and `models.yml`;
-- ZCode catalog at the launched process's consumed
-  `APPDATA/ZCode/model-providers/codexhub.json` path (isolated as
-  `appdata/roaming/ZCode/model-providers/codexhub.json`), plus
-  `.zcode/v2/bots-model-cache.v2.json` and `.zcode/v2/config.json`. The
-  catalog and cache use production provider arrays, array-shaped models,
-  `defaultKind`, and `source`; their endpoint roots differ. The v2 config uses
-  its separate `provider.<id>.options` shape and object-shaped models.
+The runner does not construct or parse Codex TOML, OpenCode JSON, Pi JSON, OMP
+YAML, or ZCode catalog/cache/config schemas. It copies the production-applied,
+readback-verified target bytes named by the seam into the same case-local paths
+consumed by the launched client: Codex `.codex`, OpenCode
+`XDG_CONFIG_HOME/opencode`, Pi `.pi/agent`, OMP `.omp/agent`, and ZCode's
+isolated `APPDATA/ZCode/model-providers` plus `.zcode/v2`. Desktop and Codex
+CLI share the Codex managed-client adapter. ZCode GUI processes therefore
+consume only files originating from that case's #194 apply root; host ZCode
+state is never read or reused. The runner owns only this path publication and
+copies opaque verified bytes without reconstructing selectors, endpoints,
+protocols, provider objects, or ownership markers.
+
+The release `0.1.6` calibration build at
+`cc9df197a709fb4c7548021819ecb8fa716ed664` predates #194. For that run,
+`-DebugBuild` and its sidecar remain bound to `cc9df197...`, while
+`-ManagedClientConfigBuild` must be built from the exact current Issue #190
+candidate and `-ManagedClientConfigSha` must name that candidate. The baseline
+never falls back to handwritten configuration. For the final candidate run,
+the same exact portable candidate executable and SHA may be supplied for both
+roles. The summary and human template record both bindings.
 
 Before launching Desktop or ZCode, the runner also requires the configured
 loopback port to be unused. It first invokes the candidate's production
@@ -164,12 +179,11 @@ The accompanying `candidate-startup.json` contains only fixed booleans, a
 bounded duration, and the classification—never raw process output, paths,
 PIDs, credentials, or account data.
 
-Provider protocol selection mirrors the production Gateway exports. Luna uses
-the Responses endpoint (`@ai-sdk/openai`, `openai-responses`, and
-`/responses`). The current Volc provider has no explicit or available upstream
-format declaration, so it uses Chat Completions (`@ai-sdk/openai-compatible`,
-`openai-completions`, ZCode `openai-chat-completions`, and
-`/chat/completions`).
+Provider protocol selection comes only from #194 preview/apply/readback. The
+runner verifies those three results agree, then verifies the real Gateway
+diagnostics agree with the returned canonical route. Under the current
+production providers this yields Responses for Luna and Chat Completions for
+Volc; the runner contains no endpoint root, SDK, or protocol-format generator.
 
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
@@ -251,7 +265,8 @@ isolated candidate, launches Codex Desktop and ZCode, and waits up to
 that exits before finalization fails immediately.
 
 The template uses schema `codexhub.real-client-manual-evidence.v2` and contains
-the candidate SHA plus a random `run_binding_sha256`. At the host console, the
+the candidate SHA, managed-client-config candidate SHA, and a random
+`run_binding_sha256`. At the host console, the
 human confirms the dedicated login and GUI, performs both model cases in each
 launched GUI, verifies the same tool/sentinel/Gateway diagnostics, then copies
 the template to `manual-evidence.json` and changes only the observed fields:
@@ -260,6 +275,7 @@ the template to `manual-evidence.json` and changes only the observed fields:
 {
   "schema": "codexhub.real-client-manual-evidence.v2",
   "candidate_sha": "<candidate SHA>",
+  "managed_client_config_sha": "<materializer candidate SHA>",
   "run_binding_sha256": "<unchanged template hash>",
   "login_confirmed": true,
   "gui_confirmed": true,
@@ -302,8 +318,12 @@ absolute path, or request/session/task identifier.
    existing host session, and do not create `isolated/work`.
 3. Check out the candidate. Run the exact `build-windows-portable.ps1 -Flavor
    debug -RepoRoot <absolute-repo-root>` command above, select the resulting
-   `_debug_portable_<sha8>/CodexHub.exe`, and write its full-SHA sidecar. Do not
-   substitute a plain Cargo Debug executable.
+   `_debug_portable_<sha8>/CodexHub.exe`, and write its full-SHA sidecar. Use
+   that exact candidate as `-ManagedClientConfigBuild`. For final-candidate
+   qualification it may also be `-DebugBuild`; for the `0.1.6` calibration,
+   keep the baseline Gateway build as `-DebugBuild` and pass the current
+   candidate only as the materializer. A plain Cargo Debug executable is not
+   valid for either role.
 4. Create the isolated input layout above. Do not create manual evidence yet.
 5. From the host console, start the blocking runner:
 
@@ -311,14 +331,18 @@ absolute path, or request/session/task identifier.
 powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -CandidateSha <sha> `
   -DebugBuild <path> `
+  -ManagedClientConfigBuild <candidate-portable-path> `
+  -ManagedClientConfigSha <candidate-materializer-sha> `
   -LunaModel codexhub-openai/gpt-5.6-luna `
   -VolcModel codexhub-volc/glm-5.2 `
   -OutputDirectory <path> `
   -HostEnvironmentManifest <path-to-host-environment.json>
 ```
 
-6. Wait for the template and both launched GUIs. Complete and finalize the four
-   GUI cases as described above while the runner is waiting.
+6. Wait for the template and four case-local GUI launches (Desktop Luna/Volc
+   and ZCode Luna/Volc). Each launch consumes its own #194-applied root.
+   Complete and finalize the four GUI cases as described above while the
+   runner is waiting.
 7. Confirm exit `0`, summary outcome `passed`, all twelve cases passed, and the
    SHA/run binding match. Upload only `summary.json` and the relative files in
    its `artifacts` list. Never upload `isolated/`, the template, or manual
@@ -346,9 +370,10 @@ matrix keeps one sanitized artifact per case and uses `failure_classification`
 `none` or `case_failure`.
 
 The success-summary top-level schema is exactly `schema`, `candidate_sha`,
-`run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
+`managed_client_config_sha`, `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
 `pinned_versions`, `canonical_models`, `counts`, `cases`, and `artifacts`.
-Its `hashes` object contains exactly `debug_build`; fingerprints of the host
+Its `hashes` object contains exactly `debug_build` and
+`managed_client_config_build`; fingerprints of the host
 manifest, account profile/auth, Volc credential, Gateway configuration, and
 manual evidence are forbidden. Failure summaries omit `run_binding_sha256`
 and `hashes`. Summary/per-case content is otherwise limited to verified pins,

@@ -7,6 +7,12 @@ param(
     [string]$DebugBuild,
 
     [Parameter(Mandatory = $true)]
+    [string]$ManagedClientConfigBuild,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ManagedClientConfigSha,
+
+    [Parameter(Mandatory = $true)]
     [string]$LunaModel,
 
     [Parameter(Mandatory = $true)]
@@ -1075,16 +1081,16 @@ function Read-CorrelatedGatewayEvents {
 }
 
 function Invoke-ClientAttempt {
-    param([pscustomobject]$Case, [string]$Executable, [string]$CaseRoot, [int]$Attempt)
+    param([pscustomobject]$Case, [string]$Executable, [string]$CaseRoot, [int]$Attempt, [string]$LaunchModel)
     $sentinel = "SENTINEL:codexhub-real-client-e2e:$($Case.case_id)"
     $sentinelPath = Join-Path $CaseRoot 'sentinel.txt'
     [System.IO.File]::WriteAllText($sentinelPath, $sentinel, $script:Utf8NoBom)
     $prompt = "Read the sentinel file once with one read-only tool call, then stream exactly $sentinel and stop."
-    $arguments = @(Get-ClientArguments -Client $Case.client -Model $Case.canonical_model -WorkRoot $CaseRoot -Prompt $prompt)
+    $arguments = @(Get-ClientArguments -Client $Case.client -Model $LaunchModel -WorkRoot $CaseRoot -Prompt $prompt)
     $environment = @{
         CODEXHUB_E2E_CASE = $Case.case_id
         CODEXHUB_E2E_CLIENT = $Case.client
-        CODEXHUB_E2E_MODEL = $Case.canonical_model
+        CODEXHUB_E2E_MODEL = $LaunchModel
         CODEXHUB_E2E_GATEWAY_MODEL = $Case.gateway_model
         CODEXHUB_E2E_SENTINEL = $sentinel
         CODEXHUB_E2E_SENTINEL_PATH = $sentinelPath
@@ -1204,14 +1210,14 @@ function Invoke-AutomatedCase {
     param([pscustomobject]$Case, [string]$Executable, [string]$ArtifactRoot, [string]$WorkRoot)
     $caseWorkRoot = Join-Path $WorkRoot $Case.case_id
     [void](New-Item -ItemType Directory -Force -Path $caseWorkRoot)
-    Initialize-ClientConfiguration -Client $Case.client -CaseRoot $caseWorkRoot -Model $Case.canonical_model
-    $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 1
+    $configuration = Initialize-ClientConfiguration -Client $Case.client -CaseRoot $caseWorkRoot -Model $Case.gateway_model
+    $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 1 -LaunchModel $configuration.launch_model
     $measurement = Measure-AutomatedAttempt -Attempt $attempt -Case $Case
     $retryClassification = 'not_needed'
     $duration = $attempt.process.duration_ms
     if (-not $measurement.passed -and $measurement.retryable_capacity) {
         $retryClassification = "capacity_$($measurement.capacity_status)_pre_output_retried"
-        $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 2
+        $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 2 -LaunchModel $configuration.launch_model
         $measurement = Measure-AutomatedAttempt -Attempt $attempt -Case $Case
         $duration = [Math]::Min($TimeoutSeconds * 2000, $duration + $attempt.process.duration_ms)
     }
@@ -1260,7 +1266,7 @@ function Get-ManualResults {
         throw 'manual_evidence_malformed'
     }
     $topLevelNames = @($evidence.PSObject.Properties.Name | Sort-Object)
-    if (($topLevelNames -join ',') -cne 'candidate_sha,cases,gui_confirmed,login_confirmed,run_binding_sha256,schema') {
+    if (($topLevelNames -join ',') -cne 'candidate_sha,cases,gui_confirmed,login_confirmed,managed_client_config_sha,run_binding_sha256,schema') {
         throw 'manual_evidence_schema_invalid'
     }
     if ((Get-JsonProperty $evidence 'schema') -cne 'codexhub.real-client-manual-evidence.v2') {
@@ -1268,6 +1274,9 @@ function Get-ManualResults {
     }
     if ((Get-JsonProperty $evidence 'candidate_sha') -cne $CandidateSha) {
         throw 'manual_evidence_candidate_sha_stale'
+    }
+    if ((Get-JsonProperty $evidence 'managed_client_config_sha') -cne $ManagedClientConfigSha) {
+        throw 'manual_evidence_materializer_sha_stale'
     }
     if ((Get-JsonProperty $evidence 'run_binding_sha256') -cne $RunBinding) {
         throw 'manual_evidence_run_binding_stale'
@@ -1380,6 +1389,7 @@ function Write-ManualEvidenceTemplate {
     Write-JsonFile -Path $Path -Value ([ordered]@{
         schema = 'codexhub.real-client-manual-evidence.v2'
         candidate_sha = $CandidateSha
+        managed_client_config_sha = $ManagedClientConfigSha
         run_binding_sha256 = $RunBinding
         login_confirmed = $false
         gui_confirmed = $false
@@ -1580,236 +1590,177 @@ function Get-NativeClientVersion {
     return $normalizedVersion
 }
 
-function Get-GatewayBaseUrl {
-    return "http://127.0.0.1:$([int]$script:GatewayConfig.listen_port)/v1"
-}
-
-function Get-CodexProviderConfigText {
-    param([string]$Model)
-    $baseUrl = Get-GatewayBaseUrl
-    $key = [string]$script:GatewayConfig.gateway_client_key
-    return @"
-model = "$Model"
-model_provider = "codex_proxy"
-
-[model_providers.codex_proxy]
-name = "CodexHub Gateway"
-base_url = "$baseUrl"
-wire_api = "responses"
-requires_openai_auth = true
-experimental_bearer_token = "$key"
-supports_websockets = false
-"@
-}
-
-function Get-ClientProviderMap {
-    param([string]$Client)
-    $baseUrl = Get-GatewayBaseUrl
-    $key = [string]$script:GatewayConfig.gateway_client_key
-    $header = @{ 'x-codex-client-id' = $Client }
-    return [ordered]@{
-        'codexhub-openai' = [ordered]@{
-            name = 'CodexHub OpenAI'
-            npm = '@ai-sdk/openai'
-            options = [ordered]@{ baseURL = "$baseUrl/providers/openai"; apiKey = $key; headers = $header }
-            models = [ordered]@{ 'gpt-5.6-luna' = [ordered]@{ name = 'GPT-5.6 Luna' } }
-        }
-        'codexhub-volc' = [ordered]@{
-            name = 'CodexHub Volcengine'
-            npm = '@ai-sdk/openai-compatible'
-            options = [ordered]@{ baseURL = "$baseUrl/providers/volc"; apiKey = $key; headers = $header }
-            models = [ordered]@{ 'glm-5.2' = [ordered]@{ name = 'Volc GLM-5.2' } }
-        }
+function Assert-ManagedClientOutputKeys {
+    param([object]$Value, [string[]]$Expected)
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $wanted = @($Expected | Sort-Object)
+    if (($actual -join ',') -cne ($wanted -join ',')) {
+        throw 'client_configuration_materializer_output_invalid'
     }
 }
 
-function Get-ProviderEndpointContract {
-    param([string]$ProviderId)
-    if ($ProviderId -ceq 'codexhub-openai') {
-        return [pscustomobject]@{
-            api = 'openai-responses'
-            api_format = 'openai-responses'
-            kind = 'openai'
-            relative_path = '/responses'
-            catalog_path = '/v1/providers/openai/responses'
+function Invoke-ManagedClientConfigVerb {
+    param(
+        [string]$Verb,
+        [string]$Client,
+        [string]$Root,
+        [string]$Model,
+        [string]$SettingsPath,
+        [string]$ProvidersPath,
+        [string]$ProcessRoot
+    )
+    $arguments = @(
+        'managed-client-config', $Verb,
+        '--client', $Client,
+        '--root', $Root,
+        '--model', $Model,
+        '--settings-path', $SettingsPath,
+        '--providers-path', $ProvidersPath
+    )
+    $result = Invoke-IsolatedProcess -Executable $script:ManagedClientConfigBuild -Arguments $arguments -CaseRoot $ProcessRoot -Environment @{
+        CODEXHUB_E2E_MATERIALIZER_LOG = $script:ManagedClientConfigLogPath
+    } -StandardInput '' -ProcessTimeoutSeconds 30
+    if ($result.timed_out) {
+        throw 'client_configuration_materializer_timeout'
+    }
+    if ($result.exit_code -ne 0) {
+        throw 'client_configuration_materializer_failed'
+    }
+    if ($result.stdout.Length -gt 8192 -or
+        $result.stdout -match '(?i)(authorization|access_token|refresh_token|api[_-]?key|bearer\s)' -or
+        $result.stdout -match '(?i)(?:[a-z]:\\|\\\\[^\\]+\\[^\\]+\\)') {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    try {
+        return $result.stdout | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+}
+
+function Get-ManagedTargetSource {
+    param([string]$ApplyRoot, [string]$RelativeName)
+    if (-not $RelativeName -or [System.IO.Path]::IsPathRooted($RelativeName) -or $RelativeName -split '[\\/]' -contains '..') {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    $root = [System.IO.Path]::GetFullPath($ApplyRoot).TrimEnd('\') + '\'
+    $source = [System.IO.Path]::GetFullPath((Join-Path $ApplyRoot ($RelativeName -replace '/', '\')))
+    if (-not $source.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    Assert-IsolatedRegularFile -Path $source -IsolationRoot $ApplyRoot
+    return $source
+}
+
+function Publish-ManagedClientTargets {
+    param([string]$Client, [string]$ApplyRoot, [string[]]$TargetNames, [string]$CaseRoot)
+    $destinations = switch ($Client) {
+        'codex' { @{ 'config.toml' = '.codex\config.toml' } }
+        'opencode' { @{ 'opencode.json' = '.config\opencode\opencode.json' } }
+        'pi' { @{ 'settings.json' = '.pi\agent\settings.json'; 'models.json' = '.pi\agent\models.json' } }
+        'omp' { @{ 'config.yml' = '.omp\agent\config.yml'; 'models.yml' = '.omp\agent\models.yml' } }
+        'zcode' { @{
+            'codexhub.json' = 'appdata\roaming\ZCode\model-providers\codexhub.json'
+            'config.json' = '.zcode\v2\config.json'
+            'bots-model-cache.v2.json' = '.zcode\v2\bots-model-cache.v2.json'
+        } }
+        default { throw 'client_configuration_materializer_output_invalid' }
+    }
+    if ($TargetNames.Count -ne $destinations.Count) {
+        throw 'client_configuration_materializer_contradiction'
+    }
+    $published = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativeName in $TargetNames) {
+        $leaf = [System.IO.Path]::GetFileName(($relativeName -replace '/', '\'))
+        if (-not $destinations.ContainsKey($leaf) -or -not $published.Add($leaf)) {
+            throw 'client_configuration_materializer_contradiction'
+        }
+        $source = Get-ManagedTargetSource -ApplyRoot $ApplyRoot -RelativeName $relativeName
+        $destination = Join-Path $CaseRoot $destinations[$leaf]
+        [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination))
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+        if ((Get-Sha256 -Path $source) -cne (Get-Sha256 -Path $destination)) {
+            throw 'client_configuration_materializer_contradiction'
         }
     }
-    if ($ProviderId -ceq 'codexhub-volc') {
-        return [pscustomobject]@{
-            api = 'openai-completions'
-            api_format = 'openai-chat-completions'
-            kind = 'openai-compatible'
-            relative_path = '/chat/completions'
-            catalog_path = '/v1/providers/volc/chat/completions'
-        }
+    if ($Client -ceq 'codex') {
+        Copy-Item -LiteralPath $script:AccountAuthPath -Destination (Join-Path $CaseRoot '.codex\auth.json') -Force
     }
-    throw 'unsupported_client_provider'
 }
 
 function Initialize-ClientConfiguration {
-    param([string]$Client, [string]$CaseRoot, [string]$Model)
-    foreach ($relative in @('.codex', '.config\opencode', '.pi\agent', '.omp\agent', '.zcode\v2', 'appdata\roaming\ZCode\model-providers')) {
-        [void](New-Item -ItemType Directory -Force -Path (Join-Path $CaseRoot $relative))
+    param(
+        [string]$Client,
+        [string]$CaseRoot,
+        [string]$Model,
+        [string]$SettingsPath = $script:ManagedClientSettingsPath,
+        [string]$ProvidersPath = $script:ManagedClientProvidersPath
+    )
+    $managedClient = if ($Client -in @('desktop', 'codex-cli')) { 'codex' } else { $Client }
+    $previewRoot = Join-Path $CaseRoot 'managed-preview'
+    $applyRoot = Join-Path $CaseRoot 'managed-apply'
+    if ((Test-Path -LiteralPath $previewRoot) -or (Test-Path -LiteralPath $applyRoot)) {
+        throw 'client_configuration_materializer_root_not_fresh'
     }
-    Copy-Item -LiteralPath $script:AccountAuthPath -Destination (Join-Path $CaseRoot '.codex\auth.json') -Force
-    [System.IO.File]::WriteAllText((Join-Path $CaseRoot '.codex\config.toml'), (Get-CodexProviderConfigText -Model $Model), $script:Utf8NoBom)
-    $providerMap = Get-ClientProviderMap -Client $Client
-    $selector = if ($Model -eq 'gpt-5.6-luna') { 'codexhub-openai/gpt-5.6-luna' } elseif ($Model -eq 'volc/glm-5.2') { 'codexhub-volc/glm-5.2' } else { $Model }
-    Write-JsonFile -Path (Join-Path $CaseRoot '.config\opencode\opencode.json') -Value ([ordered]@{
-        '$schema' = 'https://opencode.ai/config.json'
-        model = $selector
-        small_model = $selector
-        provider = $providerMap
-    })
-    $providerId, $modelId = $selector -split '/', 2
-    Write-JsonFile -Path (Join-Path $CaseRoot '.pi\agent\settings.json') -Value ([ordered]@{
-        defaultProvider = $providerId
-        defaultModel = $modelId
-    })
-    $piProviders = [ordered]@{}
-    foreach ($entry in $providerMap.GetEnumerator()) {
-        $endpoint = Get-ProviderEndpointContract -ProviderId $entry.Key
-        $piProviders[$entry.Key] = [ordered]@{
-            baseUrl = $entry.Value.options.baseURL
-            api = $endpoint.api
-            apiKey = $entry.Value.options.apiKey
-            authHeader = $true
-            headers = @{ 'x-codex-client-id' = 'pi' }
-            models = @($entry.Value.models.GetEnumerator() | ForEach-Object {
-                [ordered]@{ id = $_.Key; name = $_.Value.name; headers = @{ 'x-codex-client-id' = 'pi' } }
-            })
+    $preview = Invoke-ManagedClientConfigVerb -Verb 'preview' -Client $managedClient -Root $previewRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
+    if ($managedClient -ceq 'codex') {
+        Assert-ManagedClientOutputKeys -Value $preview -Expected @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'overlay_args_relative')
+    }
+    else {
+        Assert-ManagedClientOutputKeys -Value $preview -Expected @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'next_redacted')
+    }
+    $apply = Invoke-ManagedClientConfigVerb -Verb 'apply' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
+    if ($managedClient -ceq 'codex') {
+        Assert-ManagedClientOutputKeys -Value $apply -Expected @('mode', 'proxy_running', 'proxy_port', 'proxy_build', 'message', 'gateway_lifecycle', 'history_sync_status', 'history_sync_message')
+        if ([string](Get-JsonProperty $apply 'mode' '') -cne 'custom') {
+            throw 'client_configuration_materializer_contradiction'
         }
     }
-    Write-JsonFile -Path (Join-Path $CaseRoot '.pi\agent\models.json') -Value ([ordered]@{ providers = $piProviders })
-    $key = [string]$script:GatewayConfig.gateway_client_key
-    $baseUrl = Get-GatewayBaseUrl
-    $ompText = @"
-providers:
-  codexhub-openai:
-    baseUrl: $baseUrl/providers/openai
-    api: openai-responses
-    apiKey: $key
-    authHeader: true
-    models:
-      - id: gpt-5.6-luna
-        name: GPT-5.6 Luna
-        headers:
-          x-codex-client-id: omp
-  codexhub-volc:
-    baseUrl: $baseUrl/providers/volc
-    api: openai-completions
-    apiKey: $key
-    authHeader: true
-    models:
-      - id: glm-5.2
-        name: Volc GLM-5.2
-        headers:
-          x-codex-client-id: omp
-"@
-    [System.IO.File]::WriteAllText((Join-Path $CaseRoot '.omp\agent\config.yml'), "modelRoles:`n  default: $selector`n", $script:Utf8NoBom)
-    [System.IO.File]::WriteAllText((Join-Path $CaseRoot '.omp\agent\models.yml'), $ompText, $script:Utf8NoBom)
-    $zcodeCatalogProviders = [System.Collections.Generic.List[object]]::new()
-    $zcodeCacheProviders = [System.Collections.Generic.List[object]]::new()
-    $zcodeConfigProviders = [ordered]@{}
-    $zcodeGatewayRoot = "http://127.0.0.1:$([int]$script:GatewayConfig.listen_port)"
-    $zcodeTimestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    foreach ($entry in $providerMap.GetEnumerator()) {
-        $providerUrl = [string]$entry.Value.options.baseURL
-        $endpoint = Get-ProviderEndpointContract -ProviderId $entry.Key
-        $catalogModels = @($entry.Value.models.GetEnumerator() | ForEach-Object {
-            [ordered]@{
-                id = $_.Key
-                name = $_.Value.name
-                kinds = @($endpoint.kind)
-                defaultKind = $endpoint.kind
-                modalities = [ordered]@{ input = @('text'); output = @('text') }
-                maxOutputTokens = 32768
-            }
-        })
-        $configModels = [ordered]@{}
-        foreach ($modelEntry in $entry.Value.models.GetEnumerator()) {
-            $configModels[$modelEntry.Key] = [ordered]@{
-                name = $modelEntry.Value.name
-                limit = [ordered]@{ output = 32768 }
-                modalities = [ordered]@{ input = @('text'); output = @('text') }
-            }
-        }
-        $catalogProvider = [ordered]@{
-            id = $entry.Key
-            name = $entry.Value.name
-            enabled = $true
-            source = 'custom'
-            apiFormat = $endpoint.api_format
-            endpoints = [ordered]@{
-                baseURL = $zcodeGatewayRoot
-                paths = [ordered]@{ $endpoint.kind = $endpoint.catalog_path }
-            }
-            apiKeyRequired = $true
-            apiKey = $entry.Value.options.apiKey
-            defaultKind = $endpoint.kind
-            models = $catalogModels
-            createdAt = $zcodeTimestamp
-            updatedAt = $zcodeTimestamp
-        }
-        [void]$zcodeCatalogProviders.Add($catalogProvider)
-        $cacheProvider = [ordered]@{
-            id = $entry.Key
-            name = $entry.Value.name
-            enabled = $true
-            source = 'custom'
-            apiFormat = $endpoint.api_format
-            endpoints = [ordered]@{
-                baseURL = $providerUrl
-                paths = [ordered]@{ $endpoint.kind = $endpoint.relative_path }
-            }
-            apiKeyRequired = $true
-            apiKey = $entry.Value.options.apiKey
-            defaultKind = $endpoint.kind
-            models = $catalogModels
-            createdAt = $zcodeTimestamp
-            updatedAt = $zcodeTimestamp
-        }
-        [void]$zcodeCacheProviders.Add($cacheProvider)
-        $zcodeConfigProviders[$entry.Key] = [ordered]@{
-            name = $entry.Value.name
-            kind = $endpoint.kind
-            enabled = $true
-            source = 'custom'
-            apiFormat = $endpoint.api_format
-            endpoints = [ordered]@{
-                baseURL = $providerUrl
-                paths = [ordered]@{ $endpoint.kind = $endpoint.relative_path }
-            }
-            options = [ordered]@{
-                baseURL = $providerUrl
-                apiKey = $entry.Value.options.apiKey
-                apiKeyRequired = $true
-            }
-            models = $configModels
+    else {
+        Assert-ManagedClientOutputKeys -Value $apply -Expected @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative')
+        if ((Get-JsonProperty $apply 'applied' $false) -ne $true) {
+            throw 'client_configuration_materializer_contradiction'
         }
     }
-    Write-JsonFile -Path (Join-Path $CaseRoot 'appdata\roaming\ZCode\model-providers\codexhub.json') -Value ([ordered]@{
-        schemaVersion = 'zcode.model-providers.v2'
-        providers = @($zcodeCatalogProviders)
-    })
-    Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\bots-model-cache.v2.json') -Value ([ordered]@{
-        schemaVersion = 'zcode.model-providers.v2'
-        providers = @($zcodeCacheProviders)
-    })
-    Write-JsonFile -Path (Join-Path $CaseRoot '.zcode\v2\config.json') -Value ([ordered]@{
-        provider = $zcodeConfigProviders
-    })
+    $readback = Invoke-ManagedClientConfigVerb -Verb 'readback' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
+    Assert-ManagedClientOutputKeys -Value $readback -Expected @('client_id', 'ok', 'selector', 'model', 'route_protocol')
+    if ((Get-JsonProperty $readback 'ok' $false) -ne $true -or
+        [string](Get-JsonProperty $preview 'client_id' '') -cne $managedClient -or
+        [string](Get-JsonProperty $readback 'client_id' '') -cne $managedClient -or
+        [string](Get-JsonProperty $preview 'selector' '') -cne [string](Get-JsonProperty $readback 'selector' '') -or
+        -not [string](Get-JsonProperty $readback 'selector' '') -or
+        [string](Get-JsonProperty $preview 'model' '') -cne $Model -or
+        [string](Get-JsonProperty $readback 'model' '') -cne $Model -or
+        [string](Get-JsonProperty $preview 'route_protocol' '') -cne [string](Get-JsonProperty $readback 'route_protocol' '') -or
+        -not [string](Get-JsonProperty $readback 'route_protocol' '')) {
+        throw 'client_configuration_materializer_contradiction'
+    }
+    if ($managedClient -cne 'codex' -and (
+        [string](Get-JsonProperty $apply 'selector' '') -cne [string](Get-JsonProperty $readback 'selector' '') -or
+        [string](Get-JsonProperty $apply 'model' '') -cne $Model -or
+        [string](Get-JsonProperty $apply 'route_protocol' '') -cne [string](Get-JsonProperty $readback 'route_protocol' '') -or
+        (@(Get-JsonProperty $apply 'target_names' @()) -join ',') -cne (@(Get-JsonProperty $preview 'target_names' @()) -join ','))) {
+        throw 'client_configuration_materializer_contradiction'
+    }
+    $targetNames = @((Get-JsonProperty $preview 'target_names' @()) | ForEach-Object { [string]$_ })
+    Publish-ManagedClientTargets -Client $managedClient -ApplyRoot $applyRoot -TargetNames $targetNames -CaseRoot $CaseRoot
+    return [pscustomobject]@{
+        selector = [string](Get-JsonProperty $readback 'selector' '')
+        canonical_model = [string](Get-JsonProperty $readback 'model' '')
+        route_protocol = [string](Get-JsonProperty $readback 'route_protocol' '')
+        launch_model = if ($managedClient -ceq 'codex') { [string](Get-JsonProperty $readback 'model' '') } else { [string](Get-JsonProperty $readback 'selector' '') }
+    }
 }
 
 function Initialize-CandidateRuntime {
     param([string]$CandidateRoot)
     $script:CandidateRuntimeRoot = Join-Path $CandidateRoot 'runtime'
-    $script:CandidateCodexRoot = Join-Path $CandidateRoot 'codex'
+    $script:CandidateCodexRoot = Join-Path $CandidateRoot '.codex'
     $proxyRoot = Join-Path $script:CandidateRuntimeRoot 'proxy'
     [void](New-Item -ItemType Directory -Force -Path (Join-Path $proxyRoot 'config'))
     [void](New-Item -ItemType Directory -Force -Path $script:CandidateCodexRoot)
-    Copy-Item -LiteralPath $script:AccountAuthPath -Destination (Join-Path $script:CandidateCodexRoot 'auth.json') -Force
-    [System.IO.File]::WriteAllText((Join-Path $script:CandidateCodexRoot 'config.toml'), (Get-CodexProviderConfigText -Model 'gpt-5.6-luna'), $script:Utf8NoBom)
     Write-JsonFile -Path (Join-Path $proxyRoot 'settings.json') -Value ([ordered]@{
         auto_start_gateway = $true
         gateway_bind_address = '127.0.0.1'
@@ -1835,6 +1786,8 @@ enabled = true
   enabled = true
 "@
     [System.IO.File]::WriteAllText((Join-Path $proxyRoot 'config\providers.toml'), $providerText, $script:Utf8NoBom)
+    $script:ManagedClientSettingsPath = Join-Path $proxyRoot 'settings.json'
+    $script:ManagedClientProvidersPath = Join-Path $proxyRoot 'config\providers.toml'
     $script:DiagnosticsPath = Join-Path $proxyRoot 'codex-proxy-events.jsonl'
     [System.IO.File]::WriteAllText($script:DiagnosticsPath, '', $script:Utf8NoBom)
 }
@@ -1849,6 +1802,7 @@ function Get-SafeFailureClassification {
 }
 
 $CandidateSha = $CandidateSha.ToLowerInvariant()
+$ManagedClientConfigSha = $ManagedClientConfigSha.ToLowerInvariant()
 $failureOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 [void](New-Item -ItemType Directory -Force -Path $failureOutputDirectory)
 $failureSummaryPath = Join-Path $failureOutputDirectory 'summary.json'
@@ -1857,6 +1811,9 @@ $script:FailureArtifacts = [System.Collections.Generic.List[string]]::new()
 try {
 if ($CandidateSha -notmatch '^[0-9a-f]{40}$') {
     throw 'preflight_candidate_sha_invalid'
+}
+if ($ManagedClientConfigSha -notmatch '^[0-9a-f]{40}$') {
+    throw 'preflight_materializer_sha_invalid'
 }
 if ($LunaModel -cne 'codexhub-openai/gpt-5.6-luna') {
     throw 'preflight_luna_model_invalid'
@@ -1904,12 +1861,15 @@ Assert-CanonicalNonReparseDirectory -Path $workRoot -Failure 'preflight_work_roo
 if (@(Get-ChildItem -LiteralPath $workRoot -Force).Count -ne 0) {
     throw 'preflight_work_root_not_fresh'
 }
-foreach ($file in @($DebugBuild, $HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
+foreach ($file in @($DebugBuild, $ManagedClientConfigBuild, $HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw 'preflight_required_file_missing'
     }
 }
 $DebugBuild = (Resolve-Path -LiteralPath $DebugBuild).Path
+$ManagedClientConfigBuild = (Resolve-Path -LiteralPath $ManagedClientConfigBuild).Path
+$script:ManagedClientConfigBuild = $ManagedClientConfigBuild
+$script:ManagedClientConfigLogPath = Join-Path $workRoot 'managed-client-config-invocations.jsonl'
 $HostEnvironmentManifest = (Resolve-Path -LiteralPath $HostEnvironmentManifest).Path
 $shaSidecar = "$DebugBuild.candidate-sha"
 if (-not (Test-Path -LiteralPath $shaSidecar -PathType Leaf)) {
@@ -1918,9 +1878,19 @@ if (-not (Test-Path -LiteralPath $shaSidecar -PathType Leaf)) {
 if ((Get-Content -LiteralPath $shaSidecar -Raw).Trim() -cne $CandidateSha) {
     throw 'preflight_debug_build_sha_mismatch'
 }
+$materializerShaSidecar = "$ManagedClientConfigBuild.candidate-sha"
+if (-not (Test-Path -LiteralPath $materializerShaSidecar -PathType Leaf)) {
+    throw 'preflight_materializer_build_sha_sidecar_missing'
+}
+if ((Get-Content -LiteralPath $materializerShaSidecar -Raw).Trim() -cne $ManagedClientConfigSha) {
+    throw 'preflight_materializer_build_sha_mismatch'
+}
 if (-not (Test-DebugPortableBuildResources -Executable $DebugBuild)) {
     Write-CandidateStartupDiagnostic -FailureClassification 'preflight_debug_build_not_portable' -DurationMilliseconds 0 -PortableResourcesReady $false -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady $false
     throw 'preflight_debug_build_not_portable'
+}
+if (-not (Test-DebugPortableBuildResources -Executable $ManagedClientConfigBuild)) {
+    throw 'preflight_materializer_build_not_portable'
 }
 foreach ($isolatedInput in @($HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     Assert-IsolatedRegularFile -Path $isolatedInput -IsolationRoot $isolationRoot
@@ -1997,7 +1967,9 @@ if ($script:WindowsInstallMetadata) {
     $nonFixtureExecutables = @($executables.Values | Where-Object {
         [System.IO.Path]::GetExtension([string]$_) -inotmatch '^\.(cmd|bat)$'
     })
-    if ($nonFixtureExecutables.Count -gt 0 -or [System.IO.Path]::GetExtension($DebugBuild) -inotmatch '^\.(cmd|bat)$') {
+    if ($nonFixtureExecutables.Count -gt 0 -or
+        [System.IO.Path]::GetExtension($DebugBuild) -inotmatch '^\.(cmd|bat)$' -or
+        [System.IO.Path]::GetExtension($ManagedClientConfigBuild) -inotmatch '^\.(cmd|bat)$') {
         throw 'preflight_windows_install_metadata_fixture_forbidden'
     }
 }
@@ -2016,10 +1988,10 @@ foreach ($versionTarget in @(
 [void](New-Item -ItemType Directory -Path (Join-Path $artifactRoot 'cases'))
 
 $manualCases = @(
-    [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; canonical_model = 'gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'desktop-volc'; client = 'desktop'; canonical_model = 'volc/glm-5.2' },
-    [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; canonical_model = $LunaModel },
-    [pscustomobject]@{ case_id = 'zcode-volc'; client = 'zcode'; canonical_model = $VolcModel }
+    [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna' },
+    [pscustomobject]@{ case_id = 'desktop-volc'; client = 'desktop'; canonical_model = 'volc/glm-5.2'; gateway_model = 'volc/glm-5.2' },
+    [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
+    [pscustomobject]@{ case_id = 'zcode-volc'; client = 'zcode'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' }
 )
 $automatedCases = @(
     [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna' },
@@ -2050,6 +2022,7 @@ try {
     $candidateRoot = Join-Path $workRoot 'candidate'
     [void](New-Item -ItemType Directory -Force -Path $candidateRoot)
     Initialize-CandidateRuntime -CandidateRoot $candidateRoot
+    [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna')
     $candidateEnvironment = @{
         CODEXHUB_E2E_CANDIDATE_SHA = $CandidateSha
         CODEXHUB_E2E_GATEWAY_PORT = [string]$script:GatewayConfig.listen_port
@@ -2081,25 +2054,23 @@ try {
     Wait-CandidateGatewayReady -CandidateProcess $candidateProcess -TimeoutMilliseconds $remainingStartupMilliseconds -ElapsedBeforeWaitMilliseconds $elapsedBeforeWaitMilliseconds
     $candidateStartupStopwatch.Stop()
 
-    foreach ($guiClient in @('desktop', 'zcode')) {
-        $guiCases = @($manualCases | Where-Object { $_.client -ceq $guiClient })
+    foreach ($guiCase in $manualCases) {
+        $guiClient = $guiCase.client
         $guiRoot = Join-Path $workRoot ("gui-" + $guiClient)
         [void](New-Item -ItemType Directory -Force -Path $guiRoot)
-        Initialize-ClientConfiguration -Client $guiClient -CaseRoot $guiRoot -Model $guiCases[0].canonical_model
-        foreach ($guiCase in $guiCases) {
-            $guiCaseRoot = Join-Path $guiRoot $guiCase.case_id
-            [void](New-Item -ItemType Directory -Force -Path $guiCaseRoot)
-            $guiSentinelPath = Join-Path $guiCaseRoot 'sentinel.txt'
-            [System.IO.File]::WriteAllText($guiSentinelPath, "SENTINEL:codexhub-real-client-e2e:$($guiCase.case_id)", $script:Utf8NoBom)
-            [void]$manualSentinelPaths.Add($guiSentinelPath)
-        }
-        $guiProcess = Start-IsolatedProcess -Executable $executables[$guiClient] -Arguments @() -CaseRoot $guiRoot -Environment @{
+        $guiCaseRoot = Join-Path $guiRoot $guiCase.case_id
+        [void](New-Item -ItemType Directory -Path $guiCaseRoot)
+        [void](Initialize-ClientConfiguration -Client $guiClient -CaseRoot $guiCaseRoot -Model $guiCase.gateway_model)
+        $guiSentinelPath = Join-Path $guiCaseRoot 'sentinel.txt'
+        [System.IO.File]::WriteAllText($guiSentinelPath, "SENTINEL:codexhub-real-client-e2e:$($guiCase.case_id)", $script:Utf8NoBom)
+        [void]$manualSentinelPaths.Add($guiSentinelPath)
+        $guiProcess = Start-IsolatedProcess -Executable $executables[$guiClient] -Arguments @() -CaseRoot $guiCaseRoot -Environment @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
-            CODEXHUB_E2E_CASES = ($guiCases.case_id -join ',')
-            CODEXHUB_E2E_MODELS = ($guiCases.canonical_model -join ',')
+            CODEXHUB_E2E_CASES = $guiCase.case_id
+            CODEXHUB_E2E_MODELS = $guiCase.canonical_model
             CODEXHUB_E2E_MANUAL_TEMPLATE = $manualTemplatePath
             CODEXHUB_E2E_MANUAL_EVIDENCE = $manualEvidencePath
-            CODEXHUB_E2E_GUI_LAUNCH_MARKER = (Join-Path $workRoot "gui-$guiClient.launched")
+            CODEXHUB_E2E_GUI_LAUNCH_MARKER = (Join-Path $workRoot "gui-$($guiCase.case_id).launched")
         }
         [void]$trackedProcesses.Add($guiProcess)
         [void]$nativeGuiProcesses.Add($guiProcess)
@@ -2142,11 +2113,13 @@ try {
     $summary = [ordered]@{
         schema = 'codexhub.real-client-e2e-summary.v1'
         candidate_sha = $CandidateSha
+        managed_client_config_sha = $ManagedClientConfigSha
         run_binding_sha256 = $runBinding
         outcome = if ($passedCount -eq 12) { 'passed' } else { 'failed' }
         failure_classification = if ($passedCount -eq 12) { 'none' } else { 'case_failure' }
         hashes = [ordered]@{
             debug_build = Get-Sha256 -Path $DebugBuild
+            managed_client_config_build = Get-Sha256 -Path $ManagedClientConfigBuild
         }
         pinned_versions = $actualVersions
         canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', $LunaModel, $VolcModel)
@@ -2189,6 +2162,7 @@ catch {
     $failureSummary = [ordered]@{
         schema = 'codexhub.real-client-e2e-summary.v1'
         candidate_sha = if ($CandidateSha -match '^[0-9a-f]{40}$') { $CandidateSha } else { $null }
+        managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-f]{40}$') { $ManagedClientConfigSha } else { $null }
         outcome = 'failed'
         failure_classification = $failureClassification
         pinned_versions = $script:PinnedVersions
