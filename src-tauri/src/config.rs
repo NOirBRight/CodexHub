@@ -2881,5 +2881,53 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             assert_eq!(readback.client_id, "codex");
             assert!(readback.ok);
         }
+
+        #[test]
+        fn codex_readback_fails_closed_on_mismatched_stale_owner_marker() {
+            let root = temp_root("codex-readback-stale-owner");
+            let paths = isolated_paths(&root);
+            fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+            // The current app flavor is Stable (RoutingOwner::Release); a beta
+            // owner marker is a stale, cross-channel owner that readback must
+            // reject without mutating the file.
+            fs::write(
+                paths.codex_config_path(),
+                "# owner = beta\nmodel = \"gpt-5.6-luna\"\n",
+            )
+            .unwrap();
+            let error = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap_err();
+            assert!(
+                error.contains("stale") || error.contains("owner"),
+                "unexpected error: {error}"
+            );
+            // Readback must fail closed without altering the file.
+            assert_eq!(
+                fs::read_to_string(paths.codex_config_path()).unwrap(),
+                "# owner = beta\nmodel = \"gpt-5.6-luna\"\n",
+            );
+        }
+
+        #[test]
+        fn codex_readback_fails_closed_on_absent_owner_marker() {
+            let root = temp_root("codex-readback-absent-owner");
+            let paths = isolated_paths(&root);
+            fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+            // A config.toml with no `# owner = ...` marker was not produced
+            // by this app's overlay; readback must fail closed.
+            fs::write(
+                paths.codex_config_path(),
+                "model = \"gpt-5.6-luna\"\nmodel_provider = \"openai\"\n",
+            )
+            .unwrap();
+            let error = readback_codex_config_isolated(&paths, "gpt-5.6-luna").unwrap_err();
+            assert!(
+                error.contains("stale") || error.contains("absent") || error.contains("owner"),
+                "unexpected error: {error}"
+            );
+            assert_eq!(
+                fs::read_to_string(paths.codex_config_path()).unwrap(),
+                "model = \"gpt-5.6-luna\"\nmodel_provider = \"openai\"\n",
+            );
+        }
     }
 }

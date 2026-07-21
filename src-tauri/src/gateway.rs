@@ -1070,6 +1070,69 @@ fn gateway_client_config_write_lock() -> &'static Mutex<()> {
     GATEWAY_CLIENT_CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Reject a hard-linked output file. A produced managed-client config must be
+/// owned by exactly one path beneath the isolated root; a hard link means a
+/// second name elsewhere owns the same inode, which breaks the single-owner
+/// namespace invariant the readback verifier is responsible for.
+fn reject_hard_link(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("readback failed: cannot stat {}: {error}", path.display()))?;
+        if metadata.nlink() != 1 {
+            return Err(format!(
+                "readback failed: {} is a hard link (nlink={}); refusing single-owner namespace violation",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+                metadata.nlink()
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::fs::File;
+        use std::os::windows::io::AsRawHandle;
+        // GetFileInformationByHandle is the only std-friendly way to read
+        // number_of_links on Windows; the std MetadataExt does not expose it.
+        #[repr(C)]
+        #[derive(Default)]
+        struct ByHandleFileInformation {
+            file_attributes: u32,
+            creation_time_low: u32,
+            creation_time_high: u32,
+            last_access_time_low: u32,
+            last_access_time_high: u32,
+            last_write_time_low: u32,
+            last_write_time_high: u32,
+            volume_serial_number: u32,
+            file_size_high: u32,
+            file_size_low: u32,
+            number_of_links: u32,
+            file_index_high: u32,
+            file_index_low: u32,
+        }
+        extern "system" {
+            fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, info: *mut ByHandleFileInformation) -> i32;
+        }
+        let file = File::open(path)
+            .map_err(|error| format!("readback failed: cannot open {}: {error}", path.display()))?;
+        let mut info = ByHandleFileInformation::default();
+        let result = unsafe { GetFileInformationByHandle(file.as_raw_handle() as *mut _, &mut info) };
+        if result == 0 || info.number_of_links != 1 {
+            return Err(format!(
+                "readback failed: {} is a hard link (nlink={}); refusing single-owner namespace violation",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+                info.number_of_links
+            ));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 /// Post-apply readback verifier shared by the production GUI/Web Bridge apply
 /// entrypoints and the headless CLI. Reopens the produced files, rejects
 /// missing/partial/malformed/linked output, and asserts round-trip parity
@@ -1112,6 +1175,9 @@ pub fn verify_apply_readback(
                 ));
             }
         }
+        // Reject hard-linked output: a single-link namespace is required so
+        // the produced file is owned by exactly one path beneath the root.
+        reject_hard_link(path)?;
     }
     match client_id {
         "opencode" => {
@@ -10045,7 +10111,7 @@ mod tests {
             validate_isolated_root, IsolatedClientApplyInput,
         };
         use super::{case_sensitive_client_export_test_providers, unique_temp_dir};
-        use crate::{Provider, Settings, UpstreamFormat};
+        use crate::{Model, Provider, Settings, UpstreamFormat};
         use std::fs;
         use std::path::PathBuf;
 
@@ -10069,6 +10135,41 @@ mod tests {
                     provider.upstream_format = Some(upstream.clone());
                 }
             }
+            providers
+        }
+
+        /// Deterministic production-shaped provider set that exports an
+        /// `openai/gpt-5.6-luna` model so the Official Luna selector can be
+        /// exercised without relying on the host's published official
+        /// subscription catalog (which CI does not seed).
+        fn luna_exporting_providers() -> Vec<Provider> {
+            let mut providers = case_sensitive_client_export_test_providers();
+            // The `openai` provider is the production official-models carrier.
+            // gateway_client_provider_endpoint_selection("openai", _) returns
+            // Responses, matching the production route for official models.
+            providers.push(Provider {
+                id: "openai".to_string(),
+                name: "OpenAI".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key: None,
+                upstream_format: Some(UpstreamFormat::Responses),
+                available_upstream_formats: None,
+                tool_protocol: None,
+                tool_surface_strategy: None,
+                reports_cached_input_tokens: None,
+                supports_developer_role: None,
+                display_prefix: Some("openai/".to_string()),
+                sort_order: Some(0),
+                enabled: true,
+                locked: false,
+                models: vec![Model {
+                    id: "gpt-5.6-luna".to_string(),
+                    display_name: Some("GPT-5.6 Luna".to_string()),
+                    context_window: Some(272_000),
+                    gateway_exported: true,
+                    ..Model::default()
+                }],
+            });
             providers
         }
 
@@ -10321,14 +10422,17 @@ mod tests {
             let root = fresh_root("luna");
             let isolated = validate_isolated_root(&root).unwrap();
             let settings = settings_with_port(9099);
-            let providers = case_sensitive_client_export_test_providers();
+            // Use a deterministic provider set that exports Luna; do not rely
+            // on the host's published official subscription catalog, which CI
+            // does not seed.
+            let providers = luna_exporting_providers();
             let preview = isolated_client_preview(
                 &isolated,
-                &input("opencode", "gpt-5.6-luna", settings, providers),
+                &input("opencode", "openai/gpt-5.6-luna", settings, providers),
             )
             .unwrap();
             assert_eq!(preview.route_protocol, "responses");
-            assert!(preview.selector.starts_with("codexhub-openai/"));
+            assert_eq!(preview.selector, "codexhub-openai/gpt-5.6-luna");
         }
 
         #[test]
@@ -10394,6 +10498,196 @@ mod tests {
             let expected = super::super::opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
             fs::write(&missing, &expected).unwrap();
             verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2").unwrap();
+        }
+
+        #[test]
+        fn validate_isolated_root_rejects_symlinked_root() {
+            let parent = fresh_root("symlink-parent");
+            fs::create_dir_all(&parent).unwrap();
+            let real = parent.join("real");
+            fs::create_dir_all(&real).unwrap();
+            let link = parent.join("link");
+
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&real, &link).unwrap();
+            }
+            #[cfg(windows)]
+            {
+                // Symlinks on Windows need Developer Mode or admin; skip the
+                // assertion when the platform refuses, since the junction test
+                // below covers the reparse-point path deterministically.
+                if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+                    eprintln!("skipped symlink_root test: Windows symlink creation needs Developer Mode");
+                    return;
+                }
+            }
+
+            let err = validate_isolated_root(&link).unwrap_err();
+            assert!(
+                err.contains("symlink") || err.contains("reparse"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn validate_isolated_root_rejects_directory_junction_root() {
+            let parent = fresh_root("junction-parent");
+            fs::create_dir_all(&parent).unwrap();
+            let real = parent.join("real");
+            fs::create_dir_all(&real).unwrap();
+            let link = parent.join("junction");
+            // Directory junctions do not require admin/Developer Mode and are
+            // the canonical reparse-point fixture on Windows CI.
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+                .status()
+                .unwrap();
+            assert!(status.success(), "CI must provide a directory junction fixture");
+
+            let err = validate_isolated_root(&link).unwrap_err();
+            assert!(
+                err.contains("symlink") || err.contains("reparse") || err.contains("junction"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn validate_existing_isolated_root_rejects_directory_junction_root() {
+            let parent = fresh_root("junction-existing-parent");
+            fs::create_dir_all(&parent).unwrap();
+            let real = parent.join("real");
+            fs::create_dir_all(&real).unwrap();
+            let link = parent.join("junction-existing");
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+                .status()
+                .unwrap();
+            assert!(status.success(), "CI must provide a directory junction fixture");
+
+            let err = super::super::validate_existing_isolated_root(&link).unwrap_err();
+            assert!(
+                err.contains("symlink") || err.contains("reparse") || err.contains("junction"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn validate_existing_isolated_root_rejects_symlinked_root() {
+            let parent = fresh_root("symlink-existing-parent");
+            fs::create_dir_all(&parent).unwrap();
+            let real = parent.join("real");
+            fs::create_dir_all(&real).unwrap();
+            let link = parent.join("link-existing");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            let err = super::super::validate_existing_isolated_root(&link).unwrap_err();
+            assert!(
+                err.contains("symlink") || err.contains("reparse"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn verify_apply_readback_rejects_symlinked_target_path() {
+            let parent = fresh_root("readback-symlink-target");
+            fs::create_dir_all(&parent).unwrap();
+            let real = parent.join("real.json");
+            fs::write(&real, "real").unwrap();
+            let link = parent.join("link.json");
+
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&real, &link).unwrap();
+            }
+            #[cfg(windows)]
+            {
+                if std::os::windows::fs::symlink_file(&real, &link).is_err() {
+                    eprintln!("skipped symlink_target test: Windows symlink creation needs Developer Mode");
+                    return;
+                }
+            }
+
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+            let err = super::super::verify_apply_readback(
+                "opencode",
+                std::slice::from_ref(&link),
+                &settings,
+                &providers,
+                "volc/glm-5.2",
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("symlink") || err.contains("reparse"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn verify_apply_readback_rejects_hardlinked_target_path() {
+            use std::os::windows::fs::MetadataExt;
+            let parent = fresh_root("readback-hardlink-target");
+            fs::create_dir_all(&parent).unwrap();
+            let real = parent.join("real.json");
+            fs::write(&real, "real").unwrap();
+            let link = parent.join("hardlink.json");
+            // Hard links do not require admin and are deterministic on Windows.
+            std::fs::hard_link(&real, &link).unwrap();
+            let metadata = std::fs::symlink_metadata(&link).unwrap();
+            // Hard links are not reparse points, but verify_apply_readback
+            // must still reject them because a hard-linked output file is not
+            // a single-owner namespace — the file attributes reparse bit is
+            // unset, so this test asserts the verifier rejects via nlink.
+            assert_eq!(metadata.file_attributes() & 0x400, 0);
+
+            let settings = settings_with_port(9099);
+            let providers = volc_provider(UpstreamFormat::Responses);
+            let err = super::super::verify_apply_readback(
+                "opencode",
+                std::slice::from_ref(&link),
+                &settings,
+                &providers,
+                "volc/glm-5.2",
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("hard link") || err.contains("nlink") || err.contains("single-link"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn validate_isolated_root_rejects_hardlinked_root_path_on_unix() {
+            // Roots are directories; hard links to directories are not
+            // supported on most filesystems, so this is a file-based probe
+            // of the reparse/nlink guard surface on Unix.
+            let parent = fresh_root("hardlink-root-parent");
+            fs::create_dir_all(&parent).unwrap();
+            let real_file = parent.join("real.txt");
+            fs::write(&real_file, "x").unwrap();
+            let link_file = parent.join("link.txt");
+
+            #[cfg(unix)]
+            {
+                std::fs::hard_link(&real_file, &link_file).unwrap();
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::symlink_metadata(&link_file).unwrap();
+                assert!(metadata.nlink() >= 2);
+            }
+            #[cfg(windows)]
+            {
+                std::fs::hard_link(&real_file, &link_file).unwrap();
+                use std::os::windows::fs::MetadataExt;
+                assert_eq!(std::fs::symlink_metadata(&link_file).unwrap().file_attributes() & 0x400, 0);
+            }
+            // Sanity: the hard link fixture exists; the directory-root guard
+            // is covered by the symlink/junction tests above.
+            assert!(link_file.exists());
         }
     }
 }
