@@ -243,7 +243,7 @@ def _run(
     mutate=None,
     manual_mutation=None,
     finalize_manual: bool = True,
-    timeout_seconds: int = 3,
+    timeout_seconds: int = 5,
     manual_timeout_seconds: int = 10,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, host_manifest = _prepare_run(tmp_path)
@@ -1074,7 +1074,7 @@ def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
             "PiPath": "fake-client-invalid-evidence.cmd",
             "OmpPath": "fake-client-malformed.cmd",
         },
-        timeout_seconds=1,
+        timeout_seconds=3,
     )
 
     assert result.returncode != 0
@@ -1230,6 +1230,135 @@ def test_preexisting_gateway_listener_is_rejected_before_candidate_or_gui(tmp_pa
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
+def test_candidate_bootstraps_official_context_budget_before_gateway_start(tmp_path):
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    candidate_proxy = (
+        tmp_path / "output" / "isolated" / "work" / "candidate" / "runtime" / "proxy"
+    )
+    assert (candidate_proxy / "official-bootstrap-invocations.txt").read_text().splitlines() == [
+        "refresh-models",
+        "start",
+    ]
+    assert (candidate_proxy / "official-context-budget.ready").is_file()
+
+
+def test_candidate_bootstrap_does_not_discover_or_reuse_ambient_host_state(
+    tmp_path, monkeypatch
+):
+    host_runtime = tmp_path / "host-runtime"
+    host_codex = tmp_path / "host-codex"
+    host_runtime.mkdir()
+    host_codex.mkdir()
+    host_catalog = host_runtime / "host-official-catalog.json"
+    host_catalog.write_text("host state must remain unused", encoding="utf-8")
+    monkeypatch.setenv("CODEXHUB_RUNTIME_HOME", str(host_runtime))
+    monkeypatch.setenv("CODEXHUB_CODEX_TARGET_HOME", str(host_codex))
+    monkeypatch.setenv("CODEX_HOME", str(host_codex))
+    monkeypatch.setenv("CODEXHUB_CODEX_PATH", str(tmp_path / "missing-host-codex.exe"))
+    monkeypatch.setenv("CODEXHUB_HOST_SESSION", "must-not-reach-bootstrap")
+
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert host_catalog.read_text() == "host state must remain unused"
+    assert sorted(path.name for path in host_runtime.iterdir()) == [
+        "host-official-catalog.json"
+    ]
+    assert list(host_codex.iterdir()) == []
+    candidate_proxy = (
+        tmp_path / "output" / "isolated" / "work" / "candidate" / "runtime" / "proxy"
+    )
+    assert (candidate_proxy / "official-context-budget.ready").is_file()
+
+
+def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp_path):
+    def force_context_budget_failure(_output, _isolation, debug_build):
+        Path(f"{debug_build}.bootstrap-fail").write_text("fail", encoding="ascii")
+
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=force_context_budget_failure,
+        finalize_manual=False,
+        timeout_seconds=1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert elapsed < 10
+    summaries = list(tmp_path.rglob("summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text())
+    assert summary["failure_classification"] == (
+        "candidate_gateway_bootstrap_failed_context_budget"
+    )
+    assert summary["counts"]["case_count"] == 0
+    assert summary["artifacts"] == ["candidate-startup.json"]
+    startup_path = tmp_path / "output" / "candidate-startup.json"
+    startup = json.loads(startup_path.read_text())
+    assert set(startup) == STARTUP_DIAGNOSTIC_KEYS
+    assert startup["failure_classification"] == (
+        "candidate_gateway_bootstrap_failed_context_budget"
+    )
+    assert startup["candidate_running"] is False
+    assert startup["listener_seen"] is False
+    assert startup["health_ready"] is False
+    serialized = startup_path.read_text() + summaries[0].read_text()
+    assert str(tmp_path) not in serialized
+    assert "fixture-codex-access-token" not in serialized
+    assert "fixture-volc-private-token" not in serialized
+    assert not (tmp_path / "output" / "isolated" / "work" / "gui-desktop.launched").exists()
+    assert not (tmp_path / "output" / "isolated" / "work" / "gui-zcode.launched").exists()
+
+
+def test_candidate_bootstrap_and_listener_share_one_startup_budget(tmp_path):
+    def no_listener(_output, _isolation, debug_build):
+        Path(f"{debug_build}.no-listener").write_text("fail", encoding="ascii")
+
+    def slow_bootstrap_no_listener(_output, _isolation, debug_build):
+        Path(f"{debug_build}.bootstrap-slow").write_text("slow", encoding="ascii")
+        Path(f"{debug_build}.no-listener").write_text("fail", encoding="ascii")
+
+    fast_started = time.monotonic()
+    fast = _run(
+        tmp_path / "fast",
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=no_listener,
+        finalize_manual=False,
+        timeout_seconds=5,
+    )
+    fast_elapsed = time.monotonic() - fast_started
+    slow_started = time.monotonic()
+    slow = _run(
+        tmp_path / "slow",
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=slow_bootstrap_no_listener,
+        finalize_manual=False,
+        timeout_seconds=5,
+    )
+    slow_elapsed = time.monotonic() - slow_started
+
+    assert fast.returncode != 0
+    assert slow.returncode != 0
+    assert slow_elapsed - fast_elapsed < 2.0
+    slow_startup = json.loads(
+        (tmp_path / "slow" / "output" / "candidate-startup.json").read_text()
+    )
+    assert slow_startup["duration_ms"] <= 5000
+    assert slow_startup["failure_classification"] == (
+        "candidate_gateway_startup_failed_python"
+    )
+
+
 @pytest.mark.parametrize(
     ("debug_fake", "failure", "python_seen", "listener_seen"),
     [
@@ -1254,7 +1383,7 @@ def test_candidate_gateway_must_be_ready_before_any_gui_launch(
         tmp_path,
         debug_fake=debug_fake,
         finalize_manual=False,
-        timeout_seconds=1,
+        timeout_seconds=3,
     )
 
     assert result.returncode != 0

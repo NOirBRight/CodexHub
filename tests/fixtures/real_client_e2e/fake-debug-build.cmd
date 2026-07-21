@@ -1,4 +1,6 @@
 @echo off
+if /I "%~1"=="refresh-models" exit /b 0
+if not "%~1"=="" exit /b 39
 if not defined CODEXHUB_E2E_CANDIDATE_SHA exit /b 21
 if not defined CODEXHUB_RUNTIME_HOME exit /b 22
 if not defined CODEXHUB_CODEX_TARGET_HOME exit /b 23

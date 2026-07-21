@@ -139,15 +139,27 @@ The runner materializes, rather than assumes, the actual consumed configs:
   its separate `provider.<id>.options` shape and object-shaped models.
 
 Before launching Desktop or ZCode, the runner also requires the configured
-loopback port to be unused, starts the candidate in a kill-on-close Windows Job
-Object, and waits for a successful bounded `/health` response plus the isolated
-diagnostics path. The startup wait is capped at 30 seconds (or the smaller
-`-TimeoutSeconds` value). A missing Python lifecycle, listener, usable health
-response, or diagnostics path fails before any GUI launch with a stable
-`candidate_gateway_startup_failed_*` classification. The accompanying
-`candidate-startup.json` contains only fixed booleans, a bounded duration, and
-the classification—never raw process output, paths, PIDs, credentials, or
-account data.
+loopback port to be unused. It first invokes the candidate's production
+`refresh-models` command with the isolated `CODEXHUB_RUNTIME_HOME`, isolated
+`CODEXHUB_CODEX_TARGET_HOME`, dedicated auth input, and the exact
+version-verified Codex CLI path. This publishes the candidate-managed Official
+catalog and resolved context budget without discovering or copying a host
+catalog, session, or configuration. Operators must not seed this state by hand
+or hard-code a context limit.
+
+After that bootstrap, the runner starts the candidate in a kill-on-close
+Windows Job Object and waits for a successful `/health` response plus the
+isolated diagnostics path. Bootstrap and readiness share one 30-second budget
+(or the smaller `-TimeoutSeconds` value); bootstrap does not receive a second
+timeout window. A context-budget publication failure is classified as
+`candidate_gateway_bootstrap_failed_context_budget`; other bootstrap failures
+and timeouts use `candidate_gateway_bootstrap_failed` and
+`candidate_gateway_bootstrap_timeout`. A missing Python lifecycle, listener,
+usable health response, or diagnostics path after bootstrap fails before any
+GUI launch with a stable `candidate_gateway_startup_failed_*` classification.
+The accompanying `candidate-startup.json` contains only fixed booleans, a
+bounded duration, and the classification—never raw process output, paths,
+PIDs, credentials, or account data.
 
 Provider protocol selection mirrors the production Gateway exports. Luna uses
 the Responses endpoint (`@ai-sdk/openai`, `openai-responses`, and
@@ -159,10 +171,11 @@ format declaration, so it uses Chat Completions (`@ai-sdk/openai-compatible`,
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
 `TEMP`, and `TMP`. The candidate receives the production-consumed
-`CODEXHUB_RUNTIME_HOME`, `CODEXHUB_CODEX_TARGET_HOME`, Gateway key, and Volc
-environment values. The runner never discovers, copies, or modifies host
-shared sessions. Isolated inputs must be regular files under the invocation's
-`isolated/` root; reparse points and hard links fail as host-session reuse.
+`CODEXHUB_RUNTIME_HOME`, `CODEXHUB_CODEX_TARGET_HOME`, exact verified
+`CODEXHUB_CODEX_PATH`, Gateway key, and Volc environment values. The runner
+never discovers, copies, or modifies host shared sessions. Isolated inputs
+must be regular files under the invocation's `isolated/` root; reparse points
+and hard links fail as host-session reuse.
 
 ## Matrix and measurement
 

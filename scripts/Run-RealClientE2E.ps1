@@ -730,17 +730,24 @@ function Write-CandidateStartupDiagnostic {
 }
 
 function Wait-CandidateGatewayReady {
-    param([System.Diagnostics.Process]$CandidateProcess, [int]$TimeoutSeconds)
+    param(
+        [System.Diagnostics.Process]$CandidateProcess,
+        [int]$TimeoutMilliseconds,
+        [int]$ElapsedBeforeWaitMilliseconds
+    )
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $listenerSeen = $false
     $healthReady = $false
     $pythonChildSeen = $false
     $diagnosticsReady = Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf
-    $deadlineMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
-    while ($stopwatch.ElapsedMilliseconds -lt $deadlineMilliseconds) {
+    $deadlineMilliseconds = [Math]::Max(0, [Math]::Min($TimeoutMilliseconds, 30000))
+    $pythonProbeReserveMilliseconds = if ($deadlineMilliseconds -ge 800) { 800 } else { 0 }
+    $readinessDeadlineMilliseconds = $deadlineMilliseconds - $pythonProbeReserveMilliseconds
+    while ($stopwatch.ElapsedMilliseconds -lt $readinessDeadlineMilliseconds) {
         if ($CandidateProcess.HasExited) {
             $stopwatch.Stop()
-            Write-CandidateStartupDiagnostic -FailureClassification 'candidate_debug_build_exited_during_startup' -DurationMilliseconds $stopwatch.ElapsedMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $pythonChildSeen -ListenerSeen $listenerSeen -HealthReady $healthReady -DiagnosticsReady $diagnosticsReady
+            $reportedDuration = [Math]::Min($ElapsedBeforeWaitMilliseconds + $stopwatch.ElapsedMilliseconds, $ElapsedBeforeWaitMilliseconds + $deadlineMilliseconds)
+            Write-CandidateStartupDiagnostic -FailureClassification 'candidate_debug_build_exited_during_startup' -DurationMilliseconds $reportedDuration -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $pythonChildSeen -ListenerSeen $listenerSeen -HealthReady $healthReady -DiagnosticsReady $diagnosticsReady
             throw 'candidate_debug_build_exited_during_startup'
         }
         $listenerSeen = $listenerSeen -or (Test-LoopbackListener -Port ([int]$script:GatewayConfig.listen_port))
@@ -758,7 +765,7 @@ function Wait-CandidateGatewayReady {
         Start-Sleep -Milliseconds 100
     }
     $stopwatch.Stop()
-    if (-not $pythonChildSeen) {
+    if (-not $pythonChildSeen -and $pythonProbeReserveMilliseconds -gt 0 -and $stopwatch.ElapsedMilliseconds -lt $deadlineMilliseconds) {
         $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
     }
     $failure = if ($listenerSeen -and -not $healthReady) {
@@ -773,8 +780,35 @@ function Wait-CandidateGatewayReady {
     else {
         'candidate_gateway_startup_failed_diagnostics'
     }
-    Write-CandidateStartupDiagnostic -FailureClassification $failure -DurationMilliseconds $stopwatch.ElapsedMilliseconds -PortableResourcesReady $true -CandidateRunning (-not $CandidateProcess.HasExited) -PythonChildSeen $pythonChildSeen -ListenerSeen $listenerSeen -HealthReady $healthReady -DiagnosticsReady $diagnosticsReady
+    $reportedDuration = [Math]::Min($ElapsedBeforeWaitMilliseconds + $stopwatch.ElapsedMilliseconds, $ElapsedBeforeWaitMilliseconds + $deadlineMilliseconds)
+    Write-CandidateStartupDiagnostic -FailureClassification $failure -DurationMilliseconds $reportedDuration -PortableResourcesReady $true -CandidateRunning (-not $CandidateProcess.HasExited) -PythonChildSeen $pythonChildSeen -ListenerSeen $listenerSeen -HealthReady $healthReady -DiagnosticsReady $diagnosticsReady
     throw $failure
+}
+
+function Invoke-CandidateOfficialBootstrap {
+    param(
+        [string]$Executable,
+        [string]$CandidateRoot,
+        [hashtable]$Environment,
+        [int]$TimeoutSeconds
+    )
+    $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('refresh-models') -CaseRoot $CandidateRoot -Environment $Environment -StandardInput '' -ProcessTimeoutSeconds ([Math]::Min($TimeoutSeconds, 30))
+    if ($result.timed_out) {
+        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_timeout' -DurationMilliseconds $result.duration_ms -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        throw 'candidate_gateway_bootstrap_timeout'
+    }
+    if ($result.exit_code -ne 0) {
+        $boundedOutput = [string]$result.stdout + "`n" + [string]$result.stderr
+        $failure = if ($boundedOutput -match '(?i)published Official catalog contains no safe resolved context budget|current Official context snapshot is unavailable') {
+            'candidate_gateway_bootstrap_failed_context_budget'
+        }
+        else {
+            'candidate_gateway_bootstrap_failed'
+        }
+        Write-CandidateStartupDiagnostic -FailureClassification $failure -DurationMilliseconds $result.duration_ms -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        throw $failure
+    }
+    return $result
 }
 
 function Get-ClientArguments {
@@ -2014,17 +2048,36 @@ try {
     $candidateRoot = Join-Path $workRoot 'candidate'
     [void](New-Item -ItemType Directory -Force -Path $candidateRoot)
     Initialize-CandidateRuntime -CandidateRoot $candidateRoot
-    $candidateProcess = Start-IsolatedProcess -Executable $DebugBuild -Arguments @() -CaseRoot $candidateRoot -Environment @{
+    $candidateEnvironment = @{
         CODEXHUB_E2E_CANDIDATE_SHA = $CandidateSha
         CODEXHUB_E2E_GATEWAY_PORT = [string]$script:GatewayConfig.listen_port
         CODEXHUB_RUNTIME_HOME = $script:CandidateRuntimeRoot
         CODEXHUB_CODEX_TARGET_HOME = $script:CandidateCodexRoot
         CODEX_HOME = $script:CandidateCodexRoot
+        CODEXHUB_CODEX_PATH = [string]$executables['codex-cli']
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
         VOLCENGINE_API_KEY = [string]$credential.api_key
     }
+    $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
+    $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds)
+    $remainingStartupMilliseconds = $candidateStartupBudgetMilliseconds - [int]$candidateStartupStopwatch.ElapsedMilliseconds
+    if ($remainingStartupMilliseconds -le 0) {
+        $candidateStartupStopwatch.Stop()
+        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_startup_timeout' -DurationMilliseconds $candidateStartupBudgetMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        throw 'candidate_gateway_startup_timeout'
+    }
+    $candidateProcess = Start-IsolatedProcess -Executable $DebugBuild -Arguments @() -CaseRoot $candidateRoot -Environment $candidateEnvironment
     [void]$trackedProcesses.Add($candidateProcess)
-    Wait-CandidateGatewayReady -CandidateProcess $candidateProcess -TimeoutSeconds $TimeoutSeconds
+    $elapsedBeforeWaitMilliseconds = [int]$candidateStartupStopwatch.ElapsedMilliseconds
+    $remainingStartupMilliseconds = $candidateStartupBudgetMilliseconds - $elapsedBeforeWaitMilliseconds
+    if ($remainingStartupMilliseconds -le 0) {
+        $candidateStartupStopwatch.Stop()
+        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_startup_timeout' -DurationMilliseconds $candidateStartupBudgetMilliseconds -PortableResourcesReady $true -CandidateRunning (-not $candidateProcess.HasExited) -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        throw 'candidate_gateway_startup_timeout'
+    }
+    Wait-CandidateGatewayReady -CandidateProcess $candidateProcess -TimeoutMilliseconds $remainingStartupMilliseconds -ElapsedBeforeWaitMilliseconds $elapsedBeforeWaitMilliseconds
+    $candidateStartupStopwatch.Stop()
 
     foreach ($guiClient in @('desktop', 'zcode')) {
         $guiCases = @($manualCases | Where-Object { $_.client -ceq $guiClient })
