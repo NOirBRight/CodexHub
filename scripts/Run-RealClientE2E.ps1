@@ -752,10 +752,12 @@ function Wait-CandidateGatewayReady {
         }
         $listenerSeen = $listenerSeen -or (Test-LoopbackListener -Port ([int]$script:GatewayConfig.listen_port))
         if ($listenerSeen) {
+            if (-not $pythonChildSeen) {
+                $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
+            }
             $healthReady = Test-GatewayHealth -Port ([int]$script:GatewayConfig.listen_port)
         }
         if ($healthReady) {
-            $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
             $diagnosticsReady = Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf
             if ($diagnosticsReady) {
                 $stopwatch.Stop()
