@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -38,6 +39,18 @@ SUMMARY_KEYS = {
     "artifacts",
 }
 FAILURE_SUMMARY_KEYS = SUMMARY_KEYS - {"run_binding_sha256", "hashes"}
+STARTUP_DIAGNOSTIC_KEYS = {
+    "schema",
+    "outcome",
+    "failure_classification",
+    "duration_ms",
+    "portable_resources_ready",
+    "candidate_running",
+    "python_child_seen",
+    "listener_seen",
+    "health_ready",
+    "diagnostics_ready",
+}
 COUNT_KEYS = {
     "case_count",
     "passed_count",
@@ -174,6 +187,18 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 
     debug_build = tmp_path / "CodexHub-debug.cmd"
     shutil.copyfile(FIXTURES / "fake-debug-build.cmd", debug_build)
+    shutil.copyfile(FIXTURES / "fake-debug-gateway.py", tmp_path / "fake-debug-gateway.py")
+    portable_files = (
+        "config/providers.toml",
+        "src-python/codex_proxy.py",
+        "src-python/diagnostic_recorder.py",
+        "python/python.exe",
+        "python/codexhub-python-runtime.json",
+    )
+    for relative in portable_files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture", encoding="utf-8")
     Path(f"{debug_build}.candidate-sha").write_text(CANDIDATE_SHA, encoding="ascii")
 
     return output, isolation, debug_build, host_manifest
@@ -302,6 +327,16 @@ def _assert_exact_summary_schema(summary: dict) -> None:
                 else CASE_KEYS
             )
             assert set(case) == expected
+
+
+def test_operator_workflow_requires_release_optimized_debug_portable_build():
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+
+    assert "build-windows-portable.ps1" in documentation
+    assert "-Flavor debug" in documentation
+    assert "-RepoRoot <absolute-repo-root>" in documentation
+    assert "_debug_portable_<sha8>/CodexHub.exe" in documentation
+    assert "plain Cargo Debug executable" in documentation
 
 
 def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
@@ -1149,8 +1184,114 @@ def test_candidate_startup_failure_emits_one_summary_without_partial_artifacts(t
     assert result.returncode != 0
     summary = json.loads((tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig"))
     assert summary["failure_classification"] == "candidate_debug_build_exited_during_startup"
-    assert summary["artifacts"] == []
+    assert summary["artifacts"] == ["candidate-startup.json"]
+    startup = json.loads((tmp_path / "output" / "candidate-startup.json").read_text())
+    assert set(startup) == STARTUP_DIAGNOSTIC_KEYS
+    assert startup["failure_classification"] == summary["failure_classification"]
+    assert startup["candidate_running"] is False
     assert not (tmp_path / "output" / "artifacts").exists()
+
+
+def test_resource_incomplete_debug_build_is_rejected_before_gui_launch(tmp_path):
+    def remove_portable_python(_output, _isolation, debug_build):
+        (debug_build.parent / "python" / "python.exe").unlink()
+
+    result = _run(tmp_path, mutate=remove_portable_python, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_debug_build_not_portable"
+    assert summary["artifacts"] == ["candidate-startup.json"]
+    startup = json.loads((tmp_path / "output" / "candidate-startup.json").read_text())
+    assert set(startup) == STARTUP_DIAGNOSTIC_KEYS
+    assert startup["portable_resources_ready"] is False
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+    assert not (tmp_path / "output" / "isolated" / "work" / "gui-desktop.launched").exists()
+    assert not (tmp_path / "output" / "isolated" / "work" / "gui-zcode.launched").exists()
+
+
+def test_preexisting_gateway_listener_is_rejected_before_candidate_or_gui(tmp_path):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 19190))
+    listener.listen()
+    try:
+        result = _run(tmp_path, finalize_manual=False)
+    finally:
+        listener.close()
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_gateway_port_in_use"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("debug_fake", "failure", "python_seen", "listener_seen"),
+    [
+        (
+            "fake-debug-build-no-listener.cmd",
+            "candidate_gateway_startup_failed_python",
+            False,
+            False,
+        ),
+        (
+            "fake-debug-build-bad-health.cmd",
+            "candidate_gateway_startup_failed_lifecycle",
+            True,
+            True,
+        ),
+    ],
+)
+def test_candidate_gateway_must_be_ready_before_any_gui_launch(
+    tmp_path, debug_fake, failure, python_seen, listener_seen
+):
+    result = _run(
+        tmp_path,
+        debug_fake=debug_fake,
+        finalize_manual=False,
+        timeout_seconds=1,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == failure
+    assert summary["counts"]["case_count"] == 0
+    assert summary["artifacts"] == ["candidate-startup.json"]
+    startup_path = tmp_path / "output" / "candidate-startup.json"
+    startup = json.loads(startup_path.read_text())
+    assert set(startup) == STARTUP_DIAGNOSTIC_KEYS
+    assert startup["failure_classification"] == failure
+    assert startup["portable_resources_ready"] is True
+    assert startup["python_child_seen"] is python_seen
+    assert startup["listener_seen"] is listener_seen
+    assert startup["health_ready"] is False
+    serialized = startup_path.read_text()
+    assert str(tmp_path) not in serialized
+    assert "fixture-private" not in serialized
+    assert not (tmp_path / "output" / "isolated" / "work" / "gui-desktop.launched").exists()
+    assert not (tmp_path / "output" / "isolated" / "work" / "gui-zcode.launched").exists()
+
+
+def test_manual_timeout_cleanup_is_bounded_and_still_writes_one_summary(tmp_path):
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        client_fakes={
+            "CodexDesktopPath": "fake-gui-expanding-tree.cmd",
+            "ZCodePath": "fake-gui-expanding-tree.cmd",
+        },
+        finalize_manual=False,
+        manual_timeout_seconds=1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert elapsed < 15
+    summaries = list(tmp_path.rglob("summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text())
+    assert summary["failure_classification"] == "manual_evidence_timeout"
 
 
 def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):

@@ -17,4 +17,4 @@ if defined OPENAI_API_KEY exit /b 38
 if not exist "%CODEXHUB_RUNTIME_HOME%\proxy\settings.json" exit /b 26
 if not exist "%CODEXHUB_RUNTIME_HOME%\proxy\config\providers.toml" exit /b 27
 if not exist "%CODEXHUB_CODEX_TARGET_HOME%\auth.json" exit /b 28
-ping.exe 127.0.0.1 -t >nul
+python.exe "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%

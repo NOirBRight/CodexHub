@@ -100,11 +100,26 @@ schema `codexhub.real-client-gateway.v1`, a loopback `listen_port`, and a
 dedicated `gateway_client_key`. These secret-bearing inputs remain under
 `isolated/` and are never uploaded.
 
-Build the Debug executable from the exact candidate SHA and create
-`<DebugBuild>.candidate-sha` containing only that lowercase SHA. Pass the
-machine-bound host manifest with `-HostEnvironmentManifest`. A new SHA invalidates
-the build sidecar, run binding, automated evidence, GUI evidence, review, and
-Actions result.
+Build the runnable, release-optimized Debug portable from the exact candidate
+SHA. A plain `cargo build` or `src-tauri/target/debug/codexhub.exe` is not a
+valid candidate: it uses the Tauri development URL and can display
+`localhost` connection failure instead of the bundled frontend. From any
+working directory, use an explicit repository root:
+
+```powershell
+powershell -NoProfile -File <repo>\scripts\build-windows-portable.ps1 `
+  -Flavor debug `
+  -RepoRoot <absolute-repo-root>
+```
+
+The executable is written beneath
+`<repo>/output/portable/CodexHub_<version>_debug_portable_<sha8>/CodexHub.exe`
+with adjacent `config`, `src-python`, and embedded `python` resources. Pass
+that executable and create `<DebugBuild>.candidate-sha` containing only the
+full lowercase candidate SHA. The runner rejects a resource-incomplete or
+development-only build before GUI launch. Pass the machine-bound host manifest
+with `-HostEnvironmentManifest`. A new SHA invalidates the build sidecar, run
+binding, automated evidence, GUI evidence, review, and Actions result.
 
 The runner materializes, rather than assumes, the actual consumed configs:
 
@@ -122,6 +137,17 @@ The runner materializes, rather than assumes, the actual consumed configs:
   catalog and cache use production provider arrays, array-shaped models,
   `defaultKind`, and `source`; their endpoint roots differ. The v2 config uses
   its separate `provider.<id>.options` shape and object-shaped models.
+
+Before launching Desktop or ZCode, the runner also requires the configured
+loopback port to be unused, starts the candidate in a kill-on-close Windows Job
+Object, and waits for a successful bounded `/health` response plus the isolated
+diagnostics path. The startup wait is capped at 30 seconds (or the smaller
+`-TimeoutSeconds` value). A missing Python lifecycle, listener, usable health
+response, or diagnostics path fails before any GUI launch with a stable
+`candidate_gateway_startup_failed_*` classification. The accompanying
+`candidate-startup.json` contains only fixed booleans, a bounded duration, and
+the classification—never raw process output, paths, PIDs, credentials, or
+account data.
 
 Provider protocol selection mirrors the production Gateway exports. Luna uses
 the Responses endpoint (`@ai-sdk/openai`, `openai-responses`, and
@@ -257,7 +283,10 @@ absolute path, or request/session/task identifier.
 2. Create a fresh output root and directly materialize its machine-bound host
    manifest and dedicated Codex/Volc inputs. Do not use links or copy an
    existing host session, and do not create `isolated/work`.
-3. Check out the candidate, build Debug, and write its SHA sidecar.
+3. Check out the candidate. Run the exact `build-windows-portable.ps1 -Flavor
+   debug -RepoRoot <absolute-repo-root>` command above, select the resulting
+   `_debug_portable_<sha8>/CodexHub.exe`, and write its full-SHA sidecar. Do not
+   substitute a plain Cargo Debug executable.
 4. Create the isolated input layout above. Do not create manual evidence yet.
 5. From the host console, start the blocking runner:
 
@@ -290,10 +319,14 @@ the attempt ineligible. Every other failure is also ineligible.
 Every invocation that reaches the runner body ends with exactly one
 `summary.json`, including preflight, candidate startup, GUI, manual, and
 unexpected automated failures. A thrown-path summary contains only a bounded
-`failure_classification`, zero case counts, and no artifacts. Scoped partial
-artifacts are removed before that summary is written. A complete matrix keeps
-one sanitized artifact per case and uses `failure_classification` `none` or
-`case_failure`.
+`failure_classification`, zero case counts, and no artifacts except the fixed
+sanitized `candidate-startup.json` when portable-build or candidate-startup
+diagnosis applies. Scoped partial case artifacts are removed before that
+summary is written. Candidate and GUI processes share one kill-on-close Job
+Object, followed by a five-second bounded fallback cleanup, so resistant or
+expanding descendants cannot prevent failure-summary completion. A complete
+matrix keeps one sanitized artifact per case and uses `failure_classification`
+`none` or `case_failure`.
 
 The success-summary top-level schema is exactly `schema`, `candidate_sha`,
 `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,

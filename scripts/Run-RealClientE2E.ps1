@@ -35,6 +35,107 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+try {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CodexHubE2EJob
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExtendedLimitInformation
+    {
+        public BasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool SetInformationJobObject(
+        IntPtr job,
+        int informationClass,
+        IntPtr information,
+        uint informationLength);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static IntPtr CreateKillOnClose()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero)
+            return IntPtr.Zero;
+        ExtendedLimitInformation information = new ExtendedLimitInformation();
+        information.BasicLimitInformation.LimitFlags = 0x00002000;
+        int length = Marshal.SizeOf(information);
+        IntPtr pointer = Marshal.AllocHGlobal(length);
+        try
+        {
+            Marshal.StructureToPtr(information, pointer, false);
+            if (!SetInformationJobObject(job, 9, pointer, (uint)length))
+            {
+                CloseHandle(job);
+                return IntPtr.Zero;
+            }
+            return job;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    public static bool Assign(IntPtr job, IntPtr process)
+    {
+        return job != IntPtr.Zero && AssignProcessToJobObject(job, process);
+    }
+
+    public static void Close(IntPtr job)
+    {
+        if (job != IntPtr.Zero)
+            CloseHandle(job);
+    }
+}
+'@ -ErrorAction Stop
+}
+catch {
+    # Bounded taskkill/descendant cleanup remains available as fallback.
+}
+
 $script:PinnedVersions = [ordered]@{
     desktop = '26.715.4045.0'
     codex_cli = '0.144.5'
@@ -45,6 +146,9 @@ $script:PinnedVersions = [ordered]@{
 }
 $script:MaximumCapturedCharacters = 65536
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$script:ProcessJobHandle = [IntPtr]::Zero
+$script:ProcessJobAvailable = $null -ne ('CodexHubE2EJob' -as [type])
+$script:UnassignedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 
 function ConvertTo-ProcessArgument {
     param([AllowNull()][string]$Argument)
@@ -189,30 +293,126 @@ function Assert-ExactJsonProperties {
     }
 }
 
-function Stop-ProcessTree {
+function Get-DescendantProcessIds {
     param([int]$ProcessId)
-    $children = @()
+    $searcher = $null
+    $processes = @()
     try {
-        $searcher = [System.Management.ManagementObjectSearcher]::new(
-            "SELECT ProcessId FROM Win32_Process WHERE ParentProcessId = $ProcessId"
-        )
-        $children = @($searcher.Get())
-        $searcher.Dispose()
+        $scope = [System.Management.ManagementScope]::new('\\.\root\cimv2')
+        $query = [System.Management.ObjectQuery]::new('SELECT ProcessId, ParentProcessId FROM Win32_Process')
+        $options = [System.Management.EnumerationOptions]::new()
+        $options.Timeout = [TimeSpan]::FromMilliseconds(750)
+        $searcher = [System.Management.ManagementObjectSearcher]::new($scope, $query, $options)
+        $processes = @($searcher.Get())
+        $descendants = [System.Collections.Generic.HashSet[int]]::new()
+        [void]$descendants.Add($ProcessId)
+        $changed = $true
+        while ($changed) {
+            $changed = $false
+            foreach ($process in $processes) {
+                $parentId = [int]$process.Properties['ParentProcessId'].Value
+                $childId = [int]$process.Properties['ProcessId'].Value
+                if ($descendants.Contains($parentId) -and $descendants.Add($childId)) {
+                    $changed = $true
+                }
+            }
+        }
+        return @($descendants | Where-Object { $_ -ne $ProcessId })
     }
     catch {
-        $children = @()
+        return @()
     }
-    foreach ($child in $children) {
-        Stop-ProcessTree -ProcessId ([int]$child.ProcessId)
+    finally {
+        foreach ($process in $processes) {
+            $process.Dispose()
+        }
+        if ($null -ne $searcher) {
+            $searcher.Dispose()
+        }
+    }
+}
+
+function Stop-ProcessTree {
+    param([int]$ProcessId, [int]$TimeoutMilliseconds = 1500)
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $killer = $null
+    $descendantIds = @(Get-DescendantProcessIds -ProcessId $ProcessId)
+    try {
+        $taskkill = Join-Path ([System.Environment]::GetFolderPath('System')) 'taskkill.exe'
+        if (Test-Path -LiteralPath $taskkill -PathType Leaf) {
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $taskkill
+            $startInfo.Arguments = "/PID $ProcessId /T /F"
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::new()
+            $killer.StartInfo = $startInfo
+            [void]$killer.Start()
+            $stdoutTask = $killer.StandardOutput.ReadToEndAsync()
+            $stderrTask = $killer.StandardError.ReadToEndAsync()
+            $remaining = [Math]::Max(1, [Math]::Min(500, $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds))
+            if (-not $killer.WaitForExit($remaining)) {
+                $killer.Kill()
+                [void]$killer.WaitForExit(250)
+            }
+            if ($stdoutTask.IsCompleted) { [void]$stdoutTask.GetAwaiter().GetResult() }
+            if ($stderrTask.IsCompleted) { [void]$stderrTask.GetAwaiter().GetResult() }
+        }
+    }
+    catch {
+        # Fall through to the direct root-process kill.
+    }
+    finally {
+        if ($null -ne $killer) {
+            $killer.Dispose()
+        }
+    }
+    foreach ($descendantId in $descendantIds) {
+        if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+            break
+        }
+        try {
+            $descendant = [System.Diagnostics.Process]::GetProcessById([int]$descendantId)
+            $descendant.Kill()
+            $descendant.Dispose()
+        }
+        catch {
+            # The descendant may already have exited through taskkill.
+        }
     }
     try {
         $process = [System.Diagnostics.Process]::GetProcessById($ProcessId)
         $process.Kill()
-        [void]$process.WaitForExit(5000)
+        $remaining = [Math]::Max(1, $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds)
+        [void]$process.WaitForExit($remaining)
+        $process.Dispose()
     }
     catch {
         # The process may have exited between discovery and cleanup.
     }
+    finally {
+        $stopwatch.Stop()
+    }
+}
+
+function Stop-TrackedProcesses {
+    param([object[]]$Processes, [int]$TimeoutMilliseconds = 5000)
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($process in $Processes) {
+        if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+            break
+        }
+        try {
+            $remaining = $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds
+            Stop-ProcessTree -ProcessId $process.Id -TimeoutMilliseconds ([Math]::Min(1500, $remaining))
+        }
+        catch {
+            # Cleanup is best effort inside one shared bounded budget.
+        }
+    }
+    $stopwatch.Stop()
 }
 
 function New-IsolatedStartInfo {
@@ -228,6 +428,7 @@ function New-IsolatedStartInfo {
     if ($extension -iin @('.cmd', '.bat')) {
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
         $commandLine = @(
+            'call'
             (ConvertTo-ProcessArgument $Executable)
             ($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
         ) -join ' '
@@ -292,6 +493,14 @@ function Invoke-IsolatedProcess {
     $process.StartInfo = $startInfo
     $startedAt = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$process.Start()
+    $processJob = [IntPtr]::Zero
+    $assignedToJob = $false
+    if ($script:ProcessJobAvailable) {
+        $processJob = [CodexHubE2EJob]::CreateKillOnClose()
+        if ($processJob -ne [IntPtr]::Zero) {
+            $assignedToJob = [CodexHubE2EJob]::Assign($processJob, $process.Handle)
+        }
+    }
     if ($StandardInput) {
         $process.StandardInput.Write($StandardInput)
     }
@@ -299,12 +508,27 @@ function Invoke-IsolatedProcess {
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     $completed = $process.WaitForExit($ProcessTimeoutSeconds * 1000)
-    if (-not $completed) {
-        Stop-ProcessTree -ProcessId $process.Id
-        [void]$process.WaitForExit(5000)
+    if ($assignedToJob) {
+        [CodexHubE2EJob]::Close($processJob)
+        $processJob = [IntPtr]::Zero
     }
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
+    elseif (-not $completed) {
+        Stop-ProcessTree -ProcessId $process.Id
+    }
+    elseif ($processJob -ne [IntPtr]::Zero) {
+        [CodexHubE2EJob]::Close($processJob)
+        $processJob = [IntPtr]::Zero
+    }
+    [void]$process.WaitForExit(500)
+    [void]$stdoutTask.Wait(1000)
+    [void]$stderrTask.Wait(1000)
+    if ((-not $stdoutTask.IsCompleted -or -not $stderrTask.IsCompleted) -and -not $assignedToJob) {
+        Stop-ProcessTree -ProcessId $process.Id
+        [void]$stdoutTask.Wait(500)
+        [void]$stderrTask.Wait(500)
+    }
+    $stdout = if ($stdoutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stdoutTask.GetAwaiter().GetResult() } else { '' }
+    $stderr = if ($stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stderrTask.GetAwaiter().GetResult() } else { '' }
     $startedAt.Stop()
     $exitCode = if ($completed) { $process.ExitCode } else { -1 }
     if ($stdout.Length -gt $script:MaximumCapturedCharacters) {
@@ -339,7 +563,218 @@ function Start-IsolatedProcess {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     [void]$process.Start()
+    $assigned = $false
+    if ($script:ProcessJobAvailable -and $script:ProcessJobHandle -ne [IntPtr]::Zero) {
+        $assigned = [CodexHubE2EJob]::Assign($script:ProcessJobHandle, $process.Handle)
+    }
+    if (-not $assigned) {
+        [void]$script:UnassignedProcessIds.Add($process.Id)
+    }
     return $process
+}
+
+function Test-DebugPortableBuildResources {
+    param([string]$Executable)
+    $root = Split-Path -Parent $Executable
+    foreach ($relative in @(
+        'config\providers.toml',
+        'src-python\codex_proxy.py',
+        'src-python\diagnostic_recorder.py',
+        'python\python.exe',
+        'python\codexhub-python-runtime.json'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $root $relative) -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-LoopbackListener {
+    param([int]$Port)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.ConnectAsync('127.0.0.1', $Port)
+        return $connect.Wait(250) -and $client.Connected
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Dispose()
+    }
+}
+
+function Test-GatewayHealth {
+    param([int]$Port)
+    $response = $null
+    try {
+        $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/health")
+        $request.Method = 'GET'
+        $request.Timeout = 500
+        $request.ReadWriteTimeout = 500
+        $request.KeepAlive = $false
+        $response = [System.Net.HttpWebResponse]$request.GetResponse()
+        if ([int]$response.StatusCode -ne 200 -or $response.ContentLength -gt 4096) {
+            return $false
+        }
+        $reader = [System.IO.StreamReader]::new($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        try {
+            $payload = $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+        if ($payload.Length -gt 4096) {
+            return $false
+        }
+        $health = $payload | ConvertFrom-Json -ErrorAction Stop
+        return [bool](Get-JsonProperty -Value $health -Name 'ok' -Default $false)
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+    }
+}
+
+function Test-GatewayPythonProcess {
+    param([int]$Port)
+    $netstat = $null
+    try {
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = Join-Path ([System.Environment]::GetFolderPath('System')) 'netstat.exe'
+        $startInfo.Arguments = '-ano -p tcp'
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $netstat = [System.Diagnostics.Process]::new()
+        $netstat.StartInfo = $startInfo
+        [void]$netstat.Start()
+        $stdoutTask = $netstat.StandardOutput.ReadToEndAsync()
+        $stderrTask = $netstat.StandardError.ReadToEndAsync()
+        if (-not $netstat.WaitForExit(750)) {
+            $netstat.Kill()
+            [void]$netstat.WaitForExit(250)
+            return $false
+        }
+        [void]$stderrTask.GetAwaiter().GetResult()
+        $text = $stdoutTask.GetAwaiter().GetResult()
+        $pattern = '^\s*TCP\s+127\.0\.0\.1:' + [regex]::Escape([string]$Port) + '\s+\S+\s+LISTENING\s+(\d+)\s*$'
+        foreach ($line in ($text -split "`r?`n")) {
+            $match = [regex]::Match($line, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if (-not $match.Success) {
+                continue
+            }
+            $owner = [System.Diagnostics.Process]::GetProcessById([int]$match.Groups[1].Value)
+            try {
+                if ($owner.ProcessName -match '^pythonw?$') {
+                    return $true
+                }
+            }
+            finally {
+                $owner.Dispose()
+            }
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $netstat) {
+            if (-not $netstat.HasExited) {
+                try {
+                    $netstat.Kill()
+                }
+                catch {
+                    # The bounded ownership probe may already have exited.
+                }
+            }
+            $netstat.Dispose()
+        }
+    }
+}
+
+function Write-CandidateStartupDiagnostic {
+    param(
+        [string]$FailureClassification,
+        [int]$DurationMilliseconds,
+        [bool]$PortableResourcesReady,
+        [bool]$CandidateRunning,
+        [bool]$PythonChildSeen,
+        [bool]$ListenerSeen,
+        [bool]$HealthReady,
+        [bool]$DiagnosticsReady
+    )
+    $relative = 'candidate-startup.json'
+    Write-JsonFile -Path (Join-Path $failureOutputDirectory $relative) -Value ([ordered]@{
+        schema = 'codexhub.real-client-candidate-startup.v1'
+        outcome = 'failed'
+        failure_classification = $FailureClassification
+        duration_ms = [Math]::Max(0, [Math]::Min($DurationMilliseconds, 30000))
+        portable_resources_ready = $PortableResourcesReady
+        candidate_running = $CandidateRunning
+        python_child_seen = $PythonChildSeen
+        listener_seen = $ListenerSeen
+        health_ready = $HealthReady
+        diagnostics_ready = $DiagnosticsReady
+    })
+    if (-not $script:FailureArtifacts.Contains($relative)) {
+        [void]$script:FailureArtifacts.Add($relative)
+    }
+}
+
+function Wait-CandidateGatewayReady {
+    param([System.Diagnostics.Process]$CandidateProcess, [int]$TimeoutSeconds)
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $listenerSeen = $false
+    $healthReady = $false
+    $pythonChildSeen = $false
+    $diagnosticsReady = Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf
+    $deadlineMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
+    while ($stopwatch.ElapsedMilliseconds -lt $deadlineMilliseconds) {
+        if ($CandidateProcess.HasExited) {
+            $stopwatch.Stop()
+            Write-CandidateStartupDiagnostic -FailureClassification 'candidate_debug_build_exited_during_startup' -DurationMilliseconds $stopwatch.ElapsedMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $pythonChildSeen -ListenerSeen $listenerSeen -HealthReady $healthReady -DiagnosticsReady $diagnosticsReady
+            throw 'candidate_debug_build_exited_during_startup'
+        }
+        $listenerSeen = $listenerSeen -or (Test-LoopbackListener -Port ([int]$script:GatewayConfig.listen_port))
+        if ($listenerSeen) {
+            $healthReady = Test-GatewayHealth -Port ([int]$script:GatewayConfig.listen_port)
+        }
+        if ($healthReady) {
+            $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
+            $diagnosticsReady = Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf
+            if ($diagnosticsReady) {
+                $stopwatch.Stop()
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $stopwatch.Stop()
+    if (-not $pythonChildSeen) {
+        $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
+    }
+    $failure = if ($listenerSeen -and -not $healthReady) {
+        'candidate_gateway_startup_failed_lifecycle'
+    }
+    elseif (-not $pythonChildSeen) {
+        'candidate_gateway_startup_failed_python'
+    }
+    elseif (-not $listenerSeen) {
+        'candidate_gateway_startup_failed_listener'
+    }
+    else {
+        'candidate_gateway_startup_failed_diagnostics'
+    }
+    Write-CandidateStartupDiagnostic -FailureClassification $failure -DurationMilliseconds $stopwatch.ElapsedMilliseconds -PortableResourcesReady $true -CandidateRunning (-not $CandidateProcess.HasExited) -PythonChildSeen $pythonChildSeen -ListenerSeen $listenerSeen -HealthReady $healthReady -DiagnosticsReady $diagnosticsReady
+    throw $failure
 }
 
 function Get-ClientArguments {
@@ -1382,6 +1817,7 @@ $failureOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 [void](New-Item -ItemType Directory -Force -Path $failureOutputDirectory)
 $failureSummaryPath = Join-Path $failureOutputDirectory 'summary.json'
 $failureArtifactRoot = Join-Path $failureOutputDirectory 'artifacts'
+$script:FailureArtifacts = [System.Collections.Generic.List[string]]::new()
 try {
 if ($CandidateSha -notmatch '^[0-9a-f]{40}$') {
     throw 'preflight_candidate_sha_invalid'
@@ -1446,6 +1882,10 @@ if (-not (Test-Path -LiteralPath $shaSidecar -PathType Leaf)) {
 if ((Get-Content -LiteralPath $shaSidecar -Raw).Trim() -cne $CandidateSha) {
     throw 'preflight_debug_build_sha_mismatch'
 }
+if (-not (Test-DebugPortableBuildResources -Executable $DebugBuild)) {
+    Write-CandidateStartupDiagnostic -FailureClassification 'preflight_debug_build_not_portable' -DurationMilliseconds 0 -PortableResourcesReady $false -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady $false
+    throw 'preflight_debug_build_not_portable'
+}
 foreach ($isolatedInput in @($HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     Assert-IsolatedRegularFile -Path $isolatedInput -IsolationRoot $isolationRoot
 }
@@ -1500,6 +1940,9 @@ if ([string]$script:GatewayConfig.schema -cne 'codexhub.real-client-gateway.v1' 
     [int]$script:GatewayConfig.listen_port -lt 1024 -or [int]$script:GatewayConfig.listen_port -gt 65535 -or
     [string]$script:GatewayConfig.gateway_client_key -notmatch '^\S{16,}$') {
     throw 'preflight_gateway_config_invalid'
+}
+if (Test-LoopbackListener -Port ([int]$script:GatewayConfig.listen_port)) {
+    throw 'preflight_gateway_port_in_use'
 }
 $script:AccountAuthPath = $accountAuthPath
 if (Test-Path -LiteralPath $summaryPath) {
@@ -1561,12 +2004,19 @@ if (Test-Path -LiteralPath $manualEvidencePath) {
 $trackedProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 $nativeGuiProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 $manualSentinelPaths = [System.Collections.Generic.List[string]]::new()
+$script:UnassignedProcessIds.Clear()
+$script:ProcessJobHandle = if ($script:ProcessJobAvailable) {
+    [CodexHubE2EJob]::CreateKillOnClose()
+} else {
+    [IntPtr]::Zero
+}
 try {
     $candidateRoot = Join-Path $workRoot 'candidate'
     [void](New-Item -ItemType Directory -Force -Path $candidateRoot)
     Initialize-CandidateRuntime -CandidateRoot $candidateRoot
     $candidateProcess = Start-IsolatedProcess -Executable $DebugBuild -Arguments @() -CaseRoot $candidateRoot -Environment @{
         CODEXHUB_E2E_CANDIDATE_SHA = $CandidateSha
+        CODEXHUB_E2E_GATEWAY_PORT = [string]$script:GatewayConfig.listen_port
         CODEXHUB_RUNTIME_HOME = $script:CandidateRuntimeRoot
         CODEXHUB_CODEX_TARGET_HOME = $script:CandidateCodexRoot
         CODEX_HOME = $script:CandidateCodexRoot
@@ -1574,10 +2024,7 @@ try {
         VOLCENGINE_API_KEY = [string]$credential.api_key
     }
     [void]$trackedProcesses.Add($candidateProcess)
-    Start-Sleep -Seconds 1
-    if ($candidateProcess.HasExited) {
-        throw 'candidate_debug_build_exited_during_startup'
-    }
+    Wait-CandidateGatewayReady -CandidateProcess $candidateProcess -TimeoutSeconds $TimeoutSeconds
 
     foreach ($guiClient in @('desktop', 'zcode')) {
         $guiCases = @($manualCases | Where-Object { $_.client -ceq $guiClient })
@@ -1664,11 +2111,12 @@ try {
     }
 }
 finally {
-    foreach ($trackedProcess in $trackedProcesses) {
-        if (-not $trackedProcess.HasExited) {
-            Stop-ProcessTree -ProcessId $trackedProcess.Id
-        }
+    if ($script:ProcessJobAvailable) {
+        [CodexHubE2EJob]::Close($script:ProcessJobHandle)
     }
+    $script:ProcessJobHandle = [IntPtr]::Zero
+    $fallbackProcesses = @($trackedProcesses | Where-Object { $script:UnassignedProcessIds.Contains($_.Id) })
+    Stop-TrackedProcesses -Processes $fallbackProcesses -TimeoutMilliseconds 5000
     foreach ($manualSentinelPath in $manualSentinelPaths) {
         Remove-Item -LiteralPath $manualSentinelPath -Force -ErrorAction SilentlyContinue
     }
@@ -1698,7 +2146,7 @@ catch {
             automated_case_count = 0
         }
         cases = @()
-        artifacts = @()
+        artifacts = @($script:FailureArtifacts)
     }
     Write-JsonFile -Path $failureSummaryPath -Value $failureSummary
     exit 1
