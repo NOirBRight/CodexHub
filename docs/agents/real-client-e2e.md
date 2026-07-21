@@ -6,15 +6,16 @@ canonical routes. HTTP/configuration preflight alone is never an E2E pass.
 
 ## Pinned host environment and clients
 
-Run on the dedicated Windows host environment `codexhub-real-client-e2e` with
-a new output root, dedicated Codex login input, dedicated Volc credential, and
-no reused host user session or client configuration. A VM or named snapshot is
-not required. The runner verifies these native installed versions before
-launching the candidate or a client:
+Run on the authoritative machine-bound local dedicated Windows host
+environment `codexhub-real-client-e2e` with a new output root, dedicated Codex
+login input, dedicated Volc credential, and no reused host user session or
+client configuration. A VM or named snapshot is not required. The runner
+verifies these native installed versions before launching the candidate or a
+client:
 
 | Client | Version | Version source |
 |---|---:|---|
-| Codex Desktop | `26.715.7063.0` | `OpenAI.Codex` AppX package identity and install location |
+| Codex Desktop | `26.715.8383.0` | `OpenAI.Codex` AppX package identity and install location |
 | Codex CLI | `0.144.5` | `--version` |
 | ZCode | `3.3.6` | Authoritative Windows uninstall identity and install root |
 | OpenCode | `1.18.4` | `--version` |
@@ -292,9 +293,10 @@ absolute path, or request/session/task identifier.
 
 ## Operator workflow
 
-1. Use the dedicated `codexhub-real-client-e2e` Windows host environment. Do
-   not open, inspect, copy, or modify any current user's Codex, ZCode,
-   OpenCode, Pi, OMP, or provider session/configuration.
+1. Use the authoritative machine-bound local dedicated Windows host
+   environment `codexhub-real-client-e2e`. Do not open, inspect, copy, or
+   modify any current user's Codex, ZCode, OpenCode, Pi, OMP, or provider
+   session/configuration.
 2. Create a fresh output root and directly materialize its machine-bound host
    manifest and dedicated Codex/Volc inputs. Do not use links or copy an
    existing host session, and do not create `isolated/work`.

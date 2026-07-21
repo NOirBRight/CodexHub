@@ -18,7 +18,7 @@ CANDIDATE_SHA = "a" * 40
 LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
 VOLC_MODEL = "codexhub-volc/glm-5.2"
 PINNED_VERSIONS = {
-    "desktop": "26.715.7063.0",
+    "desktop": "26.715.8383.0",
     "codex_cli": "0.144.5",
     "zcode": "3.3.6",
     "opencode": "1.18.4",
@@ -337,6 +337,15 @@ def test_operator_workflow_requires_release_optimized_debug_portable_build():
     assert "-RepoRoot <absolute-repo-root>" in documentation
     assert "_debug_portable_<sha8>/CodexHub.exe" in documentation
     assert "plain Cargo Debug executable" in documentation
+
+
+def test_operator_workflow_uses_authoritative_machine_bound_local_host():
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+
+    assert "machine-bound local dedicated Windows host" in documentation
+    assert "A VM or named snapshot is not required" in documentation
+    assert "dedicated VM" not in documentation
+    assert "VM snapshot" not in documentation
 
 
 def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
@@ -738,7 +747,7 @@ def test_sparse_hklm_zcode_metadata_is_normalized_under_strict_mode(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
-    assert summary["pinned_versions"]["desktop"] == "26.715.7063.0"
+    assert summary["pinned_versions"]["desktop"] == "26.715.8383.0"
     assert summary["pinned_versions"]["zcode"] == "3.3.6"
     install_metadata = json.loads(
         (
@@ -750,7 +759,7 @@ def test_sparse_hklm_zcode_metadata_is_normalized_under_strict_mode(tmp_path):
         ).read_text()
     )
     desktop_metadata = install_metadata["desktop"]
-    assert desktop_metadata["package_version"] == "26.715.7063.0"
+    assert desktop_metadata["package_version"] == "26.715.8383.0"
     assert desktop_metadata["executable_product_version"] == "1.2026.1704.0"
     zcode_metadata = install_metadata["zcode"]
     assert zcode_metadata["DisplayName"] == "ZCode 3.3.6"
@@ -822,7 +831,7 @@ def test_opencode_release_pin_records_upstream_header_timeout_fix():
 @pytest.mark.parametrize(
     ("client", "field", "value", "failure"),
     [
-        ("desktop", "package_version", "26.715.4045.0", "preflight_desktop_version_mismatch"),
+        ("desktop", "package_version", "26.715.7063.0", "preflight_desktop_version_mismatch"),
         ("zcode", "DisplayVersion", "3.3.7", "preflight_zcode_version_mismatch"),
         (
             "zcode",
