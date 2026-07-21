@@ -14,7 +14,7 @@ launching the candidate or a client:
 
 | Client | Version | Version source |
 |---|---:|---|
-| Codex Desktop | `26.715.4045.0` | `OpenAI.Codex` AppX package identity and install location |
+| Codex Desktop | `26.715.7063.0` | `OpenAI.Codex` AppX package identity and install location |
 | Codex CLI | `0.144.5` | `--version` |
 | ZCode | `3.3.6` | Authoritative Windows uninstall identity and install root |
 | OpenCode | `1.18.3` | `--version` |

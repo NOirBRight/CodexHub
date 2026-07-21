@@ -18,7 +18,7 @@ CANDIDATE_SHA = "a" * 40
 LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
 VOLC_MODEL = "codexhub-volc/glm-5.2"
 PINNED_VERSIONS = {
-    "desktop": "26.715.4045.0",
+    "desktop": "26.715.7063.0",
     "codex_cli": "0.144.5",
     "zcode": "3.3.6",
     "opencode": "1.18.3",
@@ -738,9 +738,9 @@ def test_sparse_hklm_zcode_metadata_is_normalized_under_strict_mode(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
-    assert summary["pinned_versions"]["desktop"] == "26.715.4045.0"
+    assert summary["pinned_versions"]["desktop"] == "26.715.7063.0"
     assert summary["pinned_versions"]["zcode"] == "3.3.6"
-    metadata = json.loads(
+    install_metadata = json.loads(
         (
             tmp_path
             / "output"
@@ -748,11 +748,15 @@ def test_sparse_hklm_zcode_metadata_is_normalized_under_strict_mode(tmp_path):
             / "config"
             / "windows-install-metadata.json"
         ).read_text()
-    )["zcode"]
-    assert metadata["DisplayName"] == "ZCode 3.3.6"
-    assert metadata["DisplayVersion"] == "3.3.6"
-    assert metadata["Publisher"] == "ZCode"
-    assert "InstallLocation" not in metadata
+    )
+    desktop_metadata = install_metadata["desktop"]
+    assert desktop_metadata["package_version"] == "26.715.7063.0"
+    assert desktop_metadata["executable_product_version"] == "1.2026.1704.0"
+    zcode_metadata = install_metadata["zcode"]
+    assert zcode_metadata["DisplayName"] == "ZCode 3.3.6"
+    assert zcode_metadata["DisplayVersion"] == "3.3.6"
+    assert zcode_metadata["Publisher"] == "ZCode"
+    assert "InstallLocation" not in zcode_metadata
 
 
 def test_zcode_valid_install_location_agrees_with_authoritative_fallbacks(tmp_path):
@@ -794,7 +798,7 @@ def test_non_zcode_client_versions_reject_suffixes_and_multiple_versions(
 @pytest.mark.parametrize(
     ("client", "field", "value", "failure"),
     [
-        ("desktop", "package_version", "1.2026.1704.0", "preflight_desktop_version_mismatch"),
+        ("desktop", "package_version", "26.715.4045.0", "preflight_desktop_version_mismatch"),
         ("zcode", "DisplayVersion", "3.3.7", "preflight_zcode_version_mismatch"),
         (
             "zcode",
