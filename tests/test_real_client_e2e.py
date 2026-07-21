@@ -21,7 +21,7 @@ PINNED_VERSIONS = {
     "desktop": "26.715.7063.0",
     "codex_cli": "0.144.5",
     "zcode": "3.3.6",
-    "opencode": "1.18.3",
+    "opencode": "1.18.4",
     "pi": "0.80.6",
     "omp": "17.0.3",
 }
@@ -775,6 +775,7 @@ def test_zcode_valid_install_location_agrees_with_authoritative_fallbacks(tmp_pa
     ("argument", "fixture", "failure"),
     [
         ("CodexCliPath", "fake-client-version-suffix.cmd", "preflight_codex_cli_version_mismatch"),
+        ("OpenCodePath", "fake-client-version-suffix.cmd", "preflight_opencode_version_mismatch"),
         ("OpenCodePath", "fake-client-version-multiple.cmd", "preflight_opencode_version_mismatch"),
         ("PiPath", "fake-client-version-suffix.cmd", "preflight_pi_version_mismatch"),
         ("OmpPath", "fake-client-version-multiple.cmd", "preflight_omp_version_mismatch"),
@@ -793,6 +794,29 @@ def test_non_zcode_client_versions_reject_suffixes_and_multiple_versions(
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
     assert summary["failure_classification"] == failure
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_opencode_1_18_3_is_rejected_as_missing_header_timeout_fix(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"OpenCodePath": "fake-client-opencode-1.18.3.cmd"},
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_opencode_version_mismatch"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_opencode_release_pin_records_upstream_header_timeout_fix():
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    runner = SCRIPT.read_text()
+
+    assert "opencode = '1.18.4'" in runner
+    assert "OpenCode | `1.18.4`" in documentation
+    assert "response-header-timeout" in documentation
+    assert "67caf894e0843ee370e72839e8265e483233479b" in documentation
 
 
 @pytest.mark.parametrize(

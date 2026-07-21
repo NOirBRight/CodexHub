@@ -17,7 +17,7 @@ launching the candidate or a client:
 | Codex Desktop | `26.715.7063.0` | `OpenAI.Codex` AppX package identity and install location |
 | Codex CLI | `0.144.5` | `--version` |
 | ZCode | `3.3.6` | Authoritative Windows uninstall identity and install root |
-| OpenCode | `1.18.3` | `--version` |
+| OpenCode | `1.18.4` | `--version` |
 | Pi | `0.80.6` | `--version` |
 | OMP | `17.0.3` | `--version` |
 
@@ -26,9 +26,11 @@ three-part version token equal to the pin. Suffixes, four-part forms, and
 mixed or repeated version output fail. Only ZCode permits the documented
 executable build suffix.
 
-Do not upgrade a client in place. In particular, OpenCode remains `1.18.3`;
-issue #191 owns the future stable release containing upstream fix #37770. A
-pin change requires a runner and host-environment review.
+Do not upgrade a client in place. OpenCode is pinned exactly to released
+version `1.18.4`, which contains the upstream response-header-timeout fix from
+commit `67caf894e0843ee370e72839e8265e483233479b`. The old `1.18.3` release and
+any suffix or later version fail closed. A pin change requires a runner and
+host-environment review.
 
 Desktop's passed executable must reside beneath the matching `OpenAI.Codex`
 AppX `InstallLocation`. Its Chromium `ProductVersion` is not the Desktop
@@ -203,7 +205,7 @@ once. The pinned client parsers consume their real JSONL contracts:
 - Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
   items, and `turn.completed`; the read command must explicitly report
   `status = completed` and integer `exit_code = 0`;
-- OpenCode `1.18.3`: `step_start`, completed `tool_use`, `text`, and
+- OpenCode `1.18.4`: `step_start`, completed `tool_use`, `text`, and
   the final `step_finish` whose reason is `stop`; the intermediate
   `tool-calls` finish is not a terminal;
 - Pi `0.80.6` and OMP `17.0.3`: `tool_execution_end`, assistant

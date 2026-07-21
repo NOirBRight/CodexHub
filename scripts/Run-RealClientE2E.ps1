@@ -140,7 +140,7 @@ $script:PinnedVersions = [ordered]@{
     desktop = '26.715.7063.0'
     codex_cli = '0.144.5'
     zcode = '3.3.6'
-    opencode = '1.18.3'
+    opencode = '1.18.4'
     pi = '0.80.6'
     omp = '17.0.3'
 }
