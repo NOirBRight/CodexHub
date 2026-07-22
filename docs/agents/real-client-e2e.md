@@ -135,6 +135,18 @@ relative target names, and successful apply/readback state. A malformed,
 secret-bearing, absolute-path-bearing, contradictory, or non-zero response
 fails closed before that client launches.
 
+Before `refresh-models`, candidate startup, or any client/GUI launch, the
+runner contract-probes the actual passed `-ManagedClientConfigBuild` for
+Codex, OpenCode, ZCode, Pi, and OMP across both Official and Volc selections.
+Each probe performs preview/apply/readback in the final case-local root; those
+verified roots are then reused for the corresponding client launch. Thus the
+probe detects candidate #194 CLI schema drift without a second materialization
+or host-state fallback. Codex apply requires the six production fields
+`gateway_lifecycle`, `message`, `mode`, `proxy_build`, `proxy_port`, and
+`proxy_running`. `history_sync_status` and `history_sync_message` are the only
+optional keys and may be omitted, null, or bounded safe strings; all other
+unknown or missing-required keys fail closed.
+
 The runner does not construct or parse Codex TOML, OpenCode JSON, Pi JSON, OMP
 YAML, or ZCode catalog/cache/config schemas. It copies the production-applied,
 readback-verified target bytes named by the seam into the same case-local paths

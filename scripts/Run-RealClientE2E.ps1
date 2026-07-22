@@ -1207,17 +1207,24 @@ function Measure-AutomatedAttempt {
 }
 
 function Invoke-AutomatedCase {
-    param([pscustomobject]$Case, [string]$Executable, [string]$ArtifactRoot, [string]$WorkRoot)
+    param(
+        [pscustomobject]$Case,
+        [string]$Executable,
+        [string]$ArtifactRoot,
+        [string]$WorkRoot,
+        [pscustomobject]$Configuration
+    )
     $caseWorkRoot = Join-Path $WorkRoot $Case.case_id
-    [void](New-Item -ItemType Directory -Force -Path $caseWorkRoot)
-    $configuration = Initialize-ClientConfiguration -Client $Case.client -CaseRoot $caseWorkRoot -Model $Case.gateway_model
-    $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 1 -LaunchModel $configuration.launch_model
+    if (-not (Test-Path -LiteralPath $caseWorkRoot -PathType Container) -or $null -eq $Configuration) {
+        throw 'client_configuration_materializer_contradiction'
+    }
+    $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 1 -LaunchModel $Configuration.launch_model
     $measurement = Measure-AutomatedAttempt -Attempt $attempt -Case $Case
     $retryClassification = 'not_needed'
     $duration = $attempt.process.duration_ms
     if (-not $measurement.passed -and $measurement.retryable_capacity) {
         $retryClassification = "capacity_$($measurement.capacity_status)_pre_output_retried"
-        $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 2 -LaunchModel $configuration.launch_model
+        $attempt = Invoke-ClientAttempt -Case $Case -Executable $Executable -CaseRoot $caseWorkRoot -Attempt 2 -LaunchModel $Configuration.launch_model
         $measurement = Measure-AutomatedAttempt -Attempt $attempt -Case $Case
         $duration = [Math]::Min($TimeoutSeconds * 2000, $duration + $attempt.process.duration_ms)
     }
@@ -1591,11 +1598,29 @@ function Get-NativeClientVersion {
 }
 
 function Assert-ManagedClientOutputKeys {
-    param([object]$Value, [string[]]$Expected)
+    param(
+        [object]$Value,
+        [string[]]$Required,
+        [string[]]$Optional = @()
+    )
     $actual = @($Value.PSObject.Properties.Name | Sort-Object)
-    $wanted = @($Expected | Sort-Object)
-    if (($actual -join ',') -cne ($wanted -join ',')) {
+    $allowed = @($Required + $Optional | Sort-Object -Unique)
+    $missing = @($Required | Where-Object { $actual -notcontains $_ })
+    $unknown = @($actual | Where-Object { $allowed -notcontains $_ })
+    if ($missing.Count -gt 0 -or $unknown.Count -gt 0) {
         throw 'client_configuration_materializer_output_invalid'
+    }
+    foreach ($name in $Optional) {
+        $property = $Value.PSObject.Properties[$name]
+        if ($null -eq $property -or $null -eq $property.Value) {
+            continue
+        }
+        if ($property.Value -isnot [string] -or
+            $property.Value.Length -gt 512 -or
+            $property.Value -match '(?i)(authorization|access_token|refresh_token|api[_-]?key|bearer\s)' -or
+            $property.Value -match '(?i)(?:[a-z]:\\|\\\\[^\\]+\\[^\\]+\\)') {
+            throw 'client_configuration_materializer_output_invalid'
+        }
     }
 }
 
@@ -1706,26 +1731,26 @@ function Initialize-ClientConfiguration {
     }
     $preview = Invoke-ManagedClientConfigVerb -Verb 'preview' -Client $managedClient -Root $previewRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
     if ($managedClient -ceq 'codex') {
-        Assert-ManagedClientOutputKeys -Value $preview -Expected @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'overlay_args_relative')
+        Assert-ManagedClientOutputKeys -Value $preview -Required @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'overlay_args_relative')
     }
     else {
-        Assert-ManagedClientOutputKeys -Value $preview -Expected @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'next_redacted')
+        Assert-ManagedClientOutputKeys -Value $preview -Required @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'next_redacted')
     }
     $apply = Invoke-ManagedClientConfigVerb -Verb 'apply' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
     if ($managedClient -ceq 'codex') {
-        Assert-ManagedClientOutputKeys -Value $apply -Expected @('mode', 'proxy_running', 'proxy_port', 'proxy_build', 'message', 'gateway_lifecycle', 'history_sync_status', 'history_sync_message')
+        Assert-ManagedClientOutputKeys -Value $apply -Required @('mode', 'proxy_running', 'proxy_port', 'proxy_build', 'message', 'gateway_lifecycle') -Optional @('history_sync_status', 'history_sync_message')
         if ([string](Get-JsonProperty $apply 'mode' '') -cne 'custom') {
             throw 'client_configuration_materializer_contradiction'
         }
     }
     else {
-        Assert-ManagedClientOutputKeys -Value $apply -Expected @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative')
+        Assert-ManagedClientOutputKeys -Value $apply -Required @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative')
         if ((Get-JsonProperty $apply 'applied' $false) -ne $true) {
             throw 'client_configuration_materializer_contradiction'
         }
     }
     $readback = Invoke-ManagedClientConfigVerb -Verb 'readback' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
-    Assert-ManagedClientOutputKeys -Value $readback -Expected @('client_id', 'ok', 'selector', 'model', 'route_protocol')
+    Assert-ManagedClientOutputKeys -Value $readback -Required @('client_id', 'ok', 'selector', 'model', 'route_protocol')
     if ((Get-JsonProperty $readback 'ok' $false) -ne $true -or
         [string](Get-JsonProperty $preview 'client_id' '') -cne $managedClient -or
         [string](Get-JsonProperty $readback 'client_id' '') -cne $managedClient -or
@@ -2022,6 +2047,17 @@ try {
     $candidateRoot = Join-Path $workRoot 'candidate'
     [void](New-Item -ItemType Directory -Force -Path $candidateRoot)
     Initialize-CandidateRuntime -CandidateRoot $candidateRoot
+    $caseConfigurations = @{}
+    foreach ($case in @($manualCases) + @($automatedCases)) {
+        $caseRoot = if ($case.client -in @('desktop', 'zcode')) {
+            Join-Path (Join-Path $workRoot ("gui-" + $case.client)) $case.case_id
+        }
+        else {
+            Join-Path $workRoot $case.case_id
+        }
+        [void](New-Item -ItemType Directory -Path $caseRoot -Force)
+        $caseConfigurations[$case.case_id] = Initialize-ClientConfiguration -Client $case.client -CaseRoot $caseRoot -Model $case.gateway_model
+    }
     [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna')
     $candidateEnvironment = @{
         CODEXHUB_E2E_CANDIDATE_SHA = $CandidateSha
@@ -2032,6 +2068,7 @@ try {
         CODEXHUB_CODEX_PATH = [string]$executables['codex-cli']
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
         VOLCENGINE_API_KEY = [string]$credential.api_key
+        CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
     }
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -2057,10 +2094,10 @@ try {
     foreach ($guiCase in $manualCases) {
         $guiClient = $guiCase.client
         $guiRoot = Join-Path $workRoot ("gui-" + $guiClient)
-        [void](New-Item -ItemType Directory -Force -Path $guiRoot)
         $guiCaseRoot = Join-Path $guiRoot $guiCase.case_id
-        [void](New-Item -ItemType Directory -Path $guiCaseRoot)
-        [void](Initialize-ClientConfiguration -Client $guiClient -CaseRoot $guiCaseRoot -Model $guiCase.gateway_model)
+        if ($null -eq $caseConfigurations[$guiCase.case_id]) {
+            throw 'client_configuration_materializer_contradiction'
+        }
         $guiSentinelPath = Join-Path $guiCaseRoot 'sentinel.txt'
         [System.IO.File]::WriteAllText($guiSentinelPath, "SENTINEL:codexhub-real-client-e2e:$($guiCase.case_id)", $script:Utf8NoBom)
         [void]$manualSentinelPaths.Add($guiSentinelPath)
@@ -2092,7 +2129,7 @@ try {
 
     $automatedById = @{}
     foreach ($case in $automatedCases) {
-        $automatedById[$case.case_id] = Invoke-AutomatedCase -Case $case -Executable $executables[$case.client] -ArtifactRoot $artifactRoot -WorkRoot $workRoot
+        $automatedById[$case.case_id] = Invoke-AutomatedCase -Case $case -Executable $executables[$case.client] -ArtifactRoot $artifactRoot -WorkRoot $workRoot -Configuration $caseConfigurations[$case.case_id]
     }
     $manualById = @{}
     foreach ($result in $manualResults) {

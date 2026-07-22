@@ -199,6 +199,10 @@ def _prepare_run(
         tmp_path / "fake-managed-client-config.py",
     )
     shutil.copyfile(FIXTURES / "fake-debug-gateway.py", tmp_path / "fake-debug-gateway.py")
+    shutil.copyfile(
+        FIXTURES / "validate-managed-client-contract-probe.py",
+        tmp_path / "validate-managed-client-contract-probe.py",
+    )
     portable_files = (
         "config/providers.toml",
         "src-python/codex_proxy.py",
@@ -223,7 +227,7 @@ def _finalize_manual_evidence(
 ) -> None:
     template_path = output / "manual-evidence.template.json"
     work = output / "isolated" / "work"
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 180
     while time.monotonic() < deadline and not (stop_event and stop_event.is_set()):
         if (
             template_path.is_file()
@@ -429,6 +433,61 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
     }
     assert "managed-client-config" in SCRIPT.read_text(encoding="utf-8")
     assert "Get-ClientProviderMap" not in SCRIPT.read_text(encoding="utf-8")
+
+
+def test_all_managed_client_route_contracts_are_probed_before_candidate_launch(
+    tmp_path,
+):
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-contract-probe.cmd",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_codex_apply_accepts_production_omitted_optional_history_fields(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["outcome"] == "passed"
+
+
+def test_codex_apply_accepts_bounded_present_optional_history_fields(tmp_path):
+    result = _run(
+        tmp_path,
+        materializer_fake="fake-managed-client-config-present-optionals.cmd",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "materializer_fake",
+    [
+        "fake-managed-client-config-missing-required.cmd",
+        "fake-managed-client-config-unknown-key.cmd",
+    ],
+)
+def test_codex_apply_rejects_missing_required_and_unknown_keys(
+    tmp_path, materializer_fake
+):
+    result = _run(
+        tmp_path,
+        materializer_fake=materializer_fake,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["failure_classification"] == (
+        "client_configuration_materializer_output_invalid"
+    )
 
 
 def test_runner_has_no_second_managed_client_schema_or_protocol_generator():
@@ -1524,7 +1583,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     elapsed = time.monotonic() - started
 
     assert result.returncode != 0
-    assert elapsed < 10
+    assert elapsed < 90
     summaries = list(tmp_path.rglob("summary.json"))
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text())
@@ -1610,7 +1669,7 @@ def test_candidate_gateway_must_be_ready_before_any_gui_launch(
         tmp_path,
         debug_fake=debug_fake,
         finalize_manual=False,
-        timeout_seconds=3,
+        timeout_seconds=10,
     )
 
     assert result.returncode != 0

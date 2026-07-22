@@ -211,9 +211,18 @@ def main() -> None:
                 "proxy_build": None,
                 "message": "fixture",
                 "gateway_lifecycle": "unavailable",
-                "history_sync_status": None,
-                "history_sync_message": None,
             }
+            if mode == "present-optionals":
+                result.update(
+                    {
+                        "history_sync_status": None,
+                        "history_sync_message": "isolated fixture",
+                    }
+                )
+            elif mode == "missing-required":
+                result.pop("message")
+            elif mode == "unknown-key":
+                result["future_field"] = "not approved"
         else:
             result = base | {
                 "applied": True,
