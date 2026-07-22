@@ -705,6 +705,83 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["output"][0]["content"][0]["text"], "hello")
         self.assertEqual(dict(fake.headers).get("Content-Type"), "application/json")
 
+    def test_opencode_volc_transparent_responses_preserves_standard_function_history(self):
+        input_items = [
+            {"type": "message", "role": "user", "content": "Calculate 2 + 2."},
+            {
+                "id": "fc_calc_1",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_calc_1",
+                "name": "calculator",
+                "arguments": '{"expression":"2+2"}',
+            },
+            {"type": "function_call_output", "call_id": "call_calc_1", "output": "4"},
+        ]
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": input_items,
+                "tools": [{"type": "function", "name": "calculator", "parameters": {"type": "object"}}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            body,
+            headers={"X-Codex-Client-Id": "opencode"},
+        )
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp_volc","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler.do_POST(handler)
+
+        request = open_upstream.call_args.args[0]
+        self.assertEqual(request.full_url, "https://ark.example.test/v1/responses")
+        sent_payload = json.loads(request.data)
+        self.assertEqual(sent_payload["model"], "glm-5.2")
+        self.assertEqual(sent_payload["input"], input_items)
+        self.assertEqual(fake.status, 200)
+
+    def test_opencode_volc_transparent_responses_bounds_repeated_successful_function_calls(self):
+        input_items = [{"type": "message", "role": "user", "content": "Calculate 2 + 2."}]
+        for index in range(3):
+            call_id = f"call_calc_{index}"
+            input_items.extend(
+                [
+                    {
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    },
+                    {"type": "function_call_output", "call_id": call_id, "output": "4"},
+                ]
+            )
+        body = json.dumps(
+            {"model": "glm-5.2", "input": input_items, "stream": False}
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            body,
+            headers={"X-Codex-Client-Id": "opencode"},
+        )
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+            return_value=FakeContextResponse(b'{"id":"resp_unexpected","output":[]}'),
+        ) as open_upstream:
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        payload = json.loads(b"".join(fake.wfile.writes))
+        self.assertEqual(payload["codexhub_error"]["details"]["error"], "excessive_tool_loop")
+        self.assertFalse(payload["codexhub_error"]["retryable"])
+
     def test_third_party_app_official_chat_completions_uses_lightweight_responses_fallback(self):
         body = json.dumps(
             {
