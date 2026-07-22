@@ -19,7 +19,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "real_client_e2e"
 CANDIDATE_SHA = "a" * 40
 LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
 VOLC_MODEL = "codexhub-volc/glm-5.2"
-PINNED_VERSIONS = {
+MINIMUM_VERSIONS = {
     "desktop": "26.715.8383.0",
     "codex_cli": "0.144.5",
     "zcode": "3.3.6",
@@ -611,7 +611,7 @@ def test_materializer_build_sidecar_must_match_explicit_current_candidate_sha(tm
 
 def _assert_exact_summary_schema(summary: dict) -> None:
     assert set(summary) == (SUMMARY_KEYS if summary["cases"] else FAILURE_SUMMARY_KEYS)
-    assert set(summary["pinned_versions"]) == set(PINNED_VERSIONS)
+    assert set(summary["pinned_versions"]) == set(MINIMUM_VERSIONS)
     assert set(summary["counts"]) == COUNT_KEYS
     if summary["cases"]:
         assert set(summary["hashes"]) == {
@@ -646,7 +646,9 @@ def test_operator_workflow_uses_authoritative_machine_bound_local_host():
     assert "VM snapshot" not in documentation
 
 
-def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
+def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summary(
+    tmp_path,
+):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -656,7 +658,7 @@ def test_successful_matrix_emits_one_sanitized_sha_bound_summary(tmp_path):
     _assert_exact_summary_schema(summary)
     assert summary["schema"] == "codexhub.real-client-e2e-summary.v1"
     assert summary["candidate_sha"] == CANDIDATE_SHA
-    assert summary["pinned_versions"] == PINNED_VERSIONS
+    assert summary["pinned_versions"] == MINIMUM_VERSIONS
     assert summary["counts"] == {
         "case_count": 12,
         "passed_count": 12,
@@ -1097,6 +1099,117 @@ def test_non_zcode_client_versions_reject_suffixes_and_multiple_versions(
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
+def test_codex_cli_0_145_0_is_accepted_and_recorded_as_actual_version(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexCliPath": "fake-client-codex-0.145.0.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["pinned_versions"]["codex_cli"] == "0.145.0"
+
+
+def test_all_newer_stable_authoritative_versions_are_recorded_as_actual(tmp_path):
+    def install_newer_desktop_and_zcode(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["desktop"]["package_version"] = "26.716.0.0"
+        metadata["zcode"].update(
+            {
+                "DisplayName": "ZCode 3.4.0",
+                "DisplayVersion": "3.4.0",
+                "ExecutableProductVersion": "3.4.0.4000",
+            }
+        )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(
+        tmp_path,
+        fake="fake-client-newer-stable.cmd",
+        mutate=install_newer_desktop_and_zcode,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["pinned_versions"] == {
+        "desktop": "26.716.0.0",
+        "codex_cli": "0.145.0",
+        "zcode": "3.4.0",
+        "opencode": "1.19.0",
+        "pi": "0.81.0",
+        "omp": "17.1.0",
+    }
+
+
+@pytest.mark.parametrize(
+    ("argument", "failure"),
+    [
+        ("CodexCliPath", "preflight_codex_cli_version_mismatch"),
+        ("OpenCodePath", "preflight_opencode_version_mismatch"),
+        ("PiPath", "preflight_pi_version_mismatch"),
+        ("OmpPath", "preflight_omp_version_mismatch"),
+    ],
+)
+def test_non_windows_clients_reject_every_below_floor_release(
+    tmp_path, argument, failure
+):
+    result = _run(
+        tmp_path,
+        client_fakes={argument: "fake-client-below-floor.cmd"},
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == failure
+
+
+@pytest.mark.parametrize("client", ["desktop", "zcode"])
+def test_windows_authorities_reject_every_below_floor_release(tmp_path, client):
+    def install_below_floor(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        if client == "desktop":
+            metadata["desktop"]["package_version"] = "26.715.8382.9999"
+        else:
+            metadata["zcode"].update(
+                {
+                    "DisplayName": "ZCode 3.3.5",
+                    "DisplayVersion": "3.3.5",
+                    "ExecutableProductVersion": "3.3.5.3198",
+                }
+            )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(tmp_path, mutate=install_below_floor, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == f"preflight_{client}_version_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("argument", "failure"),
+    [
+        ("CodexCliPath", "preflight_codex_cli_version_mismatch"),
+        ("OpenCodePath", "preflight_opencode_version_mismatch"),
+        ("PiPath", "preflight_pi_version_mismatch"),
+        ("OmpPath", "preflight_omp_version_mismatch"),
+    ],
+)
+def test_non_windows_clients_reject_unparseable_versions(tmp_path, argument, failure):
+    result = _run(
+        tmp_path,
+        client_fakes={argument: "fake-client-version-unparseable.cmd"},
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == failure
+
+
 def test_opencode_1_18_3_is_rejected_as_missing_header_timeout_fix(tmp_path):
     result = _run(
         tmp_path,
@@ -1110,7 +1223,7 @@ def test_opencode_1_18_3_is_rejected_as_missing_header_timeout_fix(tmp_path):
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
-def test_opencode_release_pin_records_upstream_header_timeout_fix():
+def test_opencode_compatibility_floor_records_upstream_header_timeout_fix():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
     runner = SCRIPT.read_text()
 
@@ -1120,11 +1233,33 @@ def test_opencode_release_pin_records_upstream_header_timeout_fix():
     assert "67caf894e0843ee370e72839e8265e483233479b" in documentation
 
 
+def test_operator_docs_define_compatibility_floors_and_actual_version_evidence():
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+
+    assert "Minimum stable version" in documentation
+    assert "Codex CLI `0.145.0` is accepted" in documentation
+    assert "actual normalized versions" in documentation
+    assert "pinned exactly" not in documentation
+    assert "equal to the pin" not in documentation
+
+
 @pytest.mark.parametrize(
     ("client", "field", "value", "failure"),
     [
         ("desktop", "package_version", "26.715.7063.0", "preflight_desktop_version_mismatch"),
+        (
+            "desktop",
+            "package_version",
+            "26.715.8383.0-beta",
+            "preflight_desktop_version_mismatch",
+        ),
         ("zcode", "DisplayVersion", "3.3.7", "preflight_zcode_version_mismatch"),
+        (
+            "zcode",
+            "DisplayVersion",
+            "3.3.6-beta",
+            "preflight_zcode_version_mismatch",
+        ),
         (
             "zcode",
             "ExecutableProductVersion",
@@ -1812,7 +1947,7 @@ def test_external_watchdog_timeout_is_not_blocked_by_inherited_output_handles(tm
 def test_operator_commands_have_explicit_outer_and_manual_deadlines():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 
-    assert "run-with-windows-watchdog.py --timeout-seconds 1800 --" in documentation
+    assert "run-with-windows-watchdog.py --timeout-seconds 3600 --" in documentation
     assert "-OverallTimeoutSeconds 5400" in documentation
     assert "-ManualEvidenceTimeoutSeconds 900" in documentation
     assert "manual window is finite" in documentation

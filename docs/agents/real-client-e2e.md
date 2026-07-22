@@ -1,19 +1,19 @@
 # Real-client E2E gate
 
 `scripts/Run-RealClientE2E.ps1` is the release-only Windows gate for proving
-that one candidate Debug build routes six pinned real clients through both
+that one candidate Debug build routes six compatible real clients through both
 canonical routes. HTTP/configuration preflight alone is never an E2E pass.
 
-## Pinned host environment and clients
+## Authoritative host and compatibility baselines
 
 Run on the authoritative machine-bound local dedicated Windows host
 environment `codexhub-real-client-e2e` with a new output root, dedicated Codex
 login input, dedicated Volc credential, and no reused host user session or
 client configuration. A VM or named snapshot is not required. The runner
-verifies these native installed versions before launching the candidate or a
-client:
+verifies each native installed version against these compatibility floors
+before launching the candidate or a client:
 
-| Client | Version | Version source |
+| Client | Minimum stable version | Version source |
 |---|---:|---|
 | Codex Desktop | `26.715.8383.0` | `OpenAI.Codex` AppX package identity and install location |
 | Codex CLI | `0.144.5` | `--version` |
@@ -22,31 +22,37 @@ client:
 | Pi | `0.80.6` | `--version` |
 | OMP | `17.0.3` | `--version` |
 
-Codex CLI, OpenCode, Pi, and OMP must each emit exactly one normalized
-three-part version token equal to the pin. Suffixes, four-part forms, and
-mixed or repeated version output fail. Only ZCode permits the documented
-executable build suffix.
+Codex CLI, OpenCode, Pi, and OMP must each emit exactly one normalized stable
+three-part version token at or above the table's floor. Codex CLI `0.145.0` is accepted.
+Suffixes, prereleases, four-part forms, unparseable output, and mixed
+or repeated version tokens fail. Only ZCode permits its separately verified
+numeric executable build suffix.
 
-Do not upgrade a client in place. OpenCode is pinned exactly to released
-version `1.18.4`, which contains the upstream response-header-timeout fix from
-commit `67caf894e0843ee370e72839e8265e483233479b`. The old `1.18.3` release and
-any suffix or later version fail closed. A pin change requires a runner and
-host-environment review.
+Do not install or upgrade a client during a qualification run. OpenCode
+`1.18.4` is the minimum stable release because it contains the upstream
+response-header-timeout fix from commit
+`67caf894e0843ee370e72839e8265e483233479b`. The old `1.18.3` release and any
+prerelease or ambiguous suffix fail closed; newer stable releases remain
+subject to the complete parser, routing, terminal, streaming, retry, and
+evidence matrix.
 
 Desktop's passed executable must reside beneath the matching `OpenAI.Codex`
 AppX `InstallLocation`. Its Chromium `ProductVersion` is not the Desktop
-version authority. ZCode requires an authoritative HKLM uninstall entry whose
-publisher is exactly `ZCode`, whose `DisplayVersion` is exactly `3.3.6`, and
-whose display name is either `ZCode` or `ZCode 3.3.6`. A version suffix must
-agree exactly with `DisplayVersion`. The runner prefers a valid absolute
+version authority. The four-part AppX version must be stable and at least
+`26.715.8383.0`. ZCode requires an authoritative HKLM uninstall entry whose
+publisher is exactly `ZCode`, whose stable three-part `DisplayVersion` is at
+least `3.3.6`, and whose display name is either `ZCode` or `ZCode <actual
+DisplayVersion>`. A display-name version must agree exactly with
+`DisplayVersion`. The runner prefers a valid absolute
 `InstallLocation`. When it is absent, the runner derives the install root from
 the authoritative absolute `DisplayIcon` and quoted `UninstallString` paths.
 Every available source must resolve to the same existing root, and the passed
 ZCode executable must reside beneath it. Relative, missing, ambiguous,
 conflicting, or unbound metadata fails closed. The executable build suffix,
-including `3.3.6.3198`, is accepted only when `DisplayVersion` remains exactly
-`3.3.6`. Real E2E reads the installed metadata directly; operators must not
-mutate the registry or supply the test-only metadata fixture.
+including `3.3.6.3198`, is accepted only when its three-part prefix agrees with
+the actual authoritative `DisplayVersion`. Real E2E reads the installed
+metadata directly; operators must not mutate the registry or supply the
+test-only metadata fixture.
 
 The host-environment manifest is bound to the Windows MachineGuid without
 recording the MachineGuid, machine name, username, account, or credential. It
@@ -227,7 +233,8 @@ The fixed case order and selectors are:
 
 Each case creates one disposable `sentinel.txt`. The client must use exactly
 one successful read-only read tool, emit the named sentinel once, and finish
-once. The pinned client parsers consume their real JSONL contracts:
+once. The compatibility-baseline client parsers consume their real JSONL
+contracts; accepting a newer version never relaxes these shapes:
 
 - Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
   items, and `turn.completed`; the read command must explicitly report
@@ -241,7 +248,7 @@ once. The pinned client parsers consume their real JSONL contracts:
   `error`, `aborted`, `length`, missing/unknown reasons, error messages,
   contradictory ordering, and duplicate/missing agent ends fail closed.
 
-OMP `17.0.3` is launched through its one-shot JSON interface as
+OMP's `17.0.3` compatibility baseline is launched through its one-shot JSON interface as
 `omp --print --mode json --model <selector> <prompt>`. It has no `run`
 subcommand, and `--format` is not a supported launch flag.
 
@@ -286,12 +293,12 @@ captures through inherited pipes, returns `124` on timeout, and emits only a
 bounded phase/process-count message. For the Issue module use:
 
 ```powershell
-python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 1800 -- `
+python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
   python -m pytest -q tests/test_real_client_e2e.py
 ```
 
 For a required full Python run, use the same command with an explicitly
-recorded bound appropriate to that suite, for example `--timeout-seconds 3600
+recorded bound appropriate to that suite, for example `--timeout-seconds 5400
 -- python -m pytest -q`. Targeted unattended invocations use the same wrapper
 with a smaller stated bound. Do not invoke unattended E2E pytest without this
 outer watchdog.
@@ -420,11 +427,13 @@ artifact per case and uses `failure_classification` `none` or `case_failure`.
 The success-summary top-level schema is exactly `schema`, `candidate_sha`,
 `managed_client_config_sha`, `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
 `pinned_versions`, `canonical_models`, `counts`, `cases`, and `artifacts`.
+The legacy-named `pinned_versions` object contains the actual normalized versions
+verified for this run, not the compatibility floors.
 Its `hashes` object contains exactly `debug_build` and
 `managed_client_config_build`; fingerprints of the host
 manifest, account profile/auth, Volc credential, Gateway configuration, and
 manual evidence are forbidden. Failure summaries omit `run_binding_sha256`
-and `hashes`. Summary/per-case content is otherwise limited to verified pins,
+and `hashes`. Summary/per-case content is otherwise limited to verified versions,
 canonical model IDs, bounded timings and counts, classifications, outcomes,
 and relative artifact names. It never contains credentials,
 authorization headers, prompts, non-sentinel model output, usernames, account

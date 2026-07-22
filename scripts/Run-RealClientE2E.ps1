@@ -188,7 +188,7 @@ catch {
     # Bounded taskkill/descendant cleanup remains available as fallback.
 }
 
-$script:PinnedVersions = [ordered]@{
+$script:MinimumVersions = [ordered]@{
     desktop = '26.715.8383.0'
     codex_cli = '0.144.5'
     zcode = '3.3.6'
@@ -318,7 +318,7 @@ function Get-FailureSummaryValue {
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-fA-F]{40}$') { $ManagedClientConfigSha.ToLowerInvariant() } else { $null }
         outcome = 'failed'
         failure_classification = $FailureClassification
-        pinned_versions = $script:PinnedVersions
+        pinned_versions = $script:MinimumVersions
         canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
         counts = [ordered]@{
             case_count = 0
@@ -1624,6 +1624,24 @@ function Test-ExecutableBoundToInstallLocation {
     return $executablePath.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-StableVersionAtLeast {
+    param([string]$Actual, [string]$Minimum, [int]$ComponentCount)
+    $componentPattern = if ($ComponentCount -eq 4) {
+        '^\d+\.\d+\.\d+\.\d+$'
+    } else {
+        '^\d+\.\d+\.\d+$'
+    }
+    if ($Actual -notmatch $componentPattern -or $Minimum -notmatch $componentPattern) {
+        return $false
+    }
+    try {
+        return ([version]$Actual).CompareTo([version]$Minimum) -ge 0
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-AbsoluteWindowsPath {
     param([string]$Path)
     return $Path -match '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)'
@@ -1642,11 +1660,12 @@ function Get-CanonicalZCodeRootFromFilePath {
 }
 
 function Resolve-ZCodeInstallRoot {
-    param([object]$Metadata, [string]$ExpectedVersion, [string]$Executable)
+    param([object]$Metadata, [string]$MinimumVersion, [string]$Executable)
     $displayName = ([string]$Metadata.display_name).Trim()
     $displayVersion = ([string]$Metadata.display_version).Trim()
     $publisher = ([string]$Metadata.publisher).Trim()
-    if ($displayVersion -cne $ExpectedVersion -or $publisher -cne 'ZCode' -or
+    if (-not (Test-StableVersionAtLeast -Actual $displayVersion -Minimum $MinimumVersion -ComponentCount 3) -or
+        $publisher -cne 'ZCode' -or
         ($displayName -cne 'ZCode' -and $displayName -cne "ZCode $displayVersion")) {
         throw 'preflight_zcode_version_mismatch'
     }
@@ -1764,32 +1783,34 @@ function Get-ZCodeInstallationMetadata {
 }
 
 function Get-NativeClientVersion {
-    param([string]$Client, [string]$Executable, [string]$Expected, [string]$ProbeRoot)
+    param([string]$Client, [string]$Executable, [string]$Minimum, [string]$ProbeRoot)
     $failureClient = $Client.Replace('-', '_')
     if ($Client -ceq 'desktop') {
         $metadata = Get-DesktopInstallationMetadata -Executable $Executable
+        $packageVersion = ([string]$metadata.package_version).Trim()
         if ([string]$metadata.package_name -cne 'OpenAI.Codex' -or
-            [string]$metadata.package_version -cne $Expected) {
+            -not (Test-StableVersionAtLeast -Actual $packageVersion -Minimum $Minimum -ComponentCount 4)) {
             throw 'preflight_desktop_version_mismatch'
         }
         if (-not (Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$metadata.install_location))) {
             throw 'preflight_desktop_executable_unbound'
         }
-        return $Expected
+        return $packageVersion
     }
     if ($Client -ceq 'zcode') {
         $metadata = Get-ZCodeInstallationMetadata -Executable $Executable
+        $displayVersion = ([string]$metadata.display_version).Trim()
         $productVersion = ([string]$metadata.executable_product_version).Trim()
-        if ($productVersion -notmatch ('^' + [regex]::Escape($Expected) + '(?:\.\d+)?$')) {
+        if ($productVersion -notmatch ('^' + [regex]::Escape($displayVersion) + '(?:\.\d+)?$')) {
             throw 'preflight_zcode_version_mismatch'
         }
-        [void](Resolve-ZCodeInstallRoot -Metadata $metadata -ExpectedVersion $Expected -Executable $Executable)
-        return $Expected
+        [void](Resolve-ZCodeInstallRoot -Metadata $metadata -MinimumVersion $Minimum -Executable $Executable)
+        return $displayVersion
     }
     [void](New-Item -ItemType Directory -Force -Path $ProbeRoot)
     $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('--version') -CaseRoot $ProbeRoot -Environment @{
         CODEXHUB_E2E_VERSION_PROBE = '1'
-        CODEXHUB_E2E_EXPECTED_VERSION = $Expected
+        CODEXHUB_E2E_MINIMUM_VERSION = $Minimum
         CODEXHUB_E2E_CLIENT = $Client
     } -StandardInput '' -ProcessTimeoutSeconds 15
     $text = ($result.stdout + "`n" + $result.stderr).Trim()
@@ -1801,7 +1822,8 @@ function Get-NativeClientVersion {
         [string]$versionMatches[0].Groups[1].Value
     }
     else { '' }
-    if ($result.timed_out -or $result.exit_code -ne 0 -or $normalizedVersion -cne $Expected) {
+    if ($result.timed_out -or $result.exit_code -ne 0 -or
+        -not (Test-StableVersionAtLeast -Actual $normalizedVersion -Minimum $Minimum -ComponentCount 3)) {
         throw "preflight_${failureClient}_version_mismatch"
     }
     return $normalizedVersion
@@ -2234,7 +2256,7 @@ foreach ($versionTarget in @(
     [pscustomobject]@{ client = 'pi'; key = 'pi' },
     [pscustomobject]@{ client = 'omp'; key = 'omp' }
 )) {
-    $actualVersions[$versionTarget.key] = Get-NativeClientVersion -Client $versionTarget.client -Executable $executables[$versionTarget.client] -Expected $script:PinnedVersions[$versionTarget.key] -ProbeRoot (Join-Path $workRoot "version-$($versionTarget.client)")
+    $actualVersions[$versionTarget.key] = Get-NativeClientVersion -Client $versionTarget.client -Executable $executables[$versionTarget.client] -Minimum $script:MinimumVersions[$versionTarget.key] -ProbeRoot (Join-Path $workRoot "version-$($versionTarget.client)")
 }
 [void](New-Item -ItemType Directory -Path $artifactRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $artifactRoot 'cases'))
@@ -2433,7 +2455,7 @@ catch {
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-f]{40}$') { $ManagedClientConfigSha } else { $null }
         outcome = 'failed'
         failure_classification = $failureClassification
-        pinned_versions = $script:PinnedVersions
+        pinned_versions = $script:MinimumVersions
         canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
         counts = [ordered]@{
             case_count = 0

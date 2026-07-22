@@ -1,6 +1,6 @@
 @echo off
 if defined CODEXHUB_E2E_VERSION_PROBE (
-  echo %CODEXHUB_E2E_EXPECTED_VERSION%
+  echo %CODEXHUB_E2E_MINIMUM_VERSION%
   exit /b 0
 )
 if not "%CODEXHUB_E2E_GUI_CLIENT%"=="zcode" exit /b 20

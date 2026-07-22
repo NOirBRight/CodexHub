@@ -1,6 +1,6 @@
 @echo off
 if defined CODEXHUB_E2E_VERSION_PROBE (
-  echo %CODEXHUB_E2E_EXPECTED_VERSION%
+  echo %CODEXHUB_E2E_MINIMUM_VERSION%
   echo 99.99.99
   exit /b 0
 )
