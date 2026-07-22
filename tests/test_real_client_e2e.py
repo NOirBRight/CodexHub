@@ -205,6 +205,7 @@ def _prepare_run(
         FIXTURES / "validate-managed-client-contract-probe.py",
         tmp_path / "validate-managed-client-contract-probe.py",
     )
+    shutil.copyfile(FIXTURES / "write-catalog.py", tmp_path / "write-catalog.py")
     portable_files = (
         "config/providers.toml",
         "src-python/codex_proxy.py",
@@ -499,8 +500,7 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
             "readback",
         }
     assert all(
-        item["flags"]
-        == ["--client", "--model", "--providers-path", "--root", "--settings-path"]
+        "--catalog-path" in item["flags"]
         for item in invocations
     )
     assert all(

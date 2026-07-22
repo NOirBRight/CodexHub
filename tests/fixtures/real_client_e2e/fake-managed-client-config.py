@@ -43,12 +43,14 @@ def parse_args(argv: list[str]) -> tuple[str, dict[str, str]]:
     return argv[1], parsed
 
 
-def selection(client: str, model: str) -> tuple[str, str]:
+def selection(client: str, model: str, catalog_path: str | None) -> tuple[str, str]:
     if client == "codex":
         return f"custom/{model}", "responses"
     provider, model_id = model.split("/", 1)
     selector = f"codexhub-{provider}/{model_id}"
     protocol = "responses" if provider == "openai" else "chat_completions"
+    if model_id == "gpt-5.6-luna" and catalog_path is None:
+        fail("openai/gpt-5.6-luna requires candidate catalog", 11)
     return selector, protocol
 
 
@@ -205,13 +207,15 @@ def main() -> None:
     client = args["--client"]
     model = args["--model"]
     root = Path(args["--root"])
+    catalog_path = args.get("--catalog-path")
     if not root.is_absolute():
         fail("root must be absolute")
     mode = os.environ.get("CODEXHUB_E2E_MATERIALIZER_MODE", "ok")
     if mode == "failure":
         fail("materializer failed with fixture-gateway-private-key", 9)
     root.mkdir(parents=True, exist_ok=True)
-    selector, protocol = selection(client, model)
+    _, model_id = model.split("/", 1) if "/" in model else ("", model)
+    selector, protocol = selection(client, model, catalog_path)
     if verb == "apply":
         write_targets(root, client, model, mode)
         (root / ".fake-managed-state.json").write_text(
@@ -289,6 +293,10 @@ def main() -> None:
         result = base | {"ok": True}
     if mode == "unsafe-output":
         result["api_key"] = "fixture-gateway-private-key"
+    if catalog_path and model_id == "gpt-5.6-luna" and (
+        not Path(catalog_path).is_file() or "candidate-managed" not in Path(catalog_path).read_text(encoding="utf-8")
+    ):
+        fail("candidate catalog missing or stale")
     print(json.dumps(result))
 
 

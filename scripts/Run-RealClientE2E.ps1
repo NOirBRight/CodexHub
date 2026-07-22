@@ -44,6 +44,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 try {
 Add-Type -TypeDefinition @'
@@ -337,7 +338,7 @@ function Set-RunnerPhase {
     if (-not $script:WatchdogStatePath) {
         return
     }
-    if ($Phase -notin @('preflight', 'client_materialization', 'candidate_startup', 'manual_evidence', 'automated_cases', 'summary')) {
+    if ($Phase -notin @('preflight', 'client_materialization', 'candidate_startup', 'candidate_gateway_ready', 'manual_evidence', 'automated_cases', 'summary')) {
         throw 'internal_runner_phase_invalid'
     }
     [System.IO.File]::WriteAllText($script:WatchdogStatePath, $Phase, $script:Utf8NoBom)
@@ -1907,9 +1908,10 @@ function Invoke-ManagedClientConfigVerb {
         [string]$Client,
         [string]$Root,
         [string]$Model,
-        [string]$SettingsPath,
-        [string]$ProvidersPath,
-        [string]$ProcessRoot
+        [string]$SettingsPath = $script:ManagedClientSettingsPath,
+        [string]$ProvidersPath = $script:ManagedClientProvidersPath,
+        [string]$ProcessRoot,
+        [string]$CatalogPath = ''
     )
     $arguments = @(
         'managed-client-config', $Verb,
@@ -1919,6 +1921,9 @@ function Invoke-ManagedClientConfigVerb {
         '--settings-path', $SettingsPath,
         '--providers-path', $ProvidersPath
     )
+    if ($CatalogPath) {
+        $arguments += @('--catalog-path', $CatalogPath)
+    }
     $result = Invoke-IsolatedProcess -Executable $script:ManagedClientConfigBuild -Arguments $arguments -CaseRoot $ProcessRoot -Environment @{
         CODEXHUB_E2E_MATERIALIZER_LOG = $script:ManagedClientConfigLogPath
     } -StandardInput '' -ProcessTimeoutSeconds 30
@@ -2081,7 +2086,8 @@ function Initialize-ClientConfiguration {
         [string]$CaseRoot,
         [string]$Model,
         [string]$SettingsPath = $script:ManagedClientSettingsPath,
-        [string]$ProvidersPath = $script:ManagedClientProvidersPath
+        [string]$ProvidersPath = $script:ManagedClientProvidersPath,
+        [string]$CatalogPath = ''
     )
     $managedClient = if ($Client -in @('desktop', 'codex-cli')) { 'codex' } else { $Client }
     $previewRoot = Join-Path $CaseRoot 'managed-preview'
@@ -2089,14 +2095,14 @@ function Initialize-ClientConfiguration {
     if ((Test-Path -LiteralPath $previewRoot) -or (Test-Path -LiteralPath $applyRoot)) {
         throw 'client_configuration_materializer_root_not_fresh'
     }
-    $preview = Invoke-ManagedClientConfigVerb -Verb 'preview' -Client $managedClient -Root $previewRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
+    $preview = Invoke-ManagedClientConfigVerb -Verb 'preview' -Client $managedClient -Root $previewRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot -CatalogPath $CatalogPath
     if ($managedClient -ceq 'codex') {
         Assert-ManagedClientOutputKeys -Value $preview -Required @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'overlay_args_relative')
     }
     else {
         Assert-ManagedClientOutputKeys -Value $preview -Required @('client_id', 'selector', 'model', 'route_protocol', 'target_names', 'next_redacted')
     }
-    $apply = Invoke-ManagedClientConfigVerb -Verb 'apply' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
+    $apply = Invoke-ManagedClientConfigVerb -Verb 'apply' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot -CatalogPath $CatalogPath
     if ($managedClient -ceq 'codex') {
         Assert-ManagedClientOutputKeys -Value $apply -Required @('mode', 'proxy_running', 'proxy_port', 'proxy_build', 'message', 'gateway_lifecycle') -Optional @('history_sync_status', 'history_sync_message')
         if ([string](Get-JsonProperty $apply 'mode' '') -cne 'custom') {
@@ -2109,7 +2115,7 @@ function Initialize-ClientConfiguration {
             throw 'client_configuration_materializer_contradiction'
         }
     }
-    $readback = Invoke-ManagedClientConfigVerb -Verb 'readback' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot
+    $readback = Invoke-ManagedClientConfigVerb -Verb 'readback' -Client $managedClient -Root $applyRoot -Model $Model -SettingsPath $SettingsPath -ProvidersPath $ProvidersPath -ProcessRoot $CaseRoot -CatalogPath $CatalogPath
     Assert-ManagedClientOutputKeys -Value $readback -Required @('client_id', 'ok', 'selector', 'model', 'route_protocol')
     if ((Get-JsonProperty $readback 'ok' $false) -ne $true -or
         [string](Get-JsonProperty $preview 'client_id' '') -cne $managedClient -or
@@ -2460,18 +2466,6 @@ try {
     $candidateRoot = Join-Path $workRoot 'candidate'
     [void](New-Item -ItemType Directory -Force -Path $candidateRoot)
     Initialize-CandidateRuntime -CandidateRoot $candidateRoot
-    $caseConfigurations = @{}
-    foreach ($case in @($manualCases) + @($automatedCases)) {
-        $caseRoot = if ($case.client -in @('desktop', 'zcode')) {
-            Join-Path (Join-Path $workRoot ("gui-" + $case.client)) $case.case_id
-        }
-        else {
-            Join-Path $workRoot $case.case_id
-        }
-        [void](New-Item -ItemType Directory -Path $caseRoot -Force)
-        $caseConfigurations[$case.case_id] = Initialize-ClientConfiguration -Client $case.client -CaseRoot $caseRoot -Model $case.gateway_model
-    }
-    [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna')
     $candidateEnvironment = @{
         CODEXHUB_E2E_CANDIDATE_SHA = $CandidateSha
         CODEXHUB_E2E_GATEWAY_PORT = [string]$script:GatewayConfig.listen_port
@@ -2487,6 +2481,26 @@ try {
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds)
+    $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'proxy\model-catalogs\codexhub-model-catalog.json'
+    if (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf)) {
+        $candidateStartupStopwatch.Stop()
+        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_failed_context_budget' -DurationMilliseconds [int]$candidateStartupStopwatch.ElapsedMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        throw 'candidate_gateway_bootstrap_failed_context_budget'
+    }
+    $caseConfigurations = @{}
+    foreach ($case in @($manualCases) + @($automatedCases)) {
+        $caseRoot = if ($case.client -in @('desktop', 'zcode')) {
+            Join-Path (Join-Path $workRoot ("gui-" + $case.client)) $case.case_id
+        }
+        else {
+            Join-Path $workRoot $case.case_id
+        }
+        [void](New-Item -ItemType Directory -Path $caseRoot -Force)
+        $caseConfigurations[$case.case_id] = Initialize-ClientConfiguration -Client $case.client -CaseRoot $caseRoot -Model $case.gateway_model -CatalogPath $candidateCatalogPath
+    }
+    [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna' -CatalogPath $candidateCatalogPath)
+    $candidateStartupStopwatch.Stop()
+    $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $remainingStartupMilliseconds = $candidateStartupBudgetMilliseconds - [int]$candidateStartupStopwatch.ElapsedMilliseconds
     if ($remainingStartupMilliseconds -le 0) {
         $candidateStartupStopwatch.Stop()
