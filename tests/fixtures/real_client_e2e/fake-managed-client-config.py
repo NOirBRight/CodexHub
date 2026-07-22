@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -63,6 +64,14 @@ def targets(client: str) -> list[str]:
             "zcode/bots-model-cache.v2.json",
         ],
     }[client]
+
+
+def reported_targets(client: str, mode: str) -> list[str]:
+    if client == "codex":
+        if mode == "target-escape":
+            return ["../config.toml"]
+        return ["config.toml"]
+    return targets(client)
 
 
 def write_zcode(root: Path) -> None:
@@ -137,7 +146,7 @@ def write_zcode(root: Path) -> None:
     )
 
 
-def write_targets(root: Path, client: str, model: str) -> None:
+def write_targets(root: Path, client: str, model: str, mode: str) -> None:
     if client == "zcode":
         write_zcode(root)
         return
@@ -148,6 +157,47 @@ def write_targets(root: Path, client: str, model: str) -> None:
             f"fixture managed config for {client} {model} http://127.0.0.1:19190\n",
             encoding="utf-8",
         )
+    if client != "codex":
+        return
+    source = root / "codex-target" / "config.toml"
+    if mode == "target-missing":
+        source.unlink()
+    elif mode == "target-ambiguous":
+        duplicate = root / "other-target" / "config.toml"
+        duplicate.parent.mkdir(parents=True)
+        duplicate.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    elif mode == "target-hardlink":
+        alias = root / "other-target" / "alias.toml"
+        alias.parent.mkdir(parents=True)
+        os.link(source, alias)
+    elif mode == "target-reparse":
+        source.unlink()
+        source.parent.rmdir()
+        junction_target = root.parent / "managed-junction-target"
+        junction_target.mkdir()
+        (junction_target / "config.toml").write_text(
+            f"fixture managed config for {client} {model} http://127.0.0.1:19190\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                str(root / "codex-target"),
+                str(junction_target),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    elif mode == "target-over-bound":
+        noise = root / "noise"
+        noise.mkdir()
+        for index in range(65):
+            (noise / f"entry-{index:02d}.txt").write_text("fixture", encoding="utf-8")
 
 
 def main() -> None:
@@ -163,7 +213,7 @@ def main() -> None:
     root.mkdir(parents=True, exist_ok=True)
     selector, protocol = selection(client, model)
     if verb == "apply":
-        write_targets(root, client, model)
+        write_targets(root, client, model, mode)
         (root / ".fake-managed-state.json").write_text(
             json.dumps({"client": client, "model": model}), encoding="utf-8"
         )
@@ -199,9 +249,15 @@ def main() -> None:
     }
     if verb == "preview":
         if client == "codex":
-            result = base | {"target_names": targets(client), "overlay_args_relative": ["apply"]}
+            result = base | {
+                "target_names": reported_targets(client, mode),
+                "overlay_args_relative": ["apply"],
+            }
         else:
-            result = base | {"target_names": targets(client), "next_redacted": "[fixture]"}
+            result = base | {
+                "target_names": reported_targets(client, mode),
+                "next_redacted": "[fixture]",
+            }
     elif verb == "apply":
         if client == "codex":
             result = {

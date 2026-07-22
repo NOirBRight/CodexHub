@@ -1943,17 +1943,100 @@ function Invoke-ManagedClientConfigVerb {
 
 function Get-ManagedTargetSource {
     param([string]$ApplyRoot, [string]$RelativeName)
-    if (-not $RelativeName -or [System.IO.Path]::IsPathRooted($RelativeName) -or $RelativeName -split '[\\/]' -contains '..') {
+    if (-not $RelativeName -or [System.IO.Path]::IsPathRooted($RelativeName)) {
         throw 'client_configuration_materializer_output_invalid'
     }
-    $root = [System.IO.Path]::GetFullPath($ApplyRoot).TrimEnd('\') + '\'
-    $source = [System.IO.Path]::GetFullPath((Join-Path $ApplyRoot ($RelativeName -replace '/', '\')))
-    if (-not $source.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -or
-        -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+    $normalizedName = $RelativeName -replace '/', '\'
+    $segments = @($normalizedName -split '\\')
+    $invalidCharacters = [System.IO.Path]::GetInvalidFileNameChars()
+    if ($segments.Count -eq 0 -or @($segments | Where-Object {
+        -not $_ -or $_ -in @('.', '..') -or $_.EndsWith('.') -or $_.EndsWith(' ') -or
+        $_.IndexOfAny($invalidCharacters) -ge 0
+    }).Count -ne 0) {
         throw 'client_configuration_materializer_output_invalid'
     }
-    Assert-IsolatedRegularFile -Path $source -IsolationRoot $ApplyRoot
-    return $source
+    try {
+        Assert-CanonicalNonReparseDirectory -Path $ApplyRoot -Failure 'client_configuration_materializer_output_invalid'
+        $rootPath = [System.IO.Path]::GetFullPath($ApplyRoot).TrimEnd('\')
+        $resolvedRoot = (Resolve-Path -LiteralPath $ApplyRoot -ErrorAction Stop).Path.TrimEnd('\')
+    }
+    catch {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    if (-not $rootPath.Equals($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    $rootPrefix = $resolvedRoot + '\'
+    $exactPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot $normalizedName))
+    if (-not $exactPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    if (Test-Path -LiteralPath $exactPath -PathType Leaf) {
+        try {
+            $resolvedExact = (Resolve-Path -LiteralPath $exactPath -ErrorAction Stop).Path
+            if (-not $resolvedExact.Equals($exactPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'client_configuration_materializer_output_invalid'
+            }
+            Assert-IsolatedRegularFile -Path $resolvedExact -IsolationRoot $resolvedRoot
+            return $resolvedExact
+        }
+        catch {
+            throw 'client_configuration_materializer_output_invalid'
+        }
+    }
+    if ($segments.Count -ne 1) {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+
+    $maximumFiles = 64
+    $maximumDirectories = 64
+    $fileCount = 0
+    $directoryCount = 0
+    $matches = [System.Collections.Generic.List[string]]::new()
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($resolvedRoot)
+    try {
+        while ($pending.Count -gt 0) {
+            $directoryPath = $pending.Dequeue()
+            foreach ($item in @(Get-ChildItem -LiteralPath $directoryPath -Force -ErrorAction Stop)) {
+                $itemLinkType = if ($item.PSObject.Properties['LinkType']) { [string]$item.LinkType } else { '' }
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $itemLinkType) {
+                    throw 'client_configuration_materializer_output_invalid'
+                }
+                $itemPath = [System.IO.Path]::GetFullPath($item.FullName)
+                if (-not $itemPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'client_configuration_materializer_output_invalid'
+                }
+                $resolvedItem = (Resolve-Path -LiteralPath $itemPath -ErrorAction Stop).Path
+                if (-not $resolvedItem.Equals($itemPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'client_configuration_materializer_output_invalid'
+                }
+                if ($item.PSIsContainer) {
+                    $directoryCount += 1
+                    if ($directoryCount -gt $maximumDirectories) {
+                        throw 'client_configuration_materializer_output_invalid'
+                    }
+                    $pending.Enqueue($resolvedItem)
+                    continue
+                }
+                $fileCount += 1
+                if ($fileCount -gt $maximumFiles) {
+                    throw 'client_configuration_materializer_output_invalid'
+                }
+                Assert-IsolatedRegularFile -Path $resolvedItem -IsolationRoot $resolvedRoot
+                if ($item.Name.Equals($RelativeName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $matches.Add($resolvedItem)
+                }
+            }
+        }
+    }
+    catch {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    if ($matches.Count -ne 1) {
+        throw 'client_configuration_materializer_output_invalid'
+    }
+    return $matches[0]
 }
 
 function Publish-ManagedClientTargets {

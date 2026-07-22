@@ -548,6 +548,83 @@ def test_codex_apply_accepts_production_omitted_optional_history_fields(tmp_path
     assert summary["outcome"] == "passed"
 
 
+def test_materializer_resolves_unique_nested_codex_target_from_opaque_basename(
+    tmp_path,
+):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    published = list(
+        (tmp_path / "output" / "isolated" / "work").glob(
+            "*/.codex/config.toml"
+        )
+    )
+    assert published
+    assert all("127.0.0.1:19190" in path.read_text() for path in published)
+
+
+@pytest.mark.parametrize(
+    "materializer_fake",
+    [
+        "fake-managed-client-config-target-missing.cmd",
+        "fake-managed-client-config-target-ambiguous.cmd",
+        "fake-managed-client-config-target-reparse.cmd",
+        "fake-managed-client-config-target-hardlink.cmd",
+        "fake-managed-client-config-target-escape.cmd",
+        "fake-managed-client-config-target-over-bound.cmd",
+    ],
+)
+def test_materializer_target_resolution_fails_closed(
+    tmp_path, materializer_fake
+):
+    result = _run(
+        tmp_path,
+        materializer_fake=materializer_fake,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summaries = list(tmp_path.rglob("summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    _assert_exact_summary_schema(summary)
+    assert summary["failure_classification"] == (
+        "client_configuration_materializer_output_invalid"
+    )
+
+
+def test_opencodex_appdata_shim_fails_under_case_local_isolation(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={
+            "CodexCliPath": "fake-client-opencodex-appdata-shim.cmd"
+        },
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["failure_classification"] == "case_failure"
+    assert {
+        case["case_id"]
+        for case in summary["cases"]
+        if case["outcome"] == "failed"
+    } == {"codex-cli-luna", "codex-cli-volc"}
+    markers = list(
+        (tmp_path / "output" / "isolated" / "work").glob(
+            "codex-cli-*/opencodex-appdata-isolated.marker"
+        )
+    )
+    assert len(markers) == 2
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Pass the real Codex CLI executable" in documentation
+    assert "OpenCodex-style shim" in documentation
+    assert "replaces `%APPDATA%`" in documentation
+
+
 def test_codex_apply_accepts_bounded_present_optional_history_fields(tmp_path):
     result = _run(
         tmp_path,
@@ -596,6 +673,7 @@ def test_runner_has_no_second_managed_client_schema_or_protocol_generator():
         "openai-chat-completions",
         "openai-completions",
         "/chat/completions",
+        "codex-target",
     ):
         assert removed not in source
     assert "managed-client-config" in source

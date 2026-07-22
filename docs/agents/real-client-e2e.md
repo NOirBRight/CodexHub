@@ -141,6 +141,15 @@ relative target names, and successful apply/readback state. A malformed,
 secret-bearing, absolute-path-bearing, contradictory, or non-zero response
 fails closed before that client launches.
 
+The candidate owns each opaque relative `target_names` value. The runner first
+uses an exact safe path beneath the fresh apply root. If the candidate reports
+only a basename and no exact file exists, the runner performs a bounded,
+non-reparse traversal and accepts exactly one regular, single-link file with
+that basename. Zero or multiple matches, traversal/rooted names, canonical
+escape, reparse points or junctions, hard links, and an over-bound tree fail
+closed. This lookup is generic: operators and the runner must not infer a
+client-specific candidate source directory from the target name.
+
 Before `refresh-models`, candidate startup, or any client/GUI launch, the
 runner contract-probes the actual passed `-ManagedClientConfigBuild` for
 Codex, OpenCode, ZCode, Pi, and OMP across both Official and Volc selections.
@@ -182,6 +191,12 @@ version-verified Codex CLI path. This publishes the candidate-managed Official
 catalog and resolved context budget without discovering or copying a host
 catalog, session, or configuration. Operators must not seed this state by hand
 or hard-code a context limit.
+
+Pass the real Codex CLI executable to `-CodexCliPath`. Do not pass an
+OpenCodex-style shim that locates another executable relative to the current
+user's `%APPDATA%`: the runner intentionally replaces `%APPDATA%` with the
+fresh case-local directory, so such host-state indirection fails closed rather
+than weakening isolation.
 
 After that bootstrap, the runner starts the candidate in a kill-on-close
 Windows Job Object and waits for a successful `/health` response plus the
