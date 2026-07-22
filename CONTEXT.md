@@ -1,6 +1,6 @@
 # CodexHub
 
-CodexHub is a local model-routing utility for the Codex ecosystem. This glossary keeps user-facing product terms consistent across documentation and UI.
+CodexHub is the model-access console for Codex desktop users: official subscription and third-party models side by side, stable, visible, and reversible. Product positioning, non-goals, and version themes live in [ADR-0002](docs/adr/0002-product-positioning-model-access-console.md). This glossary keeps user-facing product terms consistent across documentation and UI.
 
 ## Language
 

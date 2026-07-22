@@ -2,9 +2,9 @@
 
 > [中文](README.zh-CN.md) | English
 
-> Bring official Codex models and third-party models into Codex and other coding tools through one local Gateway, while staying transparent whenever possible and only adding compatibility, adaptation, and telemetry where needed.
+> The model-access console for Codex desktop users: official subscription and third-party models side by side — stable, visible, and reversible.
 
-CodexHub is a local Gateway plus desktop management app. It lets Codex Desktop use official GPT subscription models and third-party models in the same model catalog, and it exposes those models through a local OpenAI-compatible endpoint for tools such as OpenCode, ZCode, Pi, and OMP.
+CodexHub is a desktop app plus local Gateway. It lets Codex Desktop use official GPT subscription models and third-party models in the same model catalog, keeps tool calls and subagents dependable on curated providers, shows per-model usage, cost, and health, and can always restore Codex to its native state without losing history. It also exposes those models through a local OpenAI-compatible endpoint for tools such as OpenCode, ZCode, Pi, and OMP.
 
 ## How It Works
 

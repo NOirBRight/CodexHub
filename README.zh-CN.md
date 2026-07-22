@@ -2,9 +2,9 @@
 
 > 中文 | [English](README.md)
 
-> 把 Codex 官方模型和第三方模型统一接入 Codex 与其他编程工具，尽量保持透明代理，只在必要时做协议兼容、能力适配和用量统计。
+> Codex 桌面用户的模型接入控制台：官方订阅模型与第三方模型同目录共存——用得稳、看得见、退得出。
 
-CodexHub 是一个本地 Gateway + 桌面管理工具。它让 Codex Desktop 可以在同一个模型目录中同时使用官方 GPT 模型和第三方模型，也把这些模型导出成一个本地 OpenAI 兼容端点，供 OpenCode、ZCode、Pi、OMP 等工具使用。
+CodexHub 是一个桌面应用 + 本地 Gateway。它让 Codex Desktop 在同一个模型目录中同时使用官方 GPT 模型和第三方模型，让精选 Provider 上的工具调用和子代理稳定可用，提供按模型的用量、成本与健康状态视图，并且随时可以无损恢复 Codex 原生状态、不丢历史。同时它也把这些模型导出成本地 OpenAI 兼容端点，供 OpenCode、ZCode、Pi、OMP 等工具使用。
 
 ## 工作方式
 
