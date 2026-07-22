@@ -545,7 +545,7 @@ def _selected_official_context_budget(
             if not isinstance(model, dict):
                 continue
             slug = model.get("slug")
-            if not isinstance(slug, str) or not slug.startswith("gpt-"):
+            if not isinstance(slug, str):
                 continue
             metadata = model.get("codex_proxy_metadata")
             if not isinstance(metadata, dict):
@@ -563,7 +563,7 @@ def _selected_official_context_budget(
     budget: dict[str, object] | None = None
     if normalized_selected_model:
         budget = official_budgets.get(normalized_selected_model)
-        if budget is None and not normalized_selected_model.startswith("gpt-"):
+        if budget is None:
             return None
     elif official_budgets:
         budget = next(iter(official_budgets.values()))
