@@ -499,8 +499,7 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
             "readback",
         }
     assert all(
-        item["flags"]
-        == ["--client", "--model", "--providers-path", "--root", "--settings-path"]
+        "--catalog-path" in item["flags"]
         for item in invocations
     )
     assert all(

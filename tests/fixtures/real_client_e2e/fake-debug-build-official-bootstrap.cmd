@@ -37,5 +37,9 @@ if exist "%~f0.bootstrap-fail" (
 if exist "%~f0.bootstrap-slow" (
   ping.exe 127.0.0.1 -n 4 >nul
 )
+set "catalog=%CODEXHUB_RUNTIME_HOME%\proxy\model-catalogs"
+if not exist "%catalog%" mkdir "%catalog%"
+  powershell -NoProfile -Command "Set-Content -LiteralPath \"%catalog%\codexhub-model-catalog.json\" -Value '{`\"candidate-managed`\": true}' -NoNewline"
+if errorlevel 1 exit /b 37
 >"%budget%" echo candidate-managed-safe-budget
 exit /b 0

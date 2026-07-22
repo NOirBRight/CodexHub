@@ -150,13 +150,23 @@ escape, reparse points or junctions, hard links, and an over-bound tree fail
 closed. This lookup is generic: operators and the runner must not infer a
 client-specific candidate source directory from the target name.
 
-Before `refresh-models`, candidate startup, or any client/GUI launch, the
-runner contract-probes the actual passed `-ManagedClientConfigBuild` for
-Codex, OpenCode, ZCode, Pi, and OMP across both Official and Volc selections.
-Each probe performs preview/apply/readback in the final case-local root; those
-verified roots are then reused for the corresponding client launch. Thus the
-probe detects candidate #194 CLI schema drift without a second materialization
-or host-state fallback. Codex apply requires the six production fields
+The runner first invokes the candidate's production `refresh-models` command
+with the isolated `CODEXHUB_RUNTIME_HOME`, isolated
+`CODEXHUB_CODEX_TARGET_HOME`, dedicated auth input, and the exact
+version-verified Codex CLI path. This publishes the candidate-managed Official
+catalog and resolved context budget without discovering or copying a host
+catalog, session, or configuration. Operators must not seed this state by hand
+or hard-code a context limit.
+
+After `refresh-models` succeeds, the runner contract-probes the actual passed
+`-ManagedClientConfigBuild` for Codex, OpenCode, ZCode, Pi, and OMP across both
+Official and Volc selections. Each probe performs `preview`/`apply`/`readback`
+in the final case-local root, passing the candidate-published Official catalog
+via `--catalog-path` for any `openai/gpt-5.6-luna` selection. The verified roots
+are then reused for the corresponding client launch. Thus the probe detects
+candidate #194 CLI schema drift and verifies that the candidate-managed catalog
+drives Official model resolution without a second materialization or host-state
+fallback. Codex apply requires the six production fields
 `gateway_lifecycle`, `message`, `mode`, `proxy_build`, `proxy_port`, and
 `proxy_running`. `history_sync_status` and `history_sync_message` are the only
 optional keys and may be omitted, null, or bounded safe strings; all other
@@ -184,13 +194,7 @@ the same exact portable candidate executable and SHA may be supplied for both
 roles. The summary and human template record both bindings.
 
 Before launching Desktop or ZCode, the runner also requires the configured
-loopback port to be unused. It first invokes the candidate's production
-`refresh-models` command with the isolated `CODEXHUB_RUNTIME_HOME`, isolated
-`CODEXHUB_CODEX_TARGET_HOME`, dedicated auth input, and the exact
-version-verified Codex CLI path. This publishes the candidate-managed Official
-catalog and resolved context budget without discovering or copying a host
-catalog, session, or configuration. Operators must not seed this state by hand
-or hard-code a context limit.
+loopback port to be unused.
 
 Pass the real Codex CLI executable to `-CodexCliPath`. Do not pass an
 OpenCodex-style shim that locates another executable relative to the current
@@ -198,13 +202,13 @@ user's `%APPDATA%`: the runner intentionally replaces `%APPDATA%` with the
 fresh case-local directory, so such host-state indirection fails closed rather
 than weakening isolation.
 
-After that bootstrap, the runner starts the candidate in a kill-on-close
-Windows Job Object and waits for a successful `/health` response plus the
-isolated diagnostics path. Bootstrap and readiness share one 30-second budget
-(or the smaller `-TimeoutSeconds` value); bootstrap does not receive a second
-timeout window. A context-budget publication failure is classified as
-`candidate_gateway_bootstrap_failed_context_budget`; other bootstrap failures
-and timeouts use `candidate_gateway_bootstrap_failed` and
+After the `refresh-models` bootstrap, the runner starts the candidate in a
+kill-on-close Windows Job Object and waits for a successful `/health` response
+plus the isolated diagnostics path. Bootstrap and readiness share one 30-second
+budget (or the smaller `-TimeoutSeconds` value); bootstrap does not receive a
+second timeout window. A missing or stale Official catalog after `refresh-models`
+is classified as `candidate_gateway_bootstrap_failed_context_budget`; other
+bootstrap failures and timeouts use `candidate_gateway_bootstrap_failed` and
 `candidate_gateway_bootstrap_timeout`. A missing Python lifecycle, listener,
 usable health response, or diagnostics path after bootstrap fails before any
 GUI launch with a stable `candidate_gateway_startup_failed_*` classification.

@@ -24,6 +24,9 @@ def main(path: Path) -> None:
             for row in rows
             if (row["client"], row["model"]) == pair
         } == {"preview", "apply", "readback"}
+    for row in rows:
+        if row["client"] in ("opencode", "zcode", "pi", "omp") and row["model"] == "openai/gpt-5.6-luna":
+            assert "--catalog-path" in row["flags"], row
 
 
 if __name__ == "__main__":
