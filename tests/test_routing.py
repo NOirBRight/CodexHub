@@ -705,67 +705,94 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["output"][0]["content"][0]["text"], "hello")
         self.assertEqual(dict(fake.headers).get("Content-Type"), "application/json")
 
-    def test_opencode_volc_transparent_responses_preserves_standard_function_history(self):
-        input_items = [
-            {"type": "message", "role": "user", "content": "Calculate 2 + 2."},
+    def test_opencode_volc_transparent_chat_preserves_standard_tool_history(self):
+        messages = [
+            {"role": "user", "content": "Calculate 2 + 2."},
             {
-                "id": "fc_calc_1",
-                "type": "function_call",
-                "status": "completed",
-                "call_id": "call_calc_1",
-                "name": "calculator",
-                "arguments": '{"expression":"2+2"}',
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_calc_1",
+                        "type": "function",
+                        "function": {"name": "calculator", "arguments": '{"expression":"2+2"}'},
+                    }
+                ],
             },
-            {"type": "function_call_output", "call_id": "call_calc_1", "output": "4"},
+            {"role": "tool", "tool_call_id": "call_calc_1", "content": "4"},
+        ]
+        tools = [
+            {"type": "function", "function": {"name": "calculator", "parameters": {"type": "object"}}}
         ]
         body = json.dumps(
             {
                 "model": "glm-5.2",
-                "input": input_items,
-                "tools": [{"type": "function", "name": "calculator", "parameters": {"type": "object"}}],
+                "messages": messages,
+                "tools": tools,
                 "stream": False,
             }
         ).encode("utf-8")
+        self.external_model["upstream_format"] = "chat_completions"
         handler, fake = post_handler(
-            "/v1/providers/volc/responses",
+            "/v1/providers/volc/chat/completions",
             body,
             headers={"X-Codex-Client-Id": "opencode"},
         )
 
-        with patch(
-            "codex_proxy._open_upstream_response",
-            return_value=FakeContextResponse(b'{"id":"resp_volc","output":[]}'),
-        ) as open_upstream:
+        with (
+            patch(
+                "codex_proxy._chat_completions_request_to_responses_body",
+                side_effect=AssertionError("converted to Responses"),
+            ),
+            patch(
+                "codex_proxy._responses_request_to_chat_completion_body",
+                side_effect=AssertionError("converted from Responses"),
+            ),
+            patch(
+                "codex_proxy.compatible_request_body",
+                side_effect=AssertionError("compatibility adapter ran"),
+            ),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"chatcmpl_volc","choices":[]}'),
+            ) as open_upstream,
+        ):
             CodexProxyHandler.do_POST(handler)
 
         request = open_upstream.call_args.args[0]
-        self.assertEqual(request.full_url, "https://ark.example.test/v1/responses")
+        self.assertEqual(request.full_url, "https://ark.example.test/v1/chat/completions")
         sent_payload = json.loads(request.data)
         self.assertEqual(sent_payload["model"], "glm-5.2")
-        self.assertEqual(sent_payload["input"], input_items)
+        self.assertEqual(sent_payload["messages"], messages)
+        self.assertEqual(sent_payload["tools"], tools)
         self.assertEqual(fake.status, 200)
 
-    def test_opencode_volc_transparent_responses_bounds_repeated_successful_function_calls(self):
-        input_items = [{"type": "message", "role": "user", "content": "Calculate 2 + 2."}]
+    def test_opencode_volc_transparent_chat_bounds_repeated_successful_tool_calls(self):
+        messages = [{"role": "user", "content": "Calculate 2 + 2."}]
         for index in range(3):
             call_id = f"call_calc_{index}"
-            input_items.extend(
+            messages.extend(
                 [
                     {
-                        "type": "function_call",
-                        "status": "completed",
-                        "call_id": call_id,
-                        "name": "calculator",
-                        "arguments": '{"expression":"2+2"}',
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {"name": "calculator", "arguments": '{"expression":"2+2"}'},
+                            }
+                        ],
                     },
-                    {"type": "function_call_output", "call_id": call_id, "output": "4"},
+                    {"role": "tool", "tool_call_id": call_id, "content": "4"},
                 ]
             )
         body = json.dumps(
-            {"model": "glm-5.2", "input": input_items, "stream": False}
+            {"model": "glm-5.2", "messages": messages, "stream": False}
         ).encode("utf-8")
+        self.external_model["upstream_format"] = "chat_completions"
         handler, fake = post_handler(
-            "/v1/providers/volc/responses",
+            "/v1/providers/volc/chat/completions",
             body,
             headers={"X-Codex-Client-Id": "opencode"},
         )

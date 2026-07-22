@@ -6785,6 +6785,53 @@ def _excessive_transparent_responses_tool_loop_count(payload: Mapping[str, Any])
     return None
 
 
+def _excessive_transparent_chat_tool_loop_count(payload: Mapping[str, Any]) -> int | None:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+
+    previous_pair: tuple[str, str, str] | None = None
+    repeated_count = 0
+    index = 0
+    while index < len(messages) - 1:
+        message = messages[index]
+        result = messages[index + 1]
+        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        if (
+            not isinstance(tool_calls, list)
+            or len(tool_calls) != 1
+            or not isinstance(result, Mapping)
+            or message.get("role") != "assistant"
+            or result.get("role") != "tool"
+        ):
+            previous_pair = None
+            repeated_count = 0
+            index += 1
+            continue
+        call = tool_calls[0]
+        function = call.get("function") if isinstance(call, Mapping) else None
+        if (
+            not isinstance(function, Mapping)
+            or call.get("type") != "function"
+            or not isinstance(call.get("id"), str)
+            or call["id"] != result.get("tool_call_id")
+            or not isinstance(function.get("name"), str)
+            or not isinstance(function.get("arguments"), str)
+            or not isinstance(result.get("content"), str)
+        ):
+            previous_pair = None
+            repeated_count = 0
+            index += 1
+            continue
+        pair = (function["name"], function["arguments"], result["content"])
+        repeated_count = repeated_count + 1 if pair == previous_pair else 1
+        previous_pair = pair
+        if repeated_count >= EXCESSIVE_TOOL_LOOP_BOUND:
+            return repeated_count
+        index += 2
+    return None
+
+
 def _multi_agent_discovery_output_item(item: Mapping[str, Any]) -> dict[str, Any]:
     rewritten = dict(item)
     rewritten["tools"] = MULTI_AGENT_DISCOVERY_TOOLS
@@ -12969,9 +13016,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         schemas_rewritten=tool_schema_rewrites,
                         **proxy_request_context,
                     )
-                if is_transparent_same_format and inbound_format == "responses":
-                    repeated_count = _excessive_transparent_responses_tool_loop_count(
-                        _safe_json_mapping(body) or {}
+                if upstream_name != "official" and is_transparent_same_format:
+                    transparent_payload = _safe_json_mapping(body) or {}
+                    repeated_count = (
+                        _excessive_transparent_responses_tool_loop_count(transparent_payload)
+                        if inbound_format == "responses"
+                        else _excessive_transparent_chat_tool_loop_count(transparent_payload)
+                        if inbound_format == "chat_completions"
+                        else None
                     )
                     if repeated_count is not None:
                         raise UpstreamProtocolTranslationError(
