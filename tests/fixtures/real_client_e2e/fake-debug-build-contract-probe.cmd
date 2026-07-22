@@ -4,7 +4,7 @@ if not defined CODEXHUB_E2E_CONTRACT_PROBE_LOG exit /b 50
 if /I "%~1"=="refresh-models" (
   set "catalog=%CODEXHUB_RUNTIME_HOME%\proxy\model-catalogs"
   if not exist "!catalog!" mkdir "!catalog!"
-  powershell -NoProfile -Command "Set-Content -LiteralPath '!catalog!\codexhub-model-catalog.json' -Value '{`\"candidate-managed`\": true}' -NoNewline"
+  python.exe "%~dp0write-catalog.py" "!catalog!\codexhub-model-catalog.json"
   if errorlevel 1 exit /b 37
   exit /b 0
 )

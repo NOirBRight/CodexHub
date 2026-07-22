@@ -39,7 +39,7 @@ if exist "%~f0.bootstrap-slow" (
 )
 set "catalog=%CODEXHUB_RUNTIME_HOME%\proxy\model-catalogs"
 if not exist "%catalog%" mkdir "%catalog%"
-  powershell -NoProfile -Command "Set-Content -LiteralPath \"%catalog%\codexhub-model-catalog.json\" -Value '{`\"candidate-managed`\": true}' -NoNewline"
+python.exe "%~dp0write-catalog.py" "%catalog%\codexhub-model-catalog.json"
 if errorlevel 1 exit /b 37
 >"%budget%" echo candidate-managed-safe-budget
 exit /b 0

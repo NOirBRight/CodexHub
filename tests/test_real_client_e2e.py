@@ -205,6 +205,7 @@ def _prepare_run(
         FIXTURES / "validate-managed-client-contract-probe.py",
         tmp_path / "validate-managed-client-contract-probe.py",
     )
+    shutil.copyfile(FIXTURES / "write-catalog.py", tmp_path / "write-catalog.py")
     portable_files = (
         "config/providers.toml",
         "src-python/codex_proxy.py",
