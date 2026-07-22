@@ -1,10 +1,12 @@
 import json
 import hashlib
+import ctypes
 import os
 from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -273,6 +275,7 @@ def _run(
     finalize_manual: bool = True,
     timeout_seconds: int = 10,
     manual_timeout_seconds: int = 10,
+    overall_timeout_seconds: int = 180,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
         tmp_path, candidate_sha, materializer_sha
@@ -325,6 +328,7 @@ def _run(
         command.extend((f"-{name}", str(executable)))
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
     command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
+    command.extend(("-OverallTimeoutSeconds", str(overall_timeout_seconds)))
     finalizer = None
     finalizer_stop = None
     if finalize_manual:
@@ -348,6 +352,39 @@ def _run(
             finalizer_stop.set()
             finalizer.join(timeout=1)
     return result
+
+
+def _pid_is_running(process_id: int) -> bool:
+    process = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
+    if not process:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        return bool(
+            ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
+        ) and exit_code.value == 259
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)
+
+
+def _run_watchdog_fixture(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess[str], list[int]]:
+    pid_log = tmp_path / f"{mode}.pids"
+    command = [
+        sys.executable,
+        str(FIXTURES / "run-with-windows-watchdog.py"),
+        "--timeout-seconds",
+        "5",
+        "--",
+        sys.executable,
+        str(FIXTURES / "fake-watchdog-child.py"),
+        mode,
+        str(pid_log),
+    ]
+    started = time.monotonic()
+    result = subprocess.run(command, text=True, capture_output=True, timeout=15)
+    assert time.monotonic() - started < 12
+    pids = [int(value) for value in pid_log.read_text().splitlines()]
+    return result, pids
 
 
 def test_baseline_gateway_is_bound_to_exact_current_candidate_materializer(tmp_path):
@@ -1710,6 +1747,75 @@ def test_manual_timeout_cleanup_is_bounded_and_still_writes_one_summary(tmp_path
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text())
     assert summary["failure_classification"] == "manual_evidence_timeout"
+
+
+def test_outer_watchdog_reaps_orphans_after_intermediate_parent_exits(tmp_path):
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        client_fakes={
+            "CodexDesktopPath": "fake-gui-expanding-tree.cmd",
+            "ZCodePath": "fake-gui-expanding-tree.cmd",
+        },
+        finalize_manual=False,
+        manual_timeout_seconds=120,
+        overall_timeout_seconds=75,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert elapsed < 90
+    summaries = list(tmp_path.rglob("summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text())
+    assert summary["failure_classification"] == "automated_outer_timeout"
+    assert summary["artifacts"] == ["runner-timeout.json"]
+    timeout_diagnostic = json.loads(
+        (tmp_path / "output" / "runner-timeout.json").read_text()
+    )
+    assert set(timeout_diagnostic) == {
+        "schema",
+        "outcome",
+        "failure_classification",
+        "phase",
+        "duration_ms",
+        "total_process_count",
+        "active_process_count",
+    }
+    assert timeout_diagnostic["phase"] == "manual_evidence"
+    assert 1 <= timeout_diagnostic["active_process_count"] <= 1000
+    serialized = summaries[0].read_text() + json.dumps(timeout_diagnostic)
+    assert str(tmp_path) not in serialized
+    assert "fixture-private" not in serialized
+    pid_markers = list(tmp_path.rglob("*.orphan.*"))
+    assert pid_markers
+    orphan_pids = [int(marker.read_text()) for marker in pid_markers]
+    assert not [pid for pid in orphan_pids if _pid_is_running(pid)]
+
+
+def test_external_watchdog_reaps_descendant_after_intermediate_parent_is_missing(tmp_path):
+    result, process_ids = _run_watchdog_fixture(tmp_path, "missing-parent")
+
+    assert result.returncode == 124
+    assert "watchdog_timeout phase=command" in result.stderr
+    assert not [pid for pid in process_ids if _pid_is_running(pid)]
+
+
+def test_external_watchdog_timeout_is_not_blocked_by_inherited_output_handles(tmp_path):
+    result, process_ids = _run_watchdog_fixture(tmp_path, "inherited-pipe")
+
+    assert result.returncode == 124
+    assert "watchdog_timeout phase=command" in result.stderr
+    assert not [pid for pid in process_ids if _pid_is_running(pid)]
+
+
+def test_operator_commands_have_explicit_outer_and_manual_deadlines():
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+
+    assert "run-with-windows-watchdog.py --timeout-seconds 1800 --" in documentation
+    assert "-OverallTimeoutSeconds 5400" in documentation
+    assert "-ManualEvidenceTimeoutSeconds 900" in documentation
+    assert "manual window is finite" in documentation
 
 
 def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):

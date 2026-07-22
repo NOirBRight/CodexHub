@@ -35,7 +35,11 @@ param(
 
     [int]$TimeoutSeconds = 180,
 
-    [int]$ManualEvidenceTimeoutSeconds = 900
+    [int]$ManualEvidenceTimeoutSeconds = 900,
+
+    [int]$OverallTimeoutSeconds = 5400,
+
+    [string]$InternalSupervisorToken
 )
 
 Set-StrictMode -Version Latest
@@ -98,6 +102,14 @@ public static class CodexHubE2EJob
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
     [DllImport("kernel32.dll")]
+    private static extern bool QueryInformationJobObject(
+        IntPtr job,
+        int informationClass,
+        IntPtr information,
+        uint informationLength,
+        IntPtr returnLength);
+
+    [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr handle);
 
     public static IntPtr CreateKillOnClose()
@@ -130,10 +142,44 @@ public static class CodexHubE2EJob
         return job != IntPtr.Zero && AssignProcessToJobObject(job, process);
     }
 
+    public static uint[] GetProcessCounts(IntPtr job)
+    {
+        if (job == IntPtr.Zero)
+            return new uint[] { 0, 0 };
+        int length = Marshal.SizeOf(typeof(BasicAccountingInformation));
+        IntPtr pointer = Marshal.AllocHGlobal(length);
+        try
+        {
+            if (!QueryInformationJobObject(job, 1, pointer, (uint)length, IntPtr.Zero))
+                return new uint[] { 0, 0 };
+            BasicAccountingInformation information =
+                (BasicAccountingInformation)Marshal.PtrToStructure(
+                    pointer, typeof(BasicAccountingInformation));
+            return new uint[] { information.TotalProcesses, information.ActiveProcesses };
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
     public static void Close(IntPtr job)
     {
         if (job != IntPtr.Zero)
             CloseHandle(job);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicAccountingInformation
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
     }
 }
 '@ -ErrorAction Stop
@@ -262,6 +308,170 @@ function Write-JsonFile {
     param([string]$Path, [object]$Value)
     $json = $Value | ConvertTo-Json -Depth 20
     [System.IO.File]::WriteAllText($Path, $json + "`n", $script:Utf8NoBom)
+}
+
+function Get-FailureSummaryValue {
+    param([string]$FailureClassification, [string[]]$Artifacts = @())
+    return [ordered]@{
+        schema = 'codexhub.real-client-e2e-summary.v1'
+        candidate_sha = if ($CandidateSha -match '^[0-9a-fA-F]{40}$') { $CandidateSha.ToLowerInvariant() } else { $null }
+        managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-fA-F]{40}$') { $ManagedClientConfigSha.ToLowerInvariant() } else { $null }
+        outcome = 'failed'
+        failure_classification = $FailureClassification
+        pinned_versions = $script:PinnedVersions
+        canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
+        counts = [ordered]@{
+            case_count = 0
+            passed_count = 0
+            failed_count = 0
+            manual_case_count = 0
+            automated_case_count = 0
+        }
+        cases = @()
+        artifacts = @($Artifacts)
+    }
+}
+
+function Set-RunnerPhase {
+    param([string]$Phase)
+    if (-not $script:WatchdogStatePath) {
+        return
+    }
+    if ($Phase -notin @('preflight', 'client_materialization', 'candidate_startup', 'manual_evidence', 'automated_cases', 'summary')) {
+        throw 'internal_runner_phase_invalid'
+    }
+    [System.IO.File]::WriteAllText($script:WatchdogStatePath, $Phase, $script:Utf8NoBom)
+}
+
+function Invoke-RunnerSupervisor {
+    $supervisorOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
+    [void](New-Item -ItemType Directory -Force -Path $supervisorOutput)
+    $summaryPath = Join-Path $supervisorOutput 'summary.json'
+    $statePath = Join-Path $supervisorOutput 'runner-watchdog-state'
+    $stdoutPath = Join-Path $supervisorOutput 'runner-watchdog.stdout'
+    $stderrPath = Join-Path $supervisorOutput 'runner-watchdog.stderr'
+    [System.IO.File]::WriteAllText($statePath, 'preflight', $script:Utf8NoBom)
+    foreach ($path in @($stdoutPath, $stderrPath)) {
+        [System.IO.File]::WriteAllText($path, '', $script:Utf8NoBom)
+    }
+
+    if (-not $script:ProcessJobAvailable) {
+        Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_process_supervision_unavailable')
+        return 1
+    }
+
+    $token = [Guid]::NewGuid().ToString('N')
+    $workerArguments = [System.Collections.Generic.List[string]]::new()
+    foreach ($argument in @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath,
+        '-CandidateSha', $CandidateSha,
+        '-DebugBuild', $DebugBuild,
+        '-ManagedClientConfigBuild', $ManagedClientConfigBuild,
+        '-ManagedClientConfigSha', $ManagedClientConfigSha,
+        '-LunaModel', $LunaModel,
+        '-VolcModel', $VolcModel,
+        '-OutputDirectory', $OutputDirectory,
+        '-HostEnvironmentManifest', $HostEnvironmentManifest,
+        '-CodexDesktopPath', $CodexDesktopPath,
+        '-CodexCliPath', $CodexCliPath,
+        '-ZCodePath', $ZCodePath,
+        '-OpenCodePath', $OpenCodePath,
+        '-PiPath', $PiPath,
+        '-OmpPath', $OmpPath,
+        '-TimeoutSeconds', [string]$TimeoutSeconds,
+        '-ManualEvidenceTimeoutSeconds', [string]$ManualEvidenceTimeoutSeconds,
+        '-OverallTimeoutSeconds', [string]$OverallTimeoutSeconds,
+        '-InternalSupervisorToken', $token
+    )) {
+        [void]$workerArguments.Add([string]$argument)
+    }
+    if ($TestWindowsInstallMetadataFixture) {
+        [void]$workerArguments.Add('-TestWindowsInstallMetadataFixture')
+        [void]$workerArguments.Add($TestWindowsInstallMetadataFixture)
+    }
+    $powershellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $workerCommand = @(
+        (ConvertTo-ProcessArgument $powershellPath)
+        ($workerArguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
+        ('1>' + (ConvertTo-ProcessArgument $stdoutPath))
+        ('2>' + (ConvertTo-ProcessArgument $stderrPath))
+    ) -join ' '
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+    $startInfo.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $workerCommand)"
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.EnvironmentVariables['CODEXHUB_E2E_SUPERVISOR_TOKEN'] = $token
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $job = [CodexHubE2EJob]::CreateKillOnClose()
+    $started = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+        if ($job -eq [IntPtr]::Zero -or -not [CodexHubE2EJob]::Assign($job, $process.Handle)) {
+            Stop-ProcessTree -ProcessId $process.Id -TimeoutMilliseconds 2000
+            Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_process_supervision_unavailable')
+            return 1
+        }
+        $completed = $process.WaitForExit($OverallTimeoutSeconds * 1000)
+        if (-not $completed) {
+            $counts = [CodexHubE2EJob]::GetProcessCounts($job)
+            [CodexHubE2EJob]::Close($job)
+            $job = [IntPtr]::Zero
+            [void]$process.WaitForExit(2000)
+            $phase = 'preflight'
+            try {
+                $candidatePhase = [System.IO.File]::ReadAllText($statePath).Trim()
+                if ($candidatePhase -in @('preflight', 'client_materialization', 'candidate_startup', 'manual_evidence', 'automated_cases', 'summary')) {
+                    $phase = $candidatePhase
+                }
+            }
+            catch {
+                $phase = 'preflight'
+            }
+            $timeoutArtifact = 'runner-timeout.json'
+            Write-JsonFile -Path (Join-Path $supervisorOutput $timeoutArtifact) -Value ([ordered]@{
+                schema = 'codexhub.real-client-e2e-timeout.v1'
+                outcome = 'failed'
+                failure_classification = 'automated_outer_timeout'
+                phase = $phase
+                duration_ms = [Math]::Min([int]$started.ElapsedMilliseconds, $OverallTimeoutSeconds * 1000)
+                total_process_count = [Math]::Min([int]$counts[0], 1000)
+                active_process_count = [Math]::Min([int]$counts[1], 1000)
+            })
+            Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'automated_outer_timeout' -Artifacts @($timeoutArtifact))
+            return 1
+        }
+        $exitCode = $process.ExitCode
+        [CodexHubE2EJob]::Close($job)
+        $job = [IntPtr]::Zero
+        return $exitCode
+    }
+    finally {
+        $started.Stop()
+        if ($job -ne [IntPtr]::Zero) {
+            [CodexHubE2EJob]::Close($job)
+        }
+        $process.Dispose()
+        foreach ($stream in @(
+            [pscustomobject]@{ path = $stdoutPath; target = [Console]::Out },
+            [pscustomobject]@{ path = $stderrPath; target = [Console]::Error }
+        )) {
+            try {
+                $text = [System.IO.File]::ReadAllText($stream.path)
+                if ($text.Length -gt $script:MaximumCapturedCharacters) {
+                    $text = $text.Substring(0, $script:MaximumCapturedCharacters)
+                }
+                if ($text) { $stream.target.Write($text) }
+            }
+            catch {
+                # Watchdog output is optional and never enters published evidence.
+            }
+            Remove-Item -LiteralPath $stream.path -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-JsonProperty {
@@ -1826,10 +2036,25 @@ function Get-SafeFailureClassification {
     return 'internal_error'
 }
 
+$isInternalWorker = $InternalSupervisorToken -and
+    $env:CODEXHUB_E2E_SUPERVISOR_TOKEN -and
+    $InternalSupervisorToken -ceq $env:CODEXHUB_E2E_SUPERVISOR_TOKEN
+if (-not $isInternalWorker) {
+    if ($OverallTimeoutSeconds -lt 1 -or $OverallTimeoutSeconds -gt 7200) {
+        $invalidOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
+        [void](New-Item -ItemType Directory -Force -Path $invalidOutput)
+        Write-JsonFile -Path (Join-Path $invalidOutput 'summary.json') -Value (Get-FailureSummaryValue -FailureClassification 'preflight_timeout_invalid')
+        exit 1
+    }
+    exit (Invoke-RunnerSupervisor)
+}
+
 $CandidateSha = $CandidateSha.ToLowerInvariant()
 $ManagedClientConfigSha = $ManagedClientConfigSha.ToLowerInvariant()
 $failureOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 [void](New-Item -ItemType Directory -Force -Path $failureOutputDirectory)
+$script:WatchdogStatePath = Join-Path $failureOutputDirectory 'runner-watchdog-state'
+Set-RunnerPhase -Phase 'preflight'
 $failureSummaryPath = Join-Path $failureOutputDirectory 'summary.json'
 $failureArtifactRoot = Join-Path $failureOutputDirectory 'artifacts'
 $script:FailureArtifacts = [System.Collections.Generic.List[string]]::new()
@@ -1847,7 +2072,8 @@ if ($VolcModel -cne 'codexhub-volc/glm-5.2') {
     throw 'preflight_volc_model_invalid'
 }
 if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 900 -or
-    $ManualEvidenceTimeoutSeconds -lt 1 -or $ManualEvidenceTimeoutSeconds -gt 3600) {
+    $ManualEvidenceTimeoutSeconds -lt 1 -or $ManualEvidenceTimeoutSeconds -gt 3600 -or
+    $OverallTimeoutSeconds -lt 1 -or $OverallTimeoutSeconds -gt 7200) {
     throw 'preflight_timeout_invalid'
 }
 if (-not (Test-Path -LiteralPath $OutputDirectory -PathType Container)) {
@@ -1999,6 +2225,7 @@ if ($script:WindowsInstallMetadata) {
     }
 }
 $actualVersions = [ordered]@{}
+Set-RunnerPhase -Phase 'client_materialization'
 foreach ($versionTarget in @(
     [pscustomobject]@{ client = 'desktop'; key = 'desktop' },
     [pscustomobject]@{ client = 'codex-cli'; key = 'codex_cli' },
@@ -2070,6 +2297,7 @@ try {
         VOLCENGINE_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
     }
+    Set-RunnerPhase -Phase 'candidate_startup'
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds)
@@ -2091,6 +2319,7 @@ try {
     Wait-CandidateGatewayReady -CandidateProcess $candidateProcess -TimeoutMilliseconds $remainingStartupMilliseconds -ElapsedBeforeWaitMilliseconds $elapsedBeforeWaitMilliseconds
     $candidateStartupStopwatch.Stop()
 
+    Set-RunnerPhase -Phase 'manual_evidence'
     foreach ($guiCase in $manualCases) {
         $guiClient = $guiCase.client
         $guiRoot = Join-Path $workRoot ("gui-" + $guiClient)
@@ -2127,6 +2356,7 @@ try {
     }
     $manualResults = @(Get-ManualResults -EvidencePath $manualEvidencePath -ManualCases $manualCases -ArtifactRoot $artifactRoot -RunBinding $runBinding)
 
+    Set-RunnerPhase -Phase 'automated_cases'
     $automatedById = @{}
     foreach ($case in $automatedCases) {
         $automatedById[$case.case_id] = Invoke-AutomatedCase -Case $case -Executable $executables[$case.client] -ArtifactRoot $artifactRoot -WorkRoot $workRoot -Configuration $caseConfigurations[$case.case_id]
@@ -2170,6 +2400,7 @@ try {
         cases = $caseResults
         artifacts = @($caseResults | ForEach-Object { $_.artifact })
     }
+    Set-RunnerPhase -Phase 'summary'
     Write-JsonFile -Path $summaryPath -Value $summary
     if ($passedCount -ne 12) {
         exit 1

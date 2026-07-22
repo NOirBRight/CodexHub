@@ -268,6 +268,34 @@ private request IDs are not copied into uploadable artifacts.
 Raw client output and diagnostics remain in bounded memory. Per-case files
 contain only capture hashes and approved fields.
 
+## Wall-clock supervision
+
+Every runner invocation has two process levels. The parent supervisor assigns
+the complete worker tree to a Windows kill-on-close Job Object before the
+worker can reach client launch, redirects worker stdout/stderr to bounded files
+instead of pipes, and enforces `-OverallTimeoutSeconds` (default `5400`, maximum
+`7200`). Closing the Job terminates descendants even after an intermediate
+parent exits. An outer timeout returns nonzero and replaces any partial summary
+with one sanitized `automated_outer_timeout` summary plus
+`runner-timeout.json`. That diagnostic contains only the bounded phase,
+duration, total-process count, and active-process count.
+
+Unattended pytest commands must also use the checked-in external watchdog. It
+owns the pytest process tree with the same kill-on-close behavior, never
+captures through inherited pipes, returns `124` on timeout, and emits only a
+bounded phase/process-count message. For the Issue module use:
+
+```powershell
+python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 1800 -- `
+  python -m pytest -q tests/test_real_client_e2e.py
+```
+
+For a required full Python run, use the same command with an explicitly
+recorded bound appropriate to that suite, for example `--timeout-seconds 3600
+-- python -m pytest -q`. Targeted unattended invocations use the same wrapper
+with a smaller stated bound. Do not invoke unattended E2E pytest without this
+outer watchdog.
+
 ## Human GUI phase
 
 Completed GUI evidence must not exist when the runner starts. After all
@@ -275,6 +303,11 @@ preflight checks, the runner emits `manual-evidence.template.json`, starts the
 isolated candidate, launches Codex Desktop and ZCode, and waits up to
 `-ManualEvidenceTimeoutSeconds` for a new `manual-evidence.json`. A native GUI
 that exits before finalization fails immediately.
+
+The `-ManualEvidenceTimeoutSeconds` manual window is finite (default `900`,
+maximum `3600`) and remains distinct from automated per-process timeouts. It is
+still contained by the overall runner deadline; it never disables or extends
+that outer deadline.
 
 The template uses schema `codexhub.real-client-manual-evidence.v2` and contains
 the candidate SHA, managed-client-config candidate SHA, and a random
@@ -348,7 +381,9 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -LunaModel codexhub-openai/gpt-5.6-luna `
   -VolcModel codexhub-volc/glm-5.2 `
   -OutputDirectory <path> `
-  -HostEnvironmentManifest <path-to-host-environment.json>
+  -HostEnvironmentManifest <path-to-host-environment.json> `
+  -OverallTimeoutSeconds 5400 `
+  -ManualEvidenceTimeoutSeconds 900
 ```
 
 6. Wait for the template and four case-local GUI launches (Desktop Luna/Volc
@@ -374,12 +409,13 @@ Every invocation that reaches the runner body ends with exactly one
 unexpected automated failures. A thrown-path summary contains only a bounded
 `failure_classification`, zero case counts, and no artifacts except the fixed
 sanitized `candidate-startup.json` when portable-build or candidate-startup
-diagnosis applies. Scoped partial case artifacts are removed before that
-summary is written. Candidate and GUI processes share one kill-on-close Job
-Object, followed by a five-second bounded fallback cleanup, so resistant or
-expanding descendants cannot prevent failure-summary completion. A complete
-matrix keeps one sanitized artifact per case and uses `failure_classification`
-`none` or `case_failure`.
+diagnosis applies. Scoped partial case artifacts are excluded before that
+summary is written. The outer worker Job, candidate/GUI Job, and bounded
+fallback cleanup prevent resistant, expanding, detached, or missing-parent
+descendants and inherited stdout/stderr handles from delaying failure-summary
+completion. An outer timeout references only the fixed sanitized
+`runner-timeout.json` diagnostic. A complete matrix keeps one sanitized
+artifact per case and uses `failure_classification` `none` or `case_failure`.
 
 The success-summary top-level schema is exactly `schema`, `candidate_sha`,
 `managed_client_config_sha`, `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,

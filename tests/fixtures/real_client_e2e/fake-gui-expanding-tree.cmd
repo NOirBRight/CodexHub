@@ -5,8 +5,6 @@ if defined CODEXHUB_E2E_VERSION_PROBE (
 )
 if defined CODEXHUB_E2E_GUI_CLIENT (
   echo launched>"%CODEXHUB_E2E_GUI_LAUNCH_MARKER%"
-  ping.exe 127.0.0.1 -n 2 >nul
-  for /L %%I in (1,1,6) do start "" /b cmd.exe /d /s /c "ping.exe 127.0.0.1 -t ^>nul"
-  ping.exe 127.0.0.1 -t >nul
+  python.exe "%~dp0fake-gui-expanding-tree.py" "%CODEXHUB_E2E_GUI_LAUNCH_MARKER%.orphan"
 )
 exit /b 0
