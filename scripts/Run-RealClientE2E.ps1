@@ -361,54 +361,97 @@ function Invoke-RunnerSupervisor {
     }
 
     $token = [Guid]::NewGuid().ToString('N')
+    $forwardedArguments = [ordered]@{
+        CandidateSha = $CandidateSha
+        DebugBuild = $DebugBuild
+        ManagedClientConfigBuild = $ManagedClientConfigBuild
+        ManagedClientConfigSha = $ManagedClientConfigSha
+        LunaModel = $LunaModel
+        VolcModel = $VolcModel
+        OutputDirectory = $OutputDirectory
+        HostEnvironmentManifest = $HostEnvironmentManifest
+        TestWindowsInstallMetadataFixture = $TestWindowsInstallMetadataFixture
+        CodexDesktopPath = $CodexDesktopPath
+        CodexCliPath = $CodexCliPath
+        ZCodePath = $ZCodePath
+        OpenCodePath = $OpenCodePath
+        PiPath = $PiPath
+        OmpPath = $OmpPath
+        TimeoutSeconds = $TimeoutSeconds
+        ManualEvidenceTimeoutSeconds = $ManualEvidenceTimeoutSeconds
+        OverallTimeoutSeconds = $OverallTimeoutSeconds
+    }
+    $forwardedJson = $forwardedArguments | ConvertTo-Json -Compress
+    $forwardedPayload = [Convert]::ToBase64String(
+        [System.Text.Encoding]::UTF8.GetBytes($forwardedJson)
+    )
+    $workerBootstrap = @'
+& $env:CODEXHUB_E2E_SUPERVISOR_SCRIPT `
+  -CandidateSha '0000000000000000000000000000000000000000' `
+  -DebugBuild '.' `
+  -ManagedClientConfigBuild '.' `
+  -ManagedClientConfigSha '0000000000000000000000000000000000000000' `
+  -LunaModel 'internal' `
+  -VolcModel 'internal' `
+  -OutputDirectory '.' `
+  -HostEnvironmentManifest '.' `
+  -TimeoutSeconds 1 `
+  -ManualEvidenceTimeoutSeconds 1 `
+  -OverallTimeoutSeconds 1 `
+  -InternalSupervisorToken $env:CODEXHUB_E2E_SUPERVISOR_TOKEN
+exit $LASTEXITCODE
+'@
+    $encodedBootstrap = [Convert]::ToBase64String(
+        [System.Text.Encoding]::Unicode.GetBytes($workerBootstrap)
+    )
     $workerArguments = [System.Collections.Generic.List[string]]::new()
     foreach ($argument in @(
-        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath,
-        '-CandidateSha', $CandidateSha,
-        '-DebugBuild', $DebugBuild,
-        '-ManagedClientConfigBuild', $ManagedClientConfigBuild,
-        '-ManagedClientConfigSha', $ManagedClientConfigSha,
-        '-LunaModel', $LunaModel,
-        '-VolcModel', $VolcModel,
-        '-OutputDirectory', $OutputDirectory,
-        '-HostEnvironmentManifest', $HostEnvironmentManifest,
-        '-CodexDesktopPath', $CodexDesktopPath,
-        '-CodexCliPath', $CodexCliPath,
-        '-ZCodePath', $ZCodePath,
-        '-OpenCodePath', $OpenCodePath,
-        '-PiPath', $PiPath,
-        '-OmpPath', $OmpPath,
-        '-TimeoutSeconds', [string]$TimeoutSeconds,
-        '-ManualEvidenceTimeoutSeconds', [string]$ManualEvidenceTimeoutSeconds,
-        '-OverallTimeoutSeconds', [string]$OverallTimeoutSeconds,
-        '-InternalSupervisorToken', $token
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-EncodedCommand', $encodedBootstrap
     )) {
         [void]$workerArguments.Add([string]$argument)
     }
-    if ($TestWindowsInstallMetadataFixture) {
-        [void]$workerArguments.Add('-TestWindowsInstallMetadataFixture')
-        [void]$workerArguments.Add($TestWindowsInstallMetadataFixture)
-    }
     $powershellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
-    $workerCommand = @(
-        (ConvertTo-ProcessArgument $powershellPath)
-        ($workerArguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
-        ('1>' + (ConvertTo-ProcessArgument $stdoutPath))
-        ('2>' + (ConvertTo-ProcessArgument $stderrPath))
-    ) -join ' '
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-    $startInfo.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $workerCommand)"
-    $startInfo.WorkingDirectory = (Get-Location).Path
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.EnvironmentVariables['CODEXHUB_E2E_SUPERVISOR_TOKEN'] = $token
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
+    $supervisorEnvironment = [ordered]@{
+        CODEXHUB_E2E_SUPERVISOR_TOKEN = $token
+        CODEXHUB_E2E_SUPERVISOR_SCRIPT = $PSCommandPath
+        CODEXHUB_E2E_SUPERVISOR_ARGUMENTS = $forwardedPayload
+    }
+    $previousEnvironment = @{}
+    foreach ($entry in $supervisorEnvironment.GetEnumerator()) {
+        $previousEnvironment[$entry.Key] = [System.Environment]::GetEnvironmentVariable(
+            $entry.Key,
+            [System.EnvironmentVariableTarget]::Process
+        )
+        [System.Environment]::SetEnvironmentVariable(
+            $entry.Key,
+            [string]$entry.Value,
+            [System.EnvironmentVariableTarget]::Process
+        )
+    }
+    $process = $null
     $job = [CodexHubE2EJob]::CreateKillOnClose()
     $started = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        [void]$process.Start()
+        try {
+            $process = Start-Process `
+                -FilePath $powershellPath `
+                -ArgumentList @($workerArguments) `
+                -WorkingDirectory (Get-Location).Path `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -PassThru
+        }
+        finally {
+            foreach ($entry in $previousEnvironment.GetEnumerator()) {
+                [System.Environment]::SetEnvironmentVariable(
+                    $entry.Key,
+                    $entry.Value,
+                    [System.EnvironmentVariableTarget]::Process
+                )
+            }
+        }
         if ($job -eq [IntPtr]::Zero -or -not [CodexHubE2EJob]::Assign($job, $process.Handle)) {
             Stop-ProcessTree -ProcessId $process.Id -TimeoutMilliseconds 2000
             Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_process_supervision_unavailable')
@@ -453,7 +496,9 @@ function Invoke-RunnerSupervisor {
         if ($job -ne [IntPtr]::Zero) {
             [CodexHubE2EJob]::Close($job)
         }
-        $process.Dispose()
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
         foreach ($stream in @(
             [pscustomobject]@{ path = $stdoutPath; target = [Console]::Out },
             [pscustomobject]@{ path = $stderrPath; target = [Console]::Error }
@@ -2069,6 +2114,42 @@ if (-not $isInternalWorker) {
         exit 1
     }
     exit (Invoke-RunnerSupervisor)
+}
+
+try {
+    $forwardedJson = [System.Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String([string]$env:CODEXHUB_E2E_SUPERVISOR_ARGUMENTS)
+    )
+    $forwardedArguments = $forwardedJson | ConvertFrom-Json -ErrorAction Stop
+    Assert-ExactJsonProperties -Value $forwardedArguments -Names @(
+        'CandidateSha', 'DebugBuild', 'ManagedClientConfigBuild',
+        'ManagedClientConfigSha', 'LunaModel', 'VolcModel', 'OutputDirectory',
+        'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
+        'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
+        'PiPath', 'OmpPath', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
+        'OverallTimeoutSeconds'
+    ) -Failure 'preflight_supervisor_arguments_invalid'
+    $CandidateSha = [string]$forwardedArguments.CandidateSha
+    $DebugBuild = [string]$forwardedArguments.DebugBuild
+    $ManagedClientConfigBuild = [string]$forwardedArguments.ManagedClientConfigBuild
+    $ManagedClientConfigSha = [string]$forwardedArguments.ManagedClientConfigSha
+    $LunaModel = [string]$forwardedArguments.LunaModel
+    $VolcModel = [string]$forwardedArguments.VolcModel
+    $OutputDirectory = [string]$forwardedArguments.OutputDirectory
+    $HostEnvironmentManifest = [string]$forwardedArguments.HostEnvironmentManifest
+    $TestWindowsInstallMetadataFixture = [string]$forwardedArguments.TestWindowsInstallMetadataFixture
+    $CodexDesktopPath = [string]$forwardedArguments.CodexDesktopPath
+    $CodexCliPath = [string]$forwardedArguments.CodexCliPath
+    $ZCodePath = [string]$forwardedArguments.ZCodePath
+    $OpenCodePath = [string]$forwardedArguments.OpenCodePath
+    $PiPath = [string]$forwardedArguments.PiPath
+    $OmpPath = [string]$forwardedArguments.OmpPath
+    $TimeoutSeconds = [int]$forwardedArguments.TimeoutSeconds
+    $ManualEvidenceTimeoutSeconds = [int]$forwardedArguments.ManualEvidenceTimeoutSeconds
+    $OverallTimeoutSeconds = [int]$forwardedArguments.OverallTimeoutSeconds
+}
+catch {
+    throw 'preflight_supervisor_arguments_invalid'
 }
 
 $CandidateSha = $CandidateSha.ToLowerInvariant()

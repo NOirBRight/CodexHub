@@ -276,6 +276,7 @@ def _run(
     timeout_seconds: int = 10,
     manual_timeout_seconds: int = 10,
     overall_timeout_seconds: int = 180,
+    authoritative_paths_with_spaces: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
         tmp_path, candidate_sha, materializer_sha
@@ -297,6 +298,60 @@ def _run(
     }
     for name, fixture_name in (client_fakes or {}).items():
         executable_arguments[name] = FIXTURES / fixture_name
+    if authoritative_paths_with_spaces:
+        candidate_root = tmp_path / "Program Files" / "CodexHub Candidate"
+        candidate_root.mkdir(parents=True)
+        spaced_debug_build = candidate_root / "CodexHub Debug.cmd"
+        spaced_materializer_build = candidate_root / "CodexHub Materializer.cmd"
+        shutil.copyfile(debug_build, spaced_debug_build)
+        shutil.copyfile(materializer_build, spaced_materializer_build)
+        for support in (
+            "fake-debug-gateway.py",
+            "fake-managed-client-config.py",
+            "validate-managed-client-contract-probe.py",
+        ):
+            shutil.copyfile(tmp_path / support, candidate_root / support)
+        for relative in (
+            "config/providers.toml",
+            "src-python/codex_proxy.py",
+            "src-python/diagnostic_recorder.py",
+            "python/python.exe",
+            "python/codexhub-python-runtime.json",
+        ):
+            path = candidate_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture", encoding="utf-8")
+        Path(f"{spaced_debug_build}.candidate-sha").write_text(
+            candidate_sha, encoding="ascii"
+        )
+        Path(f"{spaced_materializer_build}.candidate-sha").write_text(
+            materializer_sha, encoding="ascii"
+        )
+        debug_build = spaced_debug_build
+        materializer_build = spaced_materializer_build
+
+        desktop_root = tmp_path / "Program Files" / "OpenAI Codex"
+        zcode_root = tmp_path / "Program Files" / "ZCode"
+        desktop_root.mkdir(parents=True)
+        zcode_root.mkdir(parents=True)
+        desktop_path = desktop_root / "Codex Desktop.cmd"
+        zcode_path = zcode_root / "ZCode.cmd"
+        shutil.copyfile(FIXTURES / fake, desktop_path)
+        shutil.copyfile(FIXTURES / fake, zcode_path)
+        zcode_icon = zcode_root / "uninstallerIcon.ico"
+        zcode_uninstaller = zcode_root / "Uninstall ZCode.exe"
+        zcode_icon.write_bytes(b"fixture")
+        zcode_uninstaller.write_bytes(b"fixture")
+        metadata_path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["desktop"]["install_location"] = str(desktop_root.resolve())
+        metadata["zcode"]["DisplayIcon"] = str(zcode_icon.resolve())
+        metadata["zcode"]["UninstallString"] = (
+            f'"{zcode_uninstaller.resolve()}" /allusers'
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        executable_arguments["CodexDesktopPath"] = desktop_path
+        executable_arguments["ZCodePath"] = zcode_path
     command = [
         _powershell(),
         "-NoProfile",
@@ -1522,6 +1577,27 @@ def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     serialized = json.dumps(summary, sort_keys=True)
     assert "fixture-volc-private-token" not in serialized
     assert str(tmp_path) not in serialized
+
+
+def test_supervisor_preserves_space_containing_authoritative_path_arguments(tmp_path):
+    def remove_credentials(_output, isolation, _debug):
+        (isolation / "credentials" / "volc.json").unlink()
+
+    run_root = tmp_path / "Authoritative Host Run"
+    result = _run(
+        run_root,
+        mutate=remove_credentials,
+        finalize_manual=False,
+        authoritative_paths_with_spaces=True,
+    )
+
+    assert result.returncode != 0
+    summaries = list(run_root.rglob("summary.json"))
+    assert len(summaries) == 1, result.stdout + result.stderr
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == "preflight_required_file_missing"
+    assert "PositionalParameterNotFound" not in result.stdout + result.stderr
+    assert not (run_root / "output" / "manual-evidence.template.json").exists()
 
 
 def test_failure_matrix_is_bounded_sanitized_and_cleans_up_children(tmp_path):
