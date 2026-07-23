@@ -884,6 +884,25 @@ function Test-LoopbackListener {
     }
 }
 
+function Test-LoopbackPortBindable {
+    param([int]$Port)
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        $Port
+    )
+    try {
+        $listener.Server.ExclusiveAddressUse = $true
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
 function Test-GatewayHealth {
     param([int]$Port)
     $response = $null
@@ -1114,10 +1133,33 @@ function Invoke-CandidateOfficialBootstrap {
 function Get-ClientArguments {
     param([string]$Client, [string]$Model, [string]$WorkRoot, [string]$Prompt)
     switch ($Client) {
-        'codex-cli' { return @('exec', '--ephemeral', '--json', '--skip-git-repo-check', '-C', $WorkRoot, '-m', $Model, '-s', 'read-only', $Prompt) }
-        'opencode' { return @('run', '--format', 'json', '--model', $Model, $Prompt) }
-        'pi' { return @('--print', '--mode', 'json', '--model', $Model, '--no-session', $Prompt) }
-        'omp' { return @('--print', '--mode', 'json', '--model', $Model, $Prompt) }
+        'codex-cli' {
+            return @(
+                'exec', '--ephemeral', '--json', '--skip-git-repo-check',
+                '-C', $WorkRoot, '-m', $Model, '-s', 'read-only', '-'
+            )
+        }
+        'opencode' {
+            return @(
+                'run', '--format', 'json', '--model', $Model,
+                '--dir', $WorkRoot, '--title', 'codexhub-real-client-e2e',
+                '--pure', $Prompt
+            )
+        }
+        'pi' {
+            return @(
+                '--print', '--mode', 'json', '--model', $Model, '--no-session',
+                '--tools', 'read', '--no-context-files', '--no-extensions',
+                '--no-skills', '--no-prompt-templates', $Prompt
+            )
+        }
+        'omp' {
+            return @(
+                '--print', '--mode', 'json', '--model', $Model, '--no-session',
+                '--no-title', '--tools', 'read', '--no-extensions', '--no-skills',
+                '--no-rules', '--cwd', $WorkRoot, $Prompt
+            )
+        }
         default { return @() }
     }
 }
@@ -1377,7 +1419,7 @@ function Invoke-ClientAttempt {
     $sentinel = "SENTINEL:codexhub-real-client-e2e:$($Case.case_id)"
     $sentinelPath = Join-Path $CaseRoot 'sentinel.txt'
     [System.IO.File]::WriteAllText($sentinelPath, $sentinel, $script:Utf8NoBom)
-    $prompt = "Read the sentinel file once with one read-only tool call, then stream exactly $sentinel and stop."
+    $prompt = "Read ./sentinel.txt once with exactly one read-only tool call, then stream exactly $sentinel and stop."
     $arguments = @(Get-ClientArguments -Client $Case.client -Model $LaunchModel -WorkRoot $CaseRoot -Prompt $prompt)
     $environment = @{
         CODEXHUB_E2E_CASE = $Case.case_id
@@ -2218,6 +2260,178 @@ function Publish-ManagedClientTargets {
     }
 }
 
+function Test-ZCodeGuiSeedTransientPath {
+    param(
+        [string]$RelativeRoot,
+        [string]$RelativePath
+    )
+    $candidate = (($RelativeRoot.TrimEnd('\') + '\' + $RelativePath.TrimStart('\')) -replace '/', '\')
+    foreach ($transientRoot in @(
+        '.zcode\cli\db',
+        '.zcode\cli\log',
+        '.zcode\cli\rollout',
+        '.zcode\v2\logs',
+        'appdata\roaming\ZCode\session\IndexedDB',
+        'appdata\roaming\ZCode\session\Local Storage',
+        'appdata\roaming\ZCode\session\Session Storage'
+    )) {
+        if ($candidate.Equals($transientRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $candidate.StartsWith($transientRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $candidate.Equals(
+        '.zcode\v2\tasks-index.sqlite',
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -or $candidate.Equals(
+        '.zcode\v2\tasks-index.sqlite-shm',
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -or $candidate.Equals(
+        '.zcode\v2\tasks-index.sqlite-wal',
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Test-DesktopGuiSeedAllowedPath {
+    param(
+        [string]$RelativeRoot,
+        [string]$RelativePath
+    )
+    if ($RelativeRoot.Equals(
+        'browser-profile',
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        return $true
+    }
+    $candidate = (($RelativeRoot.TrimEnd('\') + '\' + $RelativePath.TrimStart('\')) -replace '/', '\')
+    return $candidate.Equals(
+        '.codex\.codex-global-state.json',
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Normalize-DesktopGuiSeedState {
+    param([string]$CaseRoot)
+    $statePath = Join-Path $CaseRoot '.codex\.codex-global-state.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        return
+    }
+    try {
+        $source = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+        $firstSeen = Get-JsonProperty $source 'desktop-first-seen-at-ms' $null
+        if (($firstSeen -isnot [int] -and $firstSeen -isnot [long]) -or
+            [int64]$firstSeen -le 0) {
+            throw 'preflight_gui_seed_invalid'
+        }
+        $sourceAtom = Get-JsonProperty $source 'electron-persisted-atom-state'
+        if ($null -eq $sourceAtom -or
+            (Get-JsonProperty $sourceAtom 'electron:onboarding-primary-runtime-install-ready' $false) -ne $true) {
+            throw 'preflight_gui_seed_invalid'
+        }
+        $atom = [ordered]@{
+            'chatgpt-migration-announcement-completed-v1' = (
+                (Get-JsonProperty $sourceAtom 'chatgpt-migration-announcement-completed-v1' $false) -eq $true
+            )
+            'chatgpt-update-downloaded-announcement-seen-v1' = (
+                (Get-JsonProperty $sourceAtom 'chatgpt-update-downloaded-announcement-seen-v1' $false) -eq $true
+            )
+            'desktop-link-default-destination' = if (
+                [string](Get-JsonProperty $sourceAtom 'desktop-link-default-destination' '') -ceq 'in-app-browser'
+            ) { 'in-app-browser' } else { '' }
+            'electron:onboarding-primary-runtime-install-ready' = $true
+        }
+        $allowedMigrations = @(
+            '2026-07-13-string-based-remote-projects',
+            '2026-07-13-automation-project-targets',
+            '2026-07-13-local-projects',
+            '2026-07-13-remap-legacy-automation-project-targets',
+            '2026-07-13-clear-legacy-browser-download-history',
+            '2026-07-14-repair-metadata-local-projects'
+        )
+        $migrations = @(
+            Get-JsonProperty $source 'electron-completed-local-data-migration-ids' @() |
+                ForEach-Object { [string]$_ } |
+                Where-Object { $_ -cin $allowedMigrations } |
+                Select-Object -Unique
+        )
+        $normalized = [ordered]@{
+            'desktop-first-seen-at-ms' = [int64]$firstSeen
+            'electron-persisted-atom-state' = $atom
+            'electron-completed-local-data-migration-ids' = $migrations
+            'local-projects' = [ordered]@{}
+            'remote-project-connection-backfill-completed' = (
+                (Get-JsonProperty $source 'remote-project-connection-backfill-completed' $false) -eq $true
+            )
+            'electron-remote-control-config-migration-completed' = (
+                (Get-JsonProperty $source 'electron-remote-control-config-migration-completed' $false) -eq $true
+            )
+            'electron-internal-update-cdn-enabled' = (
+                (Get-JsonProperty $source 'electron-internal-update-cdn-enabled' $false) -eq $true
+            )
+            'electron-openai-mcp-form-elicitations-enabled' = (
+                (Get-JsonProperty $source 'electron-openai-mcp-form-elicitations-enabled' $false) -eq $true
+            )
+        }
+        Write-JsonFile -Path $statePath -Value $normalized
+        $readback = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+        $readbackNames = @($readback.PSObject.Properties.Name | Sort-Object)
+        $expectedReadbackNames = @(
+            'desktop-first-seen-at-ms',
+            'electron-completed-local-data-migration-ids',
+            'electron-internal-update-cdn-enabled',
+            'electron-openai-mcp-form-elicitations-enabled',
+            'electron-persisted-atom-state',
+            'electron-remote-control-config-migration-completed',
+            'local-projects',
+            'remote-project-connection-backfill-completed'
+        ) | Sort-Object
+        if (($readbackNames -join ',') -cne ($expectedReadbackNames -join ',') -or
+            (Get-JsonProperty (Get-JsonProperty $readback 'electron-persisted-atom-state') 'electron:onboarding-primary-runtime-install-ready' $false) -ne $true) {
+            throw 'preflight_gui_seed_invalid'
+        }
+    }
+    catch {
+        throw 'preflight_gui_seed_invalid'
+    }
+}
+
+function Normalize-ZCodeGuiSeedSettings {
+    param([string]$CaseRoot)
+    $settingPath = Join-Path $CaseRoot '.zcode\v2\setting.json'
+    if (-not (Test-Path -LiteralPath $settingPath -PathType Leaf)) {
+        return
+    }
+    try {
+        $setting = Get-Content -LiteralPath $settingPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        $setting | Add-Member -NotePropertyName 'recentProjects' -NotePropertyValue @($CaseRoot) -Force
+        $setting | Add-Member -NotePropertyName 'lastWorkspaceSession' -NotePropertyValue @(
+            [pscustomobject]@{
+                kind = 'local'
+                workspacePath = $CaseRoot
+            }
+        ) -Force
+        $setting | Add-Member -NotePropertyName 'lastActiveTabIndex' -NotePropertyValue 0 -Force
+        [System.IO.File]::WriteAllText(
+            $settingPath,
+            (($setting | ConvertTo-Json -Depth 20) + [System.Environment]::NewLine),
+            $script:Utf8NoBom
+        )
+        $readback = Get-Content -LiteralPath $settingPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        if (@($readback.recentProjects).Count -ne 1 -or
+            [string]$readback.recentProjects[0] -cne $CaseRoot -or
+            @($readback.lastWorkspaceSession).Count -ne 1 -or
+            [string]$readback.lastWorkspaceSession[0].kind -cne 'local' -or
+            [string]$readback.lastWorkspaceSession[0].workspacePath -cne $CaseRoot) {
+            throw 'preflight_gui_seed_invalid'
+        }
+    }
+    catch {
+        throw 'preflight_gui_seed_invalid'
+    }
+}
+
 function Copy-GuiStateSeed {
     param(
         [string]$SeedCaseRoot,
@@ -2226,7 +2440,7 @@ function Copy-GuiStateSeed {
         [string]$IsolationRoot
     )
     $relativeRoots = if ($Client -ceq 'desktop') {
-        @('browser-profile')
+        @('browser-profile', '.codex')
     }
     elseif ($Client -ceq 'zcode') {
         @('.zcode', 'appdata')
@@ -2276,6 +2490,14 @@ function Copy-GuiStateSeed {
                     throw 'preflight_gui_seed_invalid'
                 }
                 $relative = $itemPath.Substring($sourcePrefix.Length)
+                if ($Client -ceq 'desktop' -and
+                    -not (Test-DesktopGuiSeedAllowedPath -RelativeRoot $relativeRoot -RelativePath $relative)) {
+                    continue
+                }
+                if ($Client -ceq 'zcode' -and
+                    (Test-ZCodeGuiSeedTransientPath -RelativeRoot $relativeRoot -RelativePath $relative)) {
+                    continue
+                }
                 $destination = Join-Path $destinationRoot $relative
                 if ($item.PSIsContainer) {
                     $directoryCount += 1
@@ -2296,6 +2518,12 @@ function Copy-GuiStateSeed {
                     throw 'preflight_gui_seed_invalid'
                 }
             }
+        }
+        if ($Client -ceq 'zcode') {
+            Normalize-ZCodeGuiSeedSettings -CaseRoot $CaseRoot
+        }
+        elseif ($Client -ceq 'desktop') {
+            Normalize-DesktopGuiSeedState -CaseRoot $CaseRoot
         }
     }
     catch {
@@ -2619,7 +2847,10 @@ if ([string]$script:GatewayConfig.schema -cne 'codexhub.real-client-gateway.v1' 
     [string]$script:GatewayConfig.gateway_client_key -notmatch '^\S{16,}$') {
     throw 'preflight_gateway_config_invalid'
 }
-if (Test-LoopbackListener -Port ([int]$script:GatewayConfig.listen_port)) {
+if ([int]$script:GatewayConfig.listen_port -ge 49152) {
+    throw 'preflight_gateway_port_unsafe'
+}
+if (-not (Test-LoopbackPortBindable -Port ([int]$script:GatewayConfig.listen_port))) {
     throw 'preflight_gateway_port_in_use'
 }
 $script:AccountAuthPath = $accountAuthPath

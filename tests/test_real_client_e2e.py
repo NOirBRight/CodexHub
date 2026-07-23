@@ -993,6 +993,21 @@ def test_omp_17_0_3_uses_print_json_one_shot_arguments(tmp_path):
     assert [case["outcome"] for case in omp_cases] == ["passed", "passed"]
 
 
+def test_automated_clients_bind_fresh_workspace_and_minimal_read_only_context(tmp_path):
+    result = _run(tmp_path, fake="fake-client-workspace-argv.cmd")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    automated = [
+        case
+        for case in summary["cases"]
+        if case["case_id"].startswith(("codex-cli", "opencode", "pi", "omp"))
+    ]
+    assert [case["outcome"] for case in automated] == ["passed"] * 8
+
+
 def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
     result = _run(tmp_path, fake="fake-client-isolation.cmd")
 
@@ -1792,8 +1807,8 @@ def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
     seeded_files = {
         "desktop-luna/browser-profile/Preferences": "desktop-luna-state",
         "desktop-volc/browser-profile/Preferences": "desktop-volc-state",
-        "zcode-luna/.zcode/v2/setting.json": "zcode-luna-state",
-        "zcode-volc/.zcode/v2/setting.json": "zcode-volc-state",
+        "zcode-luna/.zcode/v2/telemetry-state.json": "zcode-luna-state",
+        "zcode-volc/.zcode/v2/telemetry-state.json": "zcode-volc-state",
     }
 
     def seed_gui_state(_output, isolation, _debug):
@@ -1814,6 +1829,186 @@ def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
         copied = work / f"gui-{client}" / case_id / case_relative
         assert copied.read_text(encoding="utf-8") == value
         assert copied.stat().st_ino != source.stat().st_ino
+
+
+def test_desktop_gui_seed_preserves_onboarding_without_stale_identity_or_history(
+    tmp_path,
+):
+    stale_workspace = (
+        r"D:\Workstation\CodexHub-real-client-e2e\runs\old-run"
+        r"\isolated\work\gui-desktop\desktop-luna"
+    )
+    allowed_migrations = [
+        "2026-07-13-string-based-remote-projects",
+        "2026-07-13-local-projects",
+    ]
+
+    def seed_gui_state(_output, isolation, _debug):
+        for case_id in ("desktop-luna", "desktop-volc"):
+            codex_root = isolation / "gui-seed" / case_id / ".codex"
+            codex_root.mkdir(parents=True)
+            (codex_root / ".codex-global-state.json").write_text(
+                json.dumps(
+                    {
+                        "desktop-first-seen-at-ms": 1_784_822_624_226,
+                        "electron-persisted-atom-state": {
+                            "chatgpt-migration-announcement-completed-v1": True,
+                            "chatgpt-update-downloaded-announcement-seen-v1": True,
+                            "desktop-link-default-destination": "in-app-browser",
+                            "electron:onboarding-primary-runtime-install-ready": True,
+                            "unsafe-workspace": stale_workspace,
+                        },
+                        "electron-completed-local-data-migration-ids": [
+                            *allowed_migrations,
+                            stale_workspace,
+                        ],
+                        "local-projects": {
+                            "stale": {"path": stale_workspace},
+                        },
+                        "remote-project-connection-backfill-completed": True,
+                        "electron-local-remote-control-installation-id": "stale-installation",
+                        "electron-remote-control-config-migration-completed": True,
+                        "electron-internal-update-cdn-enabled": False,
+                        "electron-openai-mcp-form-elicitations-enabled": False,
+                        "selected-remote-host-id": "stale-host",
+                        "unexpected-secret": "must-not-copy",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (codex_root / "state_5.sqlite").write_text(
+                stale_workspace,
+                encoding="utf-8",
+            )
+
+    result = _run(tmp_path, mutate=seed_gui_state)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    work = tmp_path / "output" / "isolated" / "work" / "gui-desktop"
+    for case_id in ("desktop-luna", "desktop-volc"):
+        source = (
+            tmp_path
+            / "output"
+            / "isolated"
+            / "gui-seed"
+            / case_id
+            / ".codex"
+            / ".codex-global-state.json"
+        )
+        case_codex = work / case_id / ".codex"
+        copied = case_codex / ".codex-global-state.json"
+        state = json.loads(copied.read_text(encoding="utf-8-sig"))
+        assert state == {
+            "desktop-first-seen-at-ms": 1_784_822_624_226,
+            "electron-persisted-atom-state": {
+                "chatgpt-migration-announcement-completed-v1": True,
+                "chatgpt-update-downloaded-announcement-seen-v1": True,
+                "desktop-link-default-destination": "in-app-browser",
+                "electron:onboarding-primary-runtime-install-ready": True,
+            },
+            "electron-completed-local-data-migration-ids": allowed_migrations,
+            "local-projects": {},
+            "remote-project-connection-backfill-completed": True,
+            "electron-remote-control-config-migration-completed": True,
+            "electron-internal-update-cdn-enabled": False,
+            "electron-openai-mcp-form-elicitations-enabled": False,
+        }
+        assert stale_workspace not in copied.read_text(encoding="utf-8")
+        assert copied.stat().st_ino != source.stat().st_ino
+        assert not (case_codex / "state_5.sqlite").exists()
+        assert (case_codex / "config.toml").is_file()
+        assert (case_codex / "auth.json").is_file()
+
+
+def test_zcode_gui_seed_preserves_login_state_without_stale_workspace_state(tmp_path):
+    stale_workspace = (
+        r"D:\Workstation\CodexHub-real-client-e2e\runs\old-run"
+        r"\isolated\work\gui-zcode\zcode-luna"
+    )
+
+    def seed_gui_state(_output, isolation, _debug):
+        case_root = isolation / "gui-seed" / "zcode-luna"
+        setting = case_root / ".zcode" / "v2" / "setting.json"
+        setting.parent.mkdir(parents=True)
+        setting.write_text(
+            json.dumps(
+                {
+                    "recentProjects": [stale_workspace],
+                    "lastWorkspaceSession": [
+                        {"kind": "local", "workspacePath": stale_workspace}
+                    ],
+                    "settingsSyncFirstRunPromptHandled": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        transient_files = (
+            case_root / ".zcode" / "v2" / "tasks-index.sqlite",
+            case_root / ".zcode" / "cli" / "db" / "db.sqlite",
+            case_root
+            / "appdata"
+            / "roaming"
+            / "ZCode"
+            / "session"
+            / "Local Storage"
+            / "leveldb"
+            / "000003.log",
+        )
+        for path in transient_files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(stale_workspace, encoding="utf-8")
+        cookie = (
+            case_root
+            / "appdata"
+            / "roaming"
+            / "ZCode"
+            / "session"
+            / "Network"
+            / "Cookies"
+        )
+        cookie.parent.mkdir(parents=True)
+        cookie.write_text("reusable-login-state", encoding="utf-8")
+
+    result = _run(tmp_path, mutate=seed_gui_state)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    case_root = (
+        tmp_path
+        / "output"
+        / "isolated"
+        / "work"
+        / "gui-zcode"
+        / "zcode-luna"
+    )
+    setting = json.loads(
+        (case_root / ".zcode" / "v2" / "setting.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert setting["recentProjects"] == [str(case_root)]
+    assert setting["lastWorkspaceSession"] == [
+        {"kind": "local", "workspacePath": str(case_root)}
+    ]
+    assert setting["settingsSyncFirstRunPromptHandled"] is True
+    assert not (case_root / ".zcode" / "v2" / "tasks-index.sqlite").exists()
+    assert not (case_root / ".zcode" / "cli" / "db").exists()
+    assert not (
+        case_root
+        / "appdata"
+        / "roaming"
+        / "ZCode"
+        / "session"
+        / "Local Storage"
+    ).exists()
+    assert (
+        case_root
+        / "appdata"
+        / "roaming"
+        / "ZCode"
+        / "session"
+        / "Network"
+        / "Cookies"
+    ).read_text(encoding="utf-8") == "reusable-login-state"
 
 
 def test_gui_state_seed_rejects_hardlinked_files(tmp_path):
@@ -2264,6 +2459,42 @@ def test_preexisting_gateway_listener_is_rejected_before_candidate_or_gui(tmp_pa
     assert result.returncode != 0
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
     assert summary["failure_classification"] == "preflight_gateway_port_in_use"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_preexisting_bound_non_listener_port_is_rejected_before_candidate_or_gui(tmp_path):
+    reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reservation.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    reservation.bind(("127.0.0.1", 19190))
+    try:
+        result = _run(tmp_path, finalize_manual=False)
+    finally:
+        reservation.close()
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_gateway_port_in_use"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_dynamic_client_port_is_rejected_before_candidate_or_gui(tmp_path):
+    def use_dynamic_client_port(_output, isolation, _debug):
+        (isolation / "config" / "gateway.json").write_text(
+            json.dumps(
+                {
+                    "schema": "codexhub.real-client-gateway.v1",
+                    "listen_port": 55000,
+                    "gateway_client_key": "fixture-gateway-private-key",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    result = _run(tmp_path, mutate=use_dynamic_client_port, finalize_manual=False)
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_gateway_port_unsafe"
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
