@@ -1743,8 +1743,229 @@ def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_pat
         assert arguments.count("--user-data-dir=") == 1
         assert str(expected_profile).casefold() in arguments.casefold()
         assert "--no-first-run" in arguments
+        expected_workspace = work / "gui-desktop" / case_id
+        assert arguments.rstrip('"').casefold().endswith(
+            str(expected_workspace).casefold()
+        )
         observed[case_id] = arguments
     assert observed["desktop-luna"] != observed["desktop-volc"]
+
+
+def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"ZCodePath": "fake-client-desktop-argv.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    work = tmp_path / "output" / "isolated" / "work"
+    for case_id in ("zcode-luna", "zcode-volc"):
+        arguments = (
+            work / f"gui-{case_id}.launched.argv"
+        ).read_text(encoding="ascii").strip()
+        expected_workspace = work / "gui-zcode" / case_id
+        assert arguments.rstrip('"').casefold().endswith(
+            str(expected_workspace).casefold()
+        )
+
+
+def test_candidate_runtime_declares_volc_native_responses_route(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    providers = (
+        tmp_path
+        / "output"
+        / "isolated"
+        / "work"
+        / "candidate"
+        / "runtime"
+        / "proxy"
+        / "config"
+        / "providers.toml"
+    ).read_text(encoding="utf-8")
+    assert 'upstream_format = "responses"' in providers
+    assert 'available_upstream_formats = ["responses"]' in providers
+
+
+def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
+    seeded_files = {
+        "desktop-luna/browser-profile/Preferences": "desktop-luna-state",
+        "desktop-volc/browser-profile/Preferences": "desktop-volc-state",
+        "zcode-luna/.zcode/v2/setting.json": "zcode-luna-state",
+        "zcode-volc/.zcode/v2/setting.json": "zcode-volc-state",
+    }
+
+    def seed_gui_state(_output, isolation, _debug):
+        seed_root = isolation / "gui-seed"
+        for relative, value in seeded_files.items():
+            path = seed_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value, encoding="utf-8")
+
+    result = _run(tmp_path, mutate=seed_gui_state)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    work = tmp_path / "output" / "isolated" / "work"
+    for relative, value in seeded_files.items():
+        case_id, case_relative = relative.split("/", 1)
+        client = "desktop" if case_id.startswith("desktop-") else "zcode"
+        source = tmp_path / "output" / "isolated" / "gui-seed" / relative
+        copied = work / f"gui-{client}" / case_id / case_relative
+        assert copied.read_text(encoding="utf-8") == value
+        assert copied.stat().st_ino != source.stat().st_ino
+
+
+def test_gui_state_seed_rejects_hardlinked_files(tmp_path):
+    external = tmp_path / "external-gui-state"
+    external.write_text("must not be imported", encoding="utf-8")
+
+    def seed_hardlink(_output, isolation, _debug):
+        seed = (
+            isolation
+            / "gui-seed"
+            / "desktop-luna"
+            / "browser-profile"
+            / "Preferences"
+        )
+        seed.parent.mkdir(parents=True)
+        os.link(external, seed)
+
+    result = _run(
+        tmp_path,
+        mutate=seed_hardlink,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_gui_seed_invalid"
+
+
+def test_desktop_gui_preserves_windows_identity_for_sandbox_acl_setup(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("USERNAME", "e2e-current-user")
+    monkeypatch.setenv("USERDOMAIN", "e2e-current-domain")
+
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexDesktopPath": "fake-client-desktop-argv.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    work = tmp_path / "output" / "isolated" / "work"
+    for case_id in ("desktop-luna", "desktop-volc"):
+        identity = (work / f"gui-{case_id}.launched.identity").read_text(
+            encoding="ascii"
+        )
+        assert identity == "e2e-current-user|e2e-current-domain"
+
+
+def test_desktop_gui_launches_from_invocation_local_manifest_payload(tmp_path):
+    source_executable = FIXTURES / "fake-client-desktop-argv.cmd"
+
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexDesktopPath": source_executable.name},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    work = tmp_path / "output" / "isolated" / "work"
+    staged_root = work / "desktop-app"
+    staged_executable = staged_root / source_executable.name
+    assert staged_executable.read_bytes() == source_executable.read_bytes()
+    assert staged_executable.stat().st_ino != source_executable.stat().st_ino
+    for case_id in ("desktop-luna", "desktop-volc"):
+        launch_path = (
+            work / f"gui-{case_id}.launched.executable"
+        ).read_text(encoding="ascii")
+        assert Path(launch_path).resolve() == staged_executable.resolve()
+        assert Path(launch_path).resolve().is_relative_to(staged_root.resolve())
+
+
+def test_desktop_payload_hardlinks_are_copied_as_independent_files(tmp_path):
+    payload = b"appx deployment hardlink payload"
+    desktop_root = tmp_path / "desktop-install"
+    desktop_root.mkdir()
+    desktop_executable = desktop_root / "CodexDesktop.cmd"
+    shutil.copyfile(FIXTURES / "fake-client-desktop-argv.cmd", desktop_executable)
+    shutil.copyfile(
+        FIXTURES / "fake-client-real-contract.cmd",
+        desktop_root / "fake-client-real-contract.cmd",
+    )
+    source = desktop_root / "shared-runtime.bin"
+    linked = desktop_root / "shared-runtime-copy.bin"
+    source.write_bytes(payload)
+    os.link(source, linked)
+    assert source.stat().st_ino == linked.stat().st_ino
+
+    def bind_payload_root(_output, isolation, _debug):
+        metadata_path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["desktop"]["install_location"] = str(desktop_root.resolve())
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexDesktopPath": desktop_executable},
+        mutate=bind_payload_root,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    staged_root = tmp_path / "output" / "isolated" / "work" / "desktop-app"
+    staged_source = staged_root / "shared-runtime.bin"
+    staged_link = staged_root / "shared-runtime-copy.bin"
+    assert staged_source.read_bytes() == payload
+    assert staged_link.read_bytes() == payload
+    assert staged_source.stat().st_ino != source.stat().st_ino
+    assert staged_link.stat().st_ino != linked.stat().st_ino
+    assert staged_source.stat().st_ino != staged_link.stat().st_ino
+
+
+def test_desktop_payload_reparse_points_fail_before_gui_launch(tmp_path):
+    external = tmp_path / "external-desktop-state"
+    external.mkdir()
+    (external / "must-not-be-copied.txt").write_text("host state", encoding="utf-8")
+
+    def add_payload_junction(_output, _isolation, _debug):
+        desktop_root = tmp_path / "Program Files" / "OpenAI Codex"
+        result = subprocess.run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                str(desktop_root / "linked-host-state"),
+                str(external),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    result = _run(
+        tmp_path,
+        authoritative_paths_with_spaces=True,
+        mutate=add_payload_junction,
+        finalize_manual=False,
+        manual_timeout_seconds=1,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert summary["failure_classification"] == "preflight_desktop_payload_invalid"
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+    assert not (
+        tmp_path
+        / "output"
+        / "isolated"
+        / "work"
+        / "desktop-app"
+        / "linked-host-state"
+        / "must-not-be-copied.txt"
+    ).exists()
 
 
 def test_ambient_host_session_environment_never_reaches_candidate_or_clients(

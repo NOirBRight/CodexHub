@@ -732,7 +732,10 @@ function New-IsolatedStartInfo {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.EnvironmentVariables.Clear()
-    foreach ($name in @('SystemRoot', 'WINDIR', 'ComSpec', 'PATH', 'PATHEXT')) {
+    foreach ($name in @(
+        'SystemRoot', 'WINDIR', 'ComSpec', 'PATH', 'PATHEXT',
+        'USERNAME', 'USERDOMAIN'
+    )) {
         $value = [System.Environment]::GetEnvironmentVariable($name)
         if ($value) {
             $startInfo.EnvironmentVariables[$name] = $value
@@ -1833,6 +1836,81 @@ function Get-DesktopInstallationMetadata {
     }
 }
 
+function Copy-DesktopApplicationPayload {
+    param(
+        [string]$Executable,
+        [string]$WorkRoot,
+        [string]$IsolationRoot
+    )
+    try {
+        $sourceExecutable = (Resolve-Path -LiteralPath $Executable -ErrorAction Stop).Path
+        $sourceRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $sourceExecutable) -ErrorAction Stop).Path.TrimEnd('\')
+        $sourcePrefix = $sourceRoot + '\'
+        if (-not $sourceExecutable.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'preflight_desktop_payload_invalid'
+        }
+        $items = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force -ErrorAction Stop)
+        $files = @($items | Where-Object { -not $_.PSIsContainer })
+        $directories = @($items | Where-Object { $_.PSIsContainer })
+        if ($files.Count -eq 0 -or $files.Count -gt 20000 -or $directories.Count -gt 5000) {
+            throw 'preflight_desktop_payload_invalid'
+        }
+        $totalBytes = [uint64]0
+        foreach ($item in $items) {
+            $linkType = if ($item.PSObject.Properties['LinkType']) { [string]$item.LinkType } else { '' }
+            $isReparsePoint = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            $isAllowedAppxHardLink = -not $item.PSIsContainer -and $linkType -ceq 'HardLink'
+            if ($isReparsePoint -or ($linkType -and -not $isAllowedAppxHardLink)) {
+                throw 'preflight_desktop_payload_invalid'
+            }
+            $itemPath = [System.IO.Path]::GetFullPath($item.FullName)
+            if (-not $itemPath.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                -not (Resolve-Path -LiteralPath $itemPath -ErrorAction Stop).Path.Equals(
+                    $itemPath,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw 'preflight_desktop_payload_invalid'
+            }
+            if (-not $item.PSIsContainer) {
+                $totalBytes += [uint64]$item.Length
+                if ($totalBytes -gt 4GB) {
+                    throw 'preflight_desktop_payload_invalid'
+                }
+            }
+        }
+
+        $destinationRoot = Join-Path $WorkRoot 'desktop-app'
+        if (Test-Path -LiteralPath $destinationRoot) {
+            throw 'preflight_desktop_payload_invalid'
+        }
+        [void](New-Item -ItemType Directory -Path $destinationRoot)
+        Assert-CanonicalNonReparseDirectory -Path $destinationRoot -Failure 'preflight_desktop_payload_invalid'
+        foreach ($directory in $directories) {
+            $relative = $directory.FullName.Substring($sourcePrefix.Length)
+            [void](New-Item -ItemType Directory -Force -Path (Join-Path $destinationRoot $relative))
+        }
+        foreach ($file in $files) {
+            $relative = $file.FullName.Substring($sourcePrefix.Length)
+            $destination = Join-Path $destinationRoot $relative
+            [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination))
+            Copy-Item -LiteralPath $file.FullName -Destination $destination
+            if ((Get-Sha256 -Path $file.FullName) -cne (Get-Sha256 -Path $destination)) {
+                throw 'preflight_desktop_payload_invalid'
+            }
+        }
+        $manifestRelative = $sourceExecutable.Substring($sourcePrefix.Length)
+        $stagedExecutable = Join-Path $destinationRoot $manifestRelative
+        Assert-IsolatedRegularFile -Path $stagedExecutable -IsolationRoot $IsolationRoot
+        return $stagedExecutable
+    }
+    catch {
+        if ($_.Exception.Message -ceq 'preflight_desktop_payload_invalid') {
+            throw
+        }
+        throw 'preflight_desktop_payload_invalid'
+    }
+}
+
 function Get-ZCodeInstallationMetadata {
     param([string]$Executable)
     if ($script:WindowsInstallMetadata) {
@@ -2140,6 +2218,94 @@ function Publish-ManagedClientTargets {
     }
 }
 
+function Copy-GuiStateSeed {
+    param(
+        [string]$SeedCaseRoot,
+        [string]$CaseRoot,
+        [string]$Client,
+        [string]$IsolationRoot
+    )
+    $relativeRoots = if ($Client -ceq 'desktop') {
+        @('browser-profile')
+    }
+    elseif ($Client -ceq 'zcode') {
+        @('.zcode', 'appdata')
+    }
+    else {
+        throw 'preflight_gui_seed_invalid'
+    }
+    try {
+        Assert-CanonicalNonReparseDirectory -Path $SeedCaseRoot -Failure 'preflight_gui_seed_invalid'
+        $resolvedIsolation = (Resolve-Path -LiteralPath $IsolationRoot -ErrorAction Stop).Path.TrimEnd('\')
+        $resolvedSeedCase = (Resolve-Path -LiteralPath $SeedCaseRoot -ErrorAction Stop).Path.TrimEnd('\')
+        if (-not $resolvedSeedCase.StartsWith(
+            $resolvedIsolation + '\',
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'preflight_gui_seed_invalid'
+        }
+
+        $fileCount = 0
+        $directoryCount = 0
+        [uint64]$totalBytes = 0
+        foreach ($relativeRoot in $relativeRoots) {
+            $sourceRoot = Join-Path $resolvedSeedCase $relativeRoot
+            if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+                continue
+            }
+            Assert-CanonicalNonReparseDirectory -Path $sourceRoot -Failure 'preflight_gui_seed_invalid'
+            $resolvedSourceRoot = (Resolve-Path -LiteralPath $sourceRoot -ErrorAction Stop).Path.TrimEnd('\')
+            $sourcePrefix = $resolvedSourceRoot + '\'
+            $destinationRoot = Join-Path $CaseRoot $relativeRoot
+            if (Test-Path -LiteralPath $destinationRoot) {
+                throw 'preflight_gui_seed_invalid'
+            }
+            [void](New-Item -ItemType Directory -Path $destinationRoot)
+
+            foreach ($item in @(Get-ChildItem -LiteralPath $resolvedSourceRoot -Recurse -Force -ErrorAction Stop)) {
+                $linkType = if ($item.PSObject.Properties['LinkType']) { [string]$item.LinkType } else { '' }
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $linkType) {
+                    throw 'preflight_gui_seed_invalid'
+                }
+                $itemPath = [System.IO.Path]::GetFullPath($item.FullName)
+                if (-not $itemPath.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    -not (Resolve-Path -LiteralPath $itemPath -ErrorAction Stop).Path.Equals(
+                        $itemPath,
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    throw 'preflight_gui_seed_invalid'
+                }
+                $relative = $itemPath.Substring($sourcePrefix.Length)
+                $destination = Join-Path $destinationRoot $relative
+                if ($item.PSIsContainer) {
+                    $directoryCount += 1
+                    if ($directoryCount -gt 10000) {
+                        throw 'preflight_gui_seed_invalid'
+                    }
+                    [void](New-Item -ItemType Directory -Force -Path $destination)
+                    continue
+                }
+                $fileCount += 1
+                $totalBytes += [uint64]$item.Length
+                if ($fileCount -gt 50000 -or $totalBytes -gt 2GB) {
+                    throw 'preflight_gui_seed_invalid'
+                }
+                [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination))
+                Copy-Item -LiteralPath $itemPath -Destination $destination
+                if ((Get-Sha256 -Path $itemPath) -cne (Get-Sha256 -Path $destination)) {
+                    throw 'preflight_gui_seed_invalid'
+                }
+            }
+        }
+    }
+    catch {
+        if ($_.Exception.Message -ceq 'preflight_gui_seed_invalid') {
+            throw
+        }
+        throw 'preflight_gui_seed_invalid'
+    }
+}
+
 function Initialize-ClientConfiguration {
     param(
         [string]$Client,
@@ -2227,6 +2393,8 @@ id = "volc"
 name = "Volcengine"
 base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
 api_key = "{env:VOLCENGINE_API_KEY}"
+upstream_format = "responses"
+available_upstream_formats = ["responses"]
 enabled = true
 
   [[providers.models]]
@@ -2337,6 +2505,7 @@ $accountPath = Join-Path $isolationRoot 'account\profile.json'
 $accountAuthPath = Join-Path $isolationRoot 'account\auth.json'
 $credentialPath = Join-Path $isolationRoot 'credentials\volc.json'
 $configRoot = Join-Path $isolationRoot 'config'
+$guiSeedRoot = Join-Path $isolationRoot 'gui-seed'
 $workRoot = Join-Path $isolationRoot 'work'
 $gatewayConfigPath = Join-Path $configRoot 'gateway.json'
 $manualEvidencePath = Join-Path $OutputDirectory 'manual-evidence.json'
@@ -2489,6 +2658,10 @@ foreach ($versionTarget in @(
     $actualVersions[$versionTarget.key] = Get-NativeClientVersion -Client $versionTarget.client -Executable $executables[$versionTarget.client] -Minimum $script:MinimumVersions[$versionTarget.key] -ProbeRoot (Join-Path $workRoot "version-$($versionTarget.client)")
     $script:ObservedVersions[$versionTarget.key] = $actualVersions[$versionTarget.key]
 }
+$desktopLaunchExecutable = Copy-DesktopApplicationPayload `
+    -Executable $executables.desktop `
+    -WorkRoot $workRoot `
+    -IsolationRoot $isolationRoot
 [void](New-Item -ItemType Directory -Path $artifactRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $artifactRoot 'cases'))
 
@@ -2574,6 +2747,12 @@ try {
             Join-Path $workRoot $case.case_id
         }
         [void](New-Item -ItemType Directory -Path $caseRoot -Force)
+        if ($case.client -in @('desktop', 'zcode')) {
+            $seedCaseRoot = Join-Path $guiSeedRoot $case.case_id
+            if (Test-Path -LiteralPath $seedCaseRoot -PathType Container) {
+                Copy-GuiStateSeed -SeedCaseRoot $seedCaseRoot -CaseRoot $caseRoot -Client $case.client -IsolationRoot $isolationRoot
+            }
+        }
         $caseConfigurations[$case.case_id] = Initialize-ClientConfiguration -Client $case.client -CaseRoot $caseRoot -Model $case.gateway_model -CatalogPath $candidateCatalogPath
     }
     [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna' -CatalogPath $candidateCatalogPath)
@@ -2610,13 +2789,14 @@ try {
         [void]$manualSentinelPaths.Add($guiSentinelPath)
         $guiArguments = if ($guiClient -ceq 'desktop') {
             $desktopUserDataRoot = Join-Path $guiCaseRoot 'browser-profile'
-            [void](New-Item -ItemType Directory -Path $desktopUserDataRoot)
-            @("--user-data-dir=$desktopUserDataRoot", '--no-first-run')
+            [void](New-Item -ItemType Directory -Force -Path $desktopUserDataRoot)
+            @("--user-data-dir=$desktopUserDataRoot", '--no-first-run', $guiCaseRoot)
         }
         else {
-            @()
+            @($guiCaseRoot)
         }
-        $guiProcess = Start-IsolatedProcess -Executable $executables[$guiClient] -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment @{
+        $guiExecutable = if ($guiClient -ceq 'desktop') { $desktopLaunchExecutable } else { $executables[$guiClient] }
+        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
             CODEXHUB_E2E_CASES = $guiCase.case_id
             CODEXHUB_E2E_MODELS = $guiCase.canonical_model

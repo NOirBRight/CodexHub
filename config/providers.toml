@@ -42,6 +42,8 @@ name = "Volcengine"
 base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
 api_key = "{env:VOLCENGINE_API_KEY}"
 display_prefix = "Volc"
+upstream_format = "responses"
+available_upstream_formats = ["responses"]
 sort_order = 2
 enabled = true
 
