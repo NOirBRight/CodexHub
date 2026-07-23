@@ -2053,6 +2053,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     result = _run(
         tmp_path,
         debug_fake="fake-debug-build-official-bootstrap.cmd",
+        client_fakes={"CodexCliPath": "fake-client-codex-0.145.0.cmd"},
         mutate=force_context_budget_failure,
         finalize_manual=False,
         timeout_seconds=1,
@@ -2069,6 +2070,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     )
     assert summary["counts"]["case_count"] == 0
     assert summary["artifacts"] == ["candidate-startup.json"]
+    assert summary["pinned_versions"]["codex_cli"] == "0.145.0"
     startup_path = tmp_path / "output" / "candidate-startup.json"
     startup = json.loads(startup_path.read_text())
     assert set(startup) == STARTUP_DIAGNOSTIC_KEYS
