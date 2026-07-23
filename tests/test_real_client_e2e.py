@@ -569,6 +569,48 @@ def test_candidate_publishes_catalog_at_production_runtime_root(tmp_path):
     ).exists()
 
 
+def test_candidate_waits_for_atomic_catalog_publication_within_startup_budget(
+    tmp_path,
+):
+    catalog_path = (
+        tmp_path
+        / "output"
+        / "isolated"
+        / "work"
+        / "candidate"
+        / "runtime"
+        / "model-catalogs"
+        / "codexhub-model-catalog.json"
+    )
+    published = threading.Event()
+
+    def publish_after_refresh_returns() -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not catalog_path.parent.is_dir():
+            time.sleep(0.01)
+        time.sleep(0.25)
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text('{"candidate-managed": true}', encoding="utf-8")
+        published.set()
+
+    publisher = threading.Thread(target=publish_after_refresh_returns, daemon=True)
+    publisher.start()
+    try:
+        result = _run(
+            tmp_path,
+            debug_fake="fake-debug-build-official-bootstrap-no-catalog.cmd",
+        )
+    finally:
+        publisher.join(timeout=5)
+
+    assert published.is_set()
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["outcome"] == "passed"
+
+
 def test_obsolete_proxy_subdir_catalog_fails_closed_before_clients_or_requests(
     tmp_path,
 ):
