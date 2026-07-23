@@ -9,6 +9,7 @@ if /I not "%USERPROFILE%"=="%CD%" exit /b 24
 if /I not "%APPDATA%"=="%CD%\appdata\roaming" exit /b 25
 if /I not "%LOCALAPPDATA%"=="%CD%\appdata\local" exit /b 26
 if /I not "%CODEX_HOME%"=="%CODEXHUB_CODEX_TARGET_HOME%" exit /b 27
+if not exist "%CODEXHUB_CODEX_TARGET_HOME%\auth.json" exit /b 38
 if defined CODEXHUB_HOST_SESSION exit /b 28
 if defined OPENAI_API_KEY exit /b 29
 set "budget=%CODEXHUB_RUNTIME_HOME%\proxy\official-context-budget.ready"

@@ -2003,6 +2003,12 @@ def test_candidate_bootstraps_official_context_budget_before_gateway_start(tmp_p
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    isolated_auth = tmp_path / "output" / "isolated" / "account" / "auth.json"
+    candidate_auth = (
+        tmp_path / "output" / "isolated" / "work" / "candidate" / ".codex" / "auth.json"
+    )
+    assert candidate_auth.read_bytes() == isolated_auth.read_bytes()
+    assert candidate_auth.stat().st_ino != isolated_auth.stat().st_ino
     candidate_proxy = (
         tmp_path / "output" / "isolated" / "work" / "candidate" / "runtime" / "proxy"
     )

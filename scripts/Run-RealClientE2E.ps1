@@ -2481,6 +2481,15 @@ try {
     $candidateRoot = Join-Path $workRoot 'candidate'
     [void](New-Item -ItemType Directory -Force -Path $candidateRoot)
     Initialize-CandidateRuntime -CandidateRoot $candidateRoot
+    $candidateAuthPath = Join-Path $script:CandidateCodexRoot 'auth.json'
+    if (Test-Path -LiteralPath $candidateAuthPath) {
+        throw 'candidate_gateway_bootstrap_failed'
+    }
+    Copy-Item -LiteralPath $script:AccountAuthPath -Destination $candidateAuthPath
+    Assert-IsolatedRegularFile -Path $candidateAuthPath -IsolationRoot $isolationRoot
+    if ((Get-Sha256 -Path $script:AccountAuthPath) -cne (Get-Sha256 -Path $candidateAuthPath)) {
+        throw 'candidate_gateway_bootstrap_failed'
+    }
     $candidateEnvironment = @{
         CODEXHUB_E2E_CANDIDATE_SHA = $CandidateSha
         CODEXHUB_E2E_GATEWAY_PORT = [string]$script:GatewayConfig.listen_port
