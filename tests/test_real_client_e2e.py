@@ -286,8 +286,6 @@ def _run(
         shutil.copyfile(FIXTURES / debug_fake, debug_build)
     if materializer_fake is not None:
         shutil.copyfile(FIXTURES / materializer_fake, materializer_build)
-    if mutate is not None:
-        mutate(output, isolation, debug_build)
     fake_path = FIXTURES / fake
     executable_arguments = {
         "CodexDesktopPath": fake_path,
@@ -353,6 +351,14 @@ def _run(
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         executable_arguments["CodexDesktopPath"] = desktop_path
         executable_arguments["ZCodePath"] = zcode_path
+    metadata_path = isolation / "config" / "windows-install-metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["desktop"]["manifest_executable"] = str(
+        Path(executable_arguments["CodexDesktopPath"]).resolve()
+    )
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    if mutate is not None:
+        mutate(output, isolation, debug_build)
     command = [
         _powershell(),
         "-NoProfile",
@@ -1697,6 +1703,50 @@ def test_passed_executables_must_be_bound_to_authoritative_install_locations(tmp
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
+def test_desktop_executable_must_match_appx_manifest_entry(tmp_path):
+    def bind_manifest_to_different_executable(_output, isolation, _debug):
+        path = isolation / "config" / "windows-install-metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["desktop"]["manifest_executable"] = str(
+            (FIXTURES / "fake-client-isolation.cmd").resolve()
+        )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run(
+        tmp_path,
+        mutate=bind_manifest_to_different_executable,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert (
+        summary["failure_classification"]
+        == "preflight_desktop_executable_unbound"
+    )
+    assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexDesktopPath": "fake-client-desktop-argv.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    work = tmp_path / "output" / "isolated" / "work"
+    observed = {}
+    for case_id in ("desktop-luna", "desktop-volc"):
+        argument_log = work / f"gui-{case_id}.launched.argv"
+        arguments = argument_log.read_text(encoding="ascii").strip()
+        expected_profile = work / "gui-desktop" / case_id / "browser-profile"
+        assert arguments.count("--user-data-dir=") == 1
+        assert str(expected_profile).casefold() in arguments.casefold()
+        assert "--no-first-run" in arguments
+        observed[case_id] = arguments
+    assert observed["desktop-luna"] != observed["desktop-volc"]
+
+
 def test_ambient_host_session_environment_never_reaches_candidate_or_clients(
     tmp_path, monkeypatch
 ):
@@ -2091,6 +2141,37 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     assert "fixture-codex-access-token" not in serialized
     assert "fixture-volc-private-token" not in serialized
     assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
+
+
+def test_candidate_retries_transient_native_model_cache_timeout_within_shared_budget(
+    tmp_path,
+):
+    def fail_first_native_cache_publication(_output, _isolation, debug_build):
+        Path(f"{debug_build}.bootstrap-fail-once").write_text(
+            "fail once", encoding="ascii"
+        )
+
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=fail_first_native_cache_publication,
+        timeout_seconds=30,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed < 30
+    candidate_proxy = (
+        tmp_path / "output" / "isolated" / "work" / "candidate" / "runtime" / "proxy"
+    )
+    assert (
+        candidate_proxy / "official-bootstrap-invocations.txt"
+    ).read_text().splitlines() == [
+        "refresh-models",
+        "refresh-models",
+        "start",
+    ]
 
 
 def test_candidate_bootstrap_and_listener_share_one_startup_budget(tmp_path):

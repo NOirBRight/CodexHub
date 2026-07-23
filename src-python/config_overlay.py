@@ -618,7 +618,7 @@ def _selected_model_is_official(selected_model: str | None) -> bool:
 
 
 def build_overlay(
-    catalog_value: str,
+    catalog_value: str | None,
     owner: str,
     context_budget: tuple[int, int] | None = None,
 ) -> str:
@@ -626,8 +626,9 @@ def build_overlay(
         MARKER_BEGIN,
         f"# owner = {owner}",
         f'model_provider = "{PROXY_PROVIDER_ID}"',
-        f"model_catalog_json = {toml_literal(catalog_value)}",
     ]
+    if catalog_value is not None:
+        lines.append(f"model_catalog_json = {toml_literal(catalog_value)}")
     if context_budget is not None:
         context_window, auto_compact_token_limit = context_budget
         lines.extend(
@@ -712,7 +713,7 @@ def insert_provider_section(text: str, provider_section: str) -> str:
 def apply_overlay(
     config_path: Path,
     backup_path: Path,
-    catalog_path: Path,
+    catalog_path: Path | None,
     base_url: str,
     owner: str = "release",
     takeover: bool = False,
@@ -749,7 +750,7 @@ def apply_overlay(
         cleaned = strip_top_level_keys(cleaned, CONTEXT_GUARD_KEYS)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
     updated = build_overlay(
-        catalog_config_value(config_path, catalog_path),
+        catalog_config_value(config_path, catalog_path) if catalog_path is not None else None,
         owner,
         context_budget,
     ) + cleaned.lstrip()
@@ -799,7 +800,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--config", required=True, type=Path)
     apply_parser.add_argument("--backup", required=True, type=Path)
-    apply_parser.add_argument("--catalog", required=True, type=Path)
+    apply_parser.add_argument("--catalog", type=Path)
     apply_parser.add_argument("--base-url", required=True)
     apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
     apply_parser.add_argument("--takeover", action="store_true")

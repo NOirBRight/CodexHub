@@ -1,8 +1,12 @@
 use crate::{
-    autostart, catalog, config, gateway, history, models, proxy, AppStatus, Provider, Settings,
+    autostart, catalog, config, gateway, history, models, proxy, AppStatus, Model, Provider,
+    Settings, UpstreamFormat,
 };
 use serde::Serialize;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+const MAX_MANAGED_CLIENT_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -201,7 +205,15 @@ fn run_managed_client_config(args: &[String]) -> i32 {
 fn load_settings_and_providers(
     request: &ManagedClientConfigRequest,
     isolated_root: &Path,
-) -> Result<(Settings, Vec<Provider>, config::ConfigPaths), String> {
+) -> Result<
+    (
+        Settings,
+        Vec<Provider>,
+        config::ConfigPaths,
+        Option<PathBuf>,
+    ),
+    String,
+> {
     // The isolated ConfigPaths resolves settings/providers/catalog/targets
     // beneath the supplied root using existing production parsers. We seed
     // the isolated runtime dir with the caller-supplied settings/providers
@@ -218,6 +230,7 @@ fn load_settings_and_providers(
     // discovery. Native clients (opencode/zcode/pi/omp) do not read from
     // the repo tree, so this is harmless for them.
     config::populate_isolated_repo_resources(&paths)?;
+    let staged_catalog_path = stage_candidate_catalog(request.catalog_path.as_deref(), &paths)?;
     // Seed settings.json from the caller-supplied path if provided.
     if let Some(settings_path) = &request.settings_path {
         let text = std::fs::read_to_string(settings_path)
@@ -235,9 +248,125 @@ fn load_settings_and_providers(
             format!("failed to write isolated providers: {error}")
         })?;
     }
-    let settings = config::get_settings_from_paths(&paths)?;
-    let providers = config::get_providers_from_paths(&paths)?;
-    Ok((settings, providers, paths))
+    let mut settings = config::get_settings_from_paths(&paths)?;
+    let mut providers = config::get_providers_from_paths(&paths)?;
+
+    // The isolated CLI must never discover Official models from the current
+    // user's runtime. An explicit candidate catalog is imported below as the
+    // authoritative OpenAI provider; without one, only the supplied provider
+    // configuration is available.
+    let include_candidate_official_models = settings.include_official_models;
+    settings.include_official_models = false;
+    if include_candidate_official_models {
+        if let Some(catalog_path) = staged_catalog_path.as_deref() {
+            let official_models = models::read_official_catalog_models(catalog_path)
+                .map_err(|_| "candidate catalog is malformed".to_string())?;
+            if official_models.is_empty() {
+                return Err("candidate catalog has no Official models".to_string());
+            }
+            providers.retain(|provider| provider.id != "openai");
+            providers.push(candidate_official_provider(official_models));
+        }
+    }
+
+    Ok((settings, providers, paths, staged_catalog_path))
+}
+
+fn stage_candidate_catalog(
+    source_path: Option<&Path>,
+    paths: &config::ConfigPaths,
+) -> Result<Option<PathBuf>, String> {
+    let Some(source_path) = source_path else {
+        return Ok(None);
+    };
+    let source_bytes = read_bounded_single_link_file(source_path)
+        .map_err(|_| "candidate catalog source is not a regular single-link file".to_string())?;
+    let staged_path = paths.generated_catalog_path_for_cli();
+    let parent = staged_path
+        .parent()
+        .ok_or_else(|| "candidate catalog target has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|_| "failed to create isolated candidate catalog directory".to_string())?;
+
+    if staged_path.exists() {
+        let staged_bytes = read_bounded_single_link_file(&staged_path)
+            .map_err(|_| "isolated candidate catalog is not a regular single-link file".to_string())?;
+        if staged_bytes != source_bytes {
+            return Err("isolated candidate catalog contradicts supplied source".to_string());
+        }
+    } else {
+        let mut staged = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged_path)
+            .map_err(|_| "failed to create isolated candidate catalog".to_string())?;
+        staged
+            .write_all(&source_bytes)
+            .and_then(|_| staged.sync_all())
+            .map_err(|_| "failed to write isolated candidate catalog".to_string())?;
+        drop(staged);
+        let staged_bytes = read_bounded_single_link_file(&staged_path)
+            .map_err(|_| "isolated candidate catalog is not a regular single-link file".to_string())?;
+        if staged_bytes != source_bytes {
+            return Err("isolated candidate catalog copy verification failed".to_string());
+        }
+    }
+    Ok(Some(staged_path))
+}
+
+fn read_bounded_single_link_file(path: &Path) -> Result<Vec<u8>, String> {
+    let path_metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect input: {error}"))?;
+    if !path_metadata.file_type().is_file() || path_metadata.file_type().is_symlink() {
+        return Err("input is not a regular file".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("input is a reparse point".to_string());
+        }
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("failed to canonicalize input: {error}"))?;
+    gateway::reject_hard_link(&canonical)?;
+    let file = std::fs::File::open(&canonical)
+        .map_err(|error| format!("failed to open input: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect open input: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_MANAGED_CLIENT_CATALOG_BYTES {
+        return Err("input is not a bounded regular file".to_string());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_MANAGED_CLIENT_CATALOG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read input: {error}"))?;
+    if bytes.len() as u64 > MAX_MANAGED_CLIENT_CATALOG_BYTES {
+        return Err("input exceeds the size bound".to_string());
+    }
+    Ok(bytes)
+}
+
+fn candidate_official_provider(models: Vec<Model>) -> Provider {
+    Provider {
+        id: "openai".to_string(),
+        name: "OpenAI".to_string(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        api_key: None,
+        upstream_format: Some(UpstreamFormat::Responses),
+        available_upstream_formats: Some(vec![UpstreamFormat::Responses]),
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: Some(true),
+        display_prefix: Some("openai/".to_string()),
+        sort_order: Some(0),
+        enabled: true,
+        locked: true,
+        models,
+    }
 }
 
 fn run_native_managed_client_config(
@@ -248,13 +377,14 @@ fn run_native_managed_client_config(
     } else {
         gateway::validate_isolated_root(&request.root)?
     };
-    let (settings, providers, _paths) = load_settings_and_providers(request, isolated.root())?;
+    let (settings, providers, _paths, staged_catalog_path) =
+        load_settings_and_providers(request, isolated.root())?;
     let input = gateway::IsolatedClientApplyInput {
         client_id: request.client.clone(),
         model: request.model.clone(),
         settings,
         providers,
-        catalog_path: request.catalog_path.clone(),
+        catalog_path: staged_catalog_path,
         backup_subdir: request.backup_subdir.clone(),
     };
     match request.verb.as_str() {
@@ -282,11 +412,17 @@ fn run_codex_managed_client_config(
     } else {
         gateway::validate_isolated_root(&request.root)?
     };
-    let (_settings, _providers, paths) = load_settings_and_providers(request, isolated.root())?;
+    let (_settings, _providers, paths, staged_catalog_path) =
+        load_settings_and_providers(request, isolated.root())?;
     let model = request.model.clone().unwrap_or_else(|| "gpt-5.5".to_string());
     match request.verb.as_str() {
         "preview" => {
-            let preview = config::preview_codex_config_isolated(&paths, "custom", &model)?;
+            let preview = config::preview_codex_config_isolated(
+                &paths,
+                "custom",
+                &model,
+                staged_catalog_path.as_deref(),
+            )?;
             Ok(serde_json::to_value(&preview).map_err(|error| error.to_string())?)
         }
         "apply" => {
@@ -296,8 +432,15 @@ fn run_codex_managed_client_config(
                 .map(Path::to_path_buf)
                 .unwrap_or_else(config::find_python);
             let runner = config::ProcessCommandRunner;
-            let status =
-                config::apply_codex_config_isolated(&paths, "custom", false, &model, &python, &runner)?;
+            let status = config::apply_codex_config_isolated(
+                &paths,
+                "custom",
+                false,
+                &model,
+                staged_catalog_path.as_deref(),
+                &python,
+                &runner,
+            )?;
             Ok(serde_json::to_value(&status).map_err(|error| error.to_string())?)
         }
         "readback" => {
@@ -607,6 +750,34 @@ gateway_exported = true
             (settings_path, providers_path)
         }
 
+        fn write_candidate_official_catalog(root: &Path) -> PathBuf {
+            let catalog_path = root.join("candidate-catalog.json");
+            fs::write(
+                &catalog_path,
+                r#"{
+  "models": [
+    {
+      "slug": "gpt-cli-catalog-only",
+      "display_name": "CLI Catalog Only",
+      "context_window": 272000,
+      "input_modalities": ["text", "image"],
+      "supported_reasoning_levels": ["medium"],
+      "default_reasoning_level": "medium",
+      "enabled": true,
+      "gateway_exported": true,
+      "codex_proxy_metadata": {
+        "provider": "openai",
+        "upstream_name": "official",
+        "upstream_model": "gpt-cli-catalog-only"
+      }
+    }
+  ]
+}"#,
+            )
+            .unwrap();
+            catalog_path
+        }
+
         #[test]
         fn managed_client_config_unknown_verb_returns_usage_error() {
             let root = temp_root("mcc-unknown-verb");
@@ -761,6 +932,57 @@ gateway_exported = true
             // not regress for Codex preview.
         }
 
+        #[test]
+        fn managed_client_config_codex_volc_without_catalog_never_writes_dangling_catalog_reference()
+        {
+            let root = temp_root("mcc-codex-volc-no-catalog");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            let isolated = root.join("isolated");
+            let common_args = [
+                "--client",
+                "codex",
+                "--root",
+                isolated.to_str().unwrap(),
+                "--settings-path",
+                settings_path.to_str().unwrap(),
+                "--providers-path",
+                providers_path.to_str().unwrap(),
+                "--model",
+                "volc/glm-5.2",
+            ];
+
+            let apply_args = std::iter::once("managed-client-config")
+                .chain(std::iter::once("apply"))
+                .chain(common_args)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(run(&apply_args), 0, "Codex Volc apply should succeed");
+
+            let readback_args = std::iter::once("managed-client-config")
+                .chain(std::iter::once("readback"))
+                .chain(common_args)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(run(&readback_args), 0, "Codex Volc readback should succeed");
+
+            let config_path = isolated.join("codex-target").join("config.toml");
+            let config_text = fs::read_to_string(&config_path).unwrap();
+            assert!(
+                !config_text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("model_catalog_json")),
+                "Codex config must not reference a catalog when --catalog-path was omitted:\n{config_text}"
+            );
+            assert!(
+                !isolated
+                    .join("runtime")
+                    .join("model-catalogs")
+                    .join("codexhub-model-catalog.json")
+                    .exists(),
+                "Volc apply without --catalog-path must not synthesize an Official catalog"
+            );
+        }
+
         // F6: table-driven all-client CLI dispatch. Every supported client
         // must accept the preview verb and return exit 0, covering the CLI
         // parity surface for codex/opencode/zcode/pi/omp.
@@ -790,6 +1012,73 @@ gateway_exported = true
                     "preview should succeed for client {client_id}"
                 );
             }
+        }
+
+        #[test]
+        fn managed_client_config_native_matrix_imports_external_catalog_into_fresh_roots() {
+            let root = temp_root("mcc-external-catalog");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            let catalog_path = write_candidate_official_catalog(&root);
+
+            for client_id in ["opencode", "zcode", "pi", "omp"] {
+                let preview_root = root.join(format!("{client_id}-preview"));
+                let apply_root = root.join(format!("{client_id}-apply"));
+                for (verb, isolated) in [
+                    ("preview", preview_root.as_path()),
+                    ("apply", apply_root.as_path()),
+                    ("readback", apply_root.as_path()),
+                ] {
+                    let args = vec![
+                        "managed-client-config".to_string(),
+                        verb.to_string(),
+                        "--client".to_string(),
+                        client_id.to_string(),
+                        "--root".to_string(),
+                        isolated.to_string_lossy().to_string(),
+                        "--settings-path".to_string(),
+                        settings_path.to_string_lossy().to_string(),
+                        "--providers-path".to_string(),
+                        providers_path.to_string_lossy().to_string(),
+                        "--catalog-path".to_string(),
+                        catalog_path.to_string_lossy().to_string(),
+                        "--model".to_string(),
+                        "openai/gpt-cli-catalog-only".to_string(),
+                    ];
+                    assert_eq!(
+                        run(&args),
+                        0,
+                        "{verb} should import the candidate catalog for {client_id}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn managed_client_config_rejects_hardlinked_external_catalog() {
+            let root = temp_root("mcc-hardlinked-catalog");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            let catalog_path = write_candidate_official_catalog(&root);
+            let linked_catalog_path = root.join("linked-candidate-catalog.json");
+            fs::hard_link(&catalog_path, &linked_catalog_path).unwrap();
+            let isolated = root.join("isolated");
+            let args = vec![
+                "managed-client-config".to_string(),
+                "preview".to_string(),
+                "--client".to_string(),
+                "zcode".to_string(),
+                "--root".to_string(),
+                isolated.to_string_lossy().to_string(),
+                "--settings-path".to_string(),
+                settings_path.to_string_lossy().to_string(),
+                "--providers-path".to_string(),
+                providers_path.to_string_lossy().to_string(),
+                "--catalog-path".to_string(),
+                linked_catalog_path.to_string_lossy().to_string(),
+                "--model".to_string(),
+                "openai/gpt-cli-catalog-only".to_string(),
+            ];
+
+            assert_eq!(run(&args), 1, "linked catalog input must fail closed");
         }
     }
 }

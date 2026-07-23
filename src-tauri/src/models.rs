@@ -1890,6 +1890,24 @@ fn generate_catalog_with_runner(
 }
 
 fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
+    read_catalog_models_matching(path, |_| true)
+}
+
+pub(crate) fn read_official_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
+    read_catalog_models_matching(path, |item| {
+        item.get("codex_proxy_metadata")
+            .and_then(Value::as_object)
+            .is_some_and(|metadata| {
+                metadata.get("provider").and_then(Value::as_str) == Some("openai")
+                    && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
+            })
+    })
+}
+
+fn read_catalog_models_matching(
+    path: &Path,
+    include: impl Fn(&Value) -> bool,
+) -> Result<Vec<Model>, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("failed to read catalog JSON {}: {error}", path.display()))?;
     let payload: Value = serde_json::from_str(&text)
@@ -1907,6 +1925,9 @@ fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
     let mut seen = HashSet::new();
     let mut models = Vec::new();
     for item in items {
+        if !include(item) {
+            continue;
+        }
         let Some(model) = catalog_model_from_item(item) else {
             continue;
         };

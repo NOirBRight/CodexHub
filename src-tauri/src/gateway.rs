@@ -1074,7 +1074,7 @@ fn gateway_client_config_write_lock() -> &'static Mutex<()> {
 /// owned by exactly one path beneath the isolated root; a hard link means a
 /// second name elsewhere owns the same inode, which breaks the single-owner
 /// namespace invariant the readback verifier is responsible for.
-fn reject_hard_link(path: &Path) -> Result<(), String> {
+pub(crate) fn reject_hard_link(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -2165,7 +2165,12 @@ fn official_model_disabled(settings: &Settings, id: &str) -> bool {
 }
 
 fn gateway_models_from_config(settings: &Settings, providers: &[Provider]) -> Vec<GatewayModel> {
-    gateway_models_from_sources(settings, providers, official_models(settings))
+    let official_source_models = if settings.include_official_models {
+        official_models(settings)
+    } else {
+        Vec::new()
+    };
+    gateway_models_from_sources(settings, providers, official_source_models)
 }
 
 fn gateway_models_from_sources(
