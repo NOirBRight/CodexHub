@@ -11,6 +11,7 @@ if /I not "%LOCALAPPDATA%"=="%CD%\appdata\local" exit /b 26
 if /I not "%CODEX_HOME%"=="%CODEXHUB_CODEX_TARGET_HOME%" exit /b 27
 if defined CODEXHUB_HOST_SESSION exit /b 28
 if defined OPENAI_API_KEY exit /b 29
+if not exist "%CODEXHUB_RUNTIME_HOME%\proxy" mkdir "%CODEXHUB_RUNTIME_HOME%\proxy"
 set "budget=%CODEXHUB_RUNTIME_HOME%\proxy\official-context-budget.ready"
 set "invocations=%CODEXHUB_RUNTIME_HOME%\proxy\official-bootstrap-invocations.txt"
 if /I "%~1"=="refresh-models" goto refresh
@@ -37,7 +38,7 @@ if exist "%~f0.bootstrap-fail" (
 if exist "%~f0.bootstrap-slow" (
   ping.exe 127.0.0.1 -n 4 >nul
 )
-set "catalog=%CODEXHUB_RUNTIME_HOME%\model-catalogs"
+set "catalog=%CODEXHUB_RUNTIME_HOME%\proxy\model-catalogs"
 if not exist "%catalog%" mkdir "%catalog%"
 python.exe "%~dp0write-catalog.py" "%catalog%\codexhub-model-catalog.json"
 if errorlevel 1 exit /b 37

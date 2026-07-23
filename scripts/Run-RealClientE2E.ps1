@@ -1921,7 +1921,7 @@ function Invoke-ManagedClientConfigVerb {
         '--settings-path', $SettingsPath,
         '--providers-path', $ProvidersPath
     )
-    if ($CatalogPath) {
+    if ($CatalogPath -and $Model -in @('gpt-5.6-luna', 'openai/gpt-5.6-luna', 'codexhub-openai/gpt-5.6-luna')) {
         $arguments += @('--catalog-path', $CatalogPath)
     }
     $result = Invoke-IsolatedProcess -Executable $script:ManagedClientConfigBuild -Arguments $arguments -CaseRoot $ProcessRoot -Environment @{
@@ -2481,10 +2481,10 @@ try {
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds)
-    $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'proxy\model-catalogs\codexhub-model-catalog.json'
+    $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'model-catalogs\codexhub-model-catalog.json'
     if (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf)) {
         $candidateStartupStopwatch.Stop()
-        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_failed_context_budget' -DurationMilliseconds [int]$candidateStartupStopwatch.ElapsedMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_failed_context_budget' -DurationMilliseconds ([int]$candidateStartupStopwatch.ElapsedMilliseconds) -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
         throw 'candidate_gateway_bootstrap_failed_context_budget'
     }
     $caseConfigurations = @{}

@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 if not defined CODEXHUB_E2E_CONTRACT_PROBE_LOG exit /b 50
 if /I "%~1"=="refresh-models" (
-  set "catalog=%CODEXHUB_RUNTIME_HOME%\proxy\model-catalogs"
+  set "catalog=%CODEXHUB_RUNTIME_HOME%\model-catalogs"
   if not exist "!catalog!" mkdir "!catalog!"
   python.exe "%~dp0write-catalog.py" "!catalog!\codexhub-model-catalog.json"
   if errorlevel 1 exit /b 37
